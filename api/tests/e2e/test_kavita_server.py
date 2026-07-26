@@ -1,0 +1,333 @@
+"""E2E tests through the HTTP server, pointed at a live Kavita.
+
+These tests stand up an in-process copy of the pbemu-api server
+configured to use the Kavita provider and then drive it the same way
+the in-emulator C app drives it: bearer-token auth, ?access_token=
+on cover/file URLs, sync/delta, open-with.
+
+Run with:
+
+    export KAVITA_E2E_URL=https://kavita.example.com
+    export KAVITA_E2E_API_KEY=<your-kavita-api-key>
+    pytest api/tests/e2e/test_kavita_server.py -v
+"""
+
+# pylint: disable=missing-function-docstring,redefined-outer-name
+import json
+import os
+import socketserver
+import sys
+import threading
+from urllib import error, request
+
+import pytest
+
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
+if REPO_ROOT not in sys.path:
+    sys.path.insert(0, REPO_ROOT)
+if os.path.join(REPO_ROOT, "api") not in sys.path:
+    sys.path.insert(0, os.path.join(REPO_ROOT, "api"))
+
+from api.api.server import PbemuAPIServer, build_default_app  # noqa: E402
+
+from .conftest import (  # noqa: E402
+    KAVITA_API_KEY,
+    KAVITA_PASS,
+    KAVITA_TIMEOUT,
+    KAVITA_URL,
+    KAVITA_USER,
+    SKIP_NO_AUTH,
+    SKIP_NO_URL,
+    SKIP_UNREACHABLE,
+)
+
+
+API_TOKEN = "pbemu-e2e-token"
+
+
+def _free_port() -> int:
+    """Return an unused TCP port on localhost."""
+    s = socket = __import__("socket").socket(
+        __import__("socket").AF_INET, __import__("socket").SOCK_STREAM
+    )
+    socket.bind(("127.0.0.1", 0))
+    port = socket.getsockname()[1]
+    socket.close()
+    return port
+
+
+def _http_get(url, headers=None, timeout=30):
+    try:
+        req = request.Request(url, headers=headers or {})
+        with request.urlopen(req, timeout=timeout) as r:
+            return r.status, r.read()
+    except error.HTTPError as e:
+        return e.code, e.read()
+
+
+def _http_post(url, body, headers=None, timeout=30):
+    data = json.dumps(body).encode("utf-8")
+    try:
+        req = request.Request(
+            url,
+            data=data,
+            method="POST",
+            headers={"Content-Type": "application/json", **(headers or {})},
+        )
+        with request.urlopen(req, timeout=timeout) as r:
+            return r.status, r.read()
+    except error.HTTPError as e:
+        return e.code, e.read()
+
+
+def _json_or(body, default):
+    try:
+        return json.loads(body)
+    except (json.JSONDecodeError, ValueError):
+        return default
+
+
+# -- server fixture --------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def live_server():
+    """Boot the pbemu-api server pointed at live Kavita."""
+    if not KAVITA_URL or not (KAVITA_API_KEY or (KAVITA_USER and KAVITA_PASS)):
+        pytest.skip("live Kavita env vars missing")
+    cfg = {
+        "host": "127.0.0.1",
+        "port": 0,
+        "api_token": API_TOKEN,
+        "provider": "kavita",
+        "providers": {
+            "kavita": {
+                "kind": "kavita",
+                "base_url": KAVITA_URL,
+                "api_key": KAVITA_API_KEY,
+                "username": KAVITA_USER,
+                "password": KAVITA_PASS,
+                "verify_tls": True,
+                "timeout": KAVITA_TIMEOUT,
+            }
+        },
+    }
+    app = build_default_app(cfg)
+
+    # Smoke-test connectivity so we skip rather than hang.
+    h = app.provider.health()
+    if not h.get("ok"):
+        pytest.skip(f"Kavita auth failed: {h.get('detail')}")
+
+    RequestHandler = type("RequestHandler", (PbemuAPIServer,), {"app": app})
+    httpd = socketserver.ThreadingTCPServer(("127.0.0.1", 0), RequestHandler)
+    httpd.daemon_threads = True
+    port = httpd.server_address[1]
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{port}"
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+        thread.join(timeout=5)
+
+
+def _auth_headers():
+    return {"Authorization": f"Bearer {API_TOKEN}"}
+
+
+# -- HTTP surface ----------------------------------------------------------
+
+
+@SKIP_NO_URL
+@SKIP_UNREACHABLE
+def test_server_health_endpoint(live_server):
+    """Healthz endpoint returns the active provider name.  Note: this
+    endpoint is currently behind the bearer-token check (the
+    healthz handler runs *after* auth), so we send the token."""
+    status, body = _http_get(
+        f"{live_server}/api/v1/healthz",
+        headers=_auth_headers(),
+        timeout=15,
+    )
+    assert status == 200, body
+    data = _json_or(body, {})
+    assert data["status"] == "ok"
+    assert data["provider"] == "kavita"
+
+
+@SKIP_NO_AUTH
+@SKIP_UNREACHABLE
+def test_libraries_requires_auth(live_server):
+    status, _ = _http_get(f"{live_server}/api/v1/libraries", timeout=10)
+    assert status == 401
+
+
+@SKIP_NO_AUTH
+@SKIP_UNREACHABLE
+def test_libraries_returns_real_library(live_server):
+    status, body = _http_get(
+        f"{live_server}/api/v1/libraries", headers=_auth_headers(), timeout=15
+    )
+    assert status == 200
+    data = _json_or(body, {})
+    assert data["count"] >= 1
+    assert any(item["name"] for item in data["items"])
+
+
+@SKIP_NO_AUTH
+@SKIP_UNREACHABLE
+def test_books_endpoint_paginates(live_server):
+    status, body = _http_get(
+        f"{live_server}/api/v1/books?limit=5",
+        headers=_auth_headers(),
+        timeout=30,
+    )
+    assert status == 200
+    data = _json_or(body, {})
+    assert 1 <= data["count"] <= 5
+    items = data["items"]
+    for b in items:
+        assert b["id"].startswith("kavita_ch_")
+        assert b["title"]
+        assert b["format"] in {"epub", "pdf", "cbz", "cbr"}
+        # cover + url must be paths the device can fetch
+        assert b["cover"].startswith("/api/v1/books/")
+        assert b["url"].startswith("/api/v1/books/")
+    # Series index must be set for the first 5 epubs we get back.
+    for b in items:
+        if b["format"] == "epub":
+            assert b["seriesIdx"] is not None
+            assert b["seriesIdx"] > 0
+
+
+@SKIP_NO_AUTH
+@SKIP_UNREACHABLE
+def test_sync_delta_returns_books(live_server):
+    status, body = _http_post(
+        f"{live_server}/api/v1/sync/delta",
+        {"known": []},
+        headers=_auth_headers(),
+        timeout=60,
+    )
+    assert status == 200
+    data = _json_or(body, {})
+    assert data["provider"] == "kavita"
+    assert data["serverTime"]
+    assert isinstance(data["added"], list) and len(data["added"]) >= 1
+
+
+@SKIP_NO_AUTH
+@SKIP_UNREACHABLE
+def test_sync_delta_respects_known_list(live_server):
+    """Passing all known ids must produce an empty added list."""
+    status, body = _http_get(
+        f"{live_server}/api/v1/books?limit=200",
+        headers=_auth_headers(),
+        timeout=60,
+    )
+    books = _json_or(body, {}).get("items", [])
+    if not books:
+        pytest.skip("no books")
+    known_ids = [b["id"] for b in books]
+
+    status, body = _http_post(
+        f"{live_server}/api/v1/sync/delta",
+        {"known": known_ids},
+        headers=_auth_headers(),
+        timeout=60,
+    )
+    data = _json_or(body, {})
+    assert data["added"] == [], (
+        f"expected empty added list when all known sent, got {len(data['added'])}"
+    )
+
+
+@SKIP_NO_AUTH
+@SKIP_UNREACHABLE
+def test_cover_endpoint_returns_png(live_server):
+    status, body = _http_get(
+        f"{live_server}/api/v1/books?limit=1",
+        headers=_auth_headers(),
+        timeout=30,
+    )
+    books = _json_or(body, {}).get("items", [])
+    assert books, "no books to test cover"
+    cover_path = books[0]["cover"]
+    # The libinkview image-fetcher uses ?access_token= (no Authorization header).
+    sep = "&" if "?" in cover_path else "?"
+    url = f"{live_server}{cover_path}{sep}access_token={API_TOKEN}"
+    status, body = _http_get(url, timeout=30)
+    assert status == 200
+    assert body[:8] == b"\x89PNG\r\n\x1a\n", (
+        f"cover is not a PNG (header={body[:8].hex()})"
+    )
+    assert len(body) > 100
+
+
+@SKIP_NO_AUTH
+@SKIP_UNREACHABLE
+def test_file_endpoint_streams_real_epub(live_server):
+    status, body = _http_get(
+        f"{live_server}/api/v1/books?limit=1",
+        headers=_auth_headers(),
+        timeout=30,
+    )
+    books = _json_or(body, {}).get("items", [])
+    assert books, "no books"
+    book = books[0]
+    sep = "&" if "?" in book["url"] else "?"
+    url = f"{live_server}{book['url']}{sep}access_token={API_TOKEN}"
+    status, body = _http_get(url, timeout=120)
+    assert status == 200
+    # Real EPUB local file header is "PK\x03\x04"
+    assert body[:4] == b"PK\x03\x04", f"file is not an EPUB (header={body[:4].hex()})"
+    if book["size"] > 0:
+        assert len(body) == book["size"], (
+            f"expected {book['size']} bytes, got {len(body)}"
+        )
+
+
+@SKIP_NO_AUTH
+@SKIP_UNREACHABLE
+def test_open_with_resolves_to_eink_reader(live_server):
+    status, body = _http_get(
+        f"{live_server}/api/v1/books?limit=1",
+        headers=_auth_headers(),
+        timeout=30,
+    )
+    books = _json_or(body, {}).get("items", [])
+    assert books
+    book = books[0]
+    status, body = _http_post(
+        f"{live_server}/api/v1/open-with",
+        {"id": book["id"], "ext": book["format"]},
+        headers=_auth_headers(),
+        timeout=30,
+    )
+    assert status == 200
+    data = _json_or(body, {})
+    # api/config/server.json maps epub → [eink-reader, bookshelf]
+    assert data["app"] in {"eink-reader", "bookshelf"}
+    assert data["url"].startswith(f"/api/v1/books/{book['id']}/file")
+    assert data["ext"] == book["format"]
+
+
+@SKIP_NO_AUTH
+@SKIP_UNREACHABLE
+def test_sync_state_accepts_post(live_server):
+    """POST /api/v1/sync/state must return 202 (accepted, no-op)."""
+    status, body = _http_post(
+        f"{live_server}/api/v1/sync/state",
+        {
+            "deviceId": "pbemu-e2e",
+            "known": ["kavita_ch_00000007"],
+            "downloaded": ["kavita_ch_00000007"],
+        },
+        headers=_auth_headers(),
+        timeout=30,
+    )
+    assert status in {200, 202}, (status, body)  # noqa: C1803
+    data = _json_or(body, {})
+    assert data.get("ok")
