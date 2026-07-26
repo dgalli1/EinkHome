@@ -33,14 +33,17 @@ _READER_APP = "/workspace/firmware/ebrmain/bin/eink-reader.app"
 
 
 def pytest_collection_modifyitems(config, items):
-    """Skip integration tests when PB_SKIP_INTEGRATION=1 is set."""
+    """Skip integration/bookshelf tests when env vars are set."""
     del config
-    if os.environ.get("PB_SKIP_INTEGRATION") != "1":
+    skip_int = os.environ.get("PB_SKIP_INTEGRATION") == "1"
+    skip_bs = os.environ.get("PB_SKIP_BOOKSHELF") == "1"
+    if not skip_int and not skip_bs:
         return
-
-    skip_int = pytest.mark.skip(reason="PB_SKIP_INTEGRATION=1")
     for item in items:
-        item.add_marker(skip_int)
+        if skip_int:
+            item.add_marker(pytest.mark.skip(reason="PB_SKIP_INTEGRATION=1"))
+        elif skip_bs and item.get_closest_marker("bookshelf") is not None:
+            item.add_marker(pytest.mark.skip(reason="PB_SKIP_BOOKSHELF=1"))
 
 
 def pytest_configure(config) -> None:
@@ -49,6 +52,10 @@ def pytest_configure(config) -> None:
         "markers",
         "no_home_reset: skip the autouse reset-to-home fixture for tests "
         "that do not depend on home-surface state",
+    )
+    config.addinivalue_line(
+        "markers",
+        "bookshelf: e2e tests for the bookshelf replacement app",
     )
 
 

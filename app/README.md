@@ -1,0 +1,431 @@
+# Bookshelf replacement (Step 1 — done)
+
+A drop-in replacement for the firmware's `bookshelf.app`, designed to:
+
+* fetch a list of available books from a local HTTP server,
+* draw the book list on the e-ink framebuffer using libinkview,
+* post state reports back to the server so we can verify the emulator
+  is actually talking to us.
+
+This is the first step of the pbemu bookshelf-replacement project: prove
+the PocketBook SDK we downloaded builds a real ARM guest app that runs
+under `qemu-arm` + `libshim.so`, displays content, and reports back to
+a host service.
+
+## What this PR delivered
+
+1. **`sdk/pocketbook-sdk-b288/`** — the PocketBook SDK-B288 (matching the
+   `RPATH` recorded inside `cramfs/bin/bookshelf.app`) vendored from the
+   public `pocketbook/SDK_6.3.0` GitHub repository, branch `6.5`. Includes
+   `inkview.h`, `inkinternal.h`, `inkplatform.h`, `inklog.h`, `scrollview.h`,
+   `selection_list.h`, `line_color_improver.h`, `time_test.h`, `hwconfig.h`
+   and the matching `libinkview.so` / `libhwconfig.so` / static archive.
+   Re-fetched any time with `sdk/install-sdk.sh`.
+
+2. **`sdk/build_armel.sh`** — `arm-linux-gnueabi-gcc` cross-compile script
+   that:
+   * builds inside the pbdev container so it picks up the cross toolchain,
+   * links the resulting ELF against the firmware's own `libc.so.6` /
+     `libm.so.6` / `libz.so.1.2.11` so the binary is GLIBC_2.23-only and
+     loads transitive deps (`libpng12`, `libjpeg8`, `libtiff5`, etc.) at
+     run-time from the firmware's `/ebrmain/lib`,
+   * uses the cross-compiler's `crt1.o` / `crti.o` / `crtbeginS.o` so
+     `main(int argc, char **argv)` is invoked with a real stack and
+     well-defined `argc` / `argv` (without the crt objects, `argc` came
+     through as a garbage value and `main` segfaulted).
+
+3. **`sdk/hello/hello.c`** + a couple of sanity-check programs (`test_simple.c`,
+   `test_http.c`, `fb_hello.c`) to validate the SDK build pipeline end to end
+   (basic draw, HTTP fetch via `QuickDownload`, raw `/dev/fb0` writes).
+
+4. **`bookshelf/bookshelf.c`** — the actual bookshelf replacement. Fetches
+   `/api/v1/books` from the local bookserver, draws the list with libinkview,
+   lets the user select / open books, posts `/api/v1/state` after every UI
+   change.
+
+5. **`bookshelf/bookserver.py`** — host-side Python HTTP server (stdlib only)
+   that exposes:
+   * `GET  /healthz`
+   * `GET  /api/v1/books`
+   * `GET  /api/v1/books/<id>`
+   * `GET  /api/v1/state`
+   * `POST /api/v1/state`
+
+6. **`bookshelf/run.sh`** — end-to-end driver: builds, stages the binary into
+   the running container's `/mnt/ext1/system/bin/bookshelf.app`, restarts
+   the emulator, takes a screenshot, and prints the most recent state
+   reports from the bookserver.
+
+7. **Dockerfile change** — adds `zlib1g-dev` so the cross-compile find
+   `zlib.h` for the few symbols we need.
+
+## End-to-end validation evidence
+
+After `./pbemu start` and `./bookshelf/run.sh`:
+
+```
+==> 6/6  screenshot + bookserver state
+wrote /tmp/pbemu_bookshelf.png
+screenshot -> /tmp/pbemu_bookshelf.png
+task_id=5355 subtask_id=0
+fb_key=0xefbd4eb fb_size=4956144
+...
+
+Bookserver state reports (last 5):
+  2026-06-28T11:08:05.961345+00:00  remote=192.168.178.101  app=bookshelf.app  screen=library_list
+  2026-06-28T11:08:06.241597+00:00  remote=192.168.178.101  app=bookshelf.app  screen=library_list
+```
+
+`192.168.178.101` is the running container — proof that the in-emulator
+process is actually talking to the host. The bookserver log also shows:
+
+```
+[2026-06-28T11:08:05+00:00] 192.168.178.101 - "POST /api/v1/state HTTP/1.1" 202 -
+[2026-06-28T11:08:06+00:00] 192.168.178.101 - "GET /api/v1/books HTTP/1.1" 200 -
+[2026-06-28T11:08:06+00:00] 192.168.178.101 - "POST /api/v1/state HTTP/1.1" 202 -
+```
+
+i.e. the in-emulator app successfully fetches the book list and reports
+state back through the loopback container-to-host network.
+
+## Build
+
+```
+sdk/install-sdk.sh                         # one-off: fetch SDK headers + libs
+sdk/build_armel.sh bookshelf/bookshelf.c --output build/bookshelf.app
+```
+
+## Run
+
+```
+./pbemu start U633_6.8.2817 --no-viewer --no-audio
+./bookshelf/bookserver.py &
+./bookshelf/run.sh
+```
+
+`run.sh` will:
+
+1. Build the ELF (overwriting `build/bookshelf.app`).
+2. Stop the running emulator.
+3. Stage the ELF as `U633_6.8.2817/.live/mnt/ext1/system/bin/bookshelf.app`
+   so `monitor.app`'s launcher picks our binary on next respawn.
+4. Start the emulator again.
+5. Wait for the foreground task to be our `bookshelf.app`, take a
+   screenshot to `/tmp/pbemu_bookshelf.png` and dump the last few state
+   reports that `bookserver.py` has received.
+
+### Interactive run (with viewer)
+
+`run.sh` is headless (`--no-viewer`) for automated screenshots. To **see and
+use** the app in a Wayland window on your desktop, use the interactive
+driver instead — same build/stage/API-server steps, but it starts the
+emulator with the viewer + audio relay:
+
+```
+./bookshelf/run-visible.sh             # build + launch with viewer
+./bookshelf/run-visible.sh --no-build  # skip the ELF rebuild (faster)
+```
+
+It (re)starts the API server in the background (`/tmp/pbemu-api.log`,
+pid in `/tmp/pbemu-api.pid`), stages the binary + `bookshelf.cfg`, and
+runs `./pbemu start` with the viewer. The window appears on your desktop;
+tap the **S** button to sync, **⋯** → **Settings** to edit the API host /
+key / reader. Stop everything with `./pbemu stop`.
+
+## Network reachability
+
+The container's qemu-arm shares the container's network namespace, so
+the guest can reach the host's bookserver via:
+
+* `169.254.1.2` — the podman `host.containers.internal` alias inside
+  the running container (verified via `cat /etc/hosts`).
+
+That is what `bookshelf.c` defaults to. Override the URL by passing
+argv[1] (books URL) and argv[2] (state URL) when launching the binary
+manually.
+
+## Debugging tips
+
+If `frame_dump` reports `no valid framebuffer`, the foreground task has
+crashed. Common causes:
+
+* The host's `bookserver.py` is not running on a port the guest can
+  reach — start it (`./bookshelf/bookserver.py &`) and check
+  `curl http://169.254.1.2:8765/healthz` from inside the container.
+* `monitor.app` has stopped relaunching tasks because its fork budget
+  is exhausted — restart with `./pbemu stop && ./pbemu start`.
+* The `libinkview.so` HTTP layer is hanging on a transient network
+  error — `QuickDownload`'s 5-second timeout will eventually bail out
+  and the UI will render with `g_state.http_ok = 0`.
+
+Inspect the binary's own stderr via:
+
+```
+podman exec pb-pocketbook-ui qemu-arm -L /workspace/firmware/.live/guest \
+    -E LD_PRELOAD=/workspace/src/shim/build-arm/libshim.so \
+    -E PB_INKVIEW_WINDOW_TITLE=bookshelf.app \
+    -E PB_DEVICE_STAGE_ROOT=/workspace/firmware/.live \
+    /mnt/ext1/system/bin/bookshelf.app -i 2>&1 | tee /tmp/bookshelf.log
+```
+
+The `[bookshelf] EVT_INIT ...` lines confirm whether the HTTP fetch and
+state POST succeeded.
+
+## Configuring the API endpoint
+
+The binary resolves its API base URL in this order:
+
+1. **Config file** — searched at these paths:
+   * `<dir-of-binary>/bookshelf.cfg` (drop a file next to the binary
+     on the device — recommended)
+   * `/etc/pbemu/bookshelf.cfg` (system-wide override)
+   The file is a tiny `key=value` list:
+
+   ```
+   # Comments start with `#` or `;`
+   api_url=http://192.168.1.42:8765
+   api_token=pbemu-dev-token
+   reader=auto
+   ```
+
+   `reader` selects which app opens a tapped book. `auto` (the default)
+   honours the server's `open-with` resolution; an absolute app path
+   (e.g. `/ebrmain/bin/eink-reader.app` or
+   `/mnt/ext1/applications/koreader.app`) pins that reader directly.
+   You normally don't edit this by hand — the in-app **Settings** page
+   (below) writes it for you.
+
+   The `api_url` may be just a host (`192.168.1.42:9000`) or a full
+   URL; if it doesn't start with `http://` or `https://`, the binary
+   prepends `http://` and the port (defaulting to 8765 if you only
+   specify a host).
+
+2. **Environment variables** at startup:
+   * `PBEMU_API_URL` (full URL, e.g. `http://192.168.1.42:8765`)
+   * `PBEMU_API_HOST` (host only; see above for default-port rule)
+
+3. **Build-time default**: the pbemu-internal `host.containers.internal`
+   alias (`169.254.1.2:8765`), which works inside the pbemu container
+   but **not** on a real device.
+
+### In-app settings
+
+The **More** menu (top-right `⋯`) has a **Settings** entry that opens a
+full-screen page where you can edit the API host, the API key, and the
+reader app, then **Save & apply** (which rewrites `bookshelf.cfg`,
+rebuilds the endpoint URLs, and re-syncs immediately). The reader row
+cycles through **Auto (server)** plus every reader detected as installed
+on the device — the standard PocketBook reader
+(`/ebrmain/bin/eink-reader.app`) and KOReader
+(`/mnt/ext1/applications/koreader.app`) when present.
+
+Settings are saved next to the binary when that directory is writable;
+otherwise (e.g. the emulator's non-root guest) they fall back to
+`/tmp/bookshelf.cfg`, which is re-applied as an override on the next
+launch.
+
+For a real PocketBook, use the bundled `install-device.sh` script to
+push the binary + config and restart the existing copy:
+
+```bash
+bookshelf/install-device.sh <device-ip>            # auto-detects host LAN ip
+bookshelf/install-device.sh <device-ip> http://kavita.lan:8765
+bookshelf/install-device.sh --build <device-ip>    # also rebuilds the binary
+```
+
+The script:
+
+* sshes non-interactively to `<device-ip>` as root (run `ssh-copy-id`
+  once beforehand),
+* writes a fresh `build/bookshelf.cfg` with `api_url` set to the
+  host's primary LAN IPv4 (or the override you pass),
+* scps both files into `/mnt/ext1/applications/`,
+* renames the binary on-device to **`books.app`**, not `bookshelf.app`,
+  because PocketBook's launcher dispatches by basename — leaving the
+  original name there would launch the firmware's built-in
+  bookshelf.app and silently exit,
+* clears the on-device log and kills any stale `books.app` so the
+  next launch starts clean.
+
+Or do it by hand:
+
+```bash
+scp build/bookshelf.app   root@<device-ip>:/mnt/ext1/applications/books.app
+scp build/bookshelf.cfg   root@<device-ip>:/mnt/ext1/applications/
+ssh root@<device-ip> 'chmod +x /mnt/ext1/applications/books.app'
+```
+
+Edit the config to point at your API server before copying if you're
+not using `install-device.sh`.
+
+The next `monitor.app` respawn will log the resolved URL on stderr:
+
+```
+[bookshelf] config: /mnt/ext1/applications/bookshelf.cfg
+[bookshelf] api_base  = http://192.168.1.42:8765
+[bookshelf] api_token = pbemu-dev-token
+```
+
+### Logs on the device
+
+The firmware does **not** redirect stderr to a file, so the binary
+opens its own log at `<dir-of-binary>/bookshelf.log` (next to the
+binary on the device).  Same format, same lines; tail it to see what
+the app is doing:
+
+```bash
+ssh root@<device-ip> 'tail -f /mnt/ext1/applications/bookshelf.log'
+```
+
+### Initial sync is opt-in
+
+By default the binary does **not** sync metadata on startup.  It shows
+the top bar / status line / empty grid immediately and waits for the
+user to tap the **S** button on the top right.  This avoids a long
+blocking HTTP fetch on the EVT_INIT event (which can trip
+`monitor.app`'s task watchdog on the launcher and look like a crash).
+
+If you want auto-sync on startup, edit the EVT_INIT handler to call
+`do_sync();` after the `draw_*` calls.
+
+## UI
+
+The on-screen layout has four regions stacked vertically, all drawn
+between the system top status bar (drawn by the firmware with day-of-week
+* 24h time, e.g. "Wed 13:01") and the system bottom status bar (drawn by
+the firmware with day-of-week + 24h time + down-arrow + lightbulb + battery):
+
+```
++--------------------------------------------------+ <- 0
+|  Wed 13:01                                       |   system top status bar
++--------------------------------------------------+ <- ~28 px
+|  [⌂]    BOOKSHELF                       [☰]    |   TOP_BAR_H (88 px)
++--------------------------------------------------+
+|  [Q] search...                                  |   SEARCH_ROW_H (56 px)
++--------------------------------------------------+
+|                                                  |
+|   [book]    [book]    [book]                     |
+|   [book]    [book]    [book]                     |   3×3 grid of thumbnails
+|   [book]    [book]    [book]                     |   (CELL_MAX ~360x360)
+|                                                  |
++--------------------------------------------------+
+|              <  1 / 2  >                          |   PAGER_H
++--------------------------------------------------+   <- ScreenHeight - BOTTOM_RESERVED
+|  Wed 13:01       ⌄      💡     🔋 100%   ←  bottom status bar
++--------------------------------------------------+ <- ScreenHeight
+```
+
+The top bar style matches the firmware's standard `sudoku.app`
+header:
+
+* **Left** — a 72×72 house outline (home button).  Tapping returns to
+  the launcher (`CloseApp()`).
+* **Center** — the app title in `DEFAULTFONT 32pt`, uppercased.
+* **Right** — a 72×72 solid black circle with three white hamburger
+  lines.  Tapping opens the in-app "More" menu (sort, view, sync).
+
+The "More" menu is a right-anchored 75%-width panel with the
+following items, in order: **Sync**, **Title A–Z**, **Title Z–A**,
+**By author**, **By series**, **Recent**, **Grid**, **List**.
+
+### How the firmware system status bars are enabled
+
+PocketBook apps like `sudoku.app`, `dictionary`, `notes`, the original
+firmware's `bookshelf.app` etc. all display the standard system status
+bars at the **top** ("Wed 13:01" — day + 24h time) and **bottom** ("Wed
+13:01 + down-arrow + lightbulb + battery") of the screen.  These bars
+are drawn by the firmware's `libinkview`; the app just needs to declare
+itself as a reader-style app and ask the firmware to show them.
+
+`bookshelf.c` does this in `EVT_INIT` with the following calls (in
+this exact order — the SDK docstring on `SetCurrentApplicationAttribute`
+says "set this attribute **before first access to panel API**"):
+
+```c
+SetCurrentApplicationAttribute(APPLICATION_READER, 1);   /* flag as reader */
+SetShowPanelReader(1);            /* 1 = show the panel reader bars */
+SetPanelSeparatorEnabled(1);      /* thin separator above the bottom bar */
+SetPanelTransparent(0);           /* 0 = opaque bar (no see-through) */
+SetPanelType(PANEL_ENABLED);      /* show the swipe-down control panel */
+g_state.panel_h = PanelHeight();   /* query once so all subsequent
+                                    * draws place content below it */
+
+/* Original firmware bookshelf.app imports SetOrientation (verified via
+ * nm -D); calling it here in EVT_INIT clears the framebuffer to white
+ * and re-evaluates the panel rect, which is what allows iv_update_panel()
+ * to draw the system bars into the correct region.
+ */
+SetOrientation(0);
+
+/* Force the firmware to actually draw the system bars now.  Repaint()
+ * enqueues EVT_SHOW (=23) on the event loop; the firmware's
+ * iv_actualize_panel() handler calls iv_update_panel() to draw the
+ * bars.  Without this call the bars are only redrawn on subsequent
+ * state changes (clock minute tick, battery percent change, net
+ * state change) — on a freshly launched task with no state change
+ * yet, the bars are blank.  Repaint() forces an immediate one-shot
+ * redraw.
+ */
+Repaint();
+```
+
+The status bars are **not** drawn by the app — `libinkview` does it
+automatically once the panel is enabled and the app is flagged as a
+reader.  The app just needs to leave room: `BOTTOM_RESERVED = 80` px at
+the bottom of the framebuffer is reserved for the bottom bar, and the
+pager sits **above** that reserved zone so taps on the pager buttons
+don't conflict with the firmware's bottom-edge drawer gesture (which
+can pull the system drawer down from the bottom).
+
+We deliberately **do not** call `SetPanelType(PANEL_DISABLED)` or
+`iv_fullscreen()`.  Without those the system panel stays visible —
+swipe down from the top to access Wi-Fi / Bluetooth / Sync, swipe up
+from the bottom to see the time/battery bar plus the system settings.
+
+The original firmware's `bookshelf.app` also imports
+`SetDefaultOrientation` (called before `InkViewMain`).  We don't call
+it because on the pbemu shim the framebuffer isn't attached until the
+task is registered, so calling `set_fb_orientation()` that early hits
+a NULL fb and does nothing.  `SetOrientation(0)` in `EVT_INIT` runs
+after the shim has attached the main framebuffer and produces the same
+end-state orientation (portrait) without the early-NULL-fb problem.
+
+Below the top bar is a **search** row.  Tapping it opens the
+firmware's native on-screen keyboard; pressing Enter (or the keyboard's
+OK button) filters the visible books by title or author.
+
+The main area is a 3×3 grid of thumbnails.  Each tile shows a hatched
+cover placeholder (we don't ship real covers in the UI yet), the book
+title, the author, and a corner badge:
+
+* `v` — the book is downloaded locally (`/mnt/ext1/system/bin/<id>.<ext>` exists)
+* `R` — the book is remote-only (it lives in the API server)
+
+The bottom bar is the pager: `n / total` and `<` / `>` buttons when
+there is more than one page of books.
+
+Tapping a thumbnail resolves the configured `open-with` app for the
+file's extension, fetches the file from the API (if not already on
+device), and launches the chosen app via `NewTaskEx()` with the
+downloaded path as the first argument.  In the API server config
+(`api/config/server.json`) the `open_with` table maps extensions to
+ordered candidate apps, e.g. `epub: [eink-reader, bookshelf]`.
+
+### Languages
+
+The UI auto-detects language from the firmware's `LANG` environment
+variable and translates all of the visible strings.  Supported today:
+English, German, French, Italian.  Add a new language by extending the
+`g_i18n` table near the top of `bookshelf.c`.
+
+### Downloading and opening books
+
+1. User taps a tile.
+2. The app POSTs `{id, ext}` to `/api/v1/open-with`.  The server
+   returns `{app, url, ext}` for the first available reader in
+   `open_with[<ext>]`.
+3. The app `QuickDownload`s the file from the resolved URL (with the
+   bearer token appended as `?access_token=`) and saves it to
+   `/mnt/ext1/system/bin/<id>.<ext>`.
+4. The app calls `NewTaskEx(app.app, args=[path], ...)` to launch the
+   reader.
