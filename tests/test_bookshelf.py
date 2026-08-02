@@ -31,6 +31,7 @@ from tests.support.bookshelf import (
     MORE_TITLE_ZA,
     MORE_SETTINGS,
     MORE_SYSTEM,
+    MORE_APPS,
     BookshelfGeometry,
     BookshelfSession,
 )
@@ -631,6 +632,59 @@ def test_more_overlay_system_menu_launches_control_panel(fresh_bookshelf):
     bs.wait_hash_change(before)
     bs.assert_log_contains("opening system control panel")
 
+
+# ── launcher (app grid) ───────────────────────────────────────────────
+
+
+def test_more_overlay_apps_opens_launcher(fresh_bookshelf):
+    """Open More, tap Applications, verify the launcher overlay draws."""
+    bs = fresh_bookshelf
+    bs.tap_menu()
+    time.sleep(0.5)
+    before = bs.frame_hash()
+    bs.tap_more_item(MORE_APPS)
+    bs.wait_hash_change(before)
+    bs.assert_log_contains("launcher built")
+
+
+def test_launcher_back_returns_to_shelf(fresh_bookshelf):
+    """Open launcher, tap Back, verify the shelf is redrawn."""
+    bs = fresh_bookshelf
+    bs.open_launcher()
+    time.sleep(0.5)
+    before = bs.frame_hash()
+    bs.tap_launcher_back()
+    bs.wait_hash_change(before)
+
+
+def test_launcher_back_key_returns_to_shelf(fresh_bookshelf):
+    """Open launcher, press Back key, verify the shelf is redrawn."""
+    bs = fresh_bookshelf
+    bs.open_launcher()
+    time.sleep(0.5)
+    before = bs.frame_hash()
+    bs.send_back_key()
+    bs.wait_hash_change(before)
+
+
+def test_launcher_tap_app_launches_task(fresh_bookshelf):
+    """Open launcher, tap an app cell, verify NewTaskEx is called."""
+    bs = fresh_bookshelf
+    # Each step waits for the framebuffer to change, proving the event
+    # loop processed the tap (cover-download HTTP calls can block the
+    # loop for several seconds after a fresh restart).
+    before = bs.frame_hash()
+    bs.tap_menu()
+    bs.wait_hash_change(before)
+    before = bs.frame_hash()
+    bs.tap_at(*bs.geom.more_item_center(MORE_APPS))
+    bs.wait_hash_change(before)
+    before = bs.frame_hash()
+    bs.tap_launcher_app(0)
+    bs.wait_hash_change(before)
+    bs.assert_log_contains("launching app path=")
+
+
 # ── search ────────────────────────────────────────────────────────────
 
 
@@ -640,27 +694,55 @@ def test_search_tap_opens_keyboard(fresh_bookshelf):
     bs.tap_search_and_verify()
 
 
+def test_search_commit_filters_grid(fresh_bookshelf):
+    """Typing a query and committing it must actually filter the shelf.
+
+    Regression for the "search never searches" bug: OpenKeyboard() wrote
+    the live keystrokes straight into g_state.query, and on commit the
+    handler's snprintf(query, ..., buffer) aliased that same buffer,
+    wiping the query before apply_filter_and_sort() ran — so the grid
+    never changed and the filter log showed an empty query.  The fix
+    hands OpenKeyboard() a separate scratch buffer; this test proves the
+    committed text now survives into the filter pass.
+    """
+    bs = fresh_bookshelf
+    # kb = framebuffer with the on-screen keyboard up; the committed,
+    # filtered shelf must differ from it (keyboard gone + fewer tiles).
+    kb = bs.tap_search_and_verify()
+    bs.type_text("alpha", commit=True)
+    bs.wait_hash_change(kb)
+    # The committed query reached the filter (pre-fix this was empty).
+    bs.assert_log_contains("query=`alpha`")
+
+
 # ── book grid ──────────────────────────────────────────────────────────
 
 
 def test_book_tap_triggers_open_with(fresh_bookshelf):
-    """Tap a book tile, verify log shows open-with API call."""
+    """Tap a book tile, verify it downloads (if needed) then launches."""
     bs = fresh_bookshelf
+    _clear_downloads()
     bs.tap_book(0)
     time.sleep(3.0)
-    # The log should show the launching message
-    bs.assert_log_contains("launching app=")
+    # A book press resolves the reader and launches it.
+    bs.assert_log_contains("launching reader app=")
+    _kill_guest_tasks()
+    _clear_downloads()
 
 
 def test_book_tap_launches_reader(fresh_bookshelf):
-    """Tap a book tile, verify open-with + download + launch sequence."""
+    """Tap a book tile, verify download + launch sequence end to end."""
     bs = fresh_bookshelf
+    _clear_downloads()
     bs.tap_book(0)
     time.sleep(5.0)
     # The mock provider serves tiny fake epubs that the real reader
     # cannot open, so the reader may crash/return immediately.
-    # Verify the bookshelf side did its job: open-with call + launch.
-    bs.assert_log_contains("launching app=")
+    # Verify the bookshelf side did its job: download + launch.
+    bs.assert_log_contains("download_book_file OK")
+    bs.assert_log_contains("launching reader app=")
+    _kill_guest_tasks()
+    _clear_downloads()
 
 
 # ── pager ──────────────────────────────────────────────────────────────
@@ -855,4 +937,238 @@ def test_series_card_drill_in_and_back(fresh_bookshelf):
             "BACK key did not pop the drilled series"
         )
     finally:
+        _remove_series(injected)
+
+
+# ── tabs, downloads, context menus ─────────────────────────────────────
+# The Downloads tab, Download-all action, and the long-press context menus
+# (book: download/delete; series: download-all/delete) are exercised here.
+# In the emulator the guest runs non-root and cannot write /mnt/ext1/system/bin,
+# so bookshelf.c falls back to /tmp (resolve_downloads_dir); guest /tmp maps to
+# .live/tmp on the host.  The helpers below inspect/clean that dir.
+
+_DOWNLOADS_DIR = REPO_ROOT / FIRMWARE / ".live" / "tmp"
+
+
+def _downloaded_files() -> list[Path]:
+    """Book files the app has downloaded into LOCAL_DOWNLOADS."""
+    if not _DOWNLOADS_DIR.is_dir():
+        return []
+    return [p for p in _DOWNLOADS_DIR.iterdir() if p.suffix.lower() in _ALLOWED_EXT]
+
+
+def _clear_downloads() -> None:
+    for p in _downloaded_files():
+        try:
+            p.unlink()
+        except OSError:
+            pass
+
+
+def _wait_log_count(bs: BookshelfSession, needle: str, count: int, *, timeout: float = 20.0) -> None:
+    """Poll until *needle* appears at least *count* times in the current
+    invocation's log (downloads drain one-per-timer-tick)."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if bs.current_log().count(needle) >= count:
+            return
+        time.sleep(0.5)
+    got = bs.current_log().count(needle)
+    raise AssertionError(f"log contains {needle!r} {got}×, expected >= {count}")
+
+
+def _wait_log_slice(bs: BookshelfSession, before: str, needle: str, *, timeout: float = 8.0) -> None:
+    """Poll until *needle* appears in the log text appended after the
+    *before* snapshot.  Used to confirm a tap produced a specific redraw
+    line without being fooled by unrelated background redraws."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if needle in bs.current_log()[len(before):]:
+            return
+        time.sleep(0.1)
+    raise AssertionError(
+        f"log slice after offset {len(before)} never contained {needle!r}"
+    )
+
+
+def test_tab_downloads_shows_empty_then_library_returns(fresh_bookshelf):
+    """The Downloads tab renders (empty state) and Library switches back."""
+    bs = fresh_bookshelf
+    before = bs.frame_hash()
+    bs.tap_tab_downloads()
+    bs.wait_hash_change(before)
+    bs.assert_log_contains("draw_grid")  # still alive; tab body repainted
+    before2 = bs.frame_hash()
+    bs.tap_tab_library()
+    bs.wait_hash_change(before2)
+
+
+def test_book_press_downloads_and_launches_reader(fresh_bookshelf):
+    """Pressing a book downloads it (if needed) then launches the reader."""
+    bs = fresh_bookshelf
+    _clear_downloads()
+    _restart_bookshelf(bs.emulator)
+    time.sleep(2.0)
+    bs.wait_for_stable()
+    bs.tap_book(0)
+    time.sleep(3.0)
+    bs.assert_log_contains("download_book_file OK")
+    bs.assert_log_contains("launching reader app=")
+    assert len(_downloaded_files()) >= 1, "book file was not downloaded to device"
+    _kill_guest_tasks()  # kill the launched reader
+    _clear_downloads()
+
+
+def test_download_all_queues_library_and_switches_tab(fresh_bookshelf):
+    """Download-all queues every book and jumps to the Downloads tab."""
+    bs = fresh_bookshelf
+    _clear_downloads()
+    _restart_bookshelf(bs.emulator)
+    time.sleep(2.0)
+    bs.wait_for_stable()
+    before = bs.frame_hash()
+    bs.tap_download_all()
+    bs.wait_hash_change(before)
+    bs.assert_log_contains("download-all queued=")
+    # Let the queue drain one-per-tick, then confirm files landed on disk.
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline and len(_downloaded_files()) < 16:
+        time.sleep(0.5)
+    assert len(_downloaded_files()) >= 16, (
+        f"expected all 16 books downloaded, got {len(_downloaded_files())}"
+    )
+    _clear_downloads()
+
+
+def test_downloads_tab_pages(fresh_bookshelf):
+    """The Downloads tab pages its single-column list, and the pager buttons
+    advance and rewind it.  Regression for the tab that previously ignored
+    paging (its body was drawn but never re-paginated on Next/Prev)."""
+    bs = fresh_bookshelf
+    _clear_downloads()
+    _restart_bookshelf(bs.emulator)
+    time.sleep(2.0)
+    bs.wait_for_stable()
+
+    # Queue 16 and jump to the Downloads tab; the synchronous redraw logs
+    # the page count.  Parse the *largest* page count seen in the slice so
+    # a fast-draining queue (tiny mock files, 120ms/item) can't hide the
+    # multi-page initial state.
+    before = bs.current_log()
+    bs.tap_download_all()
+    _wait_log_slice(bs, before, "draw_downloads page=0 pages=")
+    slice0 = bs.current_log()[len(before):]
+    counts = [int(m) for m in re.findall(r"draw_downloads page=0 pages=(\d+)", slice0)]
+    assert counts and max(counts) >= 2, (
+        f"Downloads tab never reported >=2 pages for 16 items (saw {counts})"
+    )
+
+    # Tap Next with no intervening sleep (so the list is still long enough
+    # to have a page 1) and confirm the page advances.
+    before2 = bs.current_log()
+    bs.tap_pager_next()
+    _wait_log_slice(bs, before2, "draw_downloads page=1")
+
+    # And Prev returns to page 0.
+    before3 = bs.current_log()
+    bs.tap_pager_prev()
+    _wait_log_slice(bs, before3, "draw_downloads page=0")
+    _clear_downloads()
+
+
+def test_book_longpress_download(fresh_bookshelf):
+    """Long-press a book → context menu → Download fetches the file."""
+    bs = fresh_bookshelf
+    _clear_downloads()
+    _restart_bookshelf(bs.emulator)
+    time.sleep(2.0)
+    bs.wait_for_stable()
+    before = bs.frame_hash()
+    bs.long_press_book(0)
+    bs.wait_hash_change(before)
+    bs.assert_log_contains("context menu open series=0")
+    bs.tap_context_item(0)  # Download
+    time.sleep(3.0)
+    bs.assert_log_contains("download_book_file OK")
+    assert len(_downloaded_files()) >= 1
+    _clear_downloads()
+
+
+def test_book_longpress_delete(fresh_bookshelf):
+    """Long-press a downloaded book → Delete removes the local file."""
+    bs = fresh_bookshelf
+    _clear_downloads()
+    _restart_bookshelf(bs.emulator)
+    time.sleep(2.0)
+    bs.wait_for_stable()
+    # First download the book so there is something to delete.
+    bs.long_press_book(0)
+    time.sleep(1.0)
+    bs.tap_context_item(0)  # Download
+    time.sleep(3.0)
+    assert len(_downloaded_files()) >= 1, "setup download failed"
+    # Now delete it via the context menu.
+    bs.long_press_book(0)
+    time.sleep(1.0)
+    bs.tap_context_item(1)  # Delete
+    time.sleep(2.0)
+    bs.assert_log_contains("delete_book_file removed")
+    assert len(_downloaded_files()) == 0, "delete did not remove the file"
+
+
+def test_series_longpress_download_all(fresh_bookshelf):
+    """Long-press a series card → Download all fetches every member."""
+    bs = fresh_bookshelf
+    injected = _inject_series()
+    try:
+        _clear_downloads()
+        _restart_bookshelf(bs.emulator)
+        time.sleep(2.0)
+        bs.wait_for_stable()
+        standalone = _standalone_view_count()
+        series_idx = standalone
+        pos = _goto_view_tile(bs, series_idx)
+        before = bs.frame_hash()
+        bs.long_press_book(pos)
+        bs.wait_hash_change(before)
+        bs.assert_log_contains("context menu open series=1")
+        bs.tap_context_item(0)  # Download all
+        bs.assert_log_contains("download_series")
+        bs.assert_log_contains("queued=2")
+        _wait_log_count(bs, "download_book_file OK", 2)
+    finally:
+        _clear_downloads()
+        _remove_series(injected)
+
+
+def test_series_longpress_delete(fresh_bookshelf):
+    """Long-press a series card → Delete series removes all member files."""
+    bs = fresh_bookshelf
+    injected = _inject_series()
+    try:
+        _clear_downloads()
+        _restart_bookshelf(bs.emulator)
+        time.sleep(2.0)
+        bs.wait_for_stable()
+        standalone = _standalone_view_count()
+        series_idx = standalone
+        pos = _goto_view_tile(bs, series_idx)
+        # Download the series first so delete has files to remove.
+        bs.long_press_book(pos)
+        time.sleep(1.0)
+        bs.tap_context_item(0)  # Download all
+        _wait_log_count(bs, "download_book_file OK", 2)
+        removed_before = bs.current_log().count("delete_book_file removed")
+        # Now delete the whole series.
+        bs.long_press_book(pos)
+        time.sleep(1.0)
+        bs.tap_context_item(1)  # Delete series
+        time.sleep(2.0)
+        bs.assert_log_contains("delete_series")
+        removed_after = bs.current_log().count("delete_book_file removed")
+        assert removed_after - removed_before == 2, (
+            f"delete-series removed {removed_after - removed_before} files, expected 2"
+        )
+    finally:
+        _clear_downloads()
         _remove_series(injected)
