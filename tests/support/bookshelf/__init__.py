@@ -2,6 +2,7 @@
 
 from .geometry import (
     MORE_AUTHOR,
+    MORE_DOWNLOAD_ALL,
     MORE_GRID,
     MORE_LIST,
     MORE_RECENT,
@@ -11,12 +12,14 @@ from .geometry import (
     MORE_TITLE_ZA,
     MORE_SETTINGS,
     MORE_SYSTEM,
+    MORE_APPS,
     BookshelfGeometry,
 )
 from .session import BookshelfSession, read_bookshelf_log
 
 __all__ = [
     "MORE_AUTHOR",
+    "MORE_DOWNLOAD_ALL",
     "MORE_GRID",
     "MORE_LIST",
     "MORE_RECENT",
@@ -26,6 +29,7 @@ __all__ = [
     "MORE_TITLE_ZA",
     "MORE_SETTINGS",
     "MORE_SYSTEM",
+    "MORE_APPS",
     "BookshelfGeometry",
     "BookshelfSession",
     "read_bookshelf_log",
