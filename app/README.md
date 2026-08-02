@@ -225,7 +225,7 @@ otherwise (e.g. the emulator's non-root guest) they fall back to
 launch.
 
 For a real PocketBook, use the bundled `install-device.sh` script to
-push the binary + config and restart the existing copy:
+push the binary + config and install the startup wrapper:
 
 ```bash
 bookshelf/install-device.sh <device-ip>            # auto-detects host LAN ip
@@ -239,20 +239,54 @@ The script:
   once beforehand),
 * writes a fresh `build/bookshelf.cfg` with `api_url` set to the
   host's primary LAN IPv4 (or the override you pass),
-* scps both files into `/mnt/ext1/applications/`,
+* scps the binary + config into `/mnt/ext1/applications/`,
 * renames the binary on-device to **`books.app`**, not `bookshelf.app`,
   because PocketBook's launcher dispatches by basename — leaving the
   original name there would launch the firmware's built-in
   bookshelf.app and silently exit,
+* deploys **`bookshelf-wrapper.sh`** to
+  `/mnt/ext1/system/bin/bookshelf.app` — the startup hook that makes
+  the custom bookshelf launch on boot (see below),
 * clears the on-device log and kills any stale `books.app` so the
   next launch starts clean.
 
-Or do it by hand:
+### Startup wrapper (auto-launch on boot)
+
+The firmware's launcher, `monitor.app`, resolves the home/startup app
+by checking `/mnt/ext1/system/bin/bookshelf.app` **before** the
+read-only `/ebrmain/bin/bookshelf.app` (verified in the launcher's
+disassembly at `0x33b48`–`0x33b74`). `/mnt/ext1` is the writable user
+partition, so dropping a file there overrides the boot path with no
+root, no flash, and no signing.
+
+`bookshelf-wrapper.sh` is installed at that override path. On every
+boot it:
+
+1. launches the custom bookshelf (`/mnt/ext1/applications/books.app`)
+   in the background, fire-and-forget, guarded by a PID file so it
+   never spawns duplicates;
+2. `exec`s the **real** firmware bookshelf with the original argv, so
+   the stock library UI keeps working exactly as before.
+
+The result: the custom bookshelf runs as a separate task alongside the
+stock home screen. If it crashes, nothing breaks — the stock bookshelf
+is the one `monitor.app` is actually tracking, so the crash-loop guard
+(`bookshelf.self.check`) never trips on our app.
+
+To remove everything and restore the stock boot path:
 
 ```bash
-scp build/bookshelf.app   root@<device-ip>:/mnt/ext1/applications/books.app
-scp build/bookshelf.cfg   root@<device-ip>:/mnt/ext1/applications/
-ssh root@<device-ip> 'chmod +x /mnt/ext1/applications/books.app'
+bookshelf/uninstall-device.sh <device-ip>
+# then reboot the device
+```
+
+Or do the install by hand:
+
+```bash
+scp build/bookshelf.app        root@<device-ip>:/mnt/ext1/applications/books.app
+scp build/bookshelf.cfg        root@<device-ip>:/mnt/ext1/applications/
+scp bookshelf/bookshelf-wrapper.sh root@<device-ip>:/mnt/ext1/system/bin/bookshelf.app
+ssh root@<device-ip> 'chmod +x /mnt/ext1/applications/books.app /mnt/ext1/system/bin/bookshelf.app'
 ```
 
 Edit the config to point at your API server before copying if you're
@@ -343,39 +377,42 @@ says "set this attribute **before first access to panel API**"):
 
 ```c
 SetCurrentApplicationAttribute(APPLICATION_READER, 1);   /* flag as reader */
-SetShowPanelReader(1);            /* 1 = show the panel reader bars */
-SetPanelSeparatorEnabled(1);      /* thin separator above the bottom bar */
-SetPanelTransparent(0);           /* 0 = opaque bar (no see-through) */
-SetPanelType(PANEL_ENABLED);      /* show the swipe-down control panel */
-g_state.panel_h = PanelHeight();   /* query once so all subsequent
-                                    * draws place content below it */
 
-/* Original firmware bookshelf.app imports SetOrientation (verified via
- * nm -D); calling it here in EVT_INIT clears the framebuffer to white
- * and re-evaluates the panel rect, which is what allows iv_update_panel()
- * to draw the system bars into the correct region.
+/* Set the framebuffer orientation FIRST.  SetOrientation() recomputes
+ * the per-task iv_fbinfo (clearing the framebuffer to white and
+ * resetting fb_y_offset to 0).  If it runs AFTER SetPanelType() it
+ * wipes the panel's fb_y_offset and iv_update_panel() then bails —
+ * it reads fb_y_offset==0 as "no panel".  Doing it first lets
+ * SetPanelType() write the correct fb_y_offset into the final layout.
  */
 SetOrientation(0);
 
-/* Force the firmware to actually draw the system bars now.  Repaint()
- * enqueues EVT_SHOW (=23) on the event loop; the firmware's
- * iv_actualize_panel() handler calls iv_update_panel() to draw the
- * bars.  Without this call the bars are only redrawn on subsequent
- * state changes (clock minute tick, battery percent change, net
- * state change) — on a freshly launched task with no state change
- * yet, the bars are blank.  Repaint() forces an immediate one-shot
- * redraw.
+SetShowPanelReader(1);            /* 1 = show the panel reader bars */
+SetPanelSeparatorEnabled(1);      /* thin separator above the bar */
+SetPanelTransparent(0);           /* 0 = opaque bar (no see-through) */
+SetPanelType(PANEL_ENABLED);      /* enable the status panel */
+g_state.panel_h = PanelHeight();  /* height reserved at the BOTTOM */
+
+/* Force the firmware to draw the status bar now.  Repaint() enqueues
+ * EVT_SHOW (=23); the firmware's iv_actualize_panel() handler calls
+ * iv_update_panel() to blit the clock / battery / wifi strip.  Without
+ * this the bar is only redrawn on later state changes (minute tick,
+ * battery %, net state) — on a fresh task with no change yet it is
+ * blank.  Repaint() forces an immediate one-shot redraw.
  */
 Repaint();
 ```
 
-The status bars are **not** drawn by the app — `libinkview` does it
+The status bar is **not** drawn by the app — `libinkview` does it
 automatically once the panel is enabled and the app is flagged as a
-reader.  The app just needs to leave room: `BOTTOM_RESERVED = 80` px at
-the bottom of the framebuffer is reserved for the bottom bar, and the
-pager sits **above** that reserved zone so taps on the pager buttons
-don't conflict with the firmware's bottom-edge drawer gesture (which
-can pull the system drawer down from the bottom).
+reader.  Crucially, on this firmware the panel always renders at the
+**bottom** of the screen: bit 3 of the internal panel-state byte is
+clear after `SetPanelType(PANEL_ENABLED)`, and the only way to set it
+(`SetPanelType(9)`) also zeroes `fb_y_offset`, which makes the panel's
+inner draw function bail entirely (it treats `fb_y_offset==0` as "no
+panel").  So `panel_h` is a **bottom reservation**, not a top offset:
+our content starts at `y=0` and the pager is placed `panel_h` pixels
+above the bottom edge so it never overlaps the status bar.
 
 We deliberately **do not** call `SetPanelType(PANEL_DISABLED)` or
 `iv_fullscreen()`.  Without those the system panel stays visible —

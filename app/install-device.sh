@@ -148,11 +148,26 @@ echo "    api_url = ${API_URL}"
 scp ${SSH_COMMON} "${SRC_APP}" "root@${DEVICE}:/mnt/ext1/applications/books.app"
 scp ${SSH_COMMON} "${SRC_CFG}" "root@${DEVICE}:/mnt/ext1/applications/bookshelf.cfg"
 
-# Make the binary executable, kill any stale copy, restart cleanly.
+# Deploy the startup wrapper.  monitor.app resolves the home app by
+# checking /mnt/ext1/system/bin/bookshelf.app BEFORE the firmware's
+# /ebrmain/bin/bookshelf.app (verified in the launcher disassembly).
+# The wrapper launches our books.app in the background, then execs the
+# real firmware bookshelf so the stock UI keeps working.  This is what
+# makes the custom bookshelf appear on boot instead of requiring a
+# manual launch from the task list.
+WRAPPER="${HERE}/bookshelf-wrapper.sh"
+if [ -f "${WRAPPER}" ]; then
+	echo "==> deploying startup wrapper to /mnt/ext1/system/bin/bookshelf.app"
+	ssh ${SSH_COMMON} "root@${DEVICE}" 'mkdir -p /mnt/ext1/system/bin'
+	scp ${SSH_COMMON} "${WRAPPER}" "root@${DEVICE}:/mnt/ext1/system/bin/bookshelf.app"
+fi
+
+# Make the binaries executable, kill any stale copy, restart cleanly.
 # The `killall` is best-effort: it's OK if no process matches.
 ssh ${SSH_COMMON} "root@${DEVICE}" sh -c '
 	set -e
 	chmod +x /mnt/ext1/applications/books.app
+	if [ -f /mnt/ext1/system/bin/bookshelf.app ]; then chmod +x /mnt/ext1/system/bin/bookshelf.app; fi
 	# Clear any stale log so the next run is easy to read.
 	: >/mnt/ext1/applications/bookshelf.log
 	killall books.app 2>/dev/null || true
@@ -161,5 +176,5 @@ ssh ${SSH_COMMON} "root@${DEVICE}" sh -c '
 
 echo "==> installed.  verify with:"
 echo "    ssh root@${DEVICE} 'tail -f /mnt/ext1/applications/bookshelf.log'"
-echo "    then launch /mnt/ext1/applications/books.app from the device"
-echo "    task list (the app shows up as \"books\")."
+echo "    reboot the device; the custom bookshelf launches on startup"
+echo "    alongside the stock library (wrapper execs the firmware bookshelf)."
