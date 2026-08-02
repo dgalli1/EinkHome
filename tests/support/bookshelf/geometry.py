@@ -13,8 +13,9 @@ from dataclasses import dataclass
 # ── layout constants (must match bookshelf.c) ──────────────────────────
 TOP_BAR_H = 128
 SEARCH_ROW_H = 88
+TAB_ROW_H = 80
 PAGER_H = 96
-BOTTOM_RESERVED = 80
+BOTTOM_RESERVED = 0
 COLS = 3
 ROWS = 2
 PAGESIZE = COLS * ROWS  # 6
@@ -32,8 +33,10 @@ MORE_SERIES = 4
 MORE_RECENT = 5
 MORE_GRID = 6
 MORE_LIST = 7
-MORE_SETTINGS = 8
-MORE_SYSTEM = 9
+MORE_DOWNLOAD_ALL = 8
+MORE_SETTINGS = 9
+MORE_SYSTEM = 10
+MORE_APPS = 11
 
 # ── Settings overlay layout (full-screen page) ────────────────────────
 SETTINGS_ROW_H = 120
@@ -46,6 +49,19 @@ MENU_BY_AUTHOR = 1
 MENU_BY_SERIES = 2
 MENU_BY_RECENT = 3
 
+# ── Context (long-press) menu layout ──────────────────────────────────
+CTX_ITEM_H = 96
+CTX_TITLE_H = 72
+CTX_PAD = 24
+# ── Launcher overlay layout (must match bookshelf.c) ─────────────────
+LAUNCHER_HEADER_H = 104
+LAUNCHER_PAGER_H = 96
+LAUNCHER_COLS = 3
+LAUNCHER_GROUP_H = 64
+LAUNCHER_CELL_H = 232
+LAUNCHER_ICON_SZ = 120
+LAUNCHER_MARGIN = 16
+
 __all__ = [
     "BOTTOM_RESERVED",
     "CELL_MAX_H",
@@ -54,11 +70,15 @@ __all__ = [
     "CELL_MIN_W",
     "COLS",
     "BookshelfGeometry",
+    "CTX_ITEM_H",
+    "CTX_PAD",
+    "CTX_TITLE_H",
     "MENU_ALL",
     "MENU_BY_AUTHOR",
     "MENU_BY_RECENT",
     "MENU_BY_SERIES",
     "MORE_AUTHOR",
+    "MORE_DOWNLOAD_ALL",
     "MORE_SETTINGS",
     "MORE_SYSTEM",
     "MORE_GRID",
@@ -72,10 +92,19 @@ __all__ = [
     "PAGESIZE",
     "ROWS",
     "SEARCH_ROW_H",
+    "TAB_ROW_H",
     "TOP_BAR_H",
     "SETTINGS_BTN_H",
     "SETTINGS_ROW1_Y",
     "SETTINGS_ROW_H",
+    "MORE_APPS",
+    "LAUNCHER_HEADER_H",
+    "LAUNCHER_PAGER_H",
+    "LAUNCHER_COLS",
+    "LAUNCHER_GROUP_H",
+    "LAUNCHER_CELL_H",
+    "LAUNCHER_ICON_SZ",
+    "LAUNCHER_MARGIN",
 ]
 
 
@@ -112,8 +141,8 @@ class BookshelfGeometry:
 
     def _grid_params(self) -> tuple[int, int, int]:
         """Return ``(grid_top, cell_w, cell_h)`` matching ``grid_geom()``."""
-        top = self.panel_h + TOP_BAR_H + SEARCH_ROW_H
-        bot = self.screen_h - PAGER_H - BOTTOM_RESERVED
+        top = self.panel_h + TOP_BAR_H + SEARCH_ROW_H + TAB_ROW_H
+        bot = self.screen_h - PAGER_H
         avail_h = bot - top - 8
         avail_w = self.screen_w - 16
         cell_w = max(CELL_MIN_W, min(avail_w // COLS, CELL_MAX_W))
@@ -135,7 +164,7 @@ class BookshelfGeometry:
 
     def pager_y(self) -> int:
         """Top edge of the pager row."""
-        return self.screen_h - PAGER_H - BOTTOM_RESERVED
+        return self.screen_h - PAGER_H
 
     def pager_prev_center(self) -> tuple[int, int]:
         """Centre of the 96×64 prev-page button."""
@@ -155,7 +184,7 @@ class BookshelfGeometry:
         """Centre of More-overlay item *index* (y0=96, item_h=88)."""
         pw = self.screen_w * 3 // 4
         px = self.screen_w - pw
-        return (px + pw // 2, 96 + index * 88 + 44)
+        return (px + pw // 2, self.panel_h + 96 + index * 88 + 44)
 
     def outside_more_overlay(self) -> tuple[int, int]:
         """A point guaranteed to be left of the right-anchored More panel."""
@@ -170,25 +199,84 @@ class BookshelfGeometry:
     def menu_item_center(self, index: int) -> tuple[int, int]:
         """Centre of Menu-overlay item *index* (y0=96, item_h=88)."""
         pw = self.screen_w * 3 // 4
-        return (pw // 2, 96 + index * 88 + 44)
+        return (pw // 2, self.panel_h + 96 + index * 88 + 44)
 
     # ── Settings overlay (full-screen page) ───────────────────────────
 
     def settings_row_center(self, row: int) -> tuple[int, int]:
         """Centre of settings row *row* (0=API host, 1=API key, 2=reader)."""
-        y = SETTINGS_ROW1_Y + row * SETTINGS_ROW_H
+        y = self.panel_h + SETTINGS_ROW1_Y + row * SETTINGS_ROW_H
         return (self.screen_w // 2, y + (SETTINGS_ROW_H - 12) // 2)
 
     def settings_save_center(self) -> tuple[int, int]:
         """Centre of the Save & apply button."""
-        y = SETTINGS_ROW1_Y + 3 * SETTINGS_ROW_H + 24
+        y = self.panel_h + SETTINGS_ROW1_Y + 3 * SETTINGS_ROW_H + 24
         return (self.screen_w // 2, y + (SETTINGS_BTN_H - 12) // 2)
 
     def settings_back_center(self) -> tuple[int, int]:
         """Centre of the Back button."""
-        y = SETTINGS_ROW1_Y + 3 * SETTINGS_ROW_H + 24 + SETTINGS_BTN_H
+        y = self.panel_h + SETTINGS_ROW1_Y + 3 * SETTINGS_ROW_H + 24 + SETTINGS_BTN_H
         return (self.screen_w // 2, y + (SETTINGS_BTN_H - 12) // 2)
 
     def outside_menu_overlay(self) -> tuple[int, int]:
         """A point guaranteed to be right of the left-anchored Menu panel."""
         return (self.screen_w - 4, self.screen_h // 2)
+
+    # ── tab row (Library / Downloads) ─────────────────────────────────
+
+    def tab_library_center(self) -> tuple[int, int]:
+        """Centre of the Library tab button."""
+        y = self.panel_h + TOP_BAR_H + SEARCH_ROW_H
+        return (self.screen_w // 4, y + TAB_ROW_H // 2)
+
+    def tab_downloads_center(self) -> tuple[int, int]:
+        """Centre of the Downloads tab button."""
+        y = self.panel_h + TOP_BAR_H + SEARCH_ROW_H
+        return (self.screen_w * 3 // 4, y + TAB_ROW_H // 2)
+
+    # ── context (long-press) menu ─────────────────────────────────────
+    # Centred modal sheet: width = 3/4 screen, height = title + N items.
+
+    def context_item_center(self, item: int, n_items: int = 2) -> tuple[int, int]:
+        """Centre of context-menu item *item* (0-based) in a sheet of
+        *n_items* rows."""
+        pw = self.screen_w * 3 // 4
+        ph = CTX_TITLE_H + n_items * CTX_ITEM_H + CTX_PAD
+        px = (self.screen_w - pw) // 2
+        py = (self.screen_h - ph) // 2
+        iy = py + CTX_TITLE_H + item * CTX_ITEM_H
+        return (px + pw // 2, iy + CTX_ITEM_H // 2)
+
+    # ── firmware on-screen keyboard ───────────────────────────────────
+    # The keyboard is drawn by the firmware (not by bookshelf.c), so its
+    # geometry is fixed relative to the bottom of the visible area.  With
+    # the top-panel layout (PANEL_NO_FB_OFFSET, fb_y_offset=0) the visible
+    # area spans the full screen height; the return key centre shifts down
+    # by panel_h compared to the old bottom-panel measurement (1269).
+
+    def keyboard_return_center(self) -> tuple[int, int]:
+        """Centre of the on-screen keyboard's return/accept key."""
+        return (963, 1269 + self.panel_h)
+
+    # ── launcher overlay ──────────────────────────────────────────────
+
+    def launcher_back_center(self) -> tuple[int, int]:
+        """Centre of the launcher Back button."""
+        by = self.panel_h + (LAUNCHER_HEADER_H - 56) // 2
+        return (16 + 80, by + 28)
+
+    def launcher_first_app_center(self) -> tuple[int, int]:
+        """Centre of the first app cell on page 0 (after the first header)."""
+        cell_w = (self.screen_w - 2 * LAUNCHER_MARGIN) // LAUNCHER_COLS
+        y = self.panel_h + LAUNCHER_HEADER_H + LAUNCHER_GROUP_H
+        return (LAUNCHER_MARGIN + cell_w // 2, y + LAUNCHER_CELL_H // 2)
+
+    def launcher_pager_next_center(self) -> tuple[int, int]:
+        """Centre of the launcher next-page region."""
+        py = self.screen_h - LAUNCHER_PAGER_H
+        return (self.screen_w * 5 // 6, py + LAUNCHER_PAGER_H // 2)
+
+    def launcher_pager_prev_center(self) -> tuple[int, int]:
+        """Centre of the launcher prev-page region."""
+        py = self.screen_h - LAUNCHER_PAGER_H
+        return (self.screen_w // 6, py + LAUNCHER_PAGER_H // 2)

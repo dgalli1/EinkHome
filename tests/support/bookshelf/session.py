@@ -13,8 +13,8 @@ from typing import TYPE_CHECKING
 
 from tests.support.reader.session import Session
 from tests.support.runtime_common import REPO_ROOT
-from tests.support.ui_input import IV_KEY_BACK, press_key, tap
-from tests.support.bookshelf.geometry import MORE_SETTINGS
+from tests.support.ui_input import IV_KEY_BACK, pointer_down, pointer_up, press_key, tap, type_text
+from tests.support.bookshelf.geometry import MORE_APPS, MORE_DOWNLOAD_ALL, MORE_SETTINGS
 
 if TYPE_CHECKING:
     from tests.support.bookshelf.geometry import BookshelfGeometry
@@ -134,6 +134,34 @@ class BookshelfSession:
         """Tap the Prev page button."""
         self.tap_at(*self._g.pager_prev_center())
 
+    def long_press_at(self, x: int, y: int, *, hold: float = 0.9) -> None:
+        """Hold a touch at (x, y) long enough to trip the app's long-press
+        timer (LONGPRESS_MS=550 in bookshelf.c), then release."""
+        pointer_down(self.emulator, x, y)
+        time.sleep(hold)
+        pointer_up(self.emulator, x, y)
+
+    def long_press_book(self, index: int, *, hold: float = 0.9) -> None:
+        """Long-press book tile at grid *index* to open its context menu."""
+        self.long_press_at(*self._g.book_tile_center(index), hold=hold)
+
+    def tap_tab_library(self) -> None:
+        """Switch to the Library tab."""
+        self.tap_at(*self._g.tab_library_center())
+
+    def tap_tab_downloads(self) -> None:
+        """Switch to the Downloads tab."""
+        self.tap_at(*self._g.tab_downloads_center())
+
+    def tap_context_item(self, item: int) -> None:
+        """Tap context-menu item *item* (0=download, 1=delete)."""
+        self.tap_at(*self._g.context_item_center(item))
+
+    def tap_download_all(self) -> None:
+        """Open the More overlay and tap Download all."""
+        self.tap_menu()
+        self.tap_at(*self._g.more_item_center(MORE_DOWNLOAD_ALL))
+
     def tap_more_item(self, item_index: int) -> None:
         """Tap item *item_index* in the More overlay (0-based)."""
         self.tap_at(*self._g.more_item_center(item_index))
@@ -145,6 +173,25 @@ class BookshelfSession:
     def send_back_key(self) -> None:
         """Send the Back key event."""
         press_key(self.emulator, IV_KEY_BACK)
+
+    def type_text(self, text: str, *, commit: bool = True) -> None:
+        """Type *text* into the open on-screen keyboard, then commit.
+
+        Types the string in a single resolution-independent probe call
+        (``EVT_EXT_KB`` per character), then taps the firmware keyboard's
+        return key so the edit buffer is committed and the
+        ``OpenKeyboard`` handler fires.  Pass ``commit=False`` to leave
+        the keyboard open with the text in its buffer (e.g. to assert the
+        typed value before committing).  The keyboard must already be
+        open (tap the search box / a settings text row first).
+        """
+        type_text(self.emulator, text)
+        if commit:
+            # Let the guest drain the character stream into the edit
+            # buffer before the commit tap, so the handler sees the full
+            # string rather than a prefix.
+            time.sleep(0.3)
+            self.tap_at(*self._g.keyboard_return_center())
 
     # -- settings helpers -------------------------------------------------
 
@@ -164,6 +211,33 @@ class BookshelfSession:
     def tap_settings_back(self) -> None:
         """Tap the Back button."""
         self.tap_at(*self._g.settings_back_center())
+
+    # -- launcher helpers ------------------------------------------------
+
+    def open_launcher(self) -> None:
+        """Open the More overlay and tap the Applications item."""
+        self.tap_menu()
+        time.sleep(0.5)
+        self.tap_at(*self._g.more_item_center(MORE_APPS))
+
+    def tap_launcher_back(self) -> None:
+        """Tap the launcher Back button."""
+        self.tap_at(*self._g.launcher_back_center())
+
+    def tap_launcher_app(self, index: int = 0) -> None:
+        """Tap launcher app cell *index* (0 = first app on page 0)."""
+        if index == 0:
+            self.tap_at(*self._g.launcher_first_app_center())
+        else:
+            self.tap_at(*self._g.launcher_first_app_center())
+
+    def tap_launcher_pager_next(self) -> None:
+        """Tap the launcher next-page region."""
+        self.tap_at(*self._g.launcher_pager_next_center())
+
+    def tap_launcher_pager_prev(self) -> None:
+        """Tap the launcher prev-page region."""
+        self.tap_at(*self._g.launcher_pager_prev_center())
 
     # -- tap + verify helpers ---------------------------------------------
 
