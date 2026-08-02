@@ -26,19 +26,26 @@ REPO_ROOT=$(
 	cd "${HERE}/.." && pwd
 )
 CONTAINER="${PBEMU_CONTAINER:-pb-pocketbook-ui}"
-SRC="${HERE}/bookshelf.c"
+BS_DIR="${HERE}"
 OUT_REL="build/bookshelf.app"
 API_PORT="${PBEMU_API_PORT:-8765}"
 
 cd "${REPO_ROOT}"
 
-if [ ! -f "${SRC}" ]; then
-	echo "ERROR: ${SRC} not found" >&2
-	exit 1
-fi
+# All translation units that make up the bookshelf app.
+BS_SRCS=""
+for _f in bs_i18n.c bs_config.c bs_model.c bs_net.c bs_ui.c \
+          bs_input.c bs_launcher.c bs_downloads.c bs_main.c; do
+	if [ ! -f "${BS_DIR}/${_f}" ]; then
+		echo "ERROR: ${BS_DIR}/${_f} not found" >&2
+		exit 1
+	fi
+	BS_SRCS="${BS_SRCS:+${BS_SRCS} }${BS_DIR}/${_f}"
+done
 
 echo "==> 1/6  building bookshelf.app"
-"${REPO_ROOT}/sdk/build_armel.sh" "${SRC}" --output "${OUT_REL}"
+# shellcheck disable=SC2086
+"${REPO_ROOT}/sdk/build_armel.sh" ${BS_SRCS} --output "${OUT_REL}"
 
 if ! podman container exists "${CONTAINER}" 2>/dev/null; then
 	echo "INFO: container ${CONTAINER} not running; will be started in step 5"

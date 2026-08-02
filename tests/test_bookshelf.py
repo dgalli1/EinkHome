@@ -133,12 +133,22 @@ def _stop_api_server(proc: subprocess.Popen) -> None:  # type: ignore[type-arg]
 
 def _build_bookshelf() -> Path:
     """Build the bookshelf binary. Returns path to the built ELF."""
-    src = REPO_ROOT / "bookshelf" / "bookshelf.c"
+    bs_dir = REPO_ROOT / "bookshelf"
     out = REPO_ROOT / "build" / "bookshelf.app"
     build_script = REPO_ROOT / "sdk" / "build_armel.sh"
     assert build_script.is_file(), f"build script missing: {build_script}"
+    srcs = [
+        str(bs_dir / f)
+        for f in [
+            "bs_i18n.c", "bs_config.c", "bs_model.c", "bs_net.c",
+            "bs_ui.c", "bs_input.c", "bs_launcher.c",
+            "bs_downloads.c", "bs_main.c",
+        ]
+    ]
+    for s in srcs:
+        assert Path(s).is_file(), f"source missing: {s}"
     subprocess.run(
-        [str(build_script), str(src), "--output", str(out.relative_to(REPO_ROOT))],
+        [str(build_script), *srcs, "--output", str(out.relative_to(REPO_ROOT))],
         cwd=REPO_ROOT,
         check=True,
         capture_output=True,

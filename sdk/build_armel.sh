@@ -13,7 +13,10 @@
 # Usage:
 #     sdk/build_armel.sh                       # builds sdk/hello/hello.c
 #     sdk/build_armel.sh <src.c> [extra cflags...]
-#     sdk/build_armel.sh <src.c> --output <path>
+#     sdk/build_armel.sh <src1.c> <src2.c> ... --output <path>
+#
+# Multiple .c source files may be given; they are all compiled and
+# linked together into a single ELF.
 #
 # Output:
 #     build/<basename> in the repo root (or whatever --output specifies).
@@ -40,10 +43,9 @@ for path in \
 	"${SDK}/include/inkview.h" \
 	"${SYSROOT}/lib/libc.so.6" \
 	"${FIRMWARE}/ebrmain/cramfs/lib/libz.so.1.2.11"; do
-	if [ ! -f "${path}" ]; then
-		echo "ERROR: required input missing: ${path}" >&2
-		echo "  - run sdk/install-sdk.sh to fetch the PocketBook SDK headers" >&2
-		echo "  - run ./pbemu install <firmware.zip> to stage U633_6.8.2817" >&2
+	if [ ! -e "${path}" ]; then
+		echo "ERROR: required path missing: ${path}" >&2
+		echo "  Did you run './pbemu install' and 'sdk/install-sdk.sh'?" >&2
 		exit 1
 	fi
 done
@@ -53,9 +55,10 @@ done
 SRC_DEFAULT="${REPO_ROOT}/sdk/hello/hello.c"
 
 # Parse args. We allow the caller to pass extra cflags which we splice
-# through verbatim before the final output path.
+# through verbatim before the final output path.  Multiple .c source
+# files may be given (they are all compiled and linked together).
 OUTPUT=""
-SRC=""
+SRCS=""
 while [ "$#" -gt 0 ]; do
 	case "$1" in
 	--output)
@@ -80,54 +83,56 @@ while [ "$#" -gt 0 ]; do
 		continue
 		;;
 	esac
-	# First non-option argument is the source file. Anything after it is
-	# appended to EXTRA_FLAGS verbatim (extra gcc args).
-	SRC="$1"
+	# Non-option arguments: .c files are collected as sources; anything
+	# else is treated as an extra gcc flag.
+	case "$1" in
+	*.c)
+		if [ -z "${SRCS}" ]; then
+			SRCS="$1"
+		else
+			SRCS="${SRCS} $1"
+		fi
+		;;
+	*)
+		EXTRA_FLAGS="${EXTRA_FLAGS:-} $1"
+		;;
+	esac
 	shift
-	while [ "$#" -gt 0 ]; do
-		case "$1" in
-		--output)
-			OUTPUT="$2"
-			shift 2
-			continue
-			;;
-		--output=*)
-			OUTPUT="${1#--output=}"
-			shift
-			continue
-			;;
-		--help | -h)
-			sed -n '2,30p' "$0"
-			exit 0
-			;;
-		*)
-			EXTRA_FLAGS="${EXTRA_FLAGS:-} $1"
-			shift
-			;;
-		esac
-	done
-	break
 done
 
 # Default source when the caller did not supply one.
-if [ -z "${SRC}" ]; then
-	SRC="${SRC_DEFAULT}"
+if [ -z "${SRCS}" ]; then
+	SRCS="${SRC_DEFAULT}"
 fi
 
-if [ ! -f "${SRC}" ]; then
-	echo "ERROR: source file not found: ${SRC}" >&2
-	exit 1
-fi
+# Validate every source file.
+for _src in ${SRCS}; do
+	if [ ! -f "${_src}" ]; then
+		echo "ERROR: source file not found: ${_src}" >&2
+		exit 1
+	fi
+done
 
-# Resolve source path inside the bind mount: bind-mount is on /work.
-SRC_REL=$(echo "${SRC}" | sed "s|^${REPO_ROOT}/||")
+# Build the container-side source list and determine output name.
+CONTAINER_SRCS=""
+_FIRST_SRC=""
+for _src in ${SRCS}; do
+	_rel=$(echo "${_src}" | sed "s|^${REPO_ROOT}/||")
+	if [ -z "${CONTAINER_SRCS}" ]; then
+		CONTAINER_SRCS="/work/${_rel}"
+	else
+		CONTAINER_SRCS="${CONTAINER_SRCS} /work/${_rel}"
+	fi
+	if [ -z "${_FIRST_SRC}" ]; then
+		_FIRST_SRC="${_src}"
+	fi
+done
 
-NAME=$(basename "${SRC}" .c)
+NAME=$(basename "${_FIRST_SRC}" .c)
 OUT_REL="${OUTPUT:-build/${NAME}}"
 mkdir -p "$(dirname "${REPO_ROOT}/${OUT_REL}")"
 
 # All paths the compiler sees inside the container are /work/...
-CONTAINER_SRC="/work/${SRC_REL}"
 CONTAINER_OUT="/work/${OUT_REL}"
 CONTAINER_SDK_INC="/work/sdk/pocketbook-sdk-b288/include"
 CONTAINER_SDK_LIB="/work/sdk/pocketbook-sdk-b288/lib"
@@ -151,6 +156,7 @@ podman run --rm \
 	localhost/pbdev:latest \
 	/usr/bin/arm-linux-gnueabi-gcc \
 	"-I${CONTAINER_SDK_INC}" \
+	"-I/work/bookshelf" \
 	"-I/usr/include" \
 	"-Wl,-rpath,${CONTAINER_SDK_LIB}" \
 	"-L${CONTAINER_SDK_LIB}" \
@@ -161,7 +167,7 @@ podman run --rm \
 	"${CRTB}" \
 	-Wall -Wextra -Werror=implicit-function-declaration -O2 \
 	${EXTRA_FLAGS:-} \
-	"${CONTAINER_SRC}" \
+	${CONTAINER_SRCS} \
 	-o "${CONTAINER_OUT}" \
 	"-Wl,-dynamic-linker,/lib/ld-linux.so.3" \
 	"-Wl,--allow-shlib-undefined" \

@@ -86,7 +86,13 @@ SRC_CFG="${REPO_ROOT}/build/bookshelf.cfg"
 
 if [ "${DO_BUILD}" = "1" ] || [ ! -f "${SRC_APP}" ]; then
 	echo "==> building ${SRC_APP}"
-	"${REPO_ROOT}/sdk/build_armel.sh" "${HERE}/bookshelf.c" --output "${SRC_APP}"
+	BS_SRCS=""
+	for _f in bs_i18n.c bs_config.c bs_model.c bs_net.c bs_ui.c \
+	          bs_input.c bs_launcher.c bs_downloads.c bs_main.c; do
+		BS_SRCS="${BS_SRCS:+${BS_SRCS} }${HERE}/${_f}"
+	done
+	# shellcheck disable=SC2086
+	"${REPO_ROOT}/sdk/build_armel.sh" ${BS_SRCS} --output "${SRC_APP}"
 fi
 
 if [ ! -f "${SRC_APP}" ]; then

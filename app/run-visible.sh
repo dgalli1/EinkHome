@@ -32,7 +32,7 @@ REPO_ROOT=$(
 )
 CONTAINER="${PBEMU_CONTAINER:-pb-pocketbook-ui}"
 FIRMWARE="${PBEMU_FIRMWARE:-U633_6.8.2817}"
-SRC="${HERE}/bookshelf.c"
+BS_DIR="${HERE}"
 OUT_REL="build/bookshelf.app"
 API_PORT="${PBEMU_API_PORT:-8765}"
 
@@ -53,10 +53,14 @@ done
 
 cd "${REPO_ROOT}"
 
-if [ ! -f "${SRC}" ]; then
-	echo "ERROR: ${SRC} not found" >&2
-	exit 1
-fi
+# Validate all split source files exist.
+for _f in bs_i18n.c bs_config.c bs_model.c bs_net.c bs_ui.c \
+          bs_input.c bs_launcher.c bs_downloads.c bs_main.c; do
+	if [ ! -f "${BS_DIR}/${_f}" ]; then
+		echo "ERROR: ${BS_DIR}/${_f} not found" >&2
+		exit 1
+	fi
+done
 
 # Pick a Python interpreter: prefer the repo venv, fall back to python3.
 PYTHON="${REPO_ROOT}/.venv/bin/python"
@@ -70,7 +74,13 @@ fi
 
 if [ "${DO_BUILD}" -eq 1 ]; then
 	echo "==> 1/5  building bookshelf.app"
-	"${REPO_ROOT}/sdk/build_armel.sh" "${SRC}" --output "${OUT_REL}"
+	BS_SRCS=""
+	for _f in bs_i18n.c bs_config.c bs_model.c bs_net.c bs_ui.c \
+	          bs_input.c bs_launcher.c bs_downloads.c bs_main.c; do
+		BS_SRCS="${BS_SRCS:+${BS_SRCS} }${BS_DIR}/${_f}"
+	done
+	# shellcheck disable=SC2086
+	"${REPO_ROOT}/sdk/build_armel.sh" ${BS_SRCS} --output "${OUT_REL}"
 else
 	echo "==> 1/5  skipping build (--no-build)"
 	if [ ! -f "${OUT_REL}" ]; then
