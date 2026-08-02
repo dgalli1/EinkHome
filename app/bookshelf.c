@@ -50,6 +50,16 @@
 #include <math.h>
 #include <strings.h>
 #include <time.h>
+#include <unistd.h>
+
+/* libinkview exports iv_update_panel() but the public SDK header omits it.
+ * It renders the system status strip (clock / battery / wifi) into the
+ * panel region of the framebuffer.  The C++ PBAppFrame framework calls it
+ * from the app's CustomDrawPanel() override; a plain-C app must call it
+ * itself after DrawPanel() has populated the panel content, otherwise the
+ * strip stays blank.  The argument is the reading-mode-enable flag passed
+ * through to the panel draw callback (0 for the normal collapsed bar). */
+extern void iv_update_panel(int readingModeEnable);
 
 /* ── configuration ───────────────────────────────────────────────────── */
 
@@ -61,7 +71,12 @@
 
 #define TOKEN_DEFAULT   "pbemu-dev-token"
 #define LOCAL_DOWNLOADS "/mnt/ext1/system/bin"
-#define CONFIG_FILENAME "bookshelf.cfg"
+/* Guest-writable fallback for downloads.  The emulator's non-root qemu-arm
+ * guest cannot write LOCAL_DOWNLOADS (/mnt/ext1/system/bin), so downloads
+ * fall back to /tmp there (see resolve_downloads_dir).  On a real device
+ * LOCAL_DOWNLOADS is writable and used directly. */
+#define LOCAL_DOWNLOADS_FALLBACK "/tmp"
+#define CONFIG_FILENAME          "bookshelf.cfg"
 /* Guest-writable fallback config path (used when the app's own directory
  * is not writable, e.g. the emulator's non-root qemu-arm guest). */
 #define CONFIG_TMP_PATH "/tmp/" CONFIG_FILENAME
@@ -87,11 +102,8 @@
  * All sizes are generous for comfortable e-ink touch targets. */
 #define TOP_BAR_H    128
 #define SEARCH_ROW_H 88
+#define TAB_ROW_H    80
 #define PAGER_H      96
-#define BOTTOM_RESERVED                                                                            \
-    80 /* PocketBook firmware reserves ~80px at the
-                              * bottom for the system taskbar / drawer
-                              * gesture zone; keep our pager above that. */
 #define THUMB_BORDER 4
 #define COLS         3
 #define ROWS         2
@@ -101,13 +113,23 @@
 #define CELL_MIN_H   280
 #define CELL_MIN_W   280
 
+/* List-view row height.  A list row is a single full-width band holding a
+ * small cover + title + author, so it is much shorter than a grid cell and
+ * many more fit per page.  150 px keeps the touch target generous on the
+ * 300 dpi panel. */
+#define LIST_ROW_H 150
+
 /* More-overlay (right drawer) geometry, shared by the draw and tap paths.
- * Items: Sync, 5 sorts, Grid, List, Settings, System menu. */
+ * Items: Sync, 5 sorts, Grid, List, Download all, Settings, System menu. */
 #define MORE_Y0           96
 #define MORE_ITEM_H       88
-#define MORE_N_ITEMS      10
-#define MORE_SETTINGS_IDX 8
-#define MORE_SYSTEM_IDX   9
+#define MORE_N_ITEMS      12
+#define MORE_GRID_IDX     6
+#define MORE_LIST_IDX     7
+#define MORE_DLALL_IDX    8
+#define MORE_SETTINGS_IDX 9
+#define MORE_SYSTEM_IDX   10
+#define MORE_APPS_IDX     11
 
 /* Cover / blurhash rendering.  On a greyscale framebuffer a blurhash
  * decoded to luminance blits as a soft grey placeholder; on a colour
@@ -123,6 +145,33 @@
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
+
+/* Long-press detection.  The emulator only injects POINTERDOWN/UP/MOVE
+ * (the firmware-synthesised EVT_POINTERLONG never fires under qemu), so
+ * a long-press is detected app-side: POINTERDOWN arms a one-shot timer;
+ * if it elapses before the finger lifts or moves away, the context menu
+ * opens.  A POINTERUP that arrives while the timer is still pending is a
+ * normal tap. */
+#define LONGPRESS_MS 550
+/* Finger travel (px) that cancels a pending long-press (a drag, not a
+ * hold). */
+#define LONGPRESS_SLOP 24
+
+/* Context (long-press) menu — a centred modal sheet.  A book offers
+ * Download + Delete; a series card offers Download all + Delete series. */
+#define CTX_ITEM_H    96
+#define CTX_TITLE_H   72
+#define CTX_PAD       24
+#define CTX_MAX_ITEMS 4
+
+/* Active downloads.  Downloads run synchronously on the event loop
+ * (QuickDownload blocks), so at most one is ever in flight; the list
+ * still models a queue so a multi-book "Download all" can show every
+ * pending item and tick them off one per timer tick. */
+#define MAX_DOWNLOADS 64
+/* Height reserved at the top of the Downloads tab body for the single
+ * batch progress bar (one bar covering every open download). */
+#define DL_BAR_H 56
 
 /* ── i18n ────────────────────────────────────────────────────────────── */
 
@@ -188,6 +237,52 @@ static const I18n g_i18n[] = {
     {"settings.installed", "installed", "installiert", "install\u00e9e", "installata"},
     {"settings.not_installed", "not found", "nicht da", "absente", "assente"},
     {"action.system", "System menu", "Systemmen\u00fc", "Menu syst\u00e8me", "Menu sistema"},
+    {"tab.library", "Library", "Bibliothek", "Biblioth\u00e8que", "Libreria"},
+    {"tab.downloads", "Downloads", "Downloads", "T\u00e9l\u00e9chargements", "Download"},
+    {"action.download_all",
+     "Download all",
+     "Alle laden",
+     "Tout t\u00e9l\u00e9charger",
+     "Scarica tutto"},
+    {"ctx.download", "Download", "Laden", "T\u00e9l\u00e9charger", "Scarica"},
+    {"ctx.download_all",
+     "Download all",
+     "Alle laden",
+     "Tout t\u00e9l\u00e9charger",
+     "Scarica tutto"},
+    {"ctx.delete", "Delete", "L\u00f6schen", "Supprimer", "Elimina"},
+    {"ctx.delete_series",
+     "Delete series",
+     "Reihe l\u00f6schen",
+     "Supprimer la s\u00e9rie",
+     "Elimina serie"},
+    {"dl.empty",
+     "No active downloads",
+     "Keine Downloads",
+     "Aucun t\u00e9l\u00e9chargement",
+     "Nessun download"},
+    {"dl.done", "Downloaded", "Geladen", "T\u00e9l\u00e9charg\u00e9", "Scaricato"},
+    {"dl.failed", "Failed", "Fehlgeschlagen", "\u00c9chou\u00e9", "Fallito"},
+    {"dl.in_progress",
+     "Downloading\u2026",
+     "L\u00e4dt\u2026",
+     "T\u00e9l\u00e9chargement\u2026",
+     "Download\u2026"},
+    {"dl.queued", "Queued", "In Warteschlange", "En file", "In coda"},
+    {"dl.progress",
+     "Downloading %d / %d",
+     "Lade %d / %d",
+     "T\u00e9l\u00e9chargement %d / %d",
+     "Download %d / %d"},
+    {"dl.complete", "%d downloaded", "%d geladen", "%d t\u00e9l\u00e9charg\u00e9s", "%d scaricati"},
+    {"action.apps", "Applications", "Anwendungen", "Applications", "Applicazioni"},
+    {"launcher.title", "Applications", "Anwendungen", "Applications", "Applicazioni"},
+    {"launcher.empty",
+     "No applications",
+     "Keine Anwendungen",
+     "Aucune application",
+     "Nessuna applicazione"},
+    {"launcher.back", "Back", "Zurück", "Retour", "Indietro"},
     {NULL, NULL, NULL, NULL, NULL}};
 
 static const char *
@@ -442,6 +537,16 @@ typedef enum {
     GROUP_BY_RECENT,
 } GroupMode;
 
+typedef enum {
+    VIEW_GRID,
+    VIEW_LIST,
+} ViewMode;
+
+typedef enum {
+    TAB_LIBRARY,   /* the cover grid / list */
+    TAB_DOWNLOADS, /* active + finished downloads */
+} MainTab;
+
 typedef struct {
     char  id[MAX_ID_LEN];
     char  title[MAX_TITLE_LEN];
@@ -455,6 +560,7 @@ typedef struct {
     int   selected; /* set if this is the currently-highlighted tile */
     char  local_path[MAX_PATH_LEN];
     char  blurhash[MAX_BLURHASH_LEN];
+    long  added_at; /* unix epoch from server "addedAt"; 0 if absent */
 } Book;
 
 /* A tile in the projected grid view.  At the top level (not drilled),
@@ -497,11 +603,23 @@ typedef struct {
     SortMode  sort;
     GroupMode group;
     Filter    filter;
+    ViewMode  view_mode; /* GRID = cover grid, LIST = one row per book */
 
-    int menu_open;     /* hamburger overlay */
-    int more_open;     /* right "..." overlay */
-    int search_open;   /* search input is focused */
-    int settings_open; /* full-screen settings overlay */
+    int     menu_open;     /* hamburger overlay */
+    int     more_open;     /* right "..." overlay */
+    int     search_open;   /* search input is focused */
+    int     settings_open; /* full-screen settings overlay */
+    MainTab tab;           /* TAB_LIBRARY (grid) or TAB_DOWNLOADS */
+    int     launcher_open;
+    int     launcher_page;
+
+    /* Context (long-press) menu.  ctx_open shows a centred modal sheet
+     * over the tile named by ctx_book_idx (a book) or ctx_series_id (a
+     * series card). */
+    int  ctx_open;
+    int  ctx_is_series;
+    int  ctx_book_idx; /* index into g_state.books[] */
+    char ctx_series_id[MAX_ID_LEN];
 
     /* Reader selection.  reader_pref == 0 means "Auto" (honour the
      * server's open-with resolution); otherwise it is a 1-based index
@@ -516,6 +634,44 @@ typedef struct {
 
 static State g_state;
 
+/* Full, unfiltered library — the single source of truth that parse/sync
+ * mutate.  g_state.books[] is a *filtered projection* rebuilt from this
+ * master by apply_filter_and_sort(), so filtering is non-destructive: a
+ * second search always starts from the complete library instead of
+ * re-filtering an already-shrunk set. */
+static Book g_lib[MAX_BOOKS];
+static int  g_lib_count;
+static void book_local_path(const Book *b, char *out, size_t cap);
+
+/* Edit buffer handed to OpenKeyboard() for the search field.  It MUST be
+ * separate from g_state.query: the firmware writes the live keystrokes
+ * straight into the buffer we pass, and on commit keyboard_handler()
+ * receives that same pointer as `buffer`.  snprintf(g_state.query, ...,
+ * buffer) with buffer aliasing g_state.query would copy over a string
+ * being simultaneously overwritten, wiping the query (the "search never
+ * searches" bug).  A dedicated scratch buffer breaks the alias. */
+static char g_search_kb_buf[MAX_QUERY_LEN];
+
+/* Forward declarations — defined below grid_geom; needed by
+ * apply_filter_and_sort which runs before them in file order. */
+static int  view_cols(void);
+static int  view_rows(void);
+static int  view_pagesize(void);
+static void download_tick(void *ctx);
+static void longpress_tick(void *ctx);
+static void redraw_shelf(void);
+static void book_press_action(Book *b);
+static void on_tap_context(int x, int y);
+static void close_context(void);
+static void draw_downloads_tab(void);
+static void draw_grid(void);
+static void draw_pager(void);
+static void enqueue_download(const Book *b);
+static void launcher_open_set(void);
+static void launcher_close(void);
+static void draw_overlay_launcher(void);
+static void on_tap_overlay_launcher(int x, int y);
+
 /* Per-book cover cache, keyed by id and kept OUTSIDE the Book struct so
  * the wholesale struct copies in parse_books_array() can never leak or
  * double-free a decoded bitmap.  state: 0 untouched, 1 fetch in flight,
@@ -529,6 +685,49 @@ typedef struct {
 
 static CoverSlot g_covers[MAX_BOOKS];
 static int       g_cover_armed = 0;
+
+/* One queued/finished download shown on the Downloads tab.  Downloads
+ * run synchronously on the event loop, so the queue is drained one item
+ * per timer tick; `state` records the outcome so the tab can show a
+ * running tally of what finished.  state: 0 queued, 1 in flight,
+ * 2 done, 3 failed. */
+typedef struct {
+    char id[MAX_ID_LEN];
+    char title[MAX_TITLE_LEN];
+    int  state;
+} DownloadItem;
+
+static DownloadItem g_downloads[MAX_DOWNLOADS];
+static int          g_download_count = 0;
+static int          g_download_armed = 0;
+
+/* Directory downloads are written to.  Resolved once at startup by
+ * resolve_downloads_dir(): LOCAL_DOWNLOADS when the guest can write it
+ * (real device), else the /tmp fallback (emulator). */
+static char g_downloads_dir[MAX_PATH_LEN];
+
+static void
+resolve_downloads_dir(void)
+{
+    if (access(LOCAL_DOWNLOADS, W_OK) == 0)
+        snprintf(g_downloads_dir, sizeof g_downloads_dir, "%s", LOCAL_DOWNLOADS);
+    else
+        snprintf(g_downloads_dir, sizeof g_downloads_dir, "%s", LOCAL_DOWNLOADS_FALLBACK);
+    LOG("[bookshelf] downloads dir = %s\n", g_downloads_dir);
+}
+
+/* Long-press detection state.  POINTERDOWN records the tile under the
+ * finger and arms a one-shot timer; if it fires before POINTERUP (and
+ * the finger hasn't drifted), the context menu opens for that tile. */
+static int g_lp_armed = 0;
+static int g_lp_vi = -1; /* view-tile index held, or -1 */
+static int g_lp_x = 0;
+static int g_lp_y = 0;
+/* Set when longpress_tick opens the context menu: the finger is still
+ * down, so the very next EVT_POINTERUP is the long-press release and must
+ * NOT be treated as a tap on the just-opened menu (which would dismiss it
+ * immediately).  on_event clears the flag and drops that one UP. */
+static int g_ctx_suppress_up = 0;
 
 /* argv[0] from main(). */
 static char g_argv0[256];
@@ -907,6 +1106,18 @@ cmp_series(const void *a, const void *b)
     return (ia < ib) ? -1 : (ia > ib) ? 1 : 0;
 }
 
+/* Most-recently-added first; ties fall back to title so the order is
+ * stable.  added_at is 0 when the server omits it, in which case the
+ * title tie-break still yields a deterministic, non-empty ordering. */
+static int
+cmp_recent(const void *a, const void *b)
+{
+    const Book *ba = a, *bb = b;
+    if (ba->added_at != bb->added_at)
+        return (ba->added_at > bb->added_at) ? -1 : 1;
+    return strcasecmp(ba->title, bb->title);
+}
+
 /* Build the projected grid view from the filtered+sorted books array.
  * When not drilled and group is ALL or BY_SERIES, books sharing a
  * series_id with >1 member collapse into a single series card tile.
@@ -1017,10 +1228,22 @@ build_view(void)
 static void
 apply_filter_and_sort(void)
 {
+    /* Rebuild the filtered projection from the full master library so
+     * filtering is non-destructive: every search/sort starts from the
+     * complete set, never from an already-shrunk previous result. */
+    g_state.count = 0;
+    for (int i = 0; i < g_lib_count && i < MAX_BOOKS; i++)
+        g_state.books[g_state.count++] = g_lib[i];
+
     /* Filter: search query, downloaded-only / remote-only. */
     int  n = 0;
     char q[MAX_QUERY_LEN];
     snprintf(q, sizeof q, "%s", g_state.query);
+    LOG("[bookshelf] apply_filter: lib=%d query=`%s` filter=%d sort=%d\n",
+        g_lib_count,
+        q,
+        (int)g_state.filter,
+        (int)g_state.sort);
     for (char *p = q; *p; p++)
         *p = (char)tolower((unsigned char)*p);
     for (int i = 0; i < g_state.count; i++) {
@@ -1062,6 +1285,9 @@ apply_filter_and_sort(void)
     case SORT_SERIES:
         cmp = cmp_series;
         break;
+    case SORT_RECENT:
+        cmp = cmp_recent;
+        break;
     default:
         cmp = cmp_title_asc;
         break;
@@ -1073,7 +1299,7 @@ apply_filter_and_sort(void)
 
     build_view();
 
-    if (g_state.page >= (g_view_count + PAGESIZE - 1) / PAGESIZE)
+    if (g_state.page >= (g_view_count + view_pagesize() - 1) / view_pagesize())
         g_state.page = 0;
 }
 
@@ -1108,13 +1334,11 @@ parse_book_obj(const char *obj, Book *b)
     }
     b->size = json_find_int(obj, "size", 0);
     json_find_key(obj, "blurhash", b->blurhash, sizeof b->blurhash);
+    b->added_at = json_find_int(obj, "addedAt", 0);
 
-    /* Check if the file exists on local storage. */
-    char path[220];
-    if (b->ext[0])
-        snprintf(path, sizeof path, "%s/%s.%s", LOCAL_DOWNLOADS, b->id, b->ext);
-    else
-        snprintf(path, sizeof path, "%s/%s", LOCAL_DOWNLOADS, b->id);
+    /* Check if the file exists on local storage (resolved downloads dir). */
+    char path[MAX_PATH_LEN];
+    book_local_path(b, path, sizeof path);
     FILE *f = fopen(path, "rb");
     if (f) {
         b->downloaded = 1;
@@ -1131,7 +1355,7 @@ parse_book_obj(const char *obj, Book *b)
 static int
 parse_books_array(const char *arr_start)
 {
-    int         n = g_state.count;
+    int         n = g_lib_count;
     const char *p = strchr(arr_start, '[');
     if (!p)
         return n;
@@ -1144,24 +1368,20 @@ parse_books_array(const char *arr_start)
             break;
         Book b;
         if (parse_book_obj(obj, &b) == 0) {
-            /* Check if already in list — if so, update in place to
-             * preserve the selected index.
-             */
+            /* Update an existing master entry in place (matched by id) so
+             * re-syncs refresh metadata without duplicating the book. */
             int found = -1;
-            for (int i = 0; i < g_state.count; i++) {
-                if (strcmp(g_state.books[i].id, b.id) == 0) {
+            for (int i = 0; i < g_lib_count; i++) {
+                if (strcmp(g_lib[i].id, b.id) == 0) {
                     found = i;
                     break;
                 }
             }
-            if (found >= 0) {
-                int sel = g_state.books[found].selected;
-                g_state.books[found] = b;
-                g_state.books[found].selected = sel;
-            } else {
-                g_state.books[g_state.count++] = b;
-                n = g_state.count;
-            }
+            if (found >= 0)
+                g_lib[found] = b;
+            else
+                g_lib[g_lib_count++] = b;
+            n = g_lib_count;
         }
         p = end + 1;
     }
@@ -1193,14 +1413,14 @@ apply_books_from_added(const char *json, int known_count, const char known_ids[]
     char  *removed = json_collect_id_list(json, "\"removed\"", &removed_len);
     if (removed != NULL && removed_len > 0) {
         int write = 0;
-        for (int read = 0; read < g_state.count; read++) {
-            if (id_in_list(g_state.books[read].id, removed))
+        for (int read = 0; read < g_lib_count; read++) {
+            if (id_in_list(g_lib[read].id, removed))
                 continue;
             if (write != read)
-                g_state.books[write] = g_state.books[read];
+                g_lib[write] = g_lib[read];
             write++;
         }
-        g_state.count = write;
+        g_lib_count = write;
     }
     free(removed);
 
@@ -1213,21 +1433,21 @@ apply_books_from_added(const char *json, int known_count, const char known_ids[]
                 char *rids = json_collect_id_list(q, "]", NULL);
                 if (rids != NULL) {
                     int write = 0;
-                    for (int read = 0; read < g_state.count; read++) {
-                        if (id_in_list(g_state.books[read].id, rids))
+                    for (int read = 0; read < g_lib_count; read++) {
+                        if (id_in_list(g_lib[read].id, rids))
                             continue;
                         if (write != read)
-                            g_state.books[write] = g_state.books[read];
+                            g_lib[write] = g_lib[read];
                         write++;
                     }
-                    g_state.count = write;
+                    g_lib_count = write;
                     free(rids);
                 }
             }
         }
     }
 
-    LOG("[bookshelf] apply_books_from_added: final count=%d\n", g_state.count);
+    LOG("[bookshelf] apply_books_from_added: master count=%d\n", g_lib_count);
 }
 
 /* ── /sync/delta POST ────────────────────────────────────────────────── */
@@ -1247,9 +1467,8 @@ do_sync(void)
 
     char req_body[2048];
     int  n = snprintf(req_body, sizeof req_body, "{\"known\":[");
-    for (int i = 0; i < g_state.count && n < (int)sizeof(req_body) - 32; i++) {
-        n += snprintf(
-            req_body + n, sizeof req_body - n, "%s\"%s\"", i ? "," : "", g_state.books[i].id);
+    for (int i = 0; i < g_lib_count && n < (int)sizeof(req_body) - 32; i++) {
+        n += snprintf(req_body + n, sizeof req_body - n, "%s\"%s\"", i ? "," : "", g_lib[i].id);
     }
     snprintf(req_body + n, sizeof req_body - n, "]}");
 
@@ -1273,9 +1492,8 @@ do_sync(void)
     /* post state back (best-effort) */
     char state_body[2048];
     n = snprintf(state_body, sizeof state_body, "{\"deviceId\":\"pbemu\",\"known\":[");
-    for (int i = 0; i < g_state.count && n < (int)sizeof(state_body) - 32; i++) {
-        n += snprintf(
-            state_body + n, sizeof state_body - n, "%s\"%s\"", i ? "," : "", g_state.books[i].id);
+    for (int i = 0; i < g_lib_count && n < (int)sizeof(state_body) - 32; i++) {
+        n += snprintf(state_body + n, sizeof state_body - n, "%s\"%s\"", i ? "," : "", g_lib[i].id);
     }
     snprintf(state_body + n, sizeof state_body - n, "]}");
     char *resp = NULL;
@@ -1328,103 +1546,12 @@ draw_button(
     }
 }
 
-/* Draw the original's collapsed control-panel bar into the top panel_h
- * strip that the firmware reserves.  The emulator's firmware panel
- * renderer is a no-op, so without this the strip stays blank white.
- * Layout mirrors the real device: uppercase weekday + date + 24h time on
- * the left, a gear glyph on the right.  On real hardware the genuine
- * firmware panel composites over this fallback, so it is harmless there.
- * Time is sampled at draw; e-ink refreshes it on the next repaint (sync,
- * paging, overlay close) which is idiomatic and avoids a periodic
- * partial-update racing the full-screen overlays. */
-static void
-draw_system_bar(void)
-{
-    int w = ScreenWidth();
-    int ph = g_state.panel_h;
-    if (ph <= 0)
-        return;
-
-    FillArea(0, 0, w, ph, WHITE);
-    DrawLine(0, ph - 1, w, ph - 1, BLACK);
-
-    static const char *const wd[] = {
-        "SUNDAY",
-        "MONDAY",
-        "TUESDAY",
-        "WEDNESDAY",
-        "THURSDAY",
-        "FRIDAY",
-        "SATURDAY",
-    };
-    static const char *const mo[] = {
-        "JANUARY",
-        "FEBRUARY",
-        "MARCH",
-        "APRIL",
-        "MAY",
-        "JUNE",
-        "JULY",
-        "AUGUST",
-        "SEPTEMBER",
-        "OCTOBER",
-        "NOVEMBER",
-        "DECEMBER",
-    };
-
-    time_t    now = time(NULL);
-    struct tm tm;
-    localtime_r(&now, &tm);
-    if (tm.tm_wday < 0 || tm.tm_wday > 6)
-        tm.tm_wday = 0;
-    if (tm.tm_mon < 0 || tm.tm_mon > 11)
-        tm.tm_mon = 0;
-
-    char buf[64];
-    snprintf(buf,
-             sizeof buf,
-             "%s %s %d, %02d:%02d",
-             wd[tm.tm_wday],
-             mo[tm.tm_mon],
-             tm.tm_mday,
-             tm.tm_hour,
-             tm.tm_min);
-
-    int    fs = 30;
-    ifont *f = OpenFont(DEFAULTFONTB, fs, 0);
-    if (f != NULL) {
-        SetFont(f, BLACK);
-        DrawString(24, (ph - fs) / 2 - 2, buf);
-        CloseFont(f);
-    }
-
-    /* Gear / settings glyph — outer ring, centre hole and eight radial
-     * teeth.  The whole strip is the touch target, so the glyph is a
-     * visual affordance only.  Direction vectors are hard-coded (×1000)
-     * to avoid a math.h dependency. */
-    int cx = w - 56;
-    int cy = ph / 2;
-    DrawCircle(cx, cy, 20, BLACK);
-    DrawCircle(cx, cy, 7, BLACK);
-    static const int dx[8] = {1000, 707, 0, -707, -1000, -707, 0, 707};
-    static const int dy[8] = {0, 707, 1000, 707, 0, -707, -1000, -707};
-    for (int i = 0; i < 8; i++) {
-        DrawLine(cx + 18 * dx[i] / 1000,
-                 cy + 18 * dy[i] / 1000,
-                 cx + 28 * dx[i] / 1000,
-                 cy + 28 * dy[i] / 1000,
-                 BLACK);
-    }
-}
-
 static void
 draw_top_bar(void)
 {
     int w = ScreenWidth();
     int y0 = g_state.panel_h;
     int col = BLACK;
-    /* Collapsed control-panel bar in the firmware-reserved strip. */
-    draw_system_bar();
 
     FillArea(0, y0, w, TOP_BAR_H, WHITE);
     DrawLine(0, y0 + TOP_BAR_H, w, y0 + TOP_BAR_H, col);
@@ -1537,6 +1664,73 @@ draw_search_row(void)
     CloseFont(f);
 }
 
+/* Number of downloads still pending (queued or in flight) — shown as a
+ * badge on the Downloads tab so the user can see work is in progress
+ * without switching tabs. */
+static int
+downloads_pending(void)
+{
+    int n = 0;
+    for (int i = 0; i < g_download_count; i++)
+        if (g_downloads[i].state == 0 || g_downloads[i].state == 1)
+            n++;
+    return n;
+}
+
+/* Two-tab switcher drawn directly under the search row: Library |
+ * Downloads.  The active tab is an inverted (black) pill; the Downloads
+ * tab carries a small count badge while any download is pending. */
+static void
+draw_tab_row(void)
+{
+    int w = ScreenWidth();
+    int y = g_state.panel_h + TOP_BAR_H + SEARCH_ROW_H;
+    FillArea(0, y, w, TAB_ROW_H, WHITE);
+    DrawLine(0, y + TAB_ROW_H - 1, w, y + TAB_ROW_H - 1, BLACK);
+
+    int tab_w = w / 2;
+    int pad = 12;
+    int th = TAB_ROW_H - 2 * pad;
+
+    struct {
+        const char *label;
+        int         active;
+        int         x;
+    } tabs[2] = {
+        {i18n("tab.library"), g_state.tab == TAB_LIBRARY, 0},
+        {i18n("tab.downloads"), g_state.tab == TAB_DOWNLOADS, tab_w},
+    };
+
+    ifont *f = OpenFont(DEFAULTFONTB, 30, 0);
+    if (f == NULL)
+        return;
+    for (int i = 0; i < 2; i++) {
+        int tx = tabs[i].x + pad;
+        int tw = tab_w - 2 * pad;
+        int ty = y + pad;
+        FillArea(tx, ty, tw, th, tabs[i].active ? BLACK : WHITE);
+        DrawRect(tx, ty, tw, th, BLACK);
+        SetFont(f, tabs[i].active ? WHITE : BLACK);
+        int lw = StringWidth(tabs[i].label);
+        DrawString(tx + (tw - lw) / 2, ty + (th - 30) / 2 - 2, tabs[i].label);
+        /* Pending-count badge on the Downloads tab. */
+        if (i == 1) {
+            int pend = downloads_pending();
+            if (pend > 0) {
+                char badge[8];
+                snprintf(badge, sizeof badge, "%d", pend);
+                int bw = StringWidth(badge) + 14;
+                int bx = tx + tw - bw - 6;
+                int by = ty + 6;
+                FillArea(bx, by, bw, 30, tabs[i].active ? WHITE : BLACK);
+                SetFont(f, tabs[i].active ? BLACK : WHITE);
+                DrawString(bx + 7, by + 1, badge);
+            }
+        }
+    }
+    CloseFont(f);
+}
+
 /* -- cover / blurhash helpers ----------------------------------------- */
 
 static void cover_tick(void *ctx);
@@ -1608,8 +1802,8 @@ cover_slot(const char *id, int create)
         /* Table full: evict a slot whose book is no longer loaded. */
         for (int i = 0; i < MAX_BOOKS; i++) {
             int inuse = 0;
-            for (int j = 0; j < g_state.count; j++) {
-                if (strcmp(g_state.books[j].id, g_covers[i].id) == 0) {
+            for (int j = 0; j < g_lib_count; j++) {
+                if (strcmp(g_lib[j].id, g_covers[i].id) == 0) {
                     inuse = 1;
                     break;
                 }
@@ -1635,28 +1829,67 @@ cover_slot(const char *id, int create)
     return empty;
 }
 
+/* Mode-aware layout accessors.  Grid mode keeps the fixed 3×2 cover
+ * layout; list mode is a single column of short full-width rows, so it
+ * fits many more books per page.  Every draw/hit/paging path reads the
+ * grid through these so the two modes stay consistent. */
+static int
+view_cols(void)
+{
+    return g_state.view_mode == VIEW_LIST ? 1 : COLS;
+}
+
+static int
+view_rows(void)
+{
+    if (g_state.view_mode != VIEW_LIST)
+        return ROWS;
+    int t = g_state.panel_h + TOP_BAR_H + SEARCH_ROW_H + TAB_ROW_H;
+    int b = ScreenHeight() - PAGER_H;
+    if (g_state.menu_open || g_state.more_open)
+        b = ScreenHeight();
+    int rows = (b - t - 8) / LIST_ROW_H;
+    if (rows < 1)
+        rows = 1;
+    return rows;
+}
+
+static int
+view_pagesize(void)
+{
+    return view_cols() * view_rows();
+}
+
 /* Shared grid geometry so the draw loop and the per-tile fetch blit
  * agree on every coordinate. */
 static void
 grid_geom(int *top, int *bot, int *cell_w, int *cell_h)
 {
     int w = ScreenWidth();
-    int t = g_state.panel_h + TOP_BAR_H + SEARCH_ROW_H;
-    int b = ScreenHeight() - PAGER_H - BOTTOM_RESERVED;
+    int t = g_state.panel_h + TOP_BAR_H + SEARCH_ROW_H + TAB_ROW_H;
+    int b = ScreenHeight() - PAGER_H;
     if (g_state.menu_open || g_state.more_open)
         b = ScreenHeight();
     int avail_h = b - t - 8;
     int avail_w = w - 16;
-    int cw = avail_w / COLS;
-    int ch = avail_h / ROWS;
-    if (ch > CELL_MAX_H)
-        ch = CELL_MAX_H;
-    if (cw > CELL_MAX_W)
-        cw = CELL_MAX_W;
-    if (ch < CELL_MIN_H)
-        ch = CELL_MIN_H;
-    if (cw < CELL_MIN_W)
-        cw = CELL_MIN_W;
+    int cw, ch;
+    if (g_state.view_mode == VIEW_LIST) {
+        /* List rows are full-width bands of fixed height; the grid
+         * min/max clamps would distort them, so they are skipped. */
+        cw = avail_w;
+        ch = LIST_ROW_H;
+    } else {
+        cw = avail_w / COLS;
+        ch = avail_h / ROWS;
+        if (ch > CELL_MAX_H)
+            ch = CELL_MAX_H;
+        if (cw > CELL_MAX_W)
+            cw = CELL_MAX_W;
+        if (ch < CELL_MIN_H)
+            ch = CELL_MIN_H;
+        if (cw < CELL_MIN_W)
+            cw = CELL_MIN_W;
+    }
     *top = t;
     *bot = b;
     *cell_w = cw;
@@ -1670,12 +1903,14 @@ tile_rect_for_index(int idx, int *x, int *y, int *w, int *h)
     int top, bot, cell_w, cell_h;
     (void)bot;
     grid_geom(&top, &bot, &cell_w, &cell_h);
-    int page_start = g_state.page * PAGESIZE;
+    int cols = view_cols();
+    int ps = view_pagesize();
+    int page_start = g_state.page * ps;
     int rel = idx - page_start;
-    if (rel < 0 || rel >= PAGESIZE || idx >= g_view_count)
+    if (rel < 0 || rel >= ps || idx >= g_view_count)
         return 0;
-    int row = rel / COLS;
-    int col = rel % COLS;
+    int row = rel / cols;
+    int col = rel % cols;
     *x = 8 + col * cell_w;
     *y = top + 4 + row * cell_h;
     *w = cell_w - 8;
@@ -1784,8 +2019,9 @@ cover_schedule_next(void)
     (void)cell_w;
     (void)cell_h;
     grid_geom(&top, &bot, &cell_w, &cell_h);
-    int page_start = g_state.page * PAGESIZE;
-    int lim = page_start + PAGESIZE;
+    int ps = view_pagesize();
+    int page_start = g_state.page * ps;
+    int lim = page_start + ps;
     if (lim > g_view_count)
         lim = g_view_count;
     for (int i = page_start; i < lim; i++) {
@@ -1798,6 +2034,60 @@ cover_schedule_next(void)
     }
 }
 
+/* Blit a book's cover (decoded PNG, blurhash placeholder, or hatch
+ * fallback) into the given rect.  Shared by the grid card and the list
+ * row so both modes fetch/cache covers identically. */
+static void
+blit_cover(int cx, int cy, int cw, int ch, const Book *b)
+{
+    CoverSlot *s = cover_slot(b->id, 1);
+    if (s != NULL && s->cover_bmp != NULL) {
+        StretchBitmap(cx, cy, cw, ch, s->cover_bmp, 0);
+        return;
+    }
+    if (b->blurhash[0] != '\0') {
+        bh_ensure(s, b);
+        if (s != NULL && s->bh_bmp != NULL) {
+            StretchBitmap(cx, cy, cw, ch, s->bh_bmp, 0);
+            return;
+        }
+    }
+    for (int yy = cy; yy < cy + ch; yy += 8)
+        DrawLine(cx, yy, cx + cw, yy, LGRAY);
+}
+
+/* Series card decoration: draw the cover as the front book of a stack.
+ * Two "page" sheets peek out along the top and left edges (offset up and
+ * left), so the pile reads as a stack with the single book sitting at the
+ * bottom-right.  A count badge sits in the cover's top-right corner. */
+static void
+draw_series_stack(int cx, int cy, int cw, int ch, int count)
+{
+    int step = 5;
+    /* Back page sheet (furthest up-left). */
+    FillArea(cx - 2 * step, cy - 2 * step, cw, ch, WHITE);
+    DrawRect(cx - 2 * step, cy - 2 * step, cw, ch, BLACK);
+    /* Front page sheet. */
+    FillArea(cx - step, cy - step, cw, ch, WHITE);
+    DrawRect(cx - step, cy - step, cw, ch, BLACK);
+    /* Re-outline the cover so it reads as the top book of the stack. */
+    DrawRect(cx, cy, cw, ch, BLACK);
+
+    char badge[8];
+    snprintf(badge, sizeof badge, "%d", count);
+    ifont *bf = OpenFont(DEFAULTFONTB, 20, 0);
+    if (bf != NULL) {
+        SetFont(bf, WHITE);
+        int bw = StringWidth(badge) + 12;
+        int bh = 26;
+        int bx = cx + cw - bw - 2;
+        int by = cy + 2;
+        FillArea(bx, by, bw, bh, BLACK);
+        DrawString(bx + 6, by + 2, badge);
+        CloseFont(bf);
+    }
+}
+
 static void
 draw_thumbnail(int x, int y, int w, int h, const ViewTile *vt, int vi)
 {
@@ -1805,49 +2095,64 @@ draw_thumbnail(int x, int y, int w, int h, const ViewTile *vt, int vi)
     int         selected = (vi == g_state.selected);
 
     FillArea(x, y, w, h, WHITE);
+    /* List mode: one full-width row — small 2:3 cover on the left, title
+     * and author stacked to its right.  Returns early so the grid card
+     * layout below never runs for list rows. */
+    if (g_state.view_mode == VIEW_LIST) {
+        int pad = 8;
+        int chh = h - 2 * pad;
+        if (chh < 40)
+            chh = 40;
+        int cww = chh * 2 / 3;
+        int cx = x + pad, cy = y + pad;
+        FillArea(cx, cy, cww, chh, WHITE);
+        blit_cover(cx, cy, cww, chh, b);
+        if (vt->is_series)
+            draw_series_stack(cx, cy, cww, chh, vt->series_count);
+        if (selected) {
+            DrawRect(x + 2, y + 2, w - 4, h - 4, BLACK);
+            DrawRect(x + 3, y + 3, w - 6, h - 6, BLACK);
+        }
+        int tx0 = cx + cww + 16;
+        int tw0 = (x + w - pad) - tx0;
+        if (tw0 < 64)
+            tw0 = 64;
+        const char *label = vt->is_series ? vt->series_name : b->title;
+        ifont      *f = OpenFont(DEFAULTFONTB, 30, 0);
+        if (f != NULL) {
+            SetFont(f, BLACK);
+            char truncated[MAX_TITLE_LEN];
+            snprintf(truncated, sizeof truncated, "%s", label);
+            while (StringWidth(truncated) > tw0 && strlen(truncated) > 4)
+                truncated[strlen(truncated) - 1] = '\0';
+            DrawString(tx0, y + pad + 8, truncated);
+            CloseFont(f);
+        }
+        if (!vt->is_series && b->author[0] != '\0') {
+            ifont *af = OpenFont(DEFAULTFONT, 24, 0);
+            if (af != NULL) {
+                SetFont(af, DGRAY);
+                char truncated[80];
+                snprintf(truncated, sizeof truncated, "%s", b->author);
+                while (StringWidth(truncated) > tw0 && strlen(truncated) > 4)
+                    truncated[strlen(truncated) - 1] = '\0';
+                DrawString(tx0, y + pad + 8 + 40, truncated);
+                CloseFont(af);
+            }
+        }
+        return;
+    }
 
     int cx, cy, cw, ch;
     cover_rect(x, y, w, h, &cx, &cy, &cw, &ch);
 
     FillArea(cx, cy, cw, ch, WHITE);
 
-    CoverSlot *s = cover_slot(b->id, 1);
-    if (s != NULL && s->cover_bmp != NULL) {
-        StretchBitmap(cx, cy, cw, ch, s->cover_bmp, 0);
-    } else if (b->blurhash[0] != '\0') {
-        bh_ensure(s, b);
-        if (s != NULL && s->bh_bmp != NULL)
-            StretchBitmap(cx, cy, cw, ch, s->bh_bmp, 0);
-        else
-            goto hatch;
-    } else {
-    hatch:
-        for (int yy = cy; yy < cy + ch; yy += 8)
-            DrawLine(cx, yy, cx + cw, yy, LGRAY);
-    }
+    blit_cover(cx, cy, cw, ch, b);
 
-    /* Triple border for series cards — three concentric 1px rects
-     * spaced 3px apart, clearly signalling "tap to expand". */
-    if (vt->is_series) {
-        for (int i = 0; i < 3; i++) {
-            int off = 2 + i * 3;
-            DrawRect(cx - off, cy - off, cw + off * 2, ch + off * 2, BLACK);
-        }
-        /* Count badge — black pill in top-right corner of cover. */
-        char badge[8];
-        snprintf(badge, sizeof badge, "%d", vt->series_count);
-        ifont *bf = OpenFont(DEFAULTFONTB, 20, 0);
-        if (bf != NULL) {
-            SetFont(bf, WHITE);
-            int bw = StringWidth(badge) + 12;
-            int bh = 26;
-            int bx = cx + cw - bw - 2;
-            int by = cy + 2;
-            FillArea(bx, by, bw, bh, BLACK);
-            DrawString(bx + 6, by + 2, badge);
-            CloseFont(bf);
-        }
-    }
+    /* Series cards render as a stack of pages (see draw_series_stack). */
+    if (vt->is_series)
+        draw_series_stack(cx, cy, cw, ch, vt->series_count);
 
     /* Selection frame — 2px around cover on tap. */
     if (selected) {
@@ -1884,13 +2189,214 @@ draw_thumbnail(int x, int y, int w, int h, const ViewTile *vt, int vi)
     }
 }
 
+/* Rows of download entries that fit in the body once the progress bar is
+ * reserved.  Drives the downloads page size so paging never lands on a
+ * half-clipped row. */
+static int
+downloads_rows(void)
+{
+    int top, bot, cell_w, cell_h;
+    grid_geom(&top, &bot, &cell_w, &cell_h);
+    int usable = bot - top - DL_BAR_H - 8;
+    int rows = usable / 96;
+    return rows < 1 ? 1 : rows;
+}
+
+static int
+downloads_pagesize(void)
+{
+    /* The downloads list is a single column, so one page is exactly the
+     * number of rows that fit below the progress bar. */
+    return downloads_rows();
+}
+/* Page count for the active tab: the library pages the cover grid, the
+ * downloads tab pages the download list.  Always >= 1. */
+static int
+current_pages(void)
+{
+    int n, ps;
+    if (g_state.tab == TAB_DOWNLOADS) {
+        n = g_download_count;
+        ps = downloads_pagesize();
+    } else {
+        n = g_view_count;
+        ps = view_pagesize();
+    }
+    if (ps < 1)
+        ps = 1;
+    int pages = (n + ps - 1) / ps;
+    return pages < 1 ? 1 : pages;
+}
+
+/* Single batch progress bar pinned to the top of the Downloads tab: one
+ * bar for the whole open batch, filled by done/total, with a striped
+ * overlay on the unfilled portion while anything is still in flight. */
+static void
+draw_dl_progress(int x, int y, int w)
+{
+    int total = 0, done = 0, failed = 0, active = 0;
+    for (int i = 0; i < g_download_count; i++) {
+        total++;
+        if (g_downloads[i].state == 2)
+            done++;
+        else if (g_downloads[i].state == 3)
+            failed++;
+        if (g_downloads[i].state == 0 || g_downloads[i].state == 1)
+            active++;
+    }
+    if (total <= 0)
+        return;
+
+    ifont *f = OpenFont(DEFAULTFONT, 22, 0);
+    int    label_h = 26;
+    char   label[48];
+    if (active > 0)
+        snprintf(label, sizeof label, i18n("dl.progress"), done, total);
+    else
+        snprintf(label, sizeof label, i18n("dl.complete"), done);
+    if (f != NULL) {
+        SetFont(f, BLACK);
+        DrawString(x + 4, y + 2, label);
+        CloseFont(f);
+    }
+
+    int bar_y = y + label_h;
+    int bar_h = DL_BAR_H - label_h - 6;
+    if (bar_h < 8)
+        bar_h = 8;
+    int bar_w = w - 2 * x;
+    if (bar_w < 16)
+        bar_w = 16;
+    DrawRect(x, bar_y, bar_w, bar_h, BLACK);
+    int settled = done + failed;
+    int fill = (settled * bar_w) / total;
+    if (fill > 2)
+        FillArea(x + 1, bar_y + 1, fill - 2, bar_h - 2, BLACK);
+    /* Striped "in progress" overlay across the unfinished portion. */
+    if (active > 0) {
+        for (int sx = x + 1 + fill; sx < x + bar_w - 1; sx += 6)
+            DrawLine(sx, bar_y + 1, sx + 2, bar_y + bar_h - 2, DGRAY);
+    }
+}
+
+static void
+draw_downloads_tab(void)
+{
+    int top, bot, cell_w, cell_h;
+    (void)cell_w;
+    (void)cell_h;
+    grid_geom(&top, &bot, &cell_w, &cell_h);
+    int w = ScreenWidth();
+    FillArea(0, top, w, bot - top, WHITE);
+    DrawLine(0, top, w, top, BLACK);
+
+    if (g_download_count == 0) {
+        ifont *f = OpenFont(DEFAULTFONT, 30, 0);
+        if (f != NULL) {
+            SetFont(f, DGRAY);
+            const char *msg = i18n("dl.empty");
+            DrawString((w - StringWidth(msg)) / 2, top + 60, msg);
+            CloseFont(f);
+        }
+        return;
+    }
+
+    /* Progress bar pinned to the top of the body; rows start below it. */
+    draw_dl_progress(20, top + 4, w);
+
+    /* Page the list — the pager below is wired to current_pages(). */
+    int ps = downloads_pagesize();
+    if (ps < 1)
+        ps = 1;
+    int pages = (g_download_count + ps - 1) / ps;
+    if (g_state.page >= pages)
+        g_state.page = pages - 1;
+    if (g_state.page < 0)
+        g_state.page = 0;
+    int first = g_state.page * ps;
+    int last = first + ps;
+    if (last > g_download_count)
+        last = g_download_count;
+    LOG("[bookshelf] draw_downloads page=%d pages=%d count=%d\n",
+        g_state.page,
+        pages,
+        g_download_count);
+
+    int row_h = 96;
+    int y = top + DL_BAR_H + 8;
+    for (int i = first; i < last && y + row_h <= bot; i++) {
+        const DownloadItem *d = &g_downloads[i];
+        ifont              *tf = OpenFont(DEFAULTFONTB, 28, 0);
+        if (tf != NULL) {
+            SetFont(tf, BLACK);
+            char trunc[MAX_TITLE_LEN];
+            snprintf(trunc, sizeof trunc, "%s", d->title);
+            int maxw = w - 260;
+            while (StringWidth(trunc) > maxw && strlen(trunc) > 4)
+                trunc[strlen(trunc) - 1] = '\0';
+            DrawString(20, y + (row_h - 28) / 2 - 2, trunc);
+            CloseFont(tf);
+        }
+        const char *st;
+        int         scol;
+        switch (d->state) {
+        case 1:
+            st = i18n("dl.in_progress");
+            scol = BLACK;
+            break;
+        case 2:
+            st = i18n("dl.done");
+            scol = DGRAY;
+            break;
+        case 3:
+            st = i18n("dl.failed");
+            scol = BLACK;
+            break;
+        default:
+            st = i18n("dl.queued");
+            scol = DGRAY;
+            break;
+        }
+        ifont *sf = OpenFont(DEFAULTFONT, 24, 0);
+        if (sf != NULL) {
+            SetFont(sf, scol);
+            DrawString(w - 20 - StringWidth(st), y + (row_h - 24) / 2 - 2, st);
+            CloseFont(sf);
+        }
+        DrawLine(20, y + row_h - 1, w - 20, y + row_h - 1, LGRAY);
+        y += row_h;
+    }
+}
+
+/* Repaint the whole shelf (top bar, search, tabs, body, pager) in the
+ * current tab.  Centralises the sequence every state change needs. */
+static void
+redraw_shelf(void)
+{
+    if (g_state.launcher_open) {
+        draw_overlay_launcher();
+        FullUpdate();
+        return;
+    }
+    FillArea(0, g_state.panel_h, ScreenWidth(), ScreenHeight() - g_state.panel_h, WHITE);
+    draw_top_bar();
+    draw_search_row();
+    draw_tab_row();
+    if (g_state.tab == TAB_DOWNLOADS)
+        draw_downloads_tab();
+    else
+        draw_grid();
+    draw_pager();
+    FullUpdate();
+}
+
 static void
 draw_grid(void)
 {
     /* Layout: [system panel] [our top bar] [our search row] [grid] [pager].
-     * Without the panel offset we'd overdraw the status bar drawn by
-     * the firmware above us.  The pager sits ABOVE BOTTOM_RESERVED so
-     * it stays clear of the firmware's bottom drawer gesture zone.
+     * The system panel renders at the TOP of the screen (PANEL_NO_FB_OFFSET
+     * flag), occupying rows [0, panel_h).  Everything we draw is offset
+     * below it; the pager sits at the very bottom with no reservation.
      */
     int top, bot, cell_w, cell_h;
     grid_geom(&top, &bot, &cell_w, &cell_h);
@@ -1908,10 +2414,12 @@ draw_grid(void)
         top,
         bot);
 
-    int page_start = g_state.page * PAGESIZE;
+    int cols = view_cols();
+    int rows = view_rows();
+    int page_start = g_state.page * view_pagesize();
     int drawn = 0;
-    for (int row = 0; row < ROWS; row++) {
-        for (int col = 0; col < COLS; col++) {
+    for (int row = 0; row < rows; row++) {
+        for (int col = 0; col < cols; col++) {
             int idx = page_start + drawn;
             if (idx >= g_view_count)
                 goto done;
@@ -1934,6 +2442,7 @@ static void
 cover_tick(void *ctx)
 {
     (void)ctx;
+    LOG("[bookshelf] cover_tick ENTER page=%d view=%d armed->0\n", g_state.page, g_view_count);
     g_cover_armed = 0;
 
     int top, bot, cell_w, cell_h;
@@ -1942,8 +2451,9 @@ cover_tick(void *ctx)
     (void)cell_w;
     (void)cell_h;
     grid_geom(&top, &bot, &cell_w, &cell_h);
-    int page_start = g_state.page * PAGESIZE;
-    int lim = page_start + PAGESIZE;
+    int ps = view_pagesize();
+    int page_start = g_state.page * ps;
+    int lim = page_start + ps;
     if (lim > g_view_count)
         lim = g_view_count;
 
@@ -1959,6 +2469,10 @@ cover_tick(void *ctx)
         return; /* nothing pending on this page */
 
     CoverSlot *s = cover_slot(g_state.books[g_view[target].book_idx].id, 1);
+    LOG("[bookshelf] cover_tick target=%d id=%s slot=%p\n",
+        target,
+        g_state.books[g_view[target].book_idx].id,
+        (void *)s);
     s->state = 1;
 
     char url[MAX_URL_LEN + 128];
@@ -1969,37 +2483,54 @@ cover_tick(void *ctx)
              g_state.books[g_view[target].book_idx].id,
              g_state.api_token);
 
-    int      rsize = 0;
-    char    *data = QuickDownload(url, &rsize, HTTP_TIMEOUT);
+    int rsize = 0;
+    LOG("[bookshelf] cover_tick downloading url=%s\n", url);
+    char *data = QuickDownload(url, &rsize, HTTP_TIMEOUT);
+    LOG("[bookshelf] cover_tick downloaded data=%p rsize=%d\n", (void *)data, rsize);
     ibitmap *bmp = NULL;
     if (data != NULL && rsize > 8) {
         FILE *f = fopen(COVER_TMP, "wb");
         if (f != NULL) {
             fwrite(data, 1, (size_t)rsize, f);
             fclose(f);
+            LOG("[bookshelf] cover_tick LoadPNGStretch begin\n");
             bmp = LoadPNGStretch(COVER_TMP, 240, 360, 0, 0);
+            LOG("[bookshelf] cover_tick LoadPNGStretch done bmp=%p\n", (void *)bmp);
         }
     }
-    if (data != NULL)
+    if (data != NULL) {
+        LOG("[bookshelf] cover_tick free(data) begin\n");
         free(data);
+        LOG("[bookshelf] cover_tick free(data) done\n");
+    }
 
     if (bmp != NULL) {
-        if (s->cover_bmp)
+        if (s->cover_bmp) {
+            LOG("[bookshelf] cover_tick free(old cover_bmp) begin\n");
             free(s->cover_bmp);
+            LOG("[bookshelf] cover_tick free(old cover_bmp) done\n");
+        }
         s->cover_bmp = bmp;
         s->state = 2;
     } else {
         s->state = 3;
     }
+    /* The cached bitmap is stored on the slot regardless; only the
+     * on-screen blit is skipped while a modal owns the framebuffer, so a
+     * single-tile PartialUpdate can't punch a hole through the overlay's
+     * dim mask (the full redraw on close then shows the now-cached cover). */
+    int modal = g_state.ctx_open || g_state.menu_open || g_state.more_open || g_state.settings_open;
+    LOG("[bookshelf] cover_tick blit begin modal=%d\n", modal);
 
     int tx, ty, tw, th;
-    if (tile_rect_for_index(target, &tx, &ty, &tw, &th)) {
+    if (!modal && tile_rect_for_index(target, &tx, &ty, &tw, &th)) {
         FillArea(tx, ty, tw, th, WHITE);
         draw_thumbnail(tx, ty, tw, th, &g_view[target], target);
         PartialUpdate(tx, ty, tw, th);
     }
-
+    LOG("[bookshelf] cover_tick blit done, scheduling next\n");
     cover_schedule_next();
+    LOG("[bookshelf] cover_tick EXIT\n");
 }
 
 static void
@@ -2007,17 +2538,15 @@ draw_pager(void)
 {
     int w = ScreenWidth();
     int h = ScreenHeight();
-    /* Pager sits ABOVE the firmware's bottom drawer gesture zone
-     * (BOTTOM_RESERVED) so taps don't conflict with the system's
-     * bottom drawer. */
-    int y = h - PAGER_H - BOTTOM_RESERVED;
+    /* Pager sits at the very bottom; the system panel is at the top. */
+    int y = h - PAGER_H;
     FillArea(0, y, w, PAGER_H, WHITE);
     DrawLine(0, y, w, y, BLACK);
 
-    int pages = (g_view_count + PAGESIZE - 1) / PAGESIZE;
-    if (pages <= 0)
-        pages = 1;
+    int pages = current_pages();
     if (g_state.page >= pages)
+        g_state.page = pages - 1;
+    if (g_state.page < 0)
         g_state.page = 0;
 
     ifont *f = OpenFont(DEFAULTFONTB, 28, 0);
@@ -2044,15 +2573,15 @@ draw_overlay_menu(void)
 {
     int w = ScreenWidth();
     int h = ScreenHeight();
-    FillArea(0, 0, w, h, BLACK);
+    FillArea(0, g_state.panel_h, w, h - g_state.panel_h, BLACK);
     int pw = w * 3 / 4;
-    FillArea(0, 0, pw, h, WHITE);
-    DrawLine(pw, 0, pw, h, BLACK);
+    FillArea(0, g_state.panel_h, pw, h - g_state.panel_h, WHITE);
+    DrawLine(pw, g_state.panel_h, pw, h, BLACK);
 
     ifont *f = OpenFont(DEFAULTFONTB, 32, 0);
     if (f != NULL) {
         SetFont(f, BLACK);
-        DrawString(24, 32, i18n("action.menu"));
+        DrawString(24, g_state.panel_h + 32, i18n("action.menu"));
         CloseFont(f);
     }
 
@@ -2063,7 +2592,7 @@ draw_overlay_menu(void)
         "group.recent",
     };
     int n = (int)(sizeof labels / sizeof labels[0]);
-    int y0 = 96;
+    int y0 = g_state.panel_h + 96;
     int item_h = 88;
     for (int i = 0; i < n; i++) {
         int sel = (i == (int)g_state.group);
@@ -2082,16 +2611,16 @@ draw_overlay_more(void)
 {
     int w = ScreenWidth();
     int h = ScreenHeight();
-    FillArea(0, 0, w, h, BLACK);
+    FillArea(0, g_state.panel_h, w, h - g_state.panel_h, BLACK);
     int pw = w * 3 / 4;
     int px = w - pw;
-    FillArea(px, 0, pw, h, WHITE);
-    DrawLine(px, 0, px, h, BLACK);
+    FillArea(px, g_state.panel_h, pw, h - g_state.panel_h, WHITE);
+    DrawLine(px, g_state.panel_h, px, h, BLACK);
 
     ifont *f = OpenFont(DEFAULTFONTB, 32, 0);
     if (f != NULL) {
         SetFont(f, BLACK);
-        DrawString(px + 24, 32, i18n("action.more"));
+        DrawString(px + 24, g_state.panel_h + 32, i18n("action.more"));
         CloseFont(f);
     }
     const char *labels[] = {
@@ -2103,25 +2632,28 @@ draw_overlay_more(void)
         "sort.recent",
         "view.grid",
         "view.list",
+        "action.download_all",
         "action.settings",
         "action.system",
+        "action.apps",
     };
     int n = (int)(sizeof labels / sizeof labels[0]);
+    int y0 = g_state.panel_h + MORE_Y0;
     for (int i = 0; i < n; i++) {
         int sel = 0;
         if (i == 0 && g_state.sync_state == 1)
             sel = 1;
         if (i > 0 && i <= 5 && (i - 1) == (int)g_state.sort)
             sel = 1;
-        if (i == 6 && g_state.sort >= 5)
+        if (i == MORE_GRID_IDX && g_state.view_mode == VIEW_GRID)
             sel = 1;
-        FillArea(
-            px + 12, MORE_Y0 + i * MORE_ITEM_H, pw - 24, MORE_ITEM_H - 12, sel ? BLACK : WHITE);
+        if (i == MORE_LIST_IDX && g_state.view_mode == VIEW_LIST)
+            sel = 1;
+        FillArea(px + 12, y0 + i * MORE_ITEM_H, pw - 24, MORE_ITEM_H - 12, sel ? BLACK : WHITE);
         ifont *tf = OpenFont(DEFAULTFONTB, 28, 0);
         if (tf != NULL) {
             SetFont(tf, sel ? WHITE : BLACK);
-            DrawString(
-                px + 32, MORE_Y0 + i * MORE_ITEM_H + (MORE_ITEM_H - 28) / 2 - 2, i18n(labels[i]));
+            DrawString(px + 32, y0 + i * MORE_ITEM_H + (MORE_ITEM_H - 28) / 2 - 2, i18n(labels[i]));
             CloseFont(tf);
         }
     }
@@ -2165,6 +2697,10 @@ settings_keyboard_handler(char *buffer)
     }
     g_settings_edit = 0;
     draw_overlay_settings();
+    /* The on-screen keyboard draws full-screen and wipes the top status
+     * strip; re-stamp it before the flush so the panel survives the commit
+     * redraw (draw_overlay_settings clears only from panel_h). */
+    iv_update_panel(0);
     FullUpdate();
 }
 
@@ -2229,17 +2765,17 @@ draw_overlay_settings(void)
 {
     int w = ScreenWidth();
     int h = ScreenHeight();
-    FillArea(0, 0, w, h, WHITE);
+    FillArea(0, g_state.panel_h, w, h - g_state.panel_h, WHITE);
 
     ifont *tf = OpenFont(DEFAULTFONTB, 40, 0);
     if (tf != NULL) {
         SetFont(tf, BLACK);
-        DrawString(32, 28, i18n("settings.title"));
+        DrawString(32, g_state.panel_h + 28, i18n("settings.title"));
         CloseFont(tf);
     }
-    DrawLine(0, 92, w, 92, BLACK);
+    DrawLine(0, g_state.panel_h + 92, w, g_state.panel_h + 92, BLACK);
 
-    int y = 112;
+    int y = g_state.panel_h + 112;
     settings_draw_row(y, i18n("settings.api_host"), g_state.api_base, g_settings_edit == 1);
     y += SETTINGS_ROW_H;
     settings_draw_row(y, i18n("settings.api_key"), g_state.api_token, g_settings_edit == 2);
@@ -2288,29 +2824,29 @@ hit_search(int x, int y)
     return 1;
 }
 
+/* Returns 0 for the Library tab, 1 for the Downloads tab, -1 elsewhere. */
+static int
+hit_tab_row(int x, int y)
+{
+    int row_top = g_state.panel_h + TOP_BAR_H + SEARCH_ROW_H;
+    int row_bot = row_top + TAB_ROW_H;
+    if (y < row_top || y >= row_bot)
+        return -1;
+    int w = ScreenWidth();
+    return (x < w / 2) ? 0 : 1;
+}
+
 static int
 hit_thumbnail(int x, int y)
 {
-    int top = g_state.panel_h + TOP_BAR_H + SEARCH_ROW_H;
-    int bot = ScreenHeight() - PAGER_H - BOTTOM_RESERVED;
-    if (g_state.menu_open || g_state.more_open)
-        bot = ScreenHeight();
-    int avail_h = bot - top - 8;
-    int avail_w = ScreenWidth() - 16;
-    int cell_w = avail_w / COLS;
-    int cell_h = avail_h / ROWS;
-    if (cell_h > CELL_MAX_H)
-        cell_h = CELL_MAX_H;
-    if (cell_w > CELL_MAX_W)
-        cell_w = CELL_MAX_W;
-    if (cell_h < CELL_MIN_H)
-        cell_h = CELL_MIN_H;
-    if (cell_w < CELL_MIN_W)
-        cell_w = CELL_MIN_W;
-    int page_start = g_state.page * PAGESIZE;
-    for (int row = 0; row < ROWS; row++) {
-        for (int col = 0; col < COLS; col++) {
-            int idx = page_start + row * COLS + col;
+    int top, bot, cell_w, cell_h;
+    grid_geom(&top, &bot, &cell_w, &cell_h);
+    int cols = view_cols();
+    int rows = view_rows();
+    int page_start = g_state.page * view_pagesize();
+    for (int row = 0; row < rows; row++) {
+        for (int col = 0; col < cols; col++) {
+            int idx = page_start + row * cols + col;
             if (idx >= g_view_count)
                 return -1;
             int tx = 8 + col * cell_w;
@@ -2328,7 +2864,7 @@ static int
 hit_pager(int x, int y)
 {
     int h = ScreenHeight();
-    int y0 = h - PAGER_H - BOTTOM_RESERVED;
+    int y0 = h - PAGER_H;
     if (y < y0 || y >= y0 + PAGER_H)
         return 0;
     int w = ScreenWidth();
@@ -2336,9 +2872,7 @@ hit_pager(int x, int y)
     if (g_state.page > 0 && x >= 12 && x < 12 + 96)
         return -1;
     /* Next — 96px wide ending at x=w-12 */
-    int pages = (g_view_count + PAGESIZE - 1) / PAGESIZE;
-    if (pages == 0)
-        pages = 1;
+    int pages = current_pages();
     if (g_state.page + 1 < pages && x >= w - 108 && x < w - 12)
         return -2;
     return 0;
@@ -2355,6 +2889,7 @@ on_tap_overlay_menu(int x, int y)
         g_state.menu_open = 0;
         return;
     }
+    y -= g_state.panel_h;
     for (int i = 0; i < 4; i++) {
         if (y >= y0 + i * item_h && y < y0 + i * item_h + item_h) {
             g_state.group = (GroupMode)i;
@@ -2375,6 +2910,7 @@ on_tap_overlay_more(int x, int y)
         g_state.more_open = 0;
         return;
     }
+    y -= g_state.panel_h;
     if (y >= MORE_Y0 && y < MORE_Y0 + MORE_ITEM_H) {
         g_state.more_open = 0;
         do_sync();
@@ -2398,15 +2934,40 @@ on_tap_overlay_more(int x, int y)
         OpenControlPanel(NULL);
         return;
     }
-    for (int i = 1; i < MORE_SETTINGS_IDX; i++) {
+    /* Applications row opens the in-app launcher overlay. */
+    if (y >= MORE_Y0 + MORE_APPS_IDX * MORE_ITEM_H &&
+        y < MORE_Y0 + (MORE_APPS_IDX + 1) * MORE_ITEM_H) {
+        g_state.more_open = 0;
+        launcher_open_set();
+        return;
+    }
+    /* Download-all row queues every book in the library and jumps to the
+     * Downloads tab so the user watches the queue drain. */
+    if (y >= MORE_Y0 + MORE_DLALL_IDX * MORE_ITEM_H &&
+        y < MORE_Y0 + (MORE_DLALL_IDX + 1) * MORE_ITEM_H) {
+        g_state.more_open = 0;
+        for (int i = 0; i < g_lib_count; i++)
+            enqueue_download(&g_lib[i]);
+        LOG("[bookshelf] download-all queued=%d\n", g_lib_count);
+        g_state.tab = TAB_DOWNLOADS;
+        redraw_shelf();
+        return;
+    }
+    for (int i = 1; i < MORE_DLALL_IDX; i++) {
         if (y >= MORE_Y0 + i * MORE_ITEM_H && y < MORE_Y0 + i * MORE_ITEM_H + MORE_ITEM_H) {
-            int sort_idx = i - 1;
-            if (sort_idx < 5)
-                g_state.sort = (SortMode)sort_idx;
-            else
-                g_state.sort = (sort_idx == 5) ? SORT_TITLE_ASC : SORT_RECENT;
             g_state.more_open = 0;
-            apply_filter_and_sort();
+            if (i == MORE_GRID_IDX) {
+                g_state.view_mode = VIEW_GRID;
+                g_state.page = 0;
+            } else if (i == MORE_LIST_IDX) {
+                g_state.view_mode = VIEW_LIST;
+                g_state.page = 0;
+            } else {
+                /* i = 1..5 → the five sort modes (title↑/↓, author,
+                 * series, recent). */
+                g_state.sort = (SortMode)(i - 1);
+                apply_filter_and_sort();
+            }
             return;
         }
     }
@@ -2419,12 +2980,7 @@ settings_close(void)
 {
     g_state.settings_open = 0;
     g_settings_edit = 0;
-    FillArea(0, 0, ScreenWidth(), ScreenHeight(), WHITE);
-    draw_top_bar();
-    draw_search_row();
-    draw_grid();
-    draw_pager();
-    FullUpdate();
+    redraw_shelf();
 }
 
 /* Persist settings, rebuild the endpoint URLs from the (possibly edited)
@@ -2437,19 +2993,15 @@ settings_apply(void)
     build_endpoint_urls();
     g_state.settings_open = 0;
     g_settings_edit = 0;
-    FillArea(0, 0, ScreenWidth(), ScreenHeight(), WHITE);
-    draw_top_bar();
-    draw_search_row();
     do_sync();
-    draw_grid();
-    draw_pager();
-    FullUpdate();
+    redraw_shelf();
 }
 
 static void
 on_tap_overlay_settings(int x, int y)
 {
     (void)x; /* rows span the full content width; only y matters */
+    y -= g_state.panel_h;
 
     int y_row1 = 112;
     int y_row2 = y_row1 + SETTINGS_ROW_H;
@@ -2498,6 +3050,947 @@ on_tap_overlay_settings(int x, int y)
     }
 }
 
+/* -- app launcher ------------------------------------------------------- *
+ * Reproduces the firmware's grouped application grid (the "Apps" screen
+ * the original desktop renders from view.json + apps_db.json).  Since
+ * bookshelf.app *is* the home-screen replacement, the original grid is
+ * gone — this overlay restores it, resolving conditional visibility for
+ * the current device profile (Era: touch + audio + en/WW + stock partner)
+ * so the grid matches what the real device shows (e.g. Snake hidden on a
+ * touch panel).  Tapping a tile launches the app via NewTaskEx. */
+
+/* -- minimal JSON scanner ----------------------------------------------- */
+
+static const char *
+js_skip_ws(const char *p)
+{
+    while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r')
+        p++;
+    return p;
+}
+
+static const char *
+js_skip_value(const char *p)
+{
+    p = js_skip_ws(p);
+    if (*p == '"') {
+        p++;
+        while (*p && *p != '"') {
+            if (*p == '\\')
+                p++;
+            p++;
+        }
+        return *p == '"' ? p + 1 : NULL;
+    }
+    if (*p == '{' || *p == '[') {
+        int depth = 1;
+        p++;
+        while (*p && depth > 0) {
+            if (*p == '"') {
+                p = js_skip_value(p);
+                if (!p)
+                    return NULL;
+                continue;
+            }
+            if (*p == '{' || *p == '[')
+                depth++;
+            else if (*p == '}' || *p == ']')
+                depth--;
+            p++;
+        }
+        return depth == 0 ? p : NULL;
+    }
+    while (*p && *p != ',' && *p != '}' && *p != ']' && *p != ' ' && *p != '\n' && *p != '\r' &&
+           *p != '\t')
+        p++;
+    return p;
+}
+
+static void
+js_copy_string(const char *p, char *out, size_t cap)
+{
+    if (cap == 0)
+        return;
+    if (*p != '"') {
+        out[0] = '\0';
+        return;
+    }
+    p++;
+    size_t i = 0;
+    while (*p && *p != '"' && i + 1 < cap) {
+        if (*p == '\\' && p[1])
+            p++;
+        out[i++] = *p++;
+    }
+    out[i] = '\0';
+}
+
+static const char *
+js_object_body(const char *p)
+{
+    p = js_skip_ws(p);
+    return *p == '{' ? p + 1 : NULL;
+}
+
+static const char *
+js_find_member(const char *p, const char *key)
+{
+    size_t klen = strlen(key);
+    while (*p) {
+        p = js_skip_ws(p);
+        if (*p == '}')
+            return NULL;
+        if (*p != '"')
+            return NULL;
+        const char *ks = ++p;
+        while (*p && *p != '"') {
+            if (*p == '\\')
+                p++;
+            p++;
+        }
+        size_t kl = (size_t)(p - ks);
+        if (*p == '"')
+            p++;
+        p = js_skip_ws(p);
+        if (*p == ':')
+            p++;
+        p = js_skip_ws(p);
+        if (kl == klen && memcmp(ks, key, klen) == 0)
+            return p;
+        p = js_skip_value(p);
+        if (!p)
+            return NULL;
+        p = js_skip_ws(p);
+        if (*p == ',')
+            p++;
+    }
+    return NULL;
+}
+
+/* -- device profile for conditional resolution -------------------------- */
+
+typedef struct {
+    const char *device;
+    const char *partner;
+    const char *has_audio;
+    const char *has_cloud;
+    const char *language;
+    const char *localization;
+} LcProfile;
+
+static const LcProfile g_lcprof = {"all", "pocketbook", "true", "false", "en", "WW"};
+
+static const char *const lc_dims[] = {
+    "device",
+    "partner",
+    "has_audio",
+    "has_cloud",
+    "language",
+    "localization",
+    "globalcfg",
+};
+#define LC_NDIMS ((int)(sizeof lc_dims / sizeof lc_dims[0]))
+
+static const char *
+lc_prof_val(const char *dim)
+{
+    if (strcmp(dim, "device") == 0)
+        return g_lcprof.device;
+    if (strcmp(dim, "partner") == 0)
+        return g_lcprof.partner;
+    if (strcmp(dim, "has_audio") == 0)
+        return g_lcprof.has_audio;
+    if (strcmp(dim, "has_cloud") == 0)
+        return g_lcprof.has_cloud;
+    if (strcmp(dim, "language") == 0)
+        return g_lcprof.language;
+    if (strcmp(dim, "localization") == 0)
+        return g_lcprof.localization;
+    return NULL;
+}
+
+static const char *
+lc_pick_key(const char *obj_body, const char *want)
+{
+    static char first[32];
+    first[0] = '\0';
+    int         all_present = 0, def_present = 0;
+    const char *p = obj_body;
+    while (*p) {
+        p = js_skip_ws(p);
+        if (*p == '}' || *p != '"')
+            break;
+        const char *ks = ++p;
+        while (*p && *p != '"') {
+            if (*p == '\\')
+                p++;
+            p++;
+        }
+        size_t kl = (size_t)(p - ks);
+        if (*p == '"')
+            p++;
+        if (first[0] == '\0' && kl < sizeof first) {
+            memcpy(first, ks, kl);
+            first[kl] = '\0';
+        }
+        if (want && kl == strlen(want) && memcmp(ks, want, kl) == 0)
+            return want;
+        if (kl == 3 && memcmp(ks, "all", 3) == 0)
+            all_present = 1;
+        if (kl == 7 && memcmp(ks, "default", 7) == 0)
+            def_present = 1;
+        p = js_skip_ws(p);
+        if (*p == ':')
+            p++;
+        p = js_skip_value(p);
+        if (!p)
+            break;
+        p = js_skip_ws(p);
+        if (*p == ',')
+            p++;
+    }
+    if (all_present)
+        return "all";
+    if (def_present)
+        return "default";
+    return first[0] ? first : NULL;
+}
+
+static void lc_resolve(const char *p, const char *cur_dim, char *out, size_t cap);
+
+static void
+lc_resolve(const char *p, const char *cur_dim, char *out, size_t cap)
+{
+    if (cap == 0)
+        return;
+    out[0] = '\0';
+    p = js_skip_ws(p);
+    if (!p || !*p)
+        return;
+    if (*p == '"') {
+        js_copy_string(p, out, cap);
+        return;
+    }
+    if (*p != '{')
+        return;
+    const char *body = p + 1;
+    for (int d = 0; d < LC_NDIMS; d++) {
+        const char *vp = js_find_member(body, lc_dims[d]);
+        if (vp) {
+            lc_resolve(vp, lc_dims[d], out, cap);
+            return;
+        }
+    }
+    if (!cur_dim) {
+        const char *k = lc_pick_key(body, NULL);
+        if (k) {
+            const char *vp = js_find_member(body, k);
+            if (vp)
+                lc_resolve(vp, cur_dim, out, cap);
+        }
+        return;
+    }
+    if (strcmp(cur_dim, "globalcfg") == 0) {
+        const char *p2 = body;
+        while (*p2) {
+            p2 = js_skip_ws(p2);
+            if (*p2 == '}' || *p2 != '"')
+                break;
+            const char *ks = ++p2;
+            while (*p2 && *p2 != '"') {
+                if (*p2 == '\\')
+                    p2++;
+                p2++;
+            }
+            if (*p2 == '"')
+                p2++;
+            p2 = js_skip_ws(p2);
+            if (*p2 == ':')
+                p2++;
+            p2 = js_skip_ws(p2);
+            const char *inner = js_skip_ws(p2);
+            if (*inner == '{') {
+                const char *defp = js_find_member(inner + 1, "default");
+                if (defp) {
+                    lc_resolve(defp, cur_dim, out, cap);
+                    return;
+                }
+            }
+            p2 = js_skip_value(p2);
+            if (!p2)
+                break;
+            p2 = js_skip_ws(p2);
+            if (*p2 == ',')
+                p2++;
+        }
+        return;
+    }
+    const char *want = lc_prof_val(cur_dim);
+    const char *k = lc_pick_key(body, want);
+    if (k) {
+        const char *vp = js_find_member(body, k);
+        if (vp)
+            lc_resolve(vp, cur_dim, out, cap);
+    }
+}
+
+static int
+lc_resolve_bool(const char *p)
+{
+    char buf[8];
+    lc_resolve(p, NULL, buf, sizeof buf);
+    return buf[0] != '0';
+}
+
+/* -- file reader -------------------------------------------------------- */
+
+static char *
+read_text_file(const char *path)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f)
+        return NULL;
+    fseek(f, 0, SEEK_END);
+    long sz = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (sz <= 0 || sz > 256 * 1024) {
+        fclose(f);
+        return NULL;
+    }
+    char *buf = malloc((size_t)sz + 1);
+    if (!buf) {
+        fclose(f);
+        return NULL;
+    }
+    size_t nr = fread(buf, 1, (size_t)sz, f);
+    fclose(f);
+    buf[nr] = '\0';
+    return buf;
+}
+
+/* -- token translation -------------------------------------------------- */
+
+static const char *
+lc_token_en(const char *tok)
+{
+    static const struct {
+        const char *k, *v;
+    } tab[] = {
+        {"@Audio_books", "Audio books"},
+        {"@Browser", "Browser"},
+        {"@BookStoreShortName", "Book Store"},
+        {"@Legimi", "Legimi"},
+        {"@Calc", "Calculator"},
+        {"@Calendar", "Calendar"},
+        {"@Chess", "Chess"},
+        {"@coloring", "Coloring"},
+        {"@Sudoku", "Sudoku"},
+        {"@digital_frame", "Digital Frame"},
+        {"@Gallery", "Gallery"},
+        {"@Library", "Library"},
+        {"@Notes", "Notes"},
+        {"@Onleihe", "Onleihe"},
+        {"@Audio_player", "Music"},
+        {"@Pocketnews", "RSS News"},
+        {"@Settings", "Settings"},
+        {"@Snake", "Snake"},
+        {"@Scribble", "Scribble"},
+        {"@SendToPocketbook", "Send to PB"},
+        {"@Dictionary", "Dictionary"},
+        {"@Dropbox", "Dropbox"},
+        {"@Empik_store", "Empik"},
+        {"@Klondike", "Solitaire"},
+        {"@Kosynka", "Solitaire"},
+        {"@PBOnleiheLibrary", "Onleihe"},
+        {"@General", "General"},
+        {"@Games", "Games"},
+    };
+    for (size_t i = 0; i < sizeof tab / sizeof tab[0]; i++) {
+        if (strcmp(tok, tab[i].k) == 0)
+            return tab[i].v;
+    }
+    return NULL;
+}
+
+static void
+lc_translate(const char *raw, char *out, size_t cap)
+{
+    if (!raw || !*raw || cap == 0) {
+        if (cap)
+            out[0] = '\0';
+        return;
+    }
+    if (raw[0] == '@') {
+        const char *en = lc_token_en(raw);
+        if (en) {
+            snprintf(out, cap, "%s", en);
+            return;
+        }
+        raw++;
+    }
+    size_t j = 0;
+    int    cap_next = 1;
+    for (size_t i = 0; raw[i] && j + 1 < cap; i++) {
+        char c = raw[i];
+        if (c == '_') {
+            out[j++] = ' ';
+            cap_next = 1;
+        } else if (cap_next && c >= 'a' && c <= 'z') {
+            out[j++] = (char)(c - 32);
+            cap_next = 0;
+        } else {
+            out[j++] = c;
+            cap_next = 0;
+        }
+    }
+    out[j] = '\0';
+}
+
+/* -- launcher data + layout --------------------------------------------- */
+
+#define LAUNCHER_MAX_ITEMS  64
+#define LAUNCHER_MAX_PARAMS 4
+#define LAUNCHER_PARAM_LEN  64
+
+typedef struct {
+    int  kind; /* 0 = header, 1 = app */
+    char text[48];
+    char path[160];
+    char icon[64];
+    char params[LAUNCHER_MAX_PARAMS][LAUNCHER_PARAM_LEN];
+    int  nparams;
+    int  page;
+    int  x, y, w, h;
+} LauncherItem;
+
+static LauncherItem g_launcher_items[LAUNCHER_MAX_ITEMS];
+static int          g_launcher_count;
+static int          g_launcher_pages;
+static int          g_launcher_built;
+
+#define LAUNCHER_HEADER_H 104
+#define LAUNCHER_PAGER_H  96
+#define LAUNCHER_COLS     3
+#define LAUNCHER_GROUP_H  64
+#define LAUNCHER_CELL_H   232
+#define LAUNCHER_ICON_SZ  120
+#define LAUNCHER_MARGIN   16
+
+static void
+launcher_layout(void)
+{
+    int w = ScreenWidth();
+    int h = ScreenHeight();
+    int body_top = g_state.panel_h + LAUNCHER_HEADER_H;
+    int body_bot = h - LAUNCHER_PAGER_H;
+    int cell_w = (w - 2 * LAUNCHER_MARGIN) / LAUNCHER_COLS;
+    int page = 0;
+    int col = 0;
+    int y = body_top;
+
+    for (int i = 0; i < g_launcher_count; i++) {
+        LauncherItem *it = &g_launcher_items[i];
+        if (it->kind == 0) {
+            if (y + LAUNCHER_GROUP_H > body_bot) {
+                page++;
+                col = 0;
+                y = body_top;
+            }
+            it->page = page;
+            it->x = LAUNCHER_MARGIN;
+            it->y = y;
+            it->w = w - 2 * LAUNCHER_MARGIN;
+            it->h = LAUNCHER_GROUP_H;
+            y += LAUNCHER_GROUP_H;
+            col = 0;
+        } else {
+            if (col >= LAUNCHER_COLS) {
+                col = 0;
+                y += LAUNCHER_CELL_H;
+            }
+            if (y + LAUNCHER_CELL_H > body_bot) {
+                page++;
+                col = 0;
+                y = body_top;
+            }
+            it->page = page;
+            it->x = LAUNCHER_MARGIN + col * cell_w;
+            it->y = y;
+            it->w = cell_w;
+            it->h = LAUNCHER_CELL_H;
+            col++;
+        }
+    }
+    g_launcher_pages = page + 1;
+}
+
+static void
+launcher_add_app(const char *apps_body, const char *id)
+{
+    if (g_launcher_count >= LAUNCHER_MAX_ITEMS)
+        return;
+    const char *def = js_find_member(apps_body, id);
+    if (!def)
+        return;
+    const char *def_body = js_object_body(def);
+    if (!def_body)
+        return;
+    const char *vis = js_find_member(def_body, "visible");
+    if (vis && !lc_resolve_bool(vis))
+        return;
+    LauncherItem *it = &g_launcher_items[g_launcher_count];
+    memset(it, 0, sizeof *it);
+    it->kind = 1;
+    const char *tp = js_find_member(def_body, "title");
+    if (tp) {
+        char raw[64];
+        lc_resolve(tp, NULL, raw, sizeof raw);
+        lc_translate(raw, it->text, sizeof it->text);
+    }
+    if (!it->text[0])
+        snprintf(it->text, sizeof it->text, "%s", id);
+    const char *pp = js_find_member(def_body, "path");
+    if (pp)
+        lc_resolve(pp, NULL, it->path, sizeof it->path);
+    const char *ip = js_find_member(def_body, "icon");
+    if (ip)
+        lc_resolve(ip, NULL, it->icon, sizeof it->icon);
+    const char *par = js_find_member(def_body, "params");
+    if (!par)
+        par = js_find_member(def_body, "param");
+    if (par) {
+        par = js_skip_ws(par);
+        if (*par == '[') {
+            const char *q = par + 1;
+            while (*q && *q != ']' && it->nparams < LAUNCHER_MAX_PARAMS) {
+                q = js_skip_ws(q);
+                if (*q != '"')
+                    break;
+                js_copy_string(q, it->params[it->nparams], LAUNCHER_PARAM_LEN);
+                it->nparams++;
+                q = js_skip_value(q);
+                if (!q)
+                    break;
+                q = js_skip_ws(q);
+                if (*q == ',')
+                    q++;
+            }
+        } else if (*par == '"') {
+            js_copy_string(par, it->params[0], LAUNCHER_PARAM_LEN);
+            it->nparams = 1;
+        }
+    }
+    g_launcher_count++;
+}
+
+static void
+launcher_build(void)
+{
+    g_launcher_count = 0;
+    g_launcher_pages = 1;
+
+    char *db = read_text_file("/mnt/ext1/system/config/desktop/apps_db.json");
+    if (!db)
+        db = read_text_file("/ebrmain/config/desktop/apps_db.json");
+    char *vw = read_text_file("/mnt/ext1/system/config/desktop/view.json");
+    if (!vw)
+        vw = read_text_file("/ebrmain/config/desktop/view.json");
+
+    if (!db || !vw) {
+        free(db);
+        free(vw);
+        launcher_layout();
+        g_launcher_built = 1;
+        return;
+    }
+
+    const char *db_root = js_object_body(db);
+    const char *db_apps = db_root ? js_find_member(db_root, "applications") : NULL;
+    const char *db_apps_body = db_apps ? js_object_body(db_apps) : NULL;
+    if (!db_apps_body) {
+        free(db);
+        free(vw);
+        launcher_layout();
+        g_launcher_built = 1;
+        return;
+    }
+
+    const char *vw_root = js_object_body(vw);
+    const char *view_obj = vw_root ? js_find_member(vw_root, "view") : NULL;
+    const char *view_body = view_obj ? js_object_body(view_obj) : NULL;
+    const char *groups = view_body ? js_find_member(view_body, "groups") : NULL;
+    if (groups) {
+        groups = js_skip_ws(groups);
+        if (*groups == '[') {
+            const char *q = groups + 1;
+            while (*q && *q != ']') {
+                q = js_skip_ws(q);
+                if (*q != '{') {
+                    q = js_skip_value(q);
+                    if (!q)
+                        break;
+                    q = js_skip_ws(q);
+                    if (*q == ',')
+                        q++;
+                    continue;
+                }
+                const char *grp_body = q + 1;
+                const char *tp = js_find_member(grp_body, "title");
+                char        raw_title[64] = "";
+                char        disp_title[64] = "";
+                if (tp) {
+                    lc_resolve(tp, NULL, raw_title, sizeof raw_title);
+                    lc_translate(raw_title, disp_title, sizeof disp_title);
+                }
+                const char *apps_arr = js_find_member(grp_body, "apps");
+                if (apps_arr) {
+                    apps_arr = js_skip_ws(apps_arr);
+                    if (*apps_arr == '[') {
+                        if (g_launcher_count < LAUNCHER_MAX_ITEMS && disp_title[0]) {
+                            LauncherItem *hdr = &g_launcher_items[g_launcher_count++];
+                            memset(hdr, 0, sizeof *hdr);
+                            hdr->kind = 0;
+                            snprintf(hdr->text, sizeof hdr->text, "%s", disp_title);
+                        }
+                        const char *r = apps_arr + 1;
+                        while (*r && *r != ']') {
+                            r = js_skip_ws(r);
+                            if (*r == '"') {
+                                char id[48];
+                                js_copy_string(r, id, sizeof id);
+                                launcher_add_app(db_apps_body, id);
+                                r = js_skip_value(r);
+                                if (!r)
+                                    break;
+                            } else {
+                                r = js_skip_value(r);
+                                if (!r)
+                                    break;
+                            }
+                            r = js_skip_ws(r);
+                            if (*r == ',')
+                                r++;
+                        }
+                    }
+                }
+                q = js_skip_value(q);
+                if (!q)
+                    break;
+                q = js_skip_ws(q);
+                if (*q == ',')
+                    q++;
+            }
+        }
+    }
+
+    /* Scan view.json applications for U_* user apps not in any group. */
+    const char *vw_apps = vw_root ? js_find_member(vw_root, "applications") : NULL;
+    const char *vw_apps_body = vw_apps ? js_object_body(vw_apps) : NULL;
+    if (vw_apps_body) {
+        int         user_hdr_added = 0;
+        const char *p = vw_apps_body;
+        while (*p) {
+            p = js_skip_ws(p);
+            if (*p == '}' || *p != '"')
+                break;
+            const char *ks = ++p;
+            while (*p && *p != '"') {
+                if (*p == '\\')
+                    p++;
+                p++;
+            }
+            size_t kl = (size_t)(p - ks);
+            if (*p == '"')
+                p++;
+            p = js_skip_ws(p);
+            if (*p == ':')
+                p++;
+            p = js_skip_ws(p);
+            if (kl >= 2 && ks[0] == 'U' && ks[1] == '_') {
+                const char *def_body2 = (*p == '{') ? p + 1 : NULL;
+                int         vis = 1;
+                if (def_body2) {
+                    const char *v2 = js_find_member(def_body2, "visible");
+                    if (v2 && !lc_resolve_bool(v2))
+                        vis = 0;
+                }
+                if (vis && g_launcher_count < LAUNCHER_MAX_ITEMS) {
+                    char   id[48];
+                    size_t cl = kl < sizeof id - 1 ? kl : sizeof id - 1;
+                    memcpy(id, ks, cl);
+                    id[cl] = '\0';
+                    if (!user_hdr_added) {
+                        LauncherItem *hdr = &g_launcher_items[g_launcher_count++];
+                        memset(hdr, 0, sizeof *hdr);
+                        hdr->kind = 0;
+                        snprintf(hdr->text, sizeof hdr->text, "User");
+                        user_hdr_added = 1;
+                    }
+                    LauncherItem *it = &g_launcher_items[g_launcher_count];
+                    memset(it, 0, sizeof *it);
+                    it->kind = 1;
+                    if (def_body2) {
+                        const char *tp2 = js_find_member(def_body2, "title");
+                        if (tp2)
+                            lc_resolve(tp2, NULL, it->text, sizeof it->text);
+                        const char *pp2 = js_find_member(def_body2, "path");
+                        if (pp2)
+                            lc_resolve(pp2, NULL, it->path, sizeof it->path);
+                        const char *ip2 = js_find_member(def_body2, "icon");
+                        if (ip2)
+                            lc_resolve(ip2, NULL, it->icon, sizeof it->icon);
+                    }
+                    if (!it->text[0])
+                        snprintf(it->text, sizeof it->text, "%s", id);
+                    g_launcher_count++;
+                }
+            }
+            p = js_skip_value(p);
+            if (!p)
+                break;
+            p = js_skip_ws(p);
+            if (*p == ',')
+                p++;
+        }
+    }
+
+    free(db);
+    free(vw);
+    launcher_layout();
+    g_launcher_built = 1;
+    LOG("[bookshelf] launcher built: %d items, %d pages\n", g_launcher_count, g_launcher_pages);
+}
+
+/* -- launcher draw ------------------------------------------------------ */
+
+static void
+draw_launcher_icon(int cx, int cy, const char *icon_name, const char *title)
+{
+    int      sz = LAUNCHER_ICON_SZ;
+    int      x0 = cx - sz / 2;
+    int      y0 = cy - sz / 2;
+    ibitmap *bm = NULL;
+    if (icon_name && icon_name[0] && icon_name[0] != '/')
+        bm = GetResource(icon_name, NULL);
+    if (!bm && icon_name && icon_name[0] == '/')
+        bm = LoadPNG(icon_name, 0);
+    if (bm) {
+        DrawBitmap(x0, y0, bm);
+        return;
+    }
+    FillArea(x0, y0, sz, sz, WHITE);
+    DrawRect(x0, y0, sz, sz, BLACK);
+    if (title && title[0]) {
+        ifont *f = OpenFont(DEFAULTFONTB, 56, 0);
+        if (f) {
+            SetFont(f, BLACK);
+            char ch[2] = {title[0], 0};
+            int  tw = StringWidth(ch);
+            DrawString(cx - tw / 2, cy - 28, ch);
+            CloseFont(f);
+        }
+    }
+}
+
+static void
+draw_overlay_launcher(void)
+{
+    int w = ScreenWidth();
+    int h = ScreenHeight();
+    FillArea(0, g_state.panel_h, w, h - g_state.panel_h, WHITE);
+
+    FillArea(0, g_state.panel_h, w, LAUNCHER_HEADER_H, WHITE);
+    DrawLine(0,
+             g_state.panel_h + LAUNCHER_HEADER_H - 1,
+             w,
+             g_state.panel_h + LAUNCHER_HEADER_H - 1,
+             BLACK);
+    ifont *tf = OpenFont(DEFAULTFONTB, 36, 0);
+    if (tf) {
+        SetFont(tf, BLACK);
+        const char *title = i18n("launcher.title");
+        int         tw = StringWidth(title);
+        DrawString((w - tw) / 2, g_state.panel_h + (LAUNCHER_HEADER_H - 36) / 2, title);
+        CloseFont(tf);
+    }
+    {
+        int bx = 16, by = g_state.panel_h + (LAUNCHER_HEADER_H - 56) / 2, bw = 160, bh = 56;
+        DrawRect(bx, by, bw, bh, BLACK);
+        ifont *bf = OpenFont(DEFAULTFONTB, 28, 0);
+        if (bf) {
+            SetFont(bf, BLACK);
+            DrawString(bx + 16, by + (bh - 28) / 2 - 2, i18n("launcher.back"));
+            CloseFont(bf);
+        }
+    }
+
+    int pg = g_state.launcher_page;
+    if (pg < 0)
+        pg = 0;
+    if (pg >= g_launcher_pages)
+        pg = g_launcher_pages - 1;
+    if (pg < 0)
+        pg = 0;
+
+    if (g_launcher_count == 0) {
+        ifont *ef = OpenFont(DEFAULTFONT, 32, 0);
+        if (ef) {
+            SetFont(ef, BLACK);
+            const char *empty = i18n("launcher.empty");
+            int         tw = StringWidth(empty);
+            DrawString((w - tw) / 2, h / 2, empty);
+            CloseFont(ef);
+        }
+    }
+
+    ifont *hf = OpenFont(DEFAULTFONTB, 28, 0);
+    ifont *af = OpenFont(DEFAULTFONT, 24, 0);
+    for (int i = 0; i < g_launcher_count; i++) {
+        const LauncherItem *it = &g_launcher_items[i];
+        if (it->page != pg)
+            continue;
+        if (it->kind == 0) {
+            FillArea(it->x, it->y, it->w, it->h, WHITE);
+            DrawLine(it->x, it->y + it->h - 1, it->x + it->w, it->y + it->h - 1, BLACK);
+            if (hf) {
+                SetFont(hf, BLACK);
+                DrawString(it->x + 12, it->y + (it->h - 28) / 2 - 2, it->text);
+            }
+        } else {
+            int cx = it->x + it->w / 2;
+            int icon_cy = it->y + 12 + LAUNCHER_ICON_SZ / 2;
+            draw_launcher_icon(cx, icon_cy, it->icon, it->text);
+            if (af) {
+                SetFont(af, BLACK);
+                int ly = it->y + 12 + LAUNCHER_ICON_SZ + 8;
+                int maxw = it->w - 8;
+                if (StringWidth(it->text) <= maxw) {
+                    int tw = StringWidth(it->text);
+                    DrawString(cx - tw / 2, ly, it->text);
+                } else {
+                    const char *sp = strrchr(it->text, ' ');
+                    if (sp) {
+                        char   line1[48];
+                        size_t l1 = (size_t)(sp - it->text);
+                        if (l1 >= sizeof line1)
+                            l1 = sizeof line1 - 1;
+                        memcpy(line1, it->text, l1);
+                        line1[l1] = '\0';
+                        int tw = StringWidth(line1);
+                        DrawString(cx - tw / 2, ly, line1);
+                        tw = StringWidth(sp + 1);
+                        DrawString(cx - tw / 2, ly + 28, sp + 1);
+                    } else {
+                        char trunc[24];
+                        snprintf(trunc, sizeof trunc, "%.20s", it->text);
+                        int tw = StringWidth(trunc);
+                        DrawString(cx - tw / 2, ly, trunc);
+                    }
+                }
+            }
+        }
+    }
+    if (hf)
+        CloseFont(hf);
+    if (af)
+        CloseFont(af);
+
+    int py = h - LAUNCHER_PAGER_H;
+    FillArea(0, py, w, LAUNCHER_PAGER_H, WHITE);
+    DrawLine(0, py, w, py, BLACK);
+    if (g_launcher_pages > 1) {
+        char pbuf[32];
+        snprintf(pbuf, sizeof pbuf, "%d / %d", pg + 1, g_launcher_pages);
+        ifont *pf = OpenFont(DEFAULTFONT, 28, 0);
+        if (pf) {
+            SetFont(pf, BLACK);
+            int tw = StringWidth(pbuf);
+            DrawString((w - tw) / 2, py + (LAUNCHER_PAGER_H - 28) / 2 - 2, pbuf);
+            CloseFont(pf);
+        }
+        if (pg > 0) {
+            DrawLine(32, py + 28, 16, py + LAUNCHER_PAGER_H / 2, BLACK);
+            DrawLine(16, py + LAUNCHER_PAGER_H / 2, 32, py + LAUNCHER_PAGER_H - 28, BLACK);
+        }
+        if (pg < g_launcher_pages - 1) {
+            DrawLine(w - 32, py + 28, w - 16, py + LAUNCHER_PAGER_H / 2, BLACK);
+            DrawLine(w - 16, py + LAUNCHER_PAGER_H / 2, w - 32, py + LAUNCHER_PAGER_H - 28, BLACK);
+        }
+    }
+}
+
+/* -- launcher hit-test + actions ---------------------------------------- */
+
+static void
+launch_app(const LauncherItem *it)
+{
+    if (!it->path[0])
+        return;
+    const char *base = strrchr(it->path, '/');
+    base = base ? base + 1 : it->path;
+    char *args[LAUNCHER_MAX_PARAMS + 2];
+    int   ai = 0;
+    args[ai++] = (char *)it->path;
+    for (int i = 0; i < it->nparams && ai < LAUNCHER_MAX_PARAMS + 1; i++)
+        args[ai++] = (char *)it->params[i];
+    args[ai] = NULL;
+    LOG("[bookshelf] launching app path=%s base=%s params=%d\n", it->path, base, it->nparams);
+    NewTaskEx(it->path, ai ? args : NULL, base, it->text, NULL, 1u << 30, 0);
+}
+
+static void
+on_tap_overlay_launcher(int x, int y)
+{
+    int w = ScreenWidth();
+    int h = ScreenHeight();
+    if (x >= 16 && x < 176 && y >= g_state.panel_h + (LAUNCHER_HEADER_H - 56) / 2 &&
+        y < g_state.panel_h + (LAUNCHER_HEADER_H - 56) / 2 + 56) {
+        launcher_close();
+        return;
+    }
+    int py = h - LAUNCHER_PAGER_H;
+    if (y >= py) {
+        if (x < w / 3 && g_state.launcher_page > 0) {
+            g_state.launcher_page--;
+            draw_overlay_launcher();
+            FullUpdate();
+        } else if (x >= 2 * w / 3 && g_state.launcher_page < g_launcher_pages - 1) {
+            g_state.launcher_page++;
+            draw_overlay_launcher();
+            FullUpdate();
+        }
+        return;
+    }
+    int pg = g_state.launcher_page;
+    for (int i = 0; i < g_launcher_count; i++) {
+        const LauncherItem *it = &g_launcher_items[i];
+        if (it->page != pg || it->kind != 1)
+            continue;
+        if (x >= it->x && x < it->x + it->w && y >= it->y && y < it->y + it->h) {
+            launcher_close();
+            launch_app(it);
+            return;
+        }
+    }
+}
+
+static void
+launcher_open_set(void)
+{
+    if (!g_launcher_built)
+        launcher_build();
+    g_state.launcher_open = 1;
+    g_state.launcher_page = 0;
+    draw_overlay_launcher();
+    FullUpdate();
+}
+
+static void
+launcher_close(void)
+{
+    g_state.launcher_open = 0;
+    redraw_shelf();
+}
 /* Pop out of a drilled-in series back to the collapsed top-level grid. */
 static void
 drill_back(void)
@@ -2507,9 +4000,10 @@ drill_back(void)
     g_state.selected = -1;
     build_view();
     LOG("[bookshelf] drilled back to top level (view=%d)\n", g_view_count);
-    FillArea(0, 0, ScreenWidth(), ScreenHeight(), WHITE);
+    FillArea(0, g_state.panel_h, ScreenWidth(), ScreenHeight() - g_state.panel_h, WHITE);
     draw_top_bar();
     draw_search_row();
+    draw_tab_row();
     draw_grid();
     draw_pager();
     FullUpdate();
@@ -2529,90 +4023,439 @@ on_tap_thumbnail(int vi)
         g_state.selected = -1;
         build_view();
         LOG("[bookshelf] drilled into series '%s' (%d books)\n", vt->series_name, g_view_count);
-        FillArea(0, 0, ScreenWidth(), ScreenHeight(), WHITE);
+        FillArea(0, g_state.panel_h, ScreenWidth(), ScreenHeight() - g_state.panel_h, WHITE);
         draw_top_bar();
         draw_search_row();
+        draw_tab_row();
         draw_grid();
         draw_pager();
         FullUpdate();
         return;
     }
 
-    /* Flat tile → open the book. */
+    /* Flat tile → download (if needed) then open in the configured reader. */
     Book *b = &g_state.books[vt->book_idx];
-    char  body[160];
-    snprintf(body, sizeof body, "{\"id\":\"%s\",\"ext\":\"%s\"}", b->id, b->ext);
+    book_press_action(b);
+}
 
-    char *resp = NULL;
-    int   rl = 0;
-    if (http_post(g_state.url_openwith, body, &resp, &rl) != 0 || !resp) {
-        snprintf(g_state.status, sizeof g_state.status, "open-with failed");
-        if (resp)
+/* ── downloads, delete, context menu, long-press ───────────────────── */
+
+/* Local path a book downloads to (matches the open-with launch path). */
+static void
+book_local_path(const Book *b, char *out, size_t cap)
+{
+    if (b->ext[0])
+        snprintf(out, cap, "%s/%s.%s", g_downloads_dir, b->id, b->ext);
+    else
+        snprintf(out, cap, "%s/%s", g_downloads_dir, b->id);
+}
+
+/* Look a book up in the master library by id (NULL if unknown). */
+static Book *
+find_lib_book(const char *id)
+{
+    for (int i = 0; i < g_lib_count; i++)
+        if (strcmp(g_lib[i].id, id) == 0)
+            return &g_lib[i];
+    return NULL;
+}
+
+/* Sync a book's downloaded flag by probing its on-device file. */
+static void
+refresh_downloaded(Book *b)
+{
+    char path[MAX_PATH_LEN];
+    book_local_path(b, path, sizeof path);
+    b->downloaded = (access(path, F_OK) == 0);
+    if (b->downloaded)
+        snprintf(b->local_path, sizeof b->local_path, "%s", path);
+}
+
+/* Find a download-queue entry by id (NULL if absent). */
+static DownloadItem *
+find_download(const char *id)
+{
+    for (int i = 0; i < g_download_count; i++)
+        if (strcmp(g_downloads[i].id, id) == 0)
+            return &g_downloads[i];
+    return NULL;
+}
+
+/* Add a book to the download queue (no-op if already queued/done) and
+ * arm the drain timer. */
+static void
+enqueue_download(const Book *b)
+{
+    DownloadItem *d = find_download(b->id);
+    if (d != NULL)
+        return;
+    if (g_download_count >= MAX_DOWNLOADS)
+        return;
+    DownloadItem *n = &g_downloads[g_download_count++];
+    snprintf(n->id, sizeof n->id, "%s", b->id);
+    snprintf(n->title, sizeof n->title, "%s", b->title);
+    n->state = 0;
+    if (!g_download_armed) {
+        g_download_armed = 1;
+        SetWeakTimerEx("bdl", download_tick, NULL, 120);
+    }
+}
+
+/* Download one book's file to disk (blocking).  Returns 1 on success. */
+static int
+download_book_file(Book *b)
+{
+    char path[MAX_PATH_LEN];
+    book_local_path(b, path, sizeof path);
+
+    char url[MAX_URL_LEN + 128];
+    snprintf(url,
+             sizeof url,
+             "%s/api/v1/books/%s/file?access_token=%s",
+             g_state.api_base,
+             b->id,
+             g_state.api_token);
+
+    int   rsize = 0;
+    char *data = QuickDownload(url, &rsize, 60);
+    if (data == NULL || rsize <= 0) {
+        if (data)
+            free(data);
+        LOG("[bookshelf] download_book_file FAILED id=%s\n", b->id);
+        return 0;
+    }
+    FILE *f = fopen(path, "wb");
+    if (f == NULL) {
+        free(data);
+        LOG("[bookshelf] download_book_file fopen FAILED path=%s\n", path);
+        return 0;
+    }
+    fwrite(data, 1, (size_t)rsize, f);
+    fclose(f);
+    free(data);
+    b->downloaded = 1;
+    snprintf(b->local_path, sizeof b->local_path, "%s", path);
+    LOG("[bookshelf] download_book_file OK id=%s path=%s bytes=%d\n", b->id, path, rsize);
+    return 1;
+}
+
+/* Launch the configured reader on an already-downloaded book. */
+static void
+launch_reader(Book *b)
+{
+    char app[80];
+    char full_path[160];
+    if (g_state.reader_pref > 0 && g_state.reader_pref <= g_reader_count) {
+        const char *rpath = g_readers[g_state.reader_pref - 1].path;
+        const char *rbase = strrchr(rpath, '/');
+        rbase = rbase ? rbase + 1 : rpath;
+        snprintf(app, sizeof app, "%s", rbase);
+        snprintf(full_path, sizeof full_path, "%s", rpath);
+    } else {
+        /* Auto: ask the server which app handles this extension. */
+        char body[160];
+        snprintf(body, sizeof body, "{\"id\":\"%s\",\"ext\":\"%s\"}", b->id, b->ext);
+        char *resp = NULL;
+        int   rl = 0;
+        char  resolved[64] = "eink-reader";
+        if (http_post(g_state.url_openwith, body, &resp, &rl) == 0 && resp) {
+            char tmp[64];
+            if (json_find_key(resp, "app", tmp, sizeof tmp))
+                snprintf(resolved, sizeof resolved, "%s", tmp);
             free(resp);
+        }
+        size_t alen = strlen(resolved);
+        if (alen < 4 || strcmp(resolved + alen - 4, ".app") != 0)
+            snprintf(app, sizeof app, "%s.app", resolved);
+        else
+            snprintf(app, sizeof app, "%s", resolved);
+        /* Build full path from basename. */
+        if (strchr(app, '/') == NULL)
+            snprintf(full_path, sizeof full_path, "/ebrmain/bin/%s", app);
+        else
+            snprintf(full_path, sizeof full_path, "%s", app);
+    }
+    char path[MAX_PATH_LEN];
+    book_local_path(b, path, sizeof path);
+    char path_copy[MAX_PATH_LEN];
+    snprintf(path_copy, sizeof path_copy, "%s", path);
+    char *args[2] = {path_copy, NULL};
+    LOG("[bookshelf] launching reader app=%s path=%s reader_pref=%d\n",
+        app,
+        path_copy,
+        g_state.reader_pref);
+    NewTaskEx(full_path, args, app, b->title, NULL, 1u << 30, 0);
+}
+
+/* Press a book: download it if needed, then open it in the reader. */
+static void
+book_press_action(Book *b)
+{
+    refresh_downloaded(b);
+    if (!b->downloaded) {
+        snprintf(g_state.status, sizeof g_state.status, "%s", i18n("dl.in_progress"));
+        if (!download_book_file(b)) {
+            snprintf(g_state.status, sizeof g_state.status, "%s", i18n("dl.failed"));
+            return;
+        }
+    }
+    launch_reader(b);
+}
+
+/* Delete a book's local file (server metadata is untouched — there is no
+ * delete endpoint).  Marks the book not-downloaded so it can be fetched
+ * again on the next press. */
+static void
+delete_book_file(Book *b)
+{
+    char path[MAX_PATH_LEN];
+    book_local_path(b, path, sizeof path);
+    if (unlink(path) == 0)
+        LOG("[bookshelf] delete_book_file removed %s\n", path);
+    else
+        LOG("[bookshelf] delete_book_file unlink failed %s\n", path);
+    b->downloaded = 0;
+    b->local_path[0] = '\0';
+    DownloadItem *d = find_download(b->id);
+    if (d != NULL)
+        d->state = 3;
+}
+
+/* Drain the download queue one item per tick so a "Download all" shows
+ * live progress on the Downloads tab instead of blocking the UI for the
+ * whole batch. */
+static void
+download_tick(void *ctx)
+{
+    (void)ctx;
+    g_download_armed = 0;
+    DownloadItem *target = NULL;
+    for (int i = 0; i < g_download_count; i++) {
+        if (g_downloads[i].state == 0) {
+            target = &g_downloads[i];
+            break;
+        }
+    }
+    if (target == NULL) {
+        if (g_state.tab == TAB_DOWNLOADS)
+            redraw_shelf();
         return;
     }
-    char app[64], url[220];
-    if (json_find_key(resp, "app", app, sizeof app) &&
-        json_find_key(resp, "url", url, sizeof url)) {
-        char path[220];
-        if (b->ext[0])
-            snprintf(path, sizeof path, "%s/%s.%s", LOCAL_DOWNLOADS, b->id, b->ext);
-        else
-            snprintf(path, sizeof path, "%s/%s", LOCAL_DOWNLOADS, b->id);
+    target->state = 1;
+    if (g_state.tab == TAB_DOWNLOADS)
+        redraw_shelf();
 
-        int   retsize = 0;
-        char *file_body = NULL;
-        FILE *f = fopen(path, "rb");
-        if (!f) {
-            char        full_url[640];
-            const char *sep = strchr(url, '?') ? "&" : "?";
-            snprintf(full_url,
-                     sizeof full_url,
-                     "%s%s%saccess_token=%s",
-                     g_state.api_base,
-                     url,
-                     sep,
-                     g_state.api_token);
-            file_body = QuickDownload(full_url, &retsize, 60);
-            if (file_body) {
-                f = fopen(path, "wb");
-                if (f) {
-                    fwrite(file_body, 1, retsize, f);
-                    fclose(f);
-                }
-            }
-        } else {
-            fclose(f);
+    Book *b = find_lib_book(target->id);
+    int   ok = 0;
+    if (b != NULL)
+        ok = download_book_file(b);
+    target->state = ok ? 2 : 3;
+
+    if (g_state.tab == TAB_DOWNLOADS)
+        redraw_shelf();
+    else
+        draw_tab_row(); /* refresh the pending-count badge */
+
+    /* More queued? keep draining. */
+    for (int i = 0; i < g_download_count; i++) {
+        if (g_downloads[i].state == 0) {
+            g_download_armed = 1;
+            SetWeakTimerEx("bdl", download_tick, NULL, 120);
+            break;
         }
-        if (file_body)
-            free(file_body);
-
-        b->downloaded = 1;
-        snprintf(b->local_path, sizeof b->local_path, "%s", path);
-
-        char app_with_suffix[80];
-        if (g_state.reader_pref > 0 && g_state.reader_pref <= g_reader_count) {
-            const char *rpath = g_readers[g_state.reader_pref - 1].path;
-            const char *rbase = strrchr(rpath, '/');
-            rbase = rbase ? rbase + 1 : rpath;
-            snprintf(app_with_suffix, sizeof app_with_suffix, "%s", rbase);
-        } else {
-            snprintf(app_with_suffix, sizeof app_with_suffix, "%s", app);
-            size_t alen = strlen(app_with_suffix);
-            if (alen < 4 || strcmp(app_with_suffix + alen - 4, ".app") != 0) {
-                snprintf(app_with_suffix, sizeof app_with_suffix, "%s.app", app);
-            }
-        }
-        char path_copy[220];
-        snprintf(path_copy, sizeof path_copy, "%s", path);
-        char *args[2] = {path_copy, NULL};
-        LOG("[bookshelf] launching app=%s path=%s reader_pref=%d\n",
-            app_with_suffix,
-            path_copy,
-            g_state.reader_pref);
-        NewTaskEx(app_with_suffix, args, app_with_suffix, b->title, NULL, 1u << 30, 0);
     }
-    free(resp);
+}
+
+/* Queue every member of a series (by series_id). */
+static void
+download_series(const char *series_id)
+{
+    int n = 0;
+    for (int i = 0; i < g_lib_count; i++) {
+        if (strcmp(g_lib[i].series_id, series_id) == 0) {
+            enqueue_download(&g_lib[i]);
+            n++;
+        }
+    }
+    LOG("[bookshelf] download_series %s queued=%d\n", series_id, n);
+}
+
+/* Delete the local files of every member of a series. */
+static void
+delete_series(const char *series_id)
+{
+    int n = 0;
+    for (int i = 0; i < g_lib_count; i++) {
+        if (strcmp(g_lib[i].series_id, series_id) == 0) {
+            delete_book_file(&g_lib[i]);
+            n++;
+        }
+    }
+    LOG("[bookshelf] delete_series %s removed=%d\n", series_id, n);
+}
+
+/* Context menu geometry: a centred modal sheet.  Returns the sheet rect
+ * and the y of the first item row. */
+static void
+context_geom(int *px, int *py, int *pw, int *ph, int n_items)
+{
+    int w = ScreenWidth();
+    int h = ScreenHeight();
+    *pw = w * 3 / 4;
+    *ph = CTX_TITLE_H + n_items * CTX_ITEM_H + CTX_PAD;
+    *px = (w - *pw) / 2;
+    *py = (h - *ph) / 2;
+}
+
+static int
+context_item_count(void)
+{
+    /* Both the book and series menus offer exactly two actions. */
+    return 2;
+}
+
+/* Draw the long-press context menu over a dimmed shelf. */
+static void
+draw_context_menu(void)
+{
+    int w = ScreenWidth();
+    int h = ScreenHeight();
+    /* Dim mask. */
+    for (int yy = g_state.panel_h; yy < h; yy += 2)
+        DrawLine(0, yy, w, yy, LGRAY);
+
+    int n = context_item_count();
+    int px, py, pw, ph;
+    context_geom(&px, &py, &pw, &ph, n);
+    FillArea(px, py, pw, ph, WHITE);
+    DrawRect(px, py, pw, ph, BLACK);
+    DrawRect(px + 1, py + 1, pw - 2, ph - 2, BLACK);
+
+    /* Title: series name or book title. */
+    const char *title;
+    if (g_state.ctx_is_series) {
+        /* ctx_series_id holds a series id; recover the name from any member. */
+        title = "Series";
+        for (int i = 0; i < g_lib_count; i++) {
+            if (strcmp(g_lib[i].series_id, g_state.ctx_series_id) == 0) {
+                title = g_lib[i].series;
+                break;
+            }
+        }
+    } else {
+        title = g_state.books[g_state.ctx_book_idx].title;
+    }
+    ifont *tf = OpenFont(DEFAULTFONTB, 28, 0);
+    if (tf != NULL) {
+        SetFont(tf, BLACK);
+        char trunc[MAX_TITLE_LEN];
+        snprintf(trunc, sizeof trunc, "%s", title);
+        while (StringWidth(trunc) > pw - 2 * CTX_PAD && strlen(trunc) > 4)
+            trunc[strlen(trunc) - 1] = '\0';
+        DrawString(px + CTX_PAD, py + (CTX_TITLE_H - 28) / 2 - 2, trunc);
+        CloseFont(tf);
+    }
+    DrawLine(px + CTX_PAD, py + CTX_TITLE_H - 1, px + pw - CTX_PAD, py + CTX_TITLE_H - 1, LGRAY);
+
+    const char *labels[2];
+    if (g_state.ctx_is_series) {
+        labels[0] = i18n("ctx.download_all");
+        labels[1] = i18n("ctx.delete_series");
+    } else {
+        labels[0] = i18n("ctx.download");
+        labels[1] = i18n("ctx.delete");
+    }
+    ifont *f = OpenFont(DEFAULTFONTB, 30, 0);
+    if (f == NULL)
+        return;
+    SetFont(f, BLACK);
+    for (int i = 0; i < n; i++) {
+        int iy = py + CTX_TITLE_H + i * CTX_ITEM_H;
+        DrawString(px + CTX_PAD, iy + (CTX_ITEM_H - 30) / 2 - 2, labels[i]);
+        if (i + 1 < n)
+            DrawLine(
+                px + CTX_PAD, iy + CTX_ITEM_H - 1, px + pw - CTX_PAD, iy + CTX_ITEM_H - 1, LGRAY);
+    }
+    CloseFont(f);
+}
+
+static void
+close_context(void)
+{
+    g_state.ctx_open = 0;
+    redraw_shelf();
+}
+
+/* Open the context menu for a view tile (series card or book). */
+static void
+open_context_for_tile(int vi)
+{
+    if (vi < 0 || vi >= g_view_count)
+        return;
+    const ViewTile *vt = &g_view[vi];
+    g_state.ctx_open = 1;
+    g_state.ctx_is_series = vt->is_series;
+    if (vt->is_series) {
+        snprintf(g_state.ctx_series_id, sizeof g_state.ctx_series_id, "%s", vt->series_id);
+        g_state.ctx_book_idx = -1;
+    } else {
+        g_state.ctx_book_idx = vt->book_idx;
+        g_state.ctx_series_id[0] = '\0';
+    }
+    draw_context_menu();
+    FullUpdate();
+    LOG("[bookshelf] context menu open series=%d vi=%d\n", vt->is_series, vi);
+}
+
+/* Long-press timer fired with the finger still down: open the menu. */
+static void
+longpress_tick(void *ctx)
+{
+    (void)ctx;
+    if (!g_lp_armed || g_lp_vi < 0)
+        return;
+    g_lp_armed = 0;
+    int vi = g_lp_vi;
+    g_lp_vi = -1;
+    g_ctx_suppress_up = 1;
+    open_context_for_tile(vi);
+}
+
+/* Handle a tap while the context menu is open. */
+static void
+on_tap_context(int x, int y)
+{
+    int n = context_item_count();
+    int px, py, pw, ph;
+    context_geom(&px, &py, &pw, &ph, n);
+    if (x < px || x >= px + pw || y < py + CTX_TITLE_H || y >= py + ph) {
+        close_context();
+        return;
+    }
+    int  item = (y - (py + CTX_TITLE_H)) / CTX_ITEM_H;
+    int  is_series = g_state.ctx_is_series;
+    int  book_idx = g_state.ctx_book_idx;
+    char series_id[MAX_ID_LEN];
+    snprintf(series_id, sizeof series_id, "%s", g_state.ctx_series_id);
+    g_state.ctx_open = 0;
+
+    if (is_series) {
+        if (item == 0)
+            download_series(series_id);
+        else if (item == 1)
+            delete_series(series_id);
+    } else {
+        Book *b = (book_idx >= 0 && book_idx < g_state.count) ? &g_state.books[book_idx] : NULL;
+        if (b != NULL) {
+            Book *lib = find_lib_book(b->id);
+            Book *target = lib ? lib : b;
+            if (item == 0)
+                enqueue_download(target);
+            else if (item == 1)
+                delete_book_file(target);
+        }
+    }
+    redraw_shelf();
 }
 
 /* ── event loop ──────────────────────────────────────────────────────── */
@@ -2648,30 +4491,37 @@ on_event(int type, int par1, int par2)
          * and dictionary do.
          */
         SetCurrentApplicationAttribute(APPLICATION_READER, 1);
-        /* SetShowPanelReader(1) enables the firmware's status bar
-         * (Tue 23:13 + lightbulb + battery).  Per the SDK docstring:
-         * "show enable/disable showing status bar in reader".  The
-         * reader-style apps (sudoku, dictionary, etc.) all show this
-         * bar by default; without this call the firmware treats the
-         * task as a generic shell app and hides the status bar.
-         */
+
+        /* Set the framebuffer orientation FIRST.  SetOrientation()
+         * recomputes the per-task iv_fbinfo (clearing the framebuffer to
+         * white and resetting fb_y_offset to 0).  We run it before
+         * SetPanelType() so the panel config lands on the final fb layout
+         * and is not clobbered by the orientation reset. */
+        SetOrientation(0);
+
+        /* Enable the reader-style status bar at the TOP of the screen.
+         * SetShowPanelReader(1) sets the panel_conf show flag (offset 0x30)
+         * and re-applies the current panel type.  SetPanelType() with the
+         * PANEL_NO_FB_OFFSET bit (the same value eink-reader.app uses,
+         * PANEL_ENABLED | 1<<3 == 10) keeps fb_y_offset at 0 and makes the
+         * firmware's panel painter draw the strip at y=0 (top) instead of
+         * the bottom.  Our layout offsets every surface below panel_h. */
         SetShowPanelReader(1);
         SetPanelSeparatorEnabled(1);
         SetPanelTransparent(0);
-        SetPanelType(PANEL_ENABLED);
+        SetPanelType(PANEL_ENABLED | PANEL_NO_FB_OFFSET);
         g_state.panel_h = PanelHeight();
 
-        /* SetOrientation(0) after the panel is enabled, matching what
-         * the original firmware's bookshelf.app imports from libinkview
-         * (verified via nm -D).  The original calls SetDefaultOrientation
-         * in main() before InkViewMain(), then SetOrientation(0) here in
-         * the EVT_INIT path after the panel has been configured.  The
-         * SetOrientation call clears the framebuffer to white and
-         * recomputes the panel rect for the new orientation, which is
-         * what allows iv_update_panel() to draw the system panel into
-         * the correct region of the screen.
-         */
-        SetOrientation(0);
+        /* Populate and render the panel content.  DrawPanel() fills in the
+         * panel_conf content fields (the stock bookshelf.app calls
+         * DrawPanel(NULL, NULL, NULL, -1) from its CustomDrawPanel()
+         * override); iv_update_panel(0) is the function that actually blits
+         * the clock / battery / wifi strip into the framebuffer.  The
+         * framework only calls it via iv_actualize_panel() when
+         * is_state_changed() is true, which it isn't on a fresh launch, so
+         * we force it here.  Arg 0 = reading-mode disabled (normal bar). */
+        DrawPanel(NULL, "Bookshelf", NULL, -1);
+        iv_update_panel(0);
 
         /* Force the firmware to actually draw the system panel now.
          * Repaint() enqueues EVT_SHOW (=23) on the event loop, which
@@ -2700,6 +4550,7 @@ on_event(int type, int par1, int par2)
         load_config_file(g_argv0, &cfg);
         resolve_config_path(g_argv0);
         detect_readers();
+        resolve_downloads_dir();
         g_state.reader_pref = reader_pref_from_path(g_cfg_reader);
         LOG("[bookshelf] reader_pref=%d (cfg `%s`)\n", g_state.reader_pref, g_cfg_reader);
 
@@ -2739,6 +4590,7 @@ on_event(int type, int par1, int par2)
         do_sync();
         draw_top_bar();
         draw_search_row();
+        draw_tab_row();
         draw_grid();
         draw_pager();
         FullUpdate();
@@ -2746,6 +4598,19 @@ on_event(int type, int par1, int par2)
     }
 
     if (type == EVT_SHOW || type == EVT_REPAINT || type == EVT_FOREGROUND) {
+        /* Render the system panel strip before drawing app content.
+         * The framework's iv_actualize_panel() skips the draw when
+         * is_state_changed() returns 0 (no clock/battery/net change),
+         * leaving the strip blank after a FullUpdate() flush.  Calling
+         * iv_update_panel(0) directly ensures the clock/battery/wifi
+         * strip is always present in the framebuffer before we draw
+         * our content below it. */
+        iv_update_panel(0);
+        if (g_state.launcher_open) {
+            draw_overlay_launcher();
+            FullUpdate();
+            return 1;
+        }
         if (g_state.settings_open) {
             draw_overlay_settings();
             FullUpdate();
@@ -2753,7 +4618,11 @@ on_event(int type, int par1, int par2)
         }
         draw_top_bar();
         draw_search_row();
-        draw_grid();
+        draw_tab_row();
+        if (g_state.tab == TAB_DOWNLOADS)
+            draw_downloads_tab();
+        else
+            draw_grid();
         draw_pager();
         if (g_state.menu_open)
             draw_overlay_menu();
@@ -2761,6 +4630,41 @@ on_event(int type, int par1, int par2)
             draw_overlay_more();
         FullUpdate();
         return 1;
+    }
+
+    if (type == EVT_POINTERDOWN) {
+        int x = par1, y = par2;
+        /* Arm a long-press only on the Library tab's grid, and only when
+         * no modal overlay is up.  The timer (longpress_tick) opens the
+         * context menu if the finger stays put. */
+        g_lp_armed = 0;
+        g_lp_vi = -1;
+        if (g_state.tab == TAB_LIBRARY && !g_state.settings_open && !g_state.menu_open &&
+            !g_state.more_open && !g_state.ctx_open && !g_state.search_open &&
+            !g_state.launcher_open) {
+            int vi = hit_thumbnail(x, y);
+            if (vi >= 0) {
+                g_lp_armed = 1;
+                g_lp_vi = vi;
+                g_lp_x = x;
+                g_lp_y = y;
+                SetWeakTimerEx("blp", longpress_tick, NULL, LONGPRESS_MS);
+            }
+        }
+        return 1;
+    }
+
+    if (type == EVT_POINTERMOVE) {
+        /* A drag away from the press point cancels the pending long-press
+         * so scrolling/scrubbing never pops the context menu. */
+        if (g_lp_armed) {
+            int dx = par1 - g_lp_x, dy = par2 - g_lp_y;
+            if (dx * dx + dy * dy > LONGPRESS_SLOP * LONGPRESS_SLOP) {
+                g_lp_armed = 0;
+                g_lp_vi = -1;
+            }
+        }
+        return 0;
     }
 
     if (type == EVT_POINTERUP) {
@@ -2771,10 +4675,30 @@ on_event(int type, int par1, int par2)
             g_state.menu_open,
             g_state.more_open,
             g_state.search_open);
+        /* Finger lifted — a pending long-press becomes a normal tap. */
+        g_lp_armed = 0;
+        g_lp_vi = -1;
+        /* Drop the release that opened the context menu (see longpress_tick). */
+        if (g_ctx_suppress_up) {
+            g_ctx_suppress_up = 0;
+            return 1;
+        }
 
         /* Settings overlay owns the whole screen and repaints itself. */
         if (g_state.settings_open) {
             on_tap_overlay_settings(x, y);
+            return 1;
+        }
+        /* Launcher overlay owns the whole screen while open. */
+        if (g_state.launcher_open) {
+            on_tap_overlay_launcher(x, y);
+            return 1;
+        }
+
+        /* Context (long-press) menu owns all taps while open: a tap on
+         * an item runs it, anything else dismisses the sheet. */
+        if (g_state.ctx_open) {
+            on_tap_context(x, y);
             return 1;
         }
 
@@ -2785,12 +4709,7 @@ on_event(int type, int par1, int par2)
              * mask across the whole screen, so we need to repaint
              * everything underneath.
              */
-            FillArea(0, 0, ScreenWidth(), ScreenHeight(), WHITE);
-            draw_top_bar();
-            draw_search_row();
-            draw_grid();
-            draw_pager();
-            FullUpdate();
+            redraw_shelf();
             return 1;
         }
         if (g_state.more_open) {
@@ -2798,19 +4717,14 @@ on_event(int type, int par1, int par2)
             /* If Settings was opened, it already drew itself; don't
              * repaint the shelf over it. */
             if (!g_state.settings_open) {
-                FillArea(0, 0, ScreenWidth(), ScreenHeight(), WHITE);
-                draw_top_bar();
-                draw_search_row();
-                draw_grid();
-                draw_pager();
-                FullUpdate();
+                redraw_shelf();
             }
             return 1;
         }
-        /* Top system strip (the original collapsed control-panel bar).
+        /* Top system strip (the status bar with clock, battery, etc.).
          * Tapping anywhere on it opens the firmware control panel — the
          * same gesture as the real device. */
-        if (y >= 0 && y < g_state.panel_h) {
+        if (y < g_state.panel_h) {
             LOG("[bookshelf] system bar tapped -> control panel\n");
             OpenControlPanel(NULL);
             return 1;
@@ -2819,13 +4733,33 @@ on_event(int type, int par1, int par2)
         /* Search input */
         if (hit_search(x, y) == 1) {
             g_state.search_open = 1;
-            OpenKeyboard("Search", g_state.query, sizeof g_state.query - 1, 0, keyboard_handler);
+            snprintf(g_search_kb_buf, sizeof g_search_kb_buf, "%s", g_state.query);
+            OpenKeyboard(
+                "Search", g_search_kb_buf, sizeof g_search_kb_buf - 1, 0, keyboard_handler);
             return 1;
         }
 
-        /* Top-bar buttons — hit_top_bar returns:
+        /* Tab switcher — Library / Downloads. */
+        int tabhit = hit_tab_row(x, y);
+        if (tabhit == 0 && g_state.tab != TAB_LIBRARY) {
+            g_state.tab = TAB_LIBRARY;
+            g_state.page = 0;
+            redraw_shelf();
+            return 1;
+        }
+        if (tabhit == 1 && g_state.tab != TAB_DOWNLOADS) {
+            g_state.tab = TAB_DOWNLOADS;
+            redraw_shelf();
+            return 1;
+        }
+        if (tabhit >= 0)
+            return 1; /* tapped the already-active tab */
+
+        /* Top-bar buttons — shared by both tabs (home/menu/sync must work
+         * even while the Downloads tab is showing).  hit_top_bar returns:
          *   1 = home  (left, the firmware-style "back to launcher" button)
          *   3 = menu  (right, opens the in-app group/sort overlay)
+         *   2 = sync  (refresh)
          */
         int which = hit_top_bar(x, y);
         if (which == 1) {
@@ -2845,32 +4779,29 @@ on_event(int type, int par1, int par2)
         }
         if (which == 2) {
             do_sync();
-            draw_top_bar();
-            draw_search_row();
-            draw_grid();
-            draw_pager();
-            FullUpdate();
+            redraw_shelf();
             return 1;
         }
 
-        /* Pager */
+        /* Pager — shared by both tabs; the page count is per-tab, so the
+         * same buttons page the downloads list on that tab. */
         int pg = hit_pager(x, y);
         if (pg == -1) {
-            /* hit_pager only returns -1 for a valid prev press. */
             g_state.page--;
-            draw_grid();
-            draw_pager();
-            FullUpdate();
+            redraw_shelf();
             return 1;
         }
         if (pg == -2) {
-            /* hit_pager only returns -2 for a valid next press. */
             g_state.page++;
-            draw_grid();
-            draw_pager();
-            FullUpdate();
+            redraw_shelf();
             return 1;
         }
+
+        /* Below the pager the body is tab-specific: the Downloads tab has
+         * no tappable rows, so swallow the tap; the Library tab falls
+         * through to the book-grid hit-test below. */
+        if (g_state.tab == TAB_DOWNLOADS)
+            return 1;
 
         /* Book tap */
         int idx = hit_thumbnail(x, y);
@@ -2879,9 +4810,9 @@ on_event(int type, int par1, int par2)
             on_tap_thumbnail(idx);
             draw_grid();
             PartialUpdate(0,
-                          TOP_BAR_H + SEARCH_ROW_H,
+                          g_state.panel_h + TOP_BAR_H + SEARCH_ROW_H,
                           ScreenWidth(),
-                          ScreenHeight() - TOP_BAR_H - SEARCH_ROW_H);
+                          ScreenHeight() - g_state.panel_h - TOP_BAR_H - SEARCH_ROW_H);
             return 1;
         }
         return 0;
@@ -2889,28 +4820,26 @@ on_event(int type, int par1, int par2)
 
     if (type == EVT_KEYPRESS) {
         if (par1 == IV_KEY_BACK || par1 == IV_KEY_PREV) {
+            if (g_state.ctx_open) {
+                close_context();
+                return 1;
+            }
             if (g_state.settings_open) {
                 settings_close();
                 return 1;
             }
+            if (g_state.launcher_open) {
+                launcher_close();
+                return 1;
+            }
             if (g_state.menu_open) {
                 g_state.menu_open = 0;
-                FillArea(0, 0, ScreenWidth(), ScreenHeight(), WHITE);
-                draw_top_bar();
-                draw_search_row();
-                draw_grid();
-                draw_pager();
-                FullUpdate();
+                redraw_shelf();
                 return 1;
             }
             if (g_state.more_open) {
                 g_state.more_open = 0;
-                FillArea(0, 0, ScreenWidth(), ScreenHeight(), WHITE);
-                draw_top_bar();
-                draw_search_row();
-                draw_grid();
-                draw_pager();
-                FullUpdate();
+                redraw_shelf();
                 return 1;
             }
             if (g_state.search_open) {
@@ -2937,16 +4866,18 @@ on_event(int type, int par1, int par2)
 static void
 keyboard_handler(char *buffer)
 {
+    /* buffer aliases g_search_kb_buf (never g_state.query), so this copy
+     * is safe and the committed text survives into the filter pass. */
     snprintf(g_state.query, sizeof g_state.query, "%s", buffer ? buffer : "");
+    LOG("[bookshelf] search commit: query=`%s`\n", g_state.query);
     g_state.search_open = 0;
     apply_filter_and_sort();
     /* redraw grid + search */
-    FillArea(0, 0, ScreenWidth(), ScreenHeight(), WHITE);
-    draw_top_bar();
-    draw_search_row();
-    draw_grid();
-    draw_pager();
-    FullUpdate();
+    /* The on-screen keyboard draws full-screen and wipes the top status
+     * strip; re-stamp it before redraw_shelf() flushes so the panel
+     * survives the commit redraw (redraw_shelf clears only from panel_h). */
+    iv_update_panel(0);
+    redraw_shelf();
 }
 
 int
