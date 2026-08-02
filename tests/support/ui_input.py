@@ -9,6 +9,7 @@ from .ui_events import (
     pointer_move as emit_pointer_move,
     pointer_up as emit_pointer_up,
     press_key as emit_press_key,
+    type_text as emit_type_text,
     swipe as emit_swipe,
     tap as emit_tap,
 )
@@ -55,6 +56,7 @@ __all__ = [
     "pointer_move",
     "pointer_up",
     "press_key",
+    "type_text",
     "reader_center_point",
     "swipe",
     "swipe_reader_next_page",
@@ -103,6 +105,19 @@ def swipe(
 def press_key(emulator: Emulator, iv_key: int, *, timeout: float = 5.0) -> None:
     """Send one key press via the host send_event probe."""
     emit_press_key(emulator, iv_key, timeout=timeout)
+
+
+def type_text(emulator: Emulator, text: str, *, timeout: float = 15.0) -> None:
+    """Type *text* into the guest's focused text widget (one probe call).
+
+    Resolution-independent: emits the string as ``EVT_EXT_KB`` characters
+    via the host ``send_event type`` probe, so it works for any on-screen
+    keyboard regardless of layout or resolution.  It types into whatever
+    text widget the guest currently has focused but does NOT commit it —
+    use the widget-specific commit (e.g. ``BookshelfSession.type_text``
+    taps the keyboard's return key afterwards).
+    """
+    emit_type_text(emulator, text, timeout=timeout)
 
 
 def home_recent_book_tap_points(

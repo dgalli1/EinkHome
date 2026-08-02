@@ -63,6 +63,20 @@ def press_key(emulator: Emulator, iv_key: int, *, timeout: float = 5.0) -> None:
     _run_input(emulator, "key", hex(iv_key), timeout=timeout)
 
 
+def type_text(emulator: Emulator, text: str, *, timeout: float = 15.0) -> None:
+    """Type *text* into the guest's focused text widget in one probe call.
+
+    Sends the string as a stream of ``EVT_EXT_KB`` characters (the same
+    primitive the host Wayland viewer uses for printable text), so it is
+    resolution-independent and pays a single ``podman exec`` regardless of
+    length.  This lands in whatever text widget the guest currently has
+    focused — typically an open on-screen keyboard's edit field — but does
+    NOT commit it; committing is widget-specific (see
+    ``BookshelfSession.type_text`` for the keyboard-commit helper).
+    """
+    _run_input(emulator, "type", text, timeout=timeout)
+
+
 def _pointer_event(
     emulator: Emulator,
     action: str,
