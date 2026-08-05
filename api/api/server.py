@@ -175,11 +175,7 @@ def _stream(
     return status, headers, body_iter
 
 
-def _book_to_api(meta: BookMeta, cache: Any = None) -> dict[str, Any]:
-    # The blurhash is read from the on-disk cache (populated by the
-    # warm-up thread or an on-demand /cover hit).  Empty string when it
-    # isn't ready yet — the device then draws a neutral placeholder.
-    bhash = (cache.get_blurhash(meta.id) or "") if cache is not None else ""
+def _book_to_api(meta: BookMeta) -> dict[str, Any]:
     return {
         "id": meta.id,
         "title": meta.title,
@@ -197,7 +193,6 @@ def _book_to_api(meta: BookMeta, cache: Any = None) -> dict[str, Any]:
         "addedAt": meta.added_at,
         "updatedAt": meta.updated_at,
         "remoteOnly": meta.remote_only,
-        "blurhash": bhash,
         "extra": dict(meta.extra),
     }
 
@@ -443,7 +438,7 @@ class PbemuAPIServer(http.server.BaseHTTPRequestHandler):
                 if meta is None:
                     self._send(*_json(404, {"error": "not found", "id": book_id}))
                     return
-                self._send(*_json(200, _book_to_api(meta, self.app.cover_cache)))
+                self._send(*_json(200, _book_to_api(meta)))
                 return
             if sub == "cover":
                 self._handle_cover(book_id)
@@ -480,7 +475,7 @@ class PbemuAPIServer(http.server.BaseHTTPRequestHandler):
             offset=offset,
             since=since,
         )
-        items = [_book_to_api(b, self.app.cover_cache) for b in books]
+        items = [_book_to_api(b) for b in books]
         self._send(
             *_json(
                 200,
@@ -617,7 +612,6 @@ class PbemuAPIServer(http.server.BaseHTTPRequestHandler):
                     "cover": f"/api/v1/books/{e.book_id}/cover",
                     "url": f"/api/v1/books/{e.book_id}/file",
                     "addedAt": e.added_at,
-                    "blurhash": self.app.cover_cache.get_blurhash(e.book_id) or "",
                 }
             )
         next_cursor = entries[-1].rev if entries else cursor
@@ -825,8 +819,7 @@ def _coerce_env_value(raw: str) -> Any:
 
 def _warm_covers(app: Any) -> None:
     """Background pre-heat: process every cover once so the very first
-    sync already carries blurhashes and the device's cover fetches hit
-    the cache.
+    sync's cover fetches already hit the cache.
 
     Runs in a daemon thread, never on the request path.  Each book is
     handled independently so one undecodable cover can't stall the rest,
@@ -892,8 +885,8 @@ def main(argv: list[str] | None = None) -> int:
         f"pbemu-api: listening on http://{cfg['host']}:{cfg['port']} "
         f"(provider={app.provider.name})\n"
     )
-    # Pre-heat covers in the background so the first sync is already
-    # rich with blurhashes; the request path stays fast regardless.
+    # Pre-heat covers in the background so the first sync's cover fetches
+    # hit the cache; the request path stays fast regardless.
     threading.Thread(target=_warm_covers, args=(app,), daemon=True).start()
     try:
         server.serve_forever()
