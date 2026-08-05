@@ -13,7 +13,7 @@ from dataclasses import dataclass
 # ── layout constants (must match bookshelf.c) ──────────────────────────
 TOP_BAR_H = 128
 SEARCH_ROW_H = 88
-TAB_ROW_H = 80
+TAB_ROW_H = 0  # tab row removed; downloads via top-bar icon
 PAGER_H = 96
 BOTTOM_RESERVED = 0
 COLS = 3
@@ -27,16 +27,15 @@ CELL_MIN_W = 280
 # ── More overlay item indices (right-anchored panel) ───────────────────
 MORE_SYNC = 0
 MORE_TITLE_AZ = 1
-MORE_TITLE_ZA = 2
-MORE_AUTHOR = 3
-MORE_SERIES = 4
-MORE_RECENT = 5
-MORE_GRID = 6
-MORE_LIST = 7
-MORE_DOWNLOAD_ALL = 8
-MORE_SETTINGS = 9
-MORE_SYSTEM = 10
-MORE_APPS = 11
+MORE_AUTHOR = 2
+MORE_SERIES = 3
+MORE_RECENT = 4
+MORE_GRID = 5
+MORE_LIST = 6
+MORE_DOWNLOAD_ALL = 7
+MORE_SETTINGS = 8
+MORE_SYSTEM = 9
+MORE_APPS = 10
 
 # ── Settings overlay layout (full-screen page) ────────────────────────
 SETTINGS_ROW_H = 120
@@ -87,12 +86,10 @@ __all__ = [
     "MORE_SERIES",
     "MORE_SYNC",
     "MORE_TITLE_AZ",
-    "MORE_TITLE_ZA",
     "PAGER_H",
     "PAGESIZE",
     "ROWS",
     "SEARCH_ROW_H",
-    "TAB_ROW_H",
     "TOP_BAR_H",
     "SETTINGS_BTN_H",
     "SETTINGS_ROW1_Y",
@@ -127,7 +124,9 @@ class BookshelfGeometry:
         return (8 + 48, self.panel_h + TOP_BAR_H // 2)
 
     def menu_button_center(self) -> tuple[int, int]:
-        """Centre of the 96×96 hamburger-circle button, right side of top bar."""
+        """Centre of the 96×96 More (hamburger) button, right side of top
+        bar (Library tab only; the Downloads tab shows the sync button
+        there instead)."""
         return (self.screen_w - 8 - 48, self.panel_h + TOP_BAR_H // 2)
 
     # ── search row ─────────────────────────────────────────────────────
@@ -173,6 +172,14 @@ class BookshelfGeometry:
     def pager_next_center(self) -> tuple[int, int]:
         """Centre of the 96×64 next-page button."""
         return (self.screen_w - 12 - 48, self.pager_y() + PAGER_H // 2)
+
+    def pager_first_center(self) -> tuple[int, int]:
+        """Centre of the 96×64 first-page button (second from left)."""
+        return (116 + 48, self.pager_y() + PAGER_H // 2)
+
+    def pager_last_center(self) -> tuple[int, int]:
+        """Centre of the 96×64 last-page button (second from right)."""
+        return (self.screen_w - 212 + 48, self.pager_y() + PAGER_H // 2)
 
     # ── More overlay (right-anchored, 75 % width) ─────────────────────
 
@@ -222,17 +229,17 @@ class BookshelfGeometry:
         """A point guaranteed to be right of the left-anchored Menu panel."""
         return (self.screen_w - 4, self.screen_h // 2)
 
-    # ── tab row (Library / Downloads) ─────────────────────────────────
+    # ── top-bar right-corner buttons ──────────────────────────────────
 
-    def tab_library_center(self) -> tuple[int, int]:
-        """Centre of the Library tab button."""
-        y = self.panel_h + TOP_BAR_H + SEARCH_ROW_H
-        return (self.screen_w // 4, y + TAB_ROW_H // 2)
+    def downloads_icon_center(self) -> tuple[int, int]:
+        """Centre of the 96×96 downloads icon (Library tab only), left of
+        the More button."""
+        return (self.screen_w - 152, self.panel_h + TOP_BAR_H // 2)
 
-    def tab_downloads_center(self) -> tuple[int, int]:
-        """Centre of the Downloads tab button."""
-        y = self.panel_h + TOP_BAR_H + SEARCH_ROW_H
-        return (self.screen_w * 3 // 4, y + TAB_ROW_H // 2)
+    def sync_button_center(self) -> tuple[int, int]:
+        """Centre of the 96×96 sync button shown on the Downloads tab in
+        the top-bar right corner (the hamburger's Library-tab slot)."""
+        return (self.screen_w - 8 - 48, self.panel_h + TOP_BAR_H // 2)
 
     # ── context (long-press) menu ─────────────────────────────────────
     # Centred modal sheet: width = 3/4 screen, height = title + N items.

@@ -134,6 +134,14 @@ class BookshelfSession:
         """Tap the Prev page button."""
         self.tap_at(*self._g.pager_prev_center())
 
+    def tap_pager_first(self) -> None:
+        """Tap the first-page button (<<)."""
+        self.tap_at(*self._g.pager_first_center())
+
+    def tap_pager_last(self) -> None:
+        """Tap the last-page button (>>)."""
+        self.tap_at(*self._g.pager_last_center())
+
     def long_press_at(self, x: int, y: int, *, hold: float = 0.9) -> None:
         """Hold a touch at (x, y) long enough to trip the app's long-press
         timer (LONGPRESS_MS=550 in bookshelf.c), then release."""
@@ -145,13 +153,16 @@ class BookshelfSession:
         """Long-press book tile at grid *index* to open its context menu."""
         self.long_press_at(*self._g.book_tile_center(index), hold=hold)
 
-    def tap_tab_library(self) -> None:
-        """Switch to the Library tab."""
-        self.tap_at(*self._g.tab_library_center())
+    def tap_downloads_icon(self) -> None:
+        """Open the Downloads view via the top-bar downloads icon (Library
+        tab only; on the Downloads tab that slot is empty — the back arrow
+        returns to the Library)."""
+        self.tap_at(*self._g.downloads_icon_center())
 
-    def tap_tab_downloads(self) -> None:
-        """Switch to the Downloads tab."""
-        self.tap_at(*self._g.tab_downloads_center())
+    def tap_sync_button(self) -> None:
+        """Tap the sync button shown in the top-bar right corner while the
+        Downloads tab is open (runs a library sync)."""
+        self.tap_at(*self._g.sync_button_center())
 
     def tap_context_item(self, item: int) -> None:
         """Tap context-menu item *item* (0=download, 1=delete)."""
