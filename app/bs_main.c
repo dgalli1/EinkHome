@@ -4,17 +4,14 @@
 
 /* ── event loop ──────────────────────────────────────────────────────── */
 
-
 int
 on_event(int type, int par1, int par2)
 {
     if (type == EVT_INIT) {
         memset(&g_state, 0, sizeof g_state);
-        g_state.cur_lib = -1;
         g_state.sort = SORT_TITLE_ASC;
         g_state.group = GROUP_ALL;
         g_state.filter = FILTER_ALL;
-        g_state.selected = -1;
 
         /* Keep the system panel visible (battery / wifi / clock).
          * Calling SetPanelType(PANEL_DISABLED) or iv_fullscreen()
@@ -94,6 +91,11 @@ on_event(int type, int par1, int par2)
         resolve_config_path(g_argv0);
         detect_readers();
         resolve_downloads_dir();
+        resolve_covers_dir();
+        store_open();
+        refresh_downloaded_flags(); /* files may have changed while we were away */
+        view_rebuild();             /* render from the local db even if sync fails */
+        LOG("[bookshelf] config_path=%s\n", g_config_path);
         g_state.reader_pref = reader_pref_from_path(g_cfg_reader);
         LOG("[bookshelf] reader_pref=%d (cfg `%s`)\n", g_state.reader_pref, g_cfg_reader);
 
@@ -133,7 +135,6 @@ on_event(int type, int par1, int par2)
         do_sync();
         draw_top_bar();
         draw_search_row();
-        draw_tab_row();
         draw_grid();
         draw_pager();
         FullUpdate();
@@ -161,7 +162,6 @@ on_event(int type, int par1, int par2)
         }
         draw_top_bar();
         draw_search_row();
-        draw_tab_row();
         if (g_state.tab == TAB_DOWNLOADS)
             draw_downloads_tab();
         else
@@ -282,30 +282,21 @@ on_event(int type, int par1, int par2)
             return 1;
         }
 
-        /* Tab switcher — Library / Downloads. */
-        int tabhit = hit_tab_row(x, y);
-        if (tabhit == 0 && g_state.tab != TAB_LIBRARY) {
-            g_state.tab = TAB_LIBRARY;
-            g_state.page = 0;
-            redraw_shelf();
-            return 1;
-        }
-        if (tabhit == 1 && g_state.tab != TAB_DOWNLOADS) {
-            g_state.tab = TAB_DOWNLOADS;
-            redraw_shelf();
-            return 1;
-        }
-        if (tabhit >= 0)
-            return 1; /* tapped the already-active tab */
-
-        /* Top-bar buttons — shared by both tabs (home/menu/sync must work
-         * even while the Downloads tab is showing).  hit_top_bar returns:
-         *   1 = home  (left, the firmware-style "back to launcher" button)
-         *   3 = menu  (right, opens the in-app group/sort overlay)
-         *   2 = sync  (refresh)
+        /* Top-bar buttons — shared by both tabs (home/menu must work even
+         * while the Downloads tab is showing).  hit_top_bar returns:
+         *   1 = home  (left; back on the Downloads view / drilled series)
+         *   3 = menu  (right, Library tab; opens the More overlay)
+         *   2 = sync  (right, Downloads tab only; runs a library sync)
+         *   4 = downloads icon (left of the menu button, Library tab)
          */
         int which = hit_top_bar(x, y);
         if (which == 1) {
+            if (g_state.tab == TAB_DOWNLOADS) {
+                g_state.tab = TAB_LIBRARY;
+                g_state.page = 0;
+                redraw_shelf();
+                return 1;
+            }
             if (g_drilled_series[0] != '\0') {
                 drill_back();
                 return 1;
@@ -325,6 +316,12 @@ on_event(int type, int par1, int par2)
             redraw_shelf();
             return 1;
         }
+        if (which == 4) {
+            g_state.tab = TAB_DOWNLOADS;
+            g_state.page = 0;
+            redraw_shelf();
+            return 1;
+        }
 
         /* Pager — shared by both tabs; the page count is per-tab, so the
          * same buttons page the downloads list on that tab. */
@@ -339,6 +336,16 @@ on_event(int type, int par1, int par2)
             redraw_shelf();
             return 1;
         }
+        if (pg == -3) {
+            g_state.page = 0;
+            redraw_shelf();
+            return 1;
+        }
+        if (pg == -4) {
+            g_state.page = current_pages() - 1;
+            redraw_shelf();
+            return 1;
+        }
 
         /* Below the pager the body is tab-specific: the Downloads tab has
          * no tappable rows, so swallow the tap; the Library tab falls
@@ -349,7 +356,6 @@ on_event(int type, int par1, int par2)
         /* Book tap */
         int idx = hit_thumbnail(x, y);
         if (idx >= 0) {
-            g_state.selected = idx;
             on_tap_thumbnail(idx);
             draw_grid();
             PartialUpdate(0,
@@ -401,8 +407,10 @@ on_event(int type, int par1, int par2)
         return 0;
     }
 
-    if (type == EVT_EXIT)
+    if (type == EVT_EXIT) {
+        store_close();
         return 1;
+    }
     return 0;
 }
 
@@ -414,7 +422,7 @@ keyboard_handler(char *buffer)
     snprintf(g_state.query, sizeof g_state.query, "%s", buffer ? buffer : "");
     LOG("[bookshelf] search commit: query=`%s`\n", g_state.query);
     g_state.search_open = 0;
-    apply_filter_and_sort();
+    view_rebuild();
     /* redraw grid + search */
     /* The on-screen keyboard draws full-screen and wipes the top status
      * strip; re-stamp it before redraw_shelf() flushes so the panel

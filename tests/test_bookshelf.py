@@ -10,6 +10,7 @@ Run with: pytest tests/test_bookshelf.py -v
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -28,7 +29,6 @@ from tests.support.bookshelf import (
     MORE_SERIES,
     MORE_SYNC,
     MORE_TITLE_AZ,
-    MORE_TITLE_ZA,
     MORE_SETTINGS,
     MORE_SYSTEM,
     MORE_APPS,
@@ -94,6 +94,8 @@ def _start_api_server() -> subprocess.Popen:  # type: ignore[type-arg]
             str(API_PORT),
             "--provider",
             "mock",
+            "--config",
+            str(REPO_ROOT / "tests" / "support" / "server-test.json"),
         ],
         cwd=REPO_ROOT,
         env=_api_env(),
@@ -142,7 +144,7 @@ def _build_bookshelf() -> Path:
         for f in [
             "bs_i18n.c", "bs_config.c", "bs_model.c", "bs_net.c",
             "bs_ui.c", "bs_input.c", "bs_launcher.c",
-            "bs_downloads.c", "bs_main.c",
+            "bs_downloads.c", "bs_store.c", "bs_main.c",
         ]
     ]
     for s in srcs:
@@ -487,12 +489,6 @@ def test_more_overlay_sort_title_az(fresh_bookshelf):
     bs.tap_more_item_and_verify(MORE_TITLE_AZ)
 
 
-def test_more_overlay_sort_title_za(fresh_bookshelf):
-    """Open More, tap Title Z-A, verify framebuffer changes."""
-    bs = fresh_bookshelf
-    bs.tap_menu()
-    time.sleep(0.5)
-    bs.tap_more_item_and_verify(MORE_TITLE_ZA)
 
 
 def test_more_overlay_sort_author(fresh_bookshelf):
@@ -872,6 +868,20 @@ def _remove_series(paths: list[Path]) -> None:
             pass
 
 
+def _inject_bulk_books(count: int, stem: str = "BatchStress") -> list[Path]:
+    """Inject *count* standalone fake books so the library exceeds the
+    MAX_DOWNLOADS (64) download-queue slice.  Names avoid the mock
+    provider's "Name - NN" series convention so every book stays
+    standalone."""
+    _BOOKS_DIR.mkdir(parents=True, exist_ok=True)
+    paths = []
+    for i in range(count):
+        p = _BOOKS_DIR / f"{stem}_{i:03d}.epub"
+        p.write_bytes(b"PK\x03\x04 bulk stub for download-all stress test")
+        paths.append(p)
+    return paths
+
+
 def _standalone_view_count() -> int:
     """Count books the collapsed view emits as flat tiles (no series tail).
 
@@ -1001,16 +1011,61 @@ def _wait_log_slice(bs: BookshelfSession, before: str, needle: str, *, timeout: 
     )
 
 
-def test_tab_downloads_shows_empty_then_library_returns(fresh_bookshelf):
-    """The Downloads tab renders (empty state) and Library switches back."""
+def _final_dl_progress(bs: BookshelfSession, before: str, total: int, *, timeout: float = 10.0):
+    """Poll the most recent dl_progress tally logged after the *before*
+    snapshot and return it once the batch reports settled (total reached,
+    nothing active).  Returns the (done, failed, total, active) ints."""
+    deadline = time.monotonic() + timeout
+    last = None
+    while time.monotonic() < deadline:
+        matches = re.findall(
+            r"dl_progress done=(\d+) failed=(\d+) total=(\d+) active=(\d+)",
+            bs.current_log()[len(before):],
+        )
+        if matches:
+            last = matches[-1]
+        if last and int(last[2]) == total and int(last[3]) == 0:
+            return tuple(int(v) for v in last)
+        time.sleep(0.3)
+    if last is None:
+        raise AssertionError("no dl_progress line logged after completion")
+    return tuple(int(v) for v in last)
+
+
+def test_downloads_icon_toggles_view(fresh_bookshelf):
+    """The top-bar downloads icon opens the Downloads view (empty state)
+    and the top-bar back arrow returns to the Library grid."""
     bs = fresh_bookshelf
     before = bs.frame_hash()
-    bs.tap_tab_downloads()
+    bs.tap_downloads_icon()
     bs.wait_hash_change(before)
-    bs.assert_log_contains("draw_grid")  # still alive; tab body repainted
+    bs.assert_log_contains("draw_grid")  # still alive; view body repainted
     before2 = bs.frame_hash()
-    bs.tap_tab_library()
+    bs.tap_home()  # downloads icon is Library-tab-only; back arrow closes the view
     bs.wait_hash_change(before2)
+
+
+def test_sync_button_only_on_downloads_tab(fresh_bookshelf):
+    """The right-corner hamburger (Library tab) opens the More menu, while
+    the same slot on the Downloads tab is a sync button that re-syncs
+    without leaving the view — and there is no More menu there."""
+    bs = fresh_bookshelf
+    # Library tab: right corner = hamburger → More overlay (framebuffer
+    # change proves the overlay drew; the open tap itself logs more=0,
+    # the pre-tap state).
+    bs.tap_menu_and_verify()
+    # Dismiss it and open the Downloads view.
+    before = bs.frame_hash()
+    bs.send_back_key()
+    bs.wait_hash_change(before)
+    before = bs.frame_hash()
+    bs.tap_downloads_icon()
+    bs.wait_hash_change(before)
+    # Downloads tab: right corner = sync button → do_sync, stay on the view.
+    before = bs.current_log()
+    bs.tap_sync_button()
+    _wait_log_slice(bs, before, "do_sync ENTER")
+    _wait_log_slice(bs, before, "draw_downloads")
 
 
 def test_book_press_downloads_and_launches_reader(fresh_bookshelf):
@@ -1048,6 +1103,66 @@ def test_download_all_queues_library_and_switches_tab(fresh_bookshelf):
         f"expected all 16 books downloaded, got {len(_downloaded_files())}"
     )
     _clear_downloads()
+
+
+def test_download_all_survives_tab_switch_beyond_first_slice(fresh_bookshelf):
+    """Download-all on >64 books must drain past the MAX_DOWNLOADS slice
+    boundary even if the user switches tabs mid-drain.  Regression: the
+    drain timer was only re-armed while queued items remained, so once
+    the first 64-item slice settled the batch top-up never ran again and
+    the progress bar froze (e.g. 64/93) with every file on disk."""
+    bs = fresh_bookshelf
+    injected = _inject_bulk_books(70)  # 16 shipped + 70 = 86 > MAX_DOWNLOADS
+    try:
+        _clear_downloads()
+        _restart_bookshelf(bs.emulator)
+        time.sleep(2.0)
+        bs.wait_for_stable()
+        before = bs.current_log()
+        bs.tap_download_all()
+        # The 86-book drain churns the screen for ~12s, so wait on the
+        # log slice, not a settling framebuffer hash.
+        _wait_log_slice(bs, before, "download-all queued=", timeout=20.0)
+        m = re.search(r"download-all queued=(\d+)", bs.current_log()[len(before):])
+        assert m, "download-all never logged its queued total"
+        total = int(m.group(1))
+        assert total > 64, f"batch must exceed the 64-slot queue slice, got {total}"
+
+        # Switch away and back mid-drain, like the user did when the bar
+        # froze; the drain must keep running off-screen.
+        time.sleep(2.0)
+        bs.tap_home()  # → Library tab
+        time.sleep(1.0)
+        bs.tap_downloads_icon()  # → Downloads tab
+
+        # The drain must visibly pass the 64-item boundary — the exact
+        # point where the old code lost its timer and froze.
+        _wait_log_count(bs, "download_book_file OK", 65, timeout=60.0)
+
+        # ...and finish the whole batch.
+        deadline = time.monotonic() + 90.0
+        while time.monotonic() < deadline and len(_downloaded_files()) < total:
+            time.sleep(0.5)
+        got = len(_downloaded_files())
+        assert got == total, f"expected all {total} books downloaded, got {got}"
+        bs.assert_log_contains("download-all batch complete")
+
+        # Force one more Downloads-tab redraw and confirm the finished
+        # bar keeps the whole-batch tally.  Regression: the completion
+        # path zeroed the batch counters, so the bar fell back to the
+        # queue-derived count — and the pruned queue only holds the
+        # last 64-item slice, so "86 downloaded" snapped back to
+        # "64 downloaded" once the batch finished.
+        bs.tap_home()
+        bs.tap_downloads_icon()
+        done_n, failed_n, total_n, active_n = _final_dl_progress(bs, before, total)
+        assert total_n == total, f"final bar total={total_n}, expected {total}"
+        assert done_n == total, f"final bar done={done_n}, expected {total}"
+        assert failed_n == 0 and active_n == 0
+    finally:
+        for p in injected:
+            p.unlink(missing_ok=True)
+        _clear_downloads()
 
 
 def test_downloads_tab_pages(fresh_bookshelf):
@@ -1182,3 +1297,320 @@ def test_series_longpress_delete(fresh_bookshelf):
     finally:
         _clear_downloads()
         _remove_series(injected)
+
+
+# ── offline boot (API unreachable) ─────────────────────────────────────
+# The guest re-reads /tmp/bookshelf.cfg (CONFIG_TMP_PATH) last, so writing
+# a dead-port override there makes the next boot offline without touching
+# the module's real server.  Guest /tmp maps to .live/tmp on the host,
+# which is also where the library store + cover cache live.
+
+_OFFLINE_TMP = REPO_ROOT / FIRMWARE / ".live" / "tmp"
+_OFFLINE_STORE = _OFFLINE_TMP / "bookshelf_lib.db"
+_OFFLINE_LEGACY = _OFFLINE_TMP / "bookshelf_lib.json"
+_OFFLINE_COVERS = _OFFLINE_TMP / "covers"
+_OFFLINE_CFG = _OFFLINE_TMP / "bookshelf.cfg"
+
+
+def _ensure_offline_assets(emulator: Emulator) -> None:
+    """Wait for (or force) a populated library store + >=6 cached covers."""
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
+        covers = len(list(_OFFLINE_COVERS.glob("*.png")))
+        if _OFFLINE_STORE.is_file() and covers >= 6:
+            return
+        _restart_bookshelf(emulator)
+        time.sleep(3.0)
+    assert _OFFLINE_STORE.is_file(), "library store never written by an online sync"
+
+
+def _wait_offline_log(bs: BookshelfSession) -> str:
+    """Poll the current invocation log until a cover cache hit appears."""
+    deadline = time.monotonic() + 10
+    log = ""
+    while time.monotonic() < deadline:
+        log = bs.current_log()
+        if "cover_tick cache hit id=" in log:
+            break
+        time.sleep(0.5)
+    return log
+
+
+def _last_draw_grid(log: str) -> tuple[int, int]:
+    """Return (view_count, page) from the last draw_grid line in *log*."""
+    m = None
+    for m in re.finditer(r"draw_grid view=(\d+) page=(\d+)", log):
+        pass
+    assert m, "no draw_grid line in log"
+    return int(m.group(1)), int(m.group(2))
+
+
+def _store_books() -> list[dict]:
+    """Read every book row from the on-disk SQLite store."""
+    import sqlite3 as _sqlite3
+
+    con = _sqlite3.connect(str(_OFFLINE_STORE))
+    try:
+        rows = con.execute(
+            "SELECT id, title, series, series_idx, added_at FROM books"
+        ).fetchall()
+    finally:
+        con.close()
+    return [
+        {
+            "id": r[0],
+            "title": r[1],
+            "series": r[2],
+            "seriesIdx": r[3],
+            "addedAt": r[4],
+        }
+        for r in rows
+    ]
+
+
+def _wait_store_series(series_title: str) -> list[dict]:
+    """Wait until the on-disk store holds >=2 books of *series_title*."""
+    deadline = time.monotonic() + 20
+    store: list[dict] = []
+    while time.monotonic() < deadline:
+        store = _store_books()
+        if sum(1 for b in store if b.get("series") == series_title) >= 2:
+            break
+        time.sleep(1.0)
+    books = [b for b in store if b.get("series") == series_title]
+    assert len(books) >= 2, "online sync never stored the series"
+    return books
+
+
+def _wait_cover_file(member_id: str) -> None:
+    """Wait for the online cover cache to gain *member_id*.png."""
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline:
+        if (_OFFLINE_COVERS / f"{member_id}.png").is_file():
+            return
+        time.sleep(0.5)
+    raise AssertionError(f"cover cache never written for series member {member_id}")
+
+
+def _wait_cover_log(bs, member_id: str) -> None:
+    """Wait for a cache-hit blit of *member_id* in the guest log."""
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        if f"cover_tick cache hit id={member_id}" in bs.current_log():
+            return
+        time.sleep(0.5)
+    raise AssertionError("series card did not render its cached thumbnail offline")
+
+
+def _loaded_book_count(log: str) -> int:
+    """Tiles the offline boot projected from the on-disk store."""
+    m = re.search(r"view_rebuild: view=(\d+)", log)
+    assert m, "offline boot did not rebuild the view from the store"
+    return int(m.group(1))
+
+
+def _pager_roundtrip(bs, pages: int) -> None:
+    """<< / >> jump to the ends, < / > step one page at a time."""
+    targets = (
+        ("page=0", bs.tap_pager_first),
+        (f"page={pages - 1}", bs.tap_pager_last),
+        ("page=0", bs.tap_pager_first),
+        ("page=1", bs.tap_pager_next),
+    )
+    for want, tap in targets:
+        snap = bs.current_log()
+        before = bs.frame_hash()
+        tap()
+        bs.wait_hash_change(before)
+        _wait_log_slice(bs, snap, want)
+
+
+def _offline_drill_back(bs, pos, page_before: int) -> None:
+    """Drill into the offline series card; back must restore the page."""
+    before = bs.frame_hash()
+    bs.tap_book(pos)
+    bs.wait_hash_change(before)
+    bs.assert_log_contains("drilled into series 'Drill Test'")
+    snap = bs.current_log()
+    before = bs.frame_hash()
+    bs.tap_home()
+    bs.wait_hash_change(before)
+    _wait_log_slice(bs, snap, "drilled back to top level")
+    assert _last_draw_grid(bs.current_log())[1] == page_before, (
+        "offline drill-back did not restore the previous page"
+    )
+
+
+def _offline_pager_check(bs) -> None:
+    """<< / >> jump to the ends, < / > step one page at a time."""
+    view, _ = _last_draw_grid(bs.current_log())
+    pages = (view + _PAGESIZE - 1) // _PAGESIZE
+    if pages > 1:
+        _pager_roundtrip(bs, pages)
+
+
+def _offline_downloads_roundtrip(bs, invocations: int) -> None:
+    """Downloads view opens via the top-bar downloads icon and closes via
+    the top-bar back arrow — all without a process respawn."""
+    snap = bs.current_log()
+    before = bs.frame_hash()
+    bs.tap_downloads_icon()
+    bs.wait_hash_change(before)
+    _wait_log_slice(bs, snap, "draw_downloads")
+    snap = bs.current_log()
+    before = bs.frame_hash()
+    bs.tap_home()
+    bs.wait_hash_change(before)
+    _wait_log_slice(bs, snap, "draw_grid view=")
+    assert bs.invocation_count() == invocations, (
+        "offline navigation triggered CloseApp/respawn"
+    )
+
+
+def _seed_online_series(bs, emulator) -> str:
+    """Seed a two-book series online so the store carries a collapsed
+    series card and cover_tick caches its member cover; return the id."""
+    injected = _inject_series()
+    try:
+        _restart_bookshelf(emulator)
+        time.sleep(2.0)
+        bs.wait_for_stable()
+        _ensure_offline_assets(emulator)
+        series_books = _wait_store_series(_SERIES_STEM.replace("_", " "))
+        member_id = max(
+            series_books, key=lambda b: (b.get("seriesIdx") or 0, b.get("addedAt") or 0)
+        )["id"]
+        _goto_view_tile(bs, _standalone_view_count())
+        _wait_cover_file(member_id)
+    finally:
+        _remove_series(injected)
+    return member_id
+
+
+def _offline_boot_asserts(log: str) -> None:
+    """The offline boot must fail sync but render the cached library."""
+    assert "do_sync FAILED" in log
+    assert _loaded_book_count(log) >= 1, "offline boot did not load the store"
+    view, _ = _last_draw_grid(log)
+    assert view >= 1, "grid empty despite cached library"
+    # Covers come from the cache, not the network.
+    assert "cover_tick cache hit id=" in log
+
+
+def _set_dead_cfg() -> str | None:
+    """Point the guest config at a dead port; return the saved text."""
+    saved_cfg = _OFFLINE_CFG.read_text() if _OFFLINE_CFG.is_file() else None
+    # The existing file may be owned by the container UID; unlink (dir is
+    # host-writable) instead of truncating in place.
+    _OFFLINE_CFG.unlink(missing_ok=True)
+    _OFFLINE_CFG.write_text(
+        f"api_url=http://127.0.0.1:9\napi_token={API_TOKEN}\n",
+    )
+    return saved_cfg
+
+
+def _restore_cfg(saved_cfg: str | None) -> None:
+    _OFFLINE_CFG.unlink(missing_ok=True)
+    if saved_cfg is not None:
+        _OFFLINE_CFG.write_text(saved_cfg, encoding="utf-8")
+        _OFFLINE_CFG.chmod(0o666)  # guest (container UID) rewrites it later
+
+
+def test_offline_boot_renders_cached_library(bookshelf_env):
+    """Full offline e2e: with the API unreachable, bookshelf boots from the
+    on-disk library store + cover cache and stays fully navigable — series
+    cards keep their cached thumbnail, drill-in/back restores the page, the
+    pager jumps first/last, and the downloads view opens via the sync icon
+    and closes via its back arrow."""
+    bs, emulator = bookshelf_env
+    member_id = _seed_online_series(bs, emulator)
+
+    saved_cfg = _set_dead_cfg()
+    try:
+        _restart_bookshelf(emulator)
+        _offline_boot_asserts(_wait_offline_log(bs))
+        invocations = bs.invocation_count()
+
+        # Page to the series card offline: its member thumbnail must blit
+        # from the on-disk cache (there is no network to fall back to).
+        pos = _goto_view_tile(bs, _standalone_view_count())
+        page_before = _last_draw_grid(bs.current_log())[1]
+        _wait_cover_log(bs, member_id)
+        _offline_drill_back(bs, pos, page_before)
+        _offline_pager_check(bs)
+        _offline_downloads_roundtrip(bs, invocations)
+    finally:
+        _restore_cfg(saved_cfg)
+
+
+def test_legacy_json_store_migrates_to_sqlite(bookshelf_env):
+    """A pre-sqlite bookshelf_lib.json is imported into the SQLite store on
+    first boot: the books render offline, the db carries the rows, and the
+    legacy file is renamed to .migrated."""
+    bs, emulator = bookshelf_env
+
+    # Wipe any current store; drop a legacy JSON store with two books.
+    _OFFLINE_STORE.unlink(missing_ok=True)
+    (_OFFLINE_TMP / "bookshelf_lib.db.migrated").unlink(missing_ok=True)
+    _OFFLINE_LEGACY.write_text(
+        json.dumps(
+            [
+                {
+                    "id": "legacy_a",
+                    "title": "Legacy Alpha",
+                    "authors": ["pbemu"],
+                    "series": "",
+                    "seriesId": "",
+                    "seriesIdx": 0,
+                    "format": "epub",
+                    "size": 123,
+                    "addedAt": 1700000000,
+                    "blurhash": "",
+                },
+                {
+                    "id": "legacy_b",
+                    "title": "Legacy Beta",
+                    "authors": ["pbemu"],
+                    "series": "",
+                    "seriesId": "",
+                    "seriesIdx": 0,
+                    "format": "epub",
+                    "size": 456,
+                    "addedAt": 1700000001,
+                    "blurhash": "",
+                },
+            ]
+        ),
+        encoding="utf-8",
+    )
+    _OFFLINE_LEGACY.chmod(0o666)
+    # The guest runs as the mapped container UID and the staged /tmp is
+    # sticky, so it may only rename files it owns; hand the fixture over
+    # (on a real device the app creates and owns the legacy file itself).
+    container_sh(
+        "chown \"$(stat -c %u:%g /tmp/covers 2>/dev/null || "
+        "stat -c %u:%g /tmp/bookshelf.log)\" /tmp/bookshelf_lib.json",
+        check=False,
+    )
+
+    saved_cfg = _set_dead_cfg()
+    try:
+        _restart_bookshelf(emulator)
+        deadline = time.monotonic() + 15
+        log = bs.current_log()
+        while time.monotonic() < deadline:
+            log = bs.current_log()
+            if "store: migrated legacy JSON" in log and "draw_grid view=" in log:
+                break
+            time.sleep(0.5)
+        assert "store: migrated legacy JSON (2 books)" in log
+        view, _ = _last_draw_grid(log)
+        assert view >= 2, "legacy books not rendered from the import"
+
+        # The db now carries the rows and the json is renamed away.
+        ids = {b["id"] for b in _store_books()}
+        assert {"legacy_a", "legacy_b"} <= ids
+        assert not _OFFLINE_LEGACY.exists(), "legacy json not renamed"
+        assert (_OFFLINE_TMP / "bookshelf_lib.json.migrated").exists()
+    finally:
+        _restore_cfg(saved_cfg)

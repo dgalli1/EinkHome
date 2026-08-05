@@ -13,9 +13,9 @@
  *   bs_input.c
  *   bs_launcher.c
  *   bs_downloads.c
+ *   bs_store.c
  *   bs_main.c
  */
-
 
 #include <inkview.h>
 
@@ -28,6 +28,8 @@
 #include <strings.h>
 #include <time.h>
 #include <unistd.h>
+#include <sys/stat.h>
+#include <errno.h>
 
 /* libinkview exports iv_update_panel() but the public SDK header omits it.
  * It renders the system status strip (clock / battery / wifi) into the
@@ -66,8 +68,18 @@ extern void iv_update_panel(int readingModeEnable);
 #define READER_KO_PATH  "/mnt/ext1/applications/koreader.app"
 #define MAX_READERS     4
 
-#define HTTP_TIMEOUT  8
-#define MAX_BOOKS     200
+#define HTTP_TIMEOUT 8
+/* Books per /sync/delta round-trip.  The library itself is unbounded
+ * (SQLite-backed); only one batch of parsed books lives in RAM at a
+ * time, so 100k books never materialise as one array. */
+#define SYNC_BATCH 500
+/* Upper bound on grid/list rows per page.  Grid pages hold ROWS rows;
+ * list mode computes its row count from the screen geometry and stays
+ * below this. */
+#define MAX_ROWS 24
+/* LRU cover bitmap slots.  Decoded covers are the only per-tile RAM
+ * cost; a handful of slots bounds it regardless of library size. */
+#define NCOVER_SLOTS  8
 #define MAX_TITLE_LEN 96
 #define MAX_ID_LEN    48
 #define MAX_PATH_LEN  220
@@ -79,7 +91,7 @@ extern void iv_update_panel(int readingModeEnable);
  * All sizes are generous for comfortable e-ink touch targets. */
 #define TOP_BAR_H    128
 #define SEARCH_ROW_H 88
-#define TAB_ROW_H    80
+#define TAB_ROW_H    0 /* tab row removed; downloads via top-bar icon */
 #define PAGER_H      96
 #define THUMB_BORDER 4
 #define COLS         3
@@ -97,28 +109,32 @@ extern void iv_update_panel(int readingModeEnable);
 #define LIST_ROW_H 150
 
 /* More-overlay (right drawer) geometry, shared by the draw and tap paths.
- * Items: Sync, 5 sorts, Grid, List, Download all, Settings, System menu. */
+ * Items: Sync, 4 sorts, Grid, List, Download all, Settings, System menu,
+ * Applications.  (Title Z-A was removed per user request.) */
 #define MORE_Y0           96
 #define MORE_ITEM_H       88
-#define MORE_N_ITEMS      12
-#define MORE_GRID_IDX     6
-#define MORE_LIST_IDX     7
-#define MORE_DLALL_IDX    8
-#define MORE_SETTINGS_IDX 9
-#define MORE_SYSTEM_IDX   10
-#define MORE_APPS_IDX     11
+#define MORE_N_ITEMS      11
+#define MORE_GRID_IDX     5
+#define MORE_LIST_IDX     6
+#define MORE_DLALL_IDX    7
+#define MORE_SETTINGS_IDX 8
+#define MORE_SYSTEM_IDX   9
+#define MORE_APPS_IDX     10
 
 /* Cover / blurhash rendering.  On a greyscale framebuffer a blurhash
  * decoded to luminance blits as a soft grey placeholder; on a colour
  * framebuffer the same placeholder reads as a neutral grey while real
  * covers (loaded via LoadPNGStretch) render in full colour.  Covers are
  * fetched one per weak-timer tick so the event loop never blocks. */
-#define MAX_BLURHASH_LEN 48
-#define COVER_TMP        "/tmp/.bcov.png"
-#define COVER_FETCH_MS   60
-#define BH_W             24
-#define BH_H             36
-#define TEXT_AREA        52 /* vertical room below the cover for title+author */
+#define MAX_BLURHASH_LEN    48
+#define COVER_TMP           "/tmp/.bcov.png"
+#define COVER_FETCH_MS      60
+#define LIB_DB_FILENAME     "bookshelf_lib.db"
+#define LIB_LEGACY_FILENAME "bookshelf_lib.json" /* pre-sqlite store */
+#define COVERS_SUBDIR       "covers"
+#define BH_W                24
+#define BH_H                36
+#define TEXT_AREA           52 /* vertical room below the cover for title+author */
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
@@ -170,7 +186,6 @@ typedef enum {
 } Filter;
 typedef enum {
     SORT_TITLE_ASC,
-    SORT_TITLE_DESC,
     SORT_AUTHOR,
     SORT_SERIES,
     SORT_RECENT,
@@ -199,24 +214,20 @@ typedef struct {
     char  ext[8];
     int   size;
     int   downloaded;
-    int   selected; /* set if this is the currently-highlighted tile */
     char  local_path[MAX_PATH_LEN];
     char  blurhash[MAX_BLURHASH_LEN];
     long  added_at; /* unix epoch from server "addedAt"; 0 if absent */
 } Book;
 typedef struct {
     int  is_series;
-    int  book_idx; /* index into g_state.books[] */
+    Book book; /* embedded record (book, or series-card representative) */
     char series_id[MAX_ID_LEN];
     char series_name[48];
     int  series_count; /* books in the series (badge) */
-} ViewTile;
+} TileRow;
 typedef struct {
-    Book books[MAX_BOOKS];
-    int  total;      /* total available (post-filter, pre-paging) */
-    int  count;      /* currently visible (= total after filter) */
-    int  selected;   /* index within `books` for keyboard nav */
     int  sync_state; /* 0 idle, 1 syncing, 2 error */
+    int  sync_angle; /* rotation (deg) of the top-bar sync arc */
     char status[160];
 
     int panel_h; /* height of the system status panel; 0 if hidden */
@@ -225,10 +236,8 @@ typedef struct {
 
     char api_base[260];
     char api_token[MAX_TOKEN_LEN];
-    char url_books[MAX_URL_LEN];
     char url_delta[MAX_URL_LEN];
     char url_state[MAX_URL_LEN];
-    char url_libs[MAX_URL_LEN];
     char url_openwith[MAX_URL_LEN];
 
     SortMode  sort;
@@ -245,11 +254,11 @@ typedef struct {
     int     launcher_page;
 
     /* Context (long-press) menu.  ctx_open shows a centred modal sheet
-     * over the tile named by ctx_book_idx (a book) or ctx_series_id (a
+     * over the tile named by ctx_book_id (a book) or ctx_series_id (a
      * series card). */
     int  ctx_open;
     int  ctx_is_series;
-    int  ctx_book_idx; /* index into g_state.books[] */
+    char ctx_book_id[MAX_ID_LEN]; /* book the context menu is open on */
     char ctx_series_id[MAX_ID_LEN];
 
     /* Reader selection.  reader_pref == 0 means "Auto" (honour the
@@ -257,16 +266,16 @@ typedef struct {
      * into g_readers[] naming the app to launch directly. */
     int reader_pref;
 
-    int page; /* current page (0-based) */
+    int page;       /* current page (0-based) */
+    int saved_page; /* library page to restore on drill-back */
 
-    int libs_count;
-    int cur_lib; /* -1 = all */
 } State;
 typedef struct {
     char     id[MAX_ID_LEN];
     ibitmap *cover_bmp;
     ibitmap *bh_bmp;
     int      state;
+    long     last_use; /* LRU counter for eviction */
 } CoverSlot;
 typedef struct {
     char id[MAX_ID_LEN];
@@ -287,7 +296,7 @@ typedef struct {
     const char *language;
     const char *localization;
 } LcProfile;
-#define LC_NDIMS ((int)(sizeof lc_dims / sizeof lc_dims[0]))
+#define LC_NDIMS            ((int)(sizeof lc_dims / sizeof lc_dims[0]))
 #define LAUNCHER_MAX_ITEMS  64
 #define LAUNCHER_MAX_PARAMS 4
 #define LAUNCHER_PARAM_LEN  64
@@ -311,173 +320,200 @@ typedef struct {
 
 /* ── global variables ── */
 
-extern char g_lang[8];
-extern const I18n g_i18n[];
-extern FILE *g_log;
-extern char g_cfg_reader[220];
-extern char g_config_path[600];
-extern ViewTile g_view[MAX_BOOKS];
-extern int      g_view_count;
-extern char     g_drilled_series[MAX_ID_LEN];
-extern State g_state;
-extern Book g_lib[MAX_BOOKS];
-extern int  g_lib_count;
-extern char g_search_kb_buf[MAX_QUERY_LEN];
-extern CoverSlot g_covers[MAX_BOOKS];
-extern int       g_cover_armed;
-extern DownloadItem g_downloads[MAX_DOWNLOADS];
-extern int          g_download_count;
-extern int          g_download_armed;
-extern char g_downloads_dir[MAX_PATH_LEN];
-extern int g_lp_armed;
-extern int g_lp_vi;
-extern int g_lp_x;
-extern int g_lp_y;
-extern int g_ctx_suppress_up;
-extern char g_argv0[256];
-extern ReaderCandidate g_readers[MAX_READERS];
-extern int             g_reader_count;
-extern const char bh_base83[84];
-extern int g_settings_edit;
-extern char g_settings_kb_buf[260];
-extern const LcProfile g_lcprof;
+extern char              g_lang[8];
+extern const I18n        g_i18n[];
+extern FILE             *g_log;
+extern char              g_cfg_reader[220];
+extern char              g_config_path[600];
+extern char              g_drilled_series[MAX_ID_LEN];
+extern char              g_drilled_series_name[48];
+extern State             g_state;
+extern char              g_search_kb_buf[MAX_QUERY_LEN];
+extern CoverSlot         g_covers[NCOVER_SLOTS];
+extern TileRow           g_rows[MAX_ROWS * COLS]; /* current page rows */
+extern int               g_row_count;             /* rows on the page */
+extern int               g_view_total;            /* tiles in the view */
+extern int               g_dl_batch_active;       /* download-all batch mode */
+extern int               g_dl_batch_total;
+extern int               g_dl_batch_done;
+extern int               g_dl_batch_failed;
+void                     download_all_start(void);
+extern int               g_cover_armed;
+extern DownloadItem      g_downloads[MAX_DOWNLOADS];
+extern int               g_download_count;
+extern int               g_download_armed;
+extern char              g_downloads_dir[MAX_PATH_LEN];
+extern char              g_covers_dir[MAX_PATH_LEN];
+extern int               g_lp_armed;
+extern int               g_lp_vi;
+extern int               g_lp_x;
+extern int               g_lp_y;
+extern int               g_ctx_suppress_up;
+extern char              g_argv0[256];
+extern ReaderCandidate   g_readers[MAX_READERS];
+extern int               g_reader_count;
+extern const char        bh_base83[84];
+extern int               g_settings_edit;
+extern char              g_settings_kb_buf[260];
+extern const LcProfile   g_lcprof;
 extern const char *const lc_dims[];
-extern LauncherItem g_launcher_items[LAUNCHER_MAX_ITEMS];
-extern int          g_launcher_count;
-extern int          g_launcher_pages;
-extern int          g_launcher_built;
+extern LauncherItem      g_launcher_items[LAUNCHER_MAX_ITEMS];
+extern int               g_launcher_count;
+extern int               g_launcher_pages;
+extern int               g_launcher_built;
 
 /* ── function prototypes ── */
 
-const char * i18n(const char *key);
-void log_open(const char *argv0);
-void log_close(void);
-void LOG(const char *fmt, ...);
-char * trim_ws(char *s);
-int read_kv_file(const char *path, cfg_kv_cb cb, void *user);
-void cfg_set_kv(const char *key, const char *value, void *user);
-void dirname_of(const char *path, char *out, size_t out_cap);
-void load_config_file(const char *argv0, struct cfg_out *out);
-void resolve_config_path(const char *argv0);
-void resolve_downloads_dir(void);
-void detect_readers(void);
-int reader_pref_from_path(const char *value);
-int save_config_file(void);
-int http_get(const char *url, int *status_out, char **body_out, int *len_out);
-int http_post(const char *url, const char *body, char **resp_out, int *resp_len);
-void build_endpoint_urls(void);
-char * json_find_key(const char *obj, const char *key, char *out, size_t cap);
-int json_find_int(const char *obj, const char *key, int default_val);
-float json_find_float(const char *obj, const char *key, float default_val);
-const char * json_next_string(const char *arr, char *out, size_t cap);
-int cmp_series_index_hint(const Book *b);
-char * json_collect_id_list(const char *json, const char *arr_key, size_t *out_len);
-int id_in_list(const char *id, const char *list);
-int cmp_title_asc(const void *a, const void *b);
-int cmp_title_desc(const void *a, const void *b);
-int cmp_author(const void *a, const void *b);
-int cmp_series(const void *a, const void *b);
-int cmp_recent(const void *a, const void *b);
-void build_view(void);
-void apply_filter_and_sort(void);
-int parse_book_obj(const char *obj, Book *b);
-int parse_books_array(const char *arr_start);
-void apply_books_from_added(const char *json, int known_count, const char known_ids[][MAX_ID_LEN]);
-void do_sync(void);
-void do_fetch_all(void);
-void draw_text_centered(ifont *f, int cx, int cy, const char *text, int color);
-void draw_button( int x, int y, int w, int h, int selected, const char *label, int label_size, int label_color);
+const char *i18n(const char *key);
+void        log_open(const char *argv0);
+void        log_close(void);
+void        LOG(const char *fmt, ...);
+char       *trim_ws(char *s);
+int         read_kv_file(const char *path, cfg_kv_cb cb, void *user);
+void        cfg_set_kv(const char *key, const char *value, void *user);
+void        dirname_of(const char *path, char *out, size_t out_cap);
+void        load_config_file(const char *argv0, struct cfg_out *out);
+void        resolve_config_path(const char *argv0);
+void        resolve_covers_dir(void);
+void        resolve_downloads_dir(void);
+void        detect_readers(void);
+int         reader_pref_from_path(const char *value);
+int         save_config_file(void);
+int         http_get(const char *url, int *status_out, char **body_out, int *len_out);
+int         http_post(const char *url, const char *body, char **resp_out, int *resp_len);
+int
+http_post_timeout(const char *url, const char *body, int timeout, char **resp_out, int *resp_len);
+void        build_endpoint_urls(void);
+char       *json_find_key(const char *obj, const char *key, char *out, size_t cap);
+int         json_find_int(const char *obj, const char *key, int default_val);
+float       json_find_float(const char *obj, const char *key, float default_val);
+int         json_find_bool(const char *obj, const char *key, int default_val);
+const char *json_next_string(const char *arr, char *out, size_t cap);
+const char *json_next_object(const char *p, const char **end_out);
+int         parse_book_obj(const char *obj, Book *b);
+void        do_sync(void);
+void        store_open(void);
+void        store_close(void);
+int         store_count(void);
+long long   store_get_cursor(void);
+void        store_set_cursor(long long cursor);
+int         store_upsert_book(const Book *b);
+void        store_delete_book(const char *id);
+void        store_set_downloaded(const char *id, int downloaded, const char *local_path);
+int         store_get_book(const char *id, Book *out);
+void        store_begin(void);
+void        store_commit(void);
+void        store_series_name(const char *series_id, char *out, size_t cap);
+int         store_series_members(const char *series_id, Book *out, int cap);
+int         store_count_undownloaded(void);
+int         store_next_undownloaded(char ids[][MAX_ID_LEN], int cap);
+int         store_next_ids(char ids[][MAX_ID_LEN], int cap, int offset);
+void        store_delete_book_file(const char *id);
+int         store_series_ids(const char *series_id, char ids[][MAX_ID_LEN], int cap, int offset);
+void        view_rebuild(void);
+int         view_fetch_page(int page, TileRow *rows, int cap);
+int         view_fetch_row(int idx, TileRow *out);
+int         view_total(void);
+void        cover_cache_path(const char *id, char *out, size_t cap);
+int         cover_cache_load(const char *id, ibitmap **out_bmp);
+void        cover_cache_save(const char *id, const char *png_data, int len);
+void        draw_text_centered(ifont *f, int cx, int cy, const char *text, int color);
+void        draw_button(
+           int x, int y, int w, int h, int selected, const char *label, int label_size, int label_color);
 void draw_top_bar(void);
 void draw_search_row(void);
-int downloads_pending(void);
-void draw_tab_row(void);
-int bh_value(char c);
-int bh_decode83(const char *s, int n);
-float bh_s2l(int v);
-int bh_l2s(float v);
-float bh_sign_pow(float v, float e);
-CoverSlot * cover_slot(const char *id, int create);
-int view_cols(void);
-int view_rows(void);
-int view_pagesize(void);
-void grid_geom(int *top, int *bot, int *cell_w, int *cell_h);
-int tile_rect_for_index(int idx, int *x, int *y, int *w, int *h);
-void cover_rect(int tx, int ty, int tw, int th, int *cx, int *cy, int *cw, int *ch);
-void bh_ensure(CoverSlot *s, const Book *b);
-void cover_schedule_next(void);
-void blit_cover(int cx, int cy, int cw, int ch, const Book *b);
-void draw_series_stack(int cx, int cy, int cw, int ch, int count);
-void draw_thumbnail(int x, int y, int w, int h, const ViewTile *vt, int vi);
-int downloads_rows(void);
-int downloads_pagesize(void);
-int current_pages(void);
-void draw_dl_progress(int x, int y, int w);
-void draw_downloads_tab(void);
-void redraw_shelf(void);
-void draw_grid(void);
-void cover_tick(void *ctx);
-void draw_pager(void);
-void draw_overlay_menu(void);
-void draw_overlay_more(void);
-void draw_status_line(void);
-void settings_keyboard_handler(char *buffer);
-const char * settings_reader_label(void);
-void settings_draw_row(int y, const char *label, const char *value, int editing);
-void settings_draw_button(int y, const char *label, int filled);
-void draw_overlay_settings(void);
-int hit_top_bar(int x, int y);
-int hit_search(int x, int y);
-int hit_tab_row(int x, int y);
-int hit_thumbnail(int x, int y);
-int hit_pager(int x, int y);
-void on_tap_overlay_menu(int x, int y);
-void on_tap_overlay_more(int x, int y);
-void settings_close(void);
-void settings_apply(void);
-void on_tap_overlay_settings(int x, int y);
-const char * js_skip_ws(const char *p);
-const char * js_skip_value(const char *p);
-void js_copy_string(const char *p, char *out, size_t cap);
-const char * js_object_body(const char *p);
-const char * js_find_member(const char *p, const char *key);
-const char * lc_prof_val(const char *dim);
-const char * lc_pick_key(const char *obj_body, const char *want);
-void lc_resolve(const char *p, const char *cur_dim, char *out, size_t cap);
-int lc_resolve_bool(const char *p);
-char * read_text_file(const char *path);
-const char * lc_token_en(const char *tok);
-void lc_translate(const char *raw, char *out, size_t cap);
-void launcher_layout(void);
-void launcher_add_app(const char *apps_body, const char *id);
-void launcher_build(void);
-void draw_launcher_icon(int cx, int cy, const char *icon_name, const char *title);
-void draw_overlay_launcher(void);
-void launch_app(const LauncherItem *it);
-void on_tap_overlay_launcher(int x, int y);
-void launcher_open_set(void);
-void launcher_close(void);
-void drill_back(void);
-void on_tap_thumbnail(int vi);
-void book_local_path(const Book *b, char *out, size_t cap);
-Book * find_lib_book(const char *id);
-void refresh_downloaded(Book *b);
-DownloadItem * find_download(const char *id);
-void enqueue_download(const Book *b);
-int download_book_file(Book *b);
-void launch_reader(Book *b);
-void book_press_action(Book *b);
-void delete_book_file(Book *b);
-void download_tick(void *ctx);
-void download_series(const char *series_id);
-void delete_series(const char *series_id);
-void context_geom(int *px, int *py, int *pw, int *ph, int n_items);
-int context_item_count(void);
-void draw_context_menu(void);
-void close_context(void);
-void open_context_for_tile(int vi);
-void longpress_tick(void *ctx);
-void on_tap_context(int x, int y);
-int on_event(int type, int par1, int par2);
-void keyboard_handler(char *buffer);
+int  downloads_pending(void);
+/* draw_tab_row removed — tab row no longer drawn */
+int           bh_value(char c);
+int           bh_decode83(const char *s, int n);
+float         bh_s2l(int v);
+int           bh_l2s(float v);
+float         bh_sign_pow(float v, float e);
+CoverSlot    *cover_slot(const char *id, int create);
+int           view_cols(void);
+int           view_rows(void);
+int           view_pagesize(void);
+void          grid_geom(int *top, int *bot, int *cell_w, int *cell_h);
+int           tile_rect_for_index(int idx, int *x, int *y, int *w, int *h);
+void          cover_rect(int tx, int ty, int tw, int th, int *cx, int *cy, int *cw, int *ch);
+void          bh_ensure(CoverSlot *s, const Book *b);
+void          cover_schedule_next(void);
+void          blit_cover(int cx, int cy, int cw, int ch, const Book *b);
+void          draw_series_stack_back(int cx, int cy, int cw, int ch);
+void          draw_series_stack_badge(int cx, int cy, int cw, int ch, int count);
+void          draw_thumbnail(int x, int y, int w, int h, const TileRow *tr, int vi);
+int           downloads_rows(void);
+int           downloads_pagesize(void);
+int           current_pages(void);
+void          draw_dl_progress(int x, int y, int w);
+void          draw_downloads_tab(void);
+void          redraw_shelf(void);
+void          draw_grid(void);
+void          cover_tick(void *ctx);
+void          draw_pager(void);
+void          draw_overlay_menu(void);
+void          draw_overlay_more(void);
+void          draw_status_line(void);
+void          settings_keyboard_handler(char *buffer);
+const char   *settings_reader_label(void);
+void          settings_draw_row(int y, const char *label, const char *value, int editing);
+void          settings_draw_button(int y, const char *label, int filled);
+void          draw_overlay_settings(void);
+int           hit_top_bar(int x, int y);
+void          draw_download_icon(void);
+void          draw_sync_icon(void);
+void          sync_set_active(int on);
+int           hit_search(int x, int y);
+int           hit_thumbnail(int x, int y);
+int           hit_pager(int x, int y);
+void          on_tap_overlay_menu(int x, int y);
+void          on_tap_overlay_more(int x, int y);
+void          settings_close(void);
+void          settings_apply(void);
+void          on_tap_overlay_settings(int x, int y);
+const char   *js_skip_ws(const char *p);
+const char   *js_skip_value(const char *p);
+void          js_copy_string(const char *p, char *out, size_t cap);
+const char   *js_object_body(const char *p);
+const char   *js_find_member(const char *p, const char *key);
+const char   *lc_prof_val(const char *dim);
+const char   *lc_pick_key(const char *obj_body, const char *want);
+void          lc_resolve(const char *p, const char *cur_dim, char *out, size_t cap);
+int           lc_resolve_bool(const char *p);
+char         *read_text_file(const char *path);
+const char   *lc_token_en(const char *tok);
+void          lc_translate(const char *raw, char *out, size_t cap);
+void          launcher_layout(void);
+void          launcher_add_app(const char *apps_body, const char *id);
+void          launcher_build(void);
+void          draw_launcher_icon(int cx, int cy, const char *icon_name, const char *title);
+void          draw_overlay_launcher(void);
+void          launch_app(const LauncherItem *it);
+void          on_tap_overlay_launcher(int x, int y);
+void          launcher_open_set(void);
+void          launcher_close(void);
+void          drill_back(void);
+void          on_tap_thumbnail(int vi);
+void          book_local_path(const Book *b, char *out, size_t cap);
+void          refresh_downloaded(Book *b);
+void          refresh_downloaded_flags(void);
+DownloadItem *find_download(const char *id);
+void          enqueue_download(const Book *b);
+int           download_book_file(Book *b);
+void          launch_reader(Book *b);
+void          book_press_action(Book *b);
+void          delete_book_file(Book *b);
+void          download_tick(void *ctx);
+void          download_series(const char *series_id);
+void          delete_series(const char *series_id);
+void          context_geom(int *px, int *py, int *pw, int *ph, int n_items);
+int           context_item_count(void);
+void          draw_context_menu(void);
+void          close_context(void);
+void          open_context_for_tile(int vi);
+void          longpress_tick(void *ctx);
+void          on_tap_context(int x, int y);
+int           on_event(int type, int par1, int par2);
+void          keyboard_handler(char *buffer);
 
 #endif /* BOOKSHELF_H */

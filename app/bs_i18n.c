@@ -35,7 +35,6 @@ const I18n g_i18n[] = {
     {"group.series", "By series", "Nach Reihe", "Par s\u00e9rie", "Per serie"},
     {"group.recent", "By recent", "Nach Neuheit", "Par date", "Per data"},
     {"sort.title_az", "Title A\u2013Z", "Titel A\u2013Z", "Titre A\u2013Z", "Titolo A\u2013Z"},
-    {"sort.title_za", "Title Z\u2013A", "Titel Z\u2013A", "Titre Z\u2013A", "Titolo Z\u2013A"},
     {"sort.author", "By author", "Nach Autor", "Par auteur", "Per autore"},
     {"sort.series", "By series", "Nach Reihe", "Par s\u00e9rie", "Per serie"},
     {"sort.recent", "Recent", "Neuheiten", "R\u00e9cent", "Recenti"},
@@ -44,6 +43,8 @@ const I18n g_i18n[] = {
     {"pager.info", "%d / %d", "%d / %d", "%d / %d", "%d / %d"},
     {"pager.prev", "<", "<", "<", "<"},
     {"pager.next", ">", ">", ">", ">"},
+    {"pager.first", "<<", "<<", "<<", "<<"},
+    {"pager.last", ">>", ">>", ">>", ">>"},
     {"filter.all", "All", "Alle", "Tous", "Tutti"},
     {"filter.dl", "Downloaded", "Heruntergeladen", "T\u00e9l\u00e9charg\u00e9s", "Scaricati"},
     {"filter.rd", "Remote only", "Nur Remote", "Distant seulement", "Solo remoti"},
@@ -123,4 +124,3 @@ i18n(const char *key)
     }
     return key;
 }
-

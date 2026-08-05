@@ -15,9 +15,16 @@ hit_top_bar(int x, int y)
     /* Left "home" button — 96×96 region, padded 8 px on the left. */
     if (x >= 8 && x < 8 + 96)
         return 1;
-    /* Right "menu" button — 96×96 region, padded 8 px on the right. */
+    /* Right 96×96 region, padded 8 px on the right: the hamburger/More
+     * button on the Library tab, the sync button on the Downloads view
+     * (the sub-view has no More menu — see draw_top_bar). */
     if (x >= w - 96 - 8 && x < w - 8)
-        return 3;
+        return g_state.tab == TAB_DOWNLOADS ? 2 : 3;
+    /* Downloads icon — 96×96 region left of the right button, Library
+     * tab only (the Downloads view fills the whole right corner with
+     * the sync button). */
+    if (g_state.tab != TAB_DOWNLOADS && x >= w - 96 - 8 - 96 && x < w - 96 - 8)
+        return 4;
     return -1;
 }
 
@@ -39,18 +46,6 @@ hit_search(int x, int y)
     return 1;
 }
 
-/* Returns 0 for the Library tab, 1 for the Downloads tab, -1 elsewhere. */
-int
-hit_tab_row(int x, int y)
-{
-    int row_top = g_state.panel_h + TOP_BAR_H + SEARCH_ROW_H;
-    int row_bot = row_top + TAB_ROW_H;
-    if (y < row_top || y >= row_bot)
-        return -1;
-    int w = ScreenWidth();
-    return (x < w / 2) ? 0 : 1;
-}
-
 int
 hit_thumbnail(int x, int y)
 {
@@ -62,7 +57,7 @@ hit_thumbnail(int x, int y)
     for (int row = 0; row < rows; row++) {
         for (int col = 0; col < cols; col++) {
             int idx = page_start + row * cols + col;
-            if (idx >= g_view_count)
+            if (idx >= g_view_total)
                 return -1;
             int tx = 8 + col * cell_w;
             int ty = top + 4 + row * cell_h;
@@ -83,11 +78,17 @@ hit_pager(int x, int y)
     if (y < y0 || y >= y0 + PAGER_H)
         return 0;
     int w = ScreenWidth();
-    /* Prev — 96px wide starting at x=12 */
+    int pages = current_pages();
+    /* < prev — 96px wide starting at x=12 */
     if (g_state.page > 0 && x >= 12 && x < 12 + 96)
         return -1;
-    /* Next — 96px wide ending at x=w-12 */
-    int pages = current_pages();
+    /* << first page — next 96px slot */
+    if (g_state.page > 0 && x >= 116 && x < 116 + 96)
+        return -3;
+    /* >> last page — 96px slot left of the next button */
+    if (g_state.page + 1 < pages && x >= w - 212 && x < w - 116)
+        return -4;
+    /* > next — 96px wide ending at x=w-12 */
     if (g_state.page + 1 < pages && x >= w - 108 && x < w - 12)
         return -2;
     return 0;
@@ -110,7 +111,7 @@ on_tap_overlay_menu(int x, int y)
             g_state.group = (GroupMode)i;
             g_drilled_series[0] = '\0';
             g_state.menu_open = 0;
-            do_sync();
+            view_rebuild();
         }
     }
     g_state.menu_open = 0;
@@ -161,9 +162,7 @@ on_tap_overlay_more(int x, int y)
     if (y >= MORE_Y0 + MORE_DLALL_IDX * MORE_ITEM_H &&
         y < MORE_Y0 + (MORE_DLALL_IDX + 1) * MORE_ITEM_H) {
         g_state.more_open = 0;
-        for (int i = 0; i < g_lib_count; i++)
-            enqueue_download(&g_lib[i]);
-        LOG("[bookshelf] download-all queued=%d\n", g_lib_count);
+        download_all_start();
         g_state.tab = TAB_DOWNLOADS;
         redraw_shelf();
         return;
@@ -181,7 +180,7 @@ on_tap_overlay_more(int x, int y)
                 /* i = 1..5 → the five sort modes (title↑/↓, author,
                  * series, recent). */
                 g_state.sort = (SortMode)(i - 1);
-                apply_filter_and_sort();
+                view_rebuild();
             }
             return;
         }
@@ -264,4 +263,3 @@ on_tap_overlay_settings(int x, int y)
         return;
     }
 }
-

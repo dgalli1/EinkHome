@@ -43,7 +43,7 @@ draw_top_bar(void)
     int home_w = 96;
     int home_x = 8;
     int home_y = y0 + (TOP_BAR_H - home_w) / 2;
-    if (g_drilled_series[0] != '\0') {
+    if (g_drilled_series[0] != '\0' || g_state.tab == TAB_DOWNLOADS) {
         /* Left-pointing chevron arrow. */
         int ax = home_x + 20;
         int ay = home_y + home_w / 2;
@@ -65,46 +65,197 @@ draw_top_bar(void)
         DrawLine(home_x + 53, home_y + 61, home_x + 53, home_y + 85, col);
     }
 
-    /* Centered title — series name when drilled, app title otherwise. */
+    /* Centered title — series name when drilled, Downloads label on the
+     * downloads page, nothing on the plain library shelf (the app name
+     * in the top bar was dropped per user request). */
     ifont *tf = OpenFont(DEFAULTFONT, 44, 0);
     if (tf != NULL) {
         char title[80];
         if (g_drilled_series[0] != '\0') {
-            /* Find the series name from the first view tile. */
-            title[0] = '\0';
-            for (int i = 0; i < g_view_count; i++) {
-                if (g_view[i].book_idx >= 0 &&
-                    strcmp(g_state.books[g_view[i].book_idx].series_id, g_drilled_series) == 0) {
-                    snprintf(title, sizeof title, "%s", g_state.books[g_view[i].book_idx].series);
-                    break;
-                }
-            }
+            /* Series name is resolved once at drill time. */
+            snprintf(title, sizeof title, "%s", g_drilled_series_name);
             if (title[0] == '\0')
                 snprintf(title, sizeof title, "Series");
+        } else if (g_state.tab == TAB_DOWNLOADS) {
+            snprintf(title, sizeof title, "%s", i18n("tab.downloads"));
         } else {
-            snprintf(title, sizeof title, "%s", i18n("app.title"));
-            for (char *p = title; *p; p++)
-                if (*p >= 'a' && *p <= 'z')
-                    *p = (char)(*p - 32);
+            title[0] = '\0';
         }
-        SetFont(tf, col);
-        DrawString((w - StringWidth(title)) / 2, y0 + (TOP_BAR_H - 40) / 2, title);
+        if (title[0] != '\0') {
+            SetFont(tf, col);
+            DrawString((w - StringWidth(title)) / 2, y0 + (TOP_BAR_H - 40) / 2, title);
+        }
         CloseFont(tf);
     }
+    if (g_state.tab == TAB_DOWNLOADS) {
+        /* Downloads view: the right slot hosts the sync glyph instead
+         * of the hamburger — the sub-view has no More menu.  Tapping
+         * it runs a sync (see hit_top_bar). */
+        draw_sync_icon();
+    } else {
+        draw_download_icon();
 
-    /* Right "menu" button — 96×96 solid black circle with three
-     * white hamburger lines. */
-    int menu_w = 96;
-    int menu_x = w - menu_w - 8;
-    int menu_y = y0 + (TOP_BAR_H - menu_w) / 2;
-    int menu_cx = menu_x + menu_w / 2;
-    int menu_cy = menu_y + menu_w / 2;
-    int menu_r = menu_w / 2;
-    FillArea(menu_cx - menu_r, menu_cy - menu_r, menu_r * 2, menu_r * 2, col);
-    int ml_w = 44;
-    FillArea(menu_cx - ml_w / 2, menu_cy - 19, ml_w, 6, WHITE);
-    FillArea(menu_cx - ml_w / 2, menu_cy - 3, ml_w, 6, WHITE);
-    FillArea(menu_cx - ml_w / 2, menu_cy + 13, ml_w, 6, WHITE);
+        /* Right "menu" button — 96×96 solid black square with three
+         * white hamburger lines. */
+        int menu_w = 96;
+        int menu_x = w - menu_w - 8;
+        int menu_y = y0 + (TOP_BAR_H - menu_w) / 2;
+        int menu_cx = menu_x + menu_w / 2;
+        int menu_cy = menu_y + menu_w / 2;
+        int menu_r = menu_w / 2;
+        FillArea(menu_cx - menu_r, menu_cy - menu_r, menu_r * 2, menu_r * 2, col);
+        int ml_w = 44;
+        FillArea(menu_cx - ml_w / 2, menu_cy - 19, ml_w, 6, WHITE);
+        FillArea(menu_cx - ml_w / 2, menu_cy - 3, ml_w, 6, WHITE);
+        FillArea(menu_cx - ml_w / 2, menu_cy + 13, ml_w, 6, WHITE);
+    }
+}
+
+/* Download icon in the top bar (Library view only), left of the menu
+ * button: a Firefox-style down arrow landing in a tray.  Tapping it
+ * opens the Downloads view; the icon carries a pending-count badge
+ * while any download is queued or in flight. */
+void
+draw_download_icon(void)
+{
+    int w = ScreenWidth();
+    int y0 = g_state.panel_h;
+    int col = BLACK;
+    int menu_x = w - 96 - 8;
+    int ic_w = 96;
+    int ic_x = menu_x - ic_w;
+    int ic_y = y0 + (TOP_BAR_H - ic_w) / 2;
+    int cx = ic_x + ic_w / 2;
+    int cy = ic_y + ic_w / 2;
+
+    /* Shaft: three parallel vertical lines read as a solid stem. */
+    for (int t = -1; t <= 1; t++)
+        DrawLine(cx + t, cy - 28, cx + t, cy + 2, col);
+
+    /* Solid downward arrowhead: stacked horizontal slices tapering
+     * from the base to the point. */
+    int ah_w = 36, ah_h = 22;
+    for (int t = 0; t < ah_h; t++) {
+        int sw = ah_w * (ah_h - t) / ah_h;
+        FillArea(cx - sw / 2, cy + t, sw, 1, col);
+    }
+
+    /* Tray: a U under the arrowhead. */
+    FillArea(cx - 28, cy + 18, 3, 15, col);
+    FillArea(cx + 25, cy + 18, 3, 15, col);
+    FillArea(cx - 28, cy + 30, 56, 3, col);
+
+    /* pending badge */
+    int pend = downloads_pending();
+    if (pend > 0) {
+        ifont *bf = OpenFont(DEFAULTFONTB, 22, 0);
+        if (bf != NULL) {
+            char badge[8];
+            snprintf(badge, sizeof badge, "%d", pend);
+            int bw = StringWidth(badge) + 12;
+            int bx = ic_x + ic_w - bw - 2;
+            int by = ic_y + 2;
+            FillArea(bx, by, bw, 26, BLACK);
+            SetFont(bf, WHITE);
+            DrawString(bx + 6, by, badge);
+            CloseFont(bf);
+        }
+    }
+}
+
+/* Sync icon in the top bar — shown only while the Downloads view is
+ * up, taking the hamburger's slot (the sub-view has no More menu).
+ * Two white arc arrows (a "refresh" glyph) on a solid black square
+ * that rotate a few degrees per second while a sync or download is in
+ * flight (sync_set_active arms the rotation timer).  Tapping it runs
+ * a sync (see hit_top_bar). */
+static int
+sync_active(void)
+{
+    return g_state.sync_state == 1 || downloads_pending() > 0;
+}
+
+static int
+sync_modal_open(void)
+{
+    return g_state.ctx_open || g_state.menu_open || g_state.more_open || g_state.settings_open ||
+           g_state.launcher_open;
+}
+
+static int spin_armed = 0;
+
+static void
+sync_spin_tick(void *ctx)
+{
+    (void)ctx;
+    if (!sync_active()) {
+        spin_armed = 0; /* nothing in flight — the glyph rests */
+        return;
+    }
+    g_state.sync_angle = (g_state.sync_angle + 15) % 360;
+    /* The glyph only exists on the Downloads view; elsewhere the top
+     * bar is redrawn whole when the state that feeds it changes. */
+    if (!sync_modal_open() && g_state.tab == TAB_DOWNLOADS) {
+        draw_sync_icon();
+        PartialUpdate(ScreenWidth() - 96 - 8, g_state.panel_h, 96, TOP_BAR_H);
+    }
+    SetWeakTimerEx("bspin", sync_spin_tick, NULL, 1000);
+}
+
+void
+sync_set_active(int on)
+{
+    /* Arm the 1s rotation timer exactly once per active stretch; repeated
+     * calls (every download tick) must not reset it or it never fires. */
+    if (on && sync_active() && !spin_armed) {
+        spin_armed = 1;
+        SetWeakTimerEx("bspin", sync_spin_tick, NULL, 1000);
+    }
+    if (!sync_modal_open() && g_state.tab == TAB_DOWNLOADS) {
+        draw_sync_icon();
+        PartialUpdate(ScreenWidth() - 96 - 8, g_state.panel_h, 96, TOP_BAR_H);
+    }
+}
+
+void
+draw_sync_icon(void)
+{
+    int w = ScreenWidth();
+    int y0 = g_state.panel_h;
+    int ic_w = 96;
+    int ic_x = w - ic_w - 8;
+    int ic_y = y0 + (TOP_BAR_H - ic_w) / 2;
+    FillArea(ic_x, ic_y, ic_w, ic_w, BLACK);
+    int cx = ic_x + ic_w / 2;
+    int cy = ic_y + ic_w / 2;
+    int r = 28;
+    /* Two 120-degree arc arrows, rotated by g_state.sync_angle. */
+    for (int half = 0; half < 2; half++) {
+        int a0 = g_state.sync_angle + half * 180;
+        int px = 0, py = 0;
+        int ex = 0, ey = 0;
+        for (int s = 0; s <= 8; s++) {
+            double a = (a0 + s * 15) * M_PI / 180.0;
+            int    x = cx + (int)(r * cos(a));
+            int    y = cy + (int)(r * sin(a));
+            if (s > 0) {
+                DrawLine(px, py, x, y, WHITE);
+                DrawLine(px, py + 1, x, y + 1, WHITE);
+            }
+            px = x;
+            py = y;
+            if (s == 8) {
+                ex = x;
+                ey = y;
+            }
+        }
+        /* Arrowhead: two ticks trailing the tangent at the arc end. */
+        double ta = (a0 + 120) * M_PI / 180.0 + M_PI / 2.0;
+        for (int t = 0; t < 2; t++) {
+            double ha = ta + M_PI + (t ? 0.6 : -0.6);
+            DrawLine(ex, ey, ex + (int)(11 * cos(ha)), ey + (int)(11 * sin(ha)), WHITE);
+        }
+    }
 }
 
 void
@@ -115,13 +266,27 @@ draw_search_row(void)
     FillArea(0, y, w, SEARCH_ROW_H, WHITE);
     DrawLine(0, y + SEARCH_ROW_H - 1, w, y + SEARCH_ROW_H - 1, BLACK);
 
+    /* Magnifying-glass icon: outlined ring (polyline; DrawCircle fills)
+     * + diagonal handle. */
+    int gx = 30, gy = y + SEARCH_ROW_H / 2 - 8;
+    int px = 0, py = 0;
+    for (int s = 0; s <= 16; s++) {
+        double a = s * 2 * M_PI / 16.0;
+        int    x = gx + (int)(13 * cos(a));
+        int    yy = gy + (int)(13 * sin(a));
+        if (s > 0) {
+            DrawLine(px, py, x, yy, BLACK);
+            DrawLine(px, py + 1, x, yy + 1, BLACK);
+        }
+        px = x;
+        py = yy;
+    }
+    DrawLine(gx + 9, gy + 10, gx + 22, gy + 23, BLACK);
+    DrawLine(gx + 10, gy + 9, gx + 23, gy + 22, BLACK);
+
     ifont *f = OpenFont(DEFAULTFONT, 28, 0);
     if (f == NULL)
         return;
-
-    SetFont(f, BLACK);
-    const char *icon = "Q"; /* magnifier */
-    DrawString(16, y + (SEARCH_ROW_H - 28) / 2 - 2, icon);
 
     /* text box border */
     int tx = 64;
@@ -160,62 +325,7 @@ downloads_pending(void)
     return n;
 }
 
-/* Two-tab switcher drawn directly under the search row: Library |
- * Downloads.  The active tab is an inverted (black) pill; the Downloads
- * tab carries a small count badge while any download is pending. */
-void
-draw_tab_row(void)
-{
-    int w = ScreenWidth();
-    int y = g_state.panel_h + TOP_BAR_H + SEARCH_ROW_H;
-    FillArea(0, y, w, TAB_ROW_H, WHITE);
-    DrawLine(0, y + TAB_ROW_H - 1, w, y + TAB_ROW_H - 1, BLACK);
-
-    int tab_w = w / 2;
-    int pad = 12;
-    int th = TAB_ROW_H - 2 * pad;
-
-    struct {
-        const char *label;
-        int         active;
-        int         x;
-    } tabs[2] = {
-        {i18n("tab.library"), g_state.tab == TAB_LIBRARY, 0},
-        {i18n("tab.downloads"), g_state.tab == TAB_DOWNLOADS, tab_w},
-    };
-
-    ifont *f = OpenFont(DEFAULTFONTB, 30, 0);
-    if (f == NULL)
-        return;
-    for (int i = 0; i < 2; i++) {
-        int tx = tabs[i].x + pad;
-        int tw = tab_w - 2 * pad;
-        int ty = y + pad;
-        FillArea(tx, ty, tw, th, tabs[i].active ? BLACK : WHITE);
-        DrawRect(tx, ty, tw, th, BLACK);
-        SetFont(f, tabs[i].active ? WHITE : BLACK);
-        int lw = StringWidth(tabs[i].label);
-        DrawString(tx + (tw - lw) / 2, ty + (th - 30) / 2 - 2, tabs[i].label);
-        /* Pending-count badge on the Downloads tab. */
-        if (i == 1) {
-            int pend = downloads_pending();
-            if (pend > 0) {
-                char badge[8];
-                snprintf(badge, sizeof badge, "%d", pend);
-                int bw = StringWidth(badge) + 14;
-                int bx = tx + tw - bw - 6;
-                int by = ty + 6;
-                FillArea(bx, by, bw, 30, tabs[i].active ? WHITE : BLACK);
-                SetFont(f, tabs[i].active ? BLACK : WHITE);
-                DrawString(bx + 7, by + 1, badge);
-            }
-        }
-    }
-    CloseFont(f);
-}
-
 /* -- cover / blurhash helpers ----------------------------------------- */
-
 
 const char bh_base83[84] =
     "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz#$%*+,-.:;=?@[]^_{|}~";
@@ -268,36 +378,29 @@ bh_sign_pow(float v, float e)
     return (v >= 0.0f ? 1.0f : -1.0f) * powf(fabsf(v), e);
 }
 
+static long cover_lru = 0;
+
 CoverSlot *
 cover_slot(const char *id, int create)
 {
     CoverSlot *empty = NULL;
-    for (int i = 0; i < MAX_BOOKS; i++) {
-        if (g_covers[i].id[0] && strcmp(g_covers[i].id, id) == 0)
+    for (int i = 0; i < NCOVER_SLOTS; i++) {
+        if (g_covers[i].id[0] && strcmp(g_covers[i].id, id) == 0) {
+            g_covers[i].last_use = ++cover_lru;
             return &g_covers[i];
+        }
         if (empty == NULL && g_covers[i].id[0] == '\0')
             empty = &g_covers[i];
     }
     if (!create)
         return NULL;
     if (empty == NULL) {
-        /* Table full: evict a slot whose book is no longer loaded. */
-        for (int i = 0; i < MAX_BOOKS; i++) {
-            int inuse = 0;
-            for (int j = 0; j < g_lib_count; j++) {
-                if (strcmp(g_lib[j].id, g_covers[i].id) == 0) {
-                    inuse = 1;
-                    break;
-                }
-            }
-            if (!inuse) {
+        /* Table full: evict the least-recently-used slot. */
+        for (int i = 0; i < NCOVER_SLOTS; i++) {
+            if (empty == NULL || g_covers[i].last_use < empty->last_use)
                 empty = &g_covers[i];
-                break;
-            }
         }
     }
-    if (empty == NULL)
-        empty = &g_covers[0];
     if (empty->cover_bmp) {
         free(empty->cover_bmp);
         empty->cover_bmp = NULL;
@@ -308,6 +411,7 @@ cover_slot(const char *id, int create)
     }
     memset(empty, 0, sizeof *empty);
     snprintf(empty->id, sizeof empty->id, "%s", id);
+    empty->last_use = ++cover_lru;
     return empty;
 }
 
@@ -326,7 +430,7 @@ view_rows(void)
 {
     if (g_state.view_mode != VIEW_LIST)
         return ROWS;
-    int t = g_state.panel_h + TOP_BAR_H + SEARCH_ROW_H + TAB_ROW_H;
+    int t = g_state.panel_h + TOP_BAR_H + SEARCH_ROW_H;
     int b = ScreenHeight() - PAGER_H;
     if (g_state.menu_open || g_state.more_open)
         b = ScreenHeight();
@@ -348,7 +452,7 @@ void
 grid_geom(int *top, int *bot, int *cell_w, int *cell_h)
 {
     int w = ScreenWidth();
-    int t = g_state.panel_h + TOP_BAR_H + SEARCH_ROW_H + TAB_ROW_H;
+    int t = g_state.panel_h + TOP_BAR_H + SEARCH_ROW_H;
     int b = ScreenHeight() - PAGER_H;
     if (g_state.menu_open || g_state.more_open)
         b = ScreenHeight();
@@ -389,7 +493,7 @@ tile_rect_for_index(int idx, int *x, int *y, int *w, int *h)
     int ps = view_pagesize();
     int page_start = g_state.page * ps;
     int rel = idx - page_start;
-    if (rel < 0 || rel >= ps || idx >= g_view_count)
+    if (rel < 0 || rel >= ps || idx >= g_view_total)
         return 0;
     int row = rel / cols;
     int col = rel % cols;
@@ -490,7 +594,15 @@ bh_ensure(CoverSlot *s, const Book *b)
     s->bh_bmp = bmp;
 }
 
-/* Arm the one-shot fetch timer if any visible tile still needs a cover. */
+/* Id of the i-th row of the current page (NULL past the end).  The page
+ * rows live in g_rows[], filled by draw_grid / view_fetch_page. */
+static const char *
+page_row_id(int i)
+{
+    if (i < 0 || i >= g_row_count)
+        return NULL;
+    return g_rows[i].book.id;
+}
 void
 cover_schedule_next(void)
 {
@@ -504,10 +616,13 @@ cover_schedule_next(void)
     int ps = view_pagesize();
     int page_start = g_state.page * ps;
     int lim = page_start + ps;
-    if (lim > g_view_count)
-        lim = g_view_count;
+    if (lim > g_view_total)
+        lim = g_view_total;
     for (int i = page_start; i < lim; i++) {
-        CoverSlot *s = cover_slot(g_state.books[g_view[i].book_idx].id, 1);
+        const char *id = page_row_id(i - page_start);
+        if (id == NULL)
+            break;
+        CoverSlot *s = cover_slot(id, 1);
         if (s != NULL && s->state == 0) {
             g_cover_armed = 1;
             SetWeakTimerEx("bcov", cover_tick, NULL, COVER_FETCH_MS);
@@ -543,7 +658,7 @@ blit_cover(int cx, int cy, int cw, int ch, const Book *b)
  * left), so the pile reads as a stack with the single book sitting at the
  * bottom-right.  A count badge sits in the cover's top-right corner. */
 void
-draw_series_stack(int cx, int cy, int cw, int ch, int count)
+draw_series_stack_back(int cx, int cy, int cw, int ch)
 {
     int step = 5;
     /* Back page sheet (furthest up-left). */
@@ -552,7 +667,12 @@ draw_series_stack(int cx, int cy, int cw, int ch, int count)
     /* Front page sheet. */
     FillArea(cx - step, cy - step, cw, ch, WHITE);
     DrawRect(cx - step, cy - step, cw, ch, BLACK);
-    /* Re-outline the cover so it reads as the top book of the stack. */
+}
+
+void
+draw_series_stack_badge(int cx, int cy, int cw, int ch, int count)
+{
+    /* Outline the cover rect so it reads as the top book of the stack. */
     DrawRect(cx, cy, cw, ch, BLACK);
 
     char badge[8];
@@ -571,10 +691,10 @@ draw_series_stack(int cx, int cy, int cw, int ch, int count)
 }
 
 void
-draw_thumbnail(int x, int y, int w, int h, const ViewTile *vt, int vi)
+draw_thumbnail(int x, int y, int w, int h, const TileRow *tr, int vi)
 {
-    const Book *b = &g_state.books[vt->book_idx];
-    int         selected = (vi == g_state.selected);
+    (void)vi;
+    const Book *b = &tr->book;
 
     FillArea(x, y, w, h, WHITE);
     /* List mode: one full-width row — small 2:3 cover on the left, title
@@ -588,18 +708,16 @@ draw_thumbnail(int x, int y, int w, int h, const ViewTile *vt, int vi)
         int cww = chh * 2 / 3;
         int cx = x + pad, cy = y + pad;
         FillArea(cx, cy, cww, chh, WHITE);
+        if (tr->is_series)
+            draw_series_stack_back(cx, cy, cww, chh);
         blit_cover(cx, cy, cww, chh, b);
-        if (vt->is_series)
-            draw_series_stack(cx, cy, cww, chh, vt->series_count);
-        if (selected) {
-            DrawRect(x + 2, y + 2, w - 4, h - 4, BLACK);
-            DrawRect(x + 3, y + 3, w - 6, h - 6, BLACK);
-        }
+        if (tr->is_series)
+            draw_series_stack_badge(cx, cy, cww, chh, tr->series_count);
         int tx0 = cx + cww + 16;
         int tw0 = (x + w - pad) - tx0;
         if (tw0 < 64)
             tw0 = 64;
-        const char *label = vt->is_series ? vt->series_name : b->title;
+        const char *label = tr->is_series ? tr->series_name : b->title;
         ifont      *f = OpenFont(DEFAULTFONTB, 30, 0);
         if (f != NULL) {
             SetFont(f, BLACK);
@@ -610,7 +728,7 @@ draw_thumbnail(int x, int y, int w, int h, const ViewTile *vt, int vi)
             DrawString(tx0, y + pad + 8, truncated);
             CloseFont(f);
         }
-        if (!vt->is_series && b->author[0] != '\0') {
+        if (!tr->is_series && b->author[0] != '\0') {
             ifont *af = OpenFont(DEFAULTFONT, 24, 0);
             if (af != NULL) {
                 SetFont(af, DGRAY);
@@ -628,23 +746,18 @@ draw_thumbnail(int x, int y, int w, int h, const ViewTile *vt, int vi)
     int cx, cy, cw, ch;
     cover_rect(x, y, w, h, &cx, &cy, &cw, &ch);
 
-    FillArea(cx, cy, cw, ch, WHITE);
+    if (tr->is_series)
+        draw_series_stack_back(cx, cy, cw, ch);
 
     blit_cover(cx, cy, cw, ch, b);
 
-    /* Series cards render as a stack of pages (see draw_series_stack). */
-    if (vt->is_series)
-        draw_series_stack(cx, cy, cw, ch, vt->series_count);
-
-    /* Selection frame — 2px around cover on tap. */
-    if (selected) {
-        DrawRect(cx - 2, cy - 2, cw + 4, ch + 4, BLACK);
-        DrawRect(cx - 1, cy - 1, cw + 2, ch + 2, BLACK);
-    }
+    /* Series cards: badge + outline on top of the cover. */
+    if (tr->is_series)
+        draw_series_stack_badge(cx, cy, cw, ch, tr->series_count);
 
     /* Caption: series name for cards, title for books. */
     int         cap_y = cy + ch + 6;
-    const char *label = vt->is_series ? vt->series_name : b->title;
+    const char *label = tr->is_series ? tr->series_name : b->title;
     ifont      *f = OpenFont(DEFAULTFONTB, 22, 0);
     if (f != NULL) {
         SetFont(f, BLACK);
@@ -657,7 +770,7 @@ draw_thumbnail(int x, int y, int w, int h, const ViewTile *vt, int vi)
     }
 
     /* Second line: author for books, omitted for series cards. */
-    if (!vt->is_series && b->author[0] != '\0') {
+    if (!tr->is_series && b->author[0] != '\0') {
         ifont *af = OpenFont(DEFAULTFONT, 18, 0);
         if (af != NULL) {
             SetFont(af, DGRAY);
@@ -701,7 +814,7 @@ current_pages(void)
         n = g_download_count;
         ps = downloads_pagesize();
     } else {
-        n = g_view_count;
+        n = g_view_total;
         ps = view_pagesize();
     }
     if (ps < 1)
@@ -726,6 +839,26 @@ draw_dl_progress(int x, int y, int w)
         if (g_downloads[i].state == 0 || g_downloads[i].state == 1)
             active++;
     }
+    /* In batch mode the queue only holds the current slice; report the
+     * whole-batch tally instead (failures included, so the bar still
+     * reaches full width when some books fail). */
+    if (g_dl_batch_total > 0) {
+        total = g_dl_batch_total;
+        done = g_dl_batch_done;
+        failed = g_dl_batch_failed;
+    }
+    /* Retries can settle the same slot twice; keep the fill bounded. */
+    if (done > total)
+        done = total;
+    if (done + failed > total)
+        failed = total - done;
+    if (g_dl_batch_active)
+        active++;
+    LOG("[bookshelf] dl_progress done=%d failed=%d total=%d active=%d\n",
+        done,
+        failed,
+        total,
+        active);
     if (total <= 0)
         return;
 
@@ -772,6 +905,20 @@ draw_downloads_tab(void)
     FillArea(0, top, w, bot - top, WHITE);
     DrawLine(0, top, w, top, BLACK);
 
+    /* Page the list — the pager below is wired to current_pages(). */
+    int ps = downloads_pagesize();
+    if (ps < 1)
+        ps = 1;
+    int pages = (g_download_count + ps - 1) / ps;
+    if (g_state.page >= pages)
+        g_state.page = pages - 1;
+    if (g_state.page < 0)
+        g_state.page = 0;
+    LOG("[bookshelf] draw_downloads page=%d pages=%d count=%d\n",
+        g_state.page,
+        pages,
+        g_download_count);
+
     if (g_download_count == 0) {
         ifont *f = OpenFont(DEFAULTFONT, 30, 0);
         if (f != NULL) {
@@ -786,23 +933,10 @@ draw_downloads_tab(void)
     /* Progress bar pinned to the top of the body; rows start below it. */
     draw_dl_progress(20, top + 4, w);
 
-    /* Page the list — the pager below is wired to current_pages(). */
-    int ps = downloads_pagesize();
-    if (ps < 1)
-        ps = 1;
-    int pages = (g_download_count + ps - 1) / ps;
-    if (g_state.page >= pages)
-        g_state.page = pages - 1;
-    if (g_state.page < 0)
-        g_state.page = 0;
     int first = g_state.page * ps;
     int last = first + ps;
     if (last > g_download_count)
         last = g_download_count;
-    LOG("[bookshelf] draw_downloads page=%d pages=%d count=%d\n",
-        g_state.page,
-        pages,
-        g_download_count);
 
     int row_h = 96;
     int y = top + DL_BAR_H + 8;
@@ -863,7 +997,6 @@ redraw_shelf(void)
     FillArea(0, g_state.panel_h, ScreenWidth(), ScreenHeight() - g_state.panel_h, WHITE);
     draw_top_bar();
     draw_search_row();
-    draw_tab_row();
     if (g_state.tab == TAB_DOWNLOADS)
         draw_downloads_tab();
     else
@@ -889,27 +1022,27 @@ draw_grid(void)
     FillArea(0, top, ScreenWidth(), bot - top, WHITE);
     DrawLine(0, top, ScreenWidth(), top, BLACK);
     LOG("[bookshelf] draw_grid view=%d page=%d cell=%dx%d top=%d bot=%d\n",
-        g_view_count,
+        g_view_total,
         g_state.page,
         cell_w,
         cell_h,
         top,
         bot);
 
+    int ps = view_pagesize();
+    g_row_count = view_fetch_page(g_state.page, g_rows, MAX_ROWS * COLS);
     int cols = view_cols();
     int rows = view_rows();
-    int page_start = g_state.page * view_pagesize();
     int drawn = 0;
     for (int row = 0; row < rows; row++) {
         for (int col = 0; col < cols; col++) {
-            int idx = page_start + drawn;
-            if (idx >= g_view_count)
+            if (drawn >= g_row_count)
                 goto done;
             int tx = 8 + col * cell_w;
             int ty = top + 4 + row * cell_h;
             int tw = cell_w - 8;
             int th = cell_h - 6;
-            draw_thumbnail(tx, ty, tw, th, &g_view[idx], idx);
+            draw_thumbnail(tx, ty, tw, th, &g_rows[drawn], g_state.page * ps + drawn);
             drawn++;
         }
     }
@@ -924,7 +1057,7 @@ void
 cover_tick(void *ctx)
 {
     (void)ctx;
-    LOG("[bookshelf] cover_tick ENTER page=%d view=%d armed->0\n", g_state.page, g_view_count);
+    LOG("[bookshelf] cover_tick ENTER page=%d view=%d armed->0\n", g_state.page, g_view_total);
     g_cover_armed = 0;
 
     int top, bot, cell_w, cell_h;
@@ -936,12 +1069,15 @@ cover_tick(void *ctx)
     int ps = view_pagesize();
     int page_start = g_state.page * ps;
     int lim = page_start + ps;
-    if (lim > g_view_count)
-        lim = g_view_count;
+    if (lim > g_view_total)
+        lim = g_view_total;
 
     int target = -1;
     for (int i = page_start; i < lim; i++) {
-        CoverSlot *s = cover_slot(g_state.books[g_view[i].book_idx].id, 1);
+        const char *id = page_row_id(i - page_start);
+        if (id == NULL)
+            break;
+        CoverSlot *s = cover_slot(id, 1);
         if (s != NULL && s->state == 0) {
             target = i;
             break;
@@ -950,40 +1086,50 @@ cover_tick(void *ctx)
     if (target < 0)
         return; /* nothing pending on this page */
 
-    CoverSlot *s = cover_slot(g_state.books[g_view[target].book_idx].id, 1);
-    LOG("[bookshelf] cover_tick target=%d id=%s slot=%p\n",
-        target,
-        g_state.books[g_view[target].book_idx].id,
-        (void *)s);
+    const char *bid = page_row_id(target - page_start);
+    if (bid == NULL)
+        return;
+    CoverSlot *s = cover_slot(bid, 1);
+    LOG("[bookshelf] cover_tick target=%d id=%s slot=%p\n", target, bid, (void *)s);
     s->state = 1;
 
-    char url[MAX_URL_LEN + 128];
-    snprintf(url,
-             sizeof url,
-             "%s/api/v1/books/%s/cover?access_token=%s",
-             g_state.api_base,
-             g_state.books[g_view[target].book_idx].id,
-             g_state.api_token);
-
-    int rsize = 0;
-    LOG("[bookshelf] cover_tick downloading url=%s\n", url);
-    char *data = QuickDownload(url, &rsize, HTTP_TIMEOUT);
-    LOG("[bookshelf] cover_tick downloaded data=%p rsize=%d\n", (void *)data, rsize);
     ibitmap *bmp = NULL;
-    if (data != NULL && rsize > 8) {
-        FILE *f = fopen(COVER_TMP, "wb");
-        if (f != NULL) {
-            fwrite(data, 1, (size_t)rsize, f);
-            fclose(f);
-            LOG("[bookshelf] cover_tick LoadPNGStretch begin\n");
-            bmp = LoadPNGStretch(COVER_TMP, 240, 360, 0, 0);
-            LOG("[bookshelf] cover_tick LoadPNGStretch done bmp=%p\n", (void *)bmp);
+
+    /* Try the on-disk cover cache first — avoids a network round-trip
+     * when the cover was fetched in a previous session. */
+    if (cover_cache_load(bid, &bmp) == 0) {
+        LOG("[bookshelf] cover_tick cache hit id=%s\n", bid);
+    } else {
+        char url[MAX_URL_LEN + 128];
+        snprintf(url,
+                 sizeof url,
+                 "%s/api/v1/books/%s/cover?access_token=%s",
+                 g_state.api_base,
+                 bid,
+                 g_state.api_token);
+
+        int rsize = 0;
+        LOG("[bookshelf] cover_tick downloading url=%s\n", url);
+        char *data = QuickDownload(url, &rsize, HTTP_TIMEOUT);
+        LOG("[bookshelf] cover_tick downloaded data=%p rsize=%d\n", (void *)data, rsize);
+        if (data != NULL && rsize > 8) {
+            /* Persist the raw PNG so the next launch can skip the
+             * network entirely. */
+            cover_cache_save(bid, data, rsize);
+            FILE *f = fopen(COVER_TMP, "wb");
+            if (f != NULL) {
+                fwrite(data, 1, (size_t)rsize, f);
+                fclose(f);
+                LOG("[bookshelf] cover_tick LoadPNGStretch begin\n");
+                bmp = LoadPNGStretch(COVER_TMP, 240, 360, 0, 0);
+                LOG("[bookshelf] cover_tick LoadPNGStretch done bmp=%p\n", (void *)bmp);
+            }
         }
-    }
-    if (data != NULL) {
-        LOG("[bookshelf] cover_tick free(data) begin\n");
-        free(data);
-        LOG("[bookshelf] cover_tick free(data) done\n");
+        if (data != NULL) {
+            LOG("[bookshelf] cover_tick free(data) begin\n");
+            free(data);
+            LOG("[bookshelf] cover_tick free(data) done\n");
+        }
     }
 
     if (bmp != NULL) {
@@ -1007,7 +1153,7 @@ cover_tick(void *ctx)
     int tx, ty, tw, th;
     if (!modal && tile_rect_for_index(target, &tx, &ty, &tw, &th)) {
         FillArea(tx, ty, tw, th, WHITE);
-        draw_thumbnail(tx, ty, tw, th, &g_view[target], target);
+        draw_thumbnail(tx, ty, tw, th, &g_rows[target - page_start], target);
         PartialUpdate(tx, ty, tw, th);
     }
     LOG("[bookshelf] cover_tick blit done, scheduling next\n");
@@ -1040,13 +1186,21 @@ draw_pager(void)
     SetFont(f, BLACK);
     draw_text_centered(f, w / 2, y + (PAGER_H - 28) / 2 - 2, info, BLACK);
 
-    /* Prev button — 96×64 for e-ink touch target */
-    if (g_state.page > 0)
-        draw_button(12, y + (PAGER_H - 64) / 2, 96, 64, 0, i18n("pager.prev"), 28, 0);
-
-    /* Next button — 96×64 for e-ink touch target */
-    if (g_state.page + 1 < pages)
-        draw_button(w - 108, y + (PAGER_H - 64) / 2, 96, 64, 0, i18n("pager.next"), 28, 0);
+    /* Four 96x64 buttons: < prev, << first, >> last, > next.  Disabled
+     * buttons render as faint grey text on white (draw_button's selected
+     * fill is skipped and label_color forces grey). */
+    int by = y + (PAGER_H - 64) / 2;
+    int gray = 0xAAAAAA;
+    /* < prev */
+    draw_button(12, by, 96, 64, 0, i18n("pager.prev"), 28, g_state.page > 0 ? 0 : gray);
+    /* << first page */
+    draw_button(116, by, 96, 64, 0, i18n("pager.first"), 28, g_state.page > 0 ? 0 : gray);
+    /* >> last page */
+    draw_button(
+        w - 212, by, 96, 64, 0, i18n("pager.last"), 28, g_state.page + 1 < pages ? 0 : gray);
+    /* > next */
+    draw_button(
+        w - 108, by, 96, 64, 0, i18n("pager.next"), 28, g_state.page + 1 < pages ? 0 : gray);
     CloseFont(f);
 }
 
@@ -1108,7 +1262,6 @@ draw_overlay_more(void)
     const char *labels[] = {
         "action.sync",
         "sort.title_az",
-        "sort.title_za",
         "sort.author",
         "sort.series",
         "sort.recent",
@@ -1125,7 +1278,7 @@ draw_overlay_more(void)
         int sel = 0;
         if (i == 0 && g_state.sync_state == 1)
             sel = 1;
-        if (i > 0 && i <= 5 && (i - 1) == (int)g_state.sort)
+        if (i >= 1 && i <= 4 && (i - 1) == (int)g_state.sort)
             sel = 1;
         if (i == MORE_GRID_IDX && g_state.view_mode == VIEW_GRID)
             sel = 1;
@@ -1150,7 +1303,6 @@ draw_status_line(void)
 }
 
 /* ── settings overlay ────────────────────────────────────────────────── */
-
 
 /* Which settings row currently owns the on-screen keyboard:
  * 0 = none, 1 = API host, 2 = API key. */
@@ -1265,4 +1417,3 @@ draw_overlay_settings(void)
     y += SETTINGS_BTN_H;
     settings_draw_button(y, i18n("settings.back"), 0);
 }
-

@@ -129,7 +129,7 @@ emulator with the viewer + audio relay:
 It (re)starts the API server in the background (`/tmp/pbemu-api.log`,
 pid in `/tmp/pbemu-api.pid`), stages the binary + `bookshelf.cfg`, and
 runs `./pbemu start` with the viewer. The window appears on your desktop;
-tap the **S** button to sync, **⋯** → **Settings** to edit the API host /
+tap **⋯** → **Sync** to sync, **⋯** → **Settings** to edit the API host /
 key / reader. Stop everything with `./pbemu stop`.
 
 ## Network reachability
@@ -311,16 +311,15 @@ the app is doing:
 ssh root@<device-ip> 'tail -f /mnt/ext1/applications/bookshelf.log'
 ```
 
-### Initial sync is opt-in
+### Initial sync is automatic
 
-By default the binary does **not** sync metadata on startup.  It shows
-the top bar / status line / empty grid immediately and waits for the
-user to tap the **S** button on the top right.  This avoids a long
-blocking HTTP fetch on the EVT_INIT event (which can trip
-`monitor.app`'s task watchdog on the launcher and look like a crash).
-
-If you want auto-sync on startup, edit the EVT_INIT handler to call
-`do_sync();` after the `draw_*` calls.
+The binary syncs metadata on startup (the EVT_INIT handler calls
+`do_sync()` before the first draw), so the shelf populates without a
+manual tap.  The local store is opened and the grid built from it
+*before* the network sync, so an unreachable API still shows the
+cached library.  Subsequent syncs are triggered via **⋯** → **Sync**,
+or via the sync button in the top-bar right corner while the Downloads
+view is showing.
 
 ## UI
 
@@ -333,14 +332,13 @@ the firmware with day-of-week + 24h time + down-arrow + lightbulb + battery):
 +--------------------------------------------------+ <- 0
 |  Wed 13:01                                       |   system top status bar
 +--------------------------------------------------+ <- ~28 px
-|  [⌂]    BOOKSHELF                       [☰]    |   TOP_BAR_H (88 px)
+|  [⌂]                                  [⬇] [☰] |   TOP_BAR_H (128 px)
 +--------------------------------------------------+
-|  [Q] search...                                  |   SEARCH_ROW_H (56 px)
+|  [Q] search...                                  |   SEARCH_ROW_H (88 px)
 +--------------------------------------------------+
 |                                                  |
 |   [book]    [book]    [book]                     |
-|   [book]    [book]    [book]                     |   3×3 grid of thumbnails
-|   [book]    [book]    [book]                     |   (CELL_MAX ~360x360)
+|   [book]    [book]    [book]                     |   3×2 grid of thumbnails
 |                                                  |
 +--------------------------------------------------+
 |              <  1 / 2  >                          |   PAGER_H
@@ -352,15 +350,30 @@ the firmware with day-of-week + 24h time + down-arrow + lightbulb + battery):
 The top bar style matches the firmware's standard `sudoku.app`
 header:
 
-* **Left** — a 72×72 house outline (home button).  Tapping returns to
-  the launcher (`CloseApp()`).
-* **Center** — the app title in `DEFAULTFONT 32pt`, uppercased.
-* **Right** — a 72×72 solid black circle with three white hamburger
+* **Left** — a 96×96 house outline (home button).  Tapping returns to
+  the launcher (`CloseApp()`); while the Downloads view or a drilled-in
+  series is showing it acts as "back" instead.
+* **Center** — a title only while a drilled-in series (series name) or
+  the Downloads view ("Downloads") is showing; the plain library shelf
+  carries no title.
+* **Right** — a 96×96 solid black square with three white hamburger
   lines.  Tapping opens the in-app "More" menu (sort, view, sync).
+* **Left of the menu button** — a 96×96 downloads icon (down arrow
+  into a tray, Firefox-style).  Tapping it opens the Downloads view
+  (queued/finished downloads); it carries a pending-count badge while
+  a download queue drains.
+
+On the Downloads view the hamburger is gone — the sub-navigation keeps
+only back (left), the Downloads title (center), and the right slot,
+which now holds the 96×96 sync button: a solid black square with two
+white arc arrows that rotate a few degrees per second while a sync or
+download is in flight.  Tapping it runs a library sync without leaving
+the view.
 
 The "More" menu is a right-anchored 75%-width panel with the
-following items, in order: **Sync**, **Title A–Z**, **Title Z–A**,
-**By author**, **By series**, **Recent**, **Grid**, **List**.
+following items, in order: **Sync**, **Title A–Z**, **By author**,
+**By series**, **Recent**, **Grid**, **List**, **Download all**,
+**Settings**, **System menu**, **Applications**.
 
 ### How the firmware system status bars are enabled
 
@@ -431,9 +444,9 @@ Below the top bar is a **search** row.  Tapping it opens the
 firmware's native on-screen keyboard; pressing Enter (or the keyboard's
 OK button) filters the visible books by title or author.
 
-The main area is a 3×3 grid of thumbnails.  Each tile shows a hatched
-cover placeholder (we don't ship real covers in the UI yet), the book
-title, the author, and a corner badge:
+The main area is a 3×2 grid of thumbnails.  Each tile shows the book
+cover (blurhash placeholder or cached PNG while the real cover
+downloads), the book title, the author, and a corner badge:
 
 * `v` — the book is downloaded locally (`/mnt/ext1/system/bin/<id>.<ext>` exists)
 * `R` — the book is remote-only (it lives in the API server)
@@ -466,3 +479,34 @@ English, German, French, Italian.  Add a new language by extending the
    `/mnt/ext1/system/bin/<id>.<ext>`.
 4. The app calls `NewTaskEx(app.app, args=[path], ...)` to launch the
    reader.
+
+### Offline persistence (library store + cover cache)
+
+The SQLite database `bookshelf_lib.db` next to the config file
+(on-device: next to the binary; in the emulator:
+`/tmp/bookshelf_lib.db`) is the single source of truth for the
+library, using the firmware's own `libsqlite3.so.0` from
+`/ebrmain/lib`.  There is no in-memory master list: a 100k-book
+library never fits in device RAM, so every consumer pages through
+the store instead —
+
+- sync writes one bounded batch of rows per `/sync/delta` round
+  inside a transaction (rollback journal, crash-safe);
+- the grid/list renders from a materialised `view` table that the
+  store rebuilds in SQL (filter/sort/group/collapse all happen in
+  the query plan), paged `LIMIT`/`OFFSET` into page-sized row
+  buffers;
+- series cards are collapsed in SQL (one card per multi-member
+  series, representative = highest volume);
+- cover PNGs are cached under `covers/<id>.png` and blitted through
+  a small LRU of decoded bitmaps, never one per book.
+
+On boot the app opens the store, re-probes every book's on-device
+file to resync its `downloaded` flag (files can vanish or appear
+while the app is away), and builds the grid from the store *before*
+attempting the auto-sync, so with the API unreachable the shelf
+still shows the cached library and covers blit from the cache
+instead of the network (log line `cover_tick cache hit id=…`).
+
+A pre-sqlite `bookshelf_lib.json` store is imported once on first
+boot and renamed to `bookshelf_lib.json.migrated`.

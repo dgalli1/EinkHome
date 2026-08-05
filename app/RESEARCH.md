@@ -294,10 +294,11 @@ version probe first thing on every connection).
 | `api/config/server.json` | Server config.  Switch
    `provider: "mock" ↔ "kavita"` to change sources. |
 | `bookshelf/bookshelf.c` | The in-emulator C app.  Uses InkViewMain
-   for proper task registration and draws the new UI
-   (top bar, hamburger, sync, more menu, 2×2 thumbnail grid,
-   per-book cloud/downloaded icon, progress bar, tap-to-open
-   that calls `/open-with` then streams the file). |
+  for proper task registration and draws the new UI
+  (top bar with home/downloads/menu buttons, search row,
+  3×2 thumbnail grid, per-book cloud/downloaded badge,
+  offline library store + on-disk cover cache, tap-to-open
+  that calls `/open-with` then streams the file). |
 | `bookshelf/run.sh` | End-to-end driver.  Builds, restarts the
    API server, restarts the emulator, screenshots. |
 | `sdk/build_armel.sh` | Cross-compile script.  Pulls in

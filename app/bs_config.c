@@ -71,7 +71,6 @@ trim_ws(char *s)
     return s;
 }
 
-
 int
 read_kv_file(const char *path, cfg_kv_cb cb, void *user)
 {
@@ -102,7 +101,6 @@ read_kv_file(const char *path, cfg_kv_cb cb, void *user)
 /* Raw `reader=` value from the config file, resolved to reader_pref after
  * detect_readers() runs (the reader table must exist first). */
 char g_cfg_reader[220];
-
 
 void
 cfg_set_kv(const char *key, const char *value, void *user)
@@ -207,4 +205,3 @@ resolve_config_path(const char *argv0)
     }
     snprintf(g_config_path, sizeof g_config_path, "%s", CONFIG_TMP_PATH);
 }
-

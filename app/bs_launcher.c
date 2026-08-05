@@ -121,7 +121,6 @@ js_find_member(const char *p, const char *key)
 
 /* -- device profile for conditional resolution -------------------------- */
 
-
 const LcProfile g_lcprof = {"all", "pocketbook", "true", "false", "en", "WW"};
 
 const char *const lc_dims[] = {
@@ -198,7 +197,6 @@ lc_pick_key(const char *obj_body, const char *want)
         return "default";
     return first[0] ? first : NULL;
 }
-
 
 void
 lc_resolve(const char *p, const char *cur_dim, char *out, size_t cap)
@@ -390,13 +388,10 @@ lc_translate(const char *raw, char *out, size_t cap)
 
 /* -- launcher data + layout --------------------------------------------- */
 
-
-
 LauncherItem g_launcher_items[LAUNCHER_MAX_ITEMS];
 int          g_launcher_count;
 int          g_launcher_pages;
 int          g_launcher_built;
-
 
 void
 launcher_layout(void)
@@ -918,14 +913,12 @@ void
 drill_back(void)
 {
     g_drilled_series[0] = '\0';
-    g_state.page = 0;
-    g_state.selected = -1;
-    build_view();
-    LOG("[bookshelf] drilled back to top level (view=%d)\n", g_view_count);
+    g_state.page = g_state.saved_page;
+    view_rebuild();
+    LOG("[bookshelf] drilled back to top level (view=%d)\n", g_view_total);
     FillArea(0, g_state.panel_h, ScreenWidth(), ScreenHeight() - g_state.panel_h, WHITE);
     draw_top_bar();
     draw_search_row();
-    draw_tab_row();
     draw_grid();
     draw_pager();
     FullUpdate();
@@ -934,21 +927,23 @@ drill_back(void)
 void
 on_tap_thumbnail(int vi)
 {
-    if (vi < 0 || vi >= g_view_count)
+    TileRow tr;
+    if (!view_fetch_row(vi, &tr))
         return;
-    const ViewTile *vt = &g_view[vi];
 
     /* Series card → drill into the series. */
-    if (vt->is_series) {
-        snprintf(g_drilled_series, sizeof g_drilled_series, "%s", vt->series_id);
+    if (tr.is_series) {
+        snprintf(g_drilled_series, sizeof g_drilled_series, "%s", tr.series_id);
+        snprintf(g_drilled_series_name, sizeof g_drilled_series_name, "%s", tr.series_name);
+        g_state.saved_page = g_state.page;
         g_state.page = 0;
-        g_state.selected = -1;
-        build_view();
-        LOG("[bookshelf] drilled into series '%s' (%d books)\n", vt->series_name, g_view_count);
+        view_rebuild();
+        LOG("[bookshelf] drilled into series '%s' (%d books)\n",
+            g_drilled_series_name,
+            g_view_total);
         FillArea(0, g_state.panel_h, ScreenWidth(), ScreenHeight() - g_state.panel_h, WHITE);
         draw_top_bar();
         draw_search_row();
-        draw_tab_row();
         draw_grid();
         draw_pager();
         FullUpdate();
@@ -956,7 +951,5 @@ on_tap_thumbnail(int vi)
     }
 
     /* Flat tile → download (if needed) then open in the configured reader. */
-    Book *b = &g_state.books[vt->book_idx];
-    book_press_action(b);
+    book_press_action(&tr.book);
 }
-

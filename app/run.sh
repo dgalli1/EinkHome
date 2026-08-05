@@ -35,7 +35,7 @@ cd "${REPO_ROOT}"
 # All translation units that make up the bookshelf app.
 BS_SRCS=""
 for _f in bs_i18n.c bs_config.c bs_model.c bs_net.c bs_ui.c \
-          bs_input.c bs_launcher.c bs_downloads.c bs_main.c; do
+          bs_input.c bs_launcher.c bs_downloads.c bs_store.c bs_main.c; do
 	if [ ! -f "${BS_DIR}/${_f}" ]; then
 		echo "ERROR: ${BS_DIR}/${_f} not found" >&2
 		exit 1

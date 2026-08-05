@@ -4,32 +4,26 @@
 
 /* ── book record ─────────────────────────────────────────────────────── */
 
-
-
-
-
-
-
 /* A tile in the projected grid view.  At the top level (not drilled),
  * series with >1 book collapse into a single card (is_series=1) showing
  * the newest volume's cover + a triple border + count badge.  Standalone
  * books and drilled-in series members are individual tiles (is_series=0).
  */
 
-ViewTile g_view[MAX_BOOKS];
-int      g_view_count;
-char     g_drilled_series[MAX_ID_LEN]; /* "" = top level */
+char g_drilled_series[MAX_ID_LEN]; /* "" = top level */
+char g_drilled_series_name[48];    /* display name while drilled */
 
+/* Current page of view rows, shared by the draw loop and the cover
+ * fetcher.  Single-threaded event loop, so one static page buffer is
+ * safe and bounds RAM to O(page) regardless of library size. */
+TileRow g_rows[MAX_ROWS * COLS];
+int     g_row_count = 0;
+int     g_view_total = 0;
 
 State g_state;
 
-/* Full, unfiltered library — the single source of truth that parse/sync
- * mutate.  g_state.books[] is a *filtered projection* rebuilt from this
- * master by apply_filter_and_sort(), so filtering is non-destructive: a
- * second search always starts from the complete library instead of
- * re-filtering an already-shrunk set. */
-Book g_lib[MAX_BOOKS];
-int  g_lib_count;
+/* The library itself lives in SQLite (bs_store.c); there is no
+ * in-memory master array.  g_state only carries UI state. */
 
 /* Edit buffer handed to OpenKeyboard() for the search field.  It MUST be
  * separate from g_state.query: the firmware writes the live keystrokes
@@ -40,15 +34,15 @@ int  g_lib_count;
  * searches" bug).  A dedicated scratch buffer breaks the alias. */
 char g_search_kb_buf[MAX_QUERY_LEN];
 
-/* Forward declarations — defined below grid_geom; needed by
- * apply_filter_and_sort which runs before them in file order. */
+/* Forward declarations — defined below grid_geom; needed by do_sync
+ * which runs before them in file order. */
 
-/* Per-book cover cache, keyed by id and kept OUTSIDE the Book struct so
- * the wholesale struct copies in parse_books_array() can never leak or
- * double-free a decoded bitmap.  state: 0 untouched, 1 fetch in flight,
- * 2 cover loaded, 3 fetch failed. */
+/* LRU cover cache, keyed by id and kept OUTSIDE the Book struct so a
+ * decoded bitmap can never leak or double-free.  state: 0 untouched,
+ * 1 fetch in flight, 2 cover loaded, 3 fetch failed.  A handful of
+ * slots bounds decoded-cover RAM regardless of library size. */
 
-CoverSlot g_covers[MAX_BOOKS];
+CoverSlot g_covers[NCOVER_SLOTS];
 int       g_cover_armed = 0;
 
 /* One queued/finished download shown on the Downloads tab.  Downloads
@@ -60,6 +54,13 @@ int       g_cover_armed = 0;
 DownloadItem g_downloads[MAX_DOWNLOADS];
 int          g_download_count = 0;
 int          g_download_armed = 0;
+
+/* Download-all batch bookkeeping: total = undownloaded count at queue
+ * time, done/failed = settled downloads. */
+int g_dl_batch_active = 0;
+int g_dl_batch_total = 0;
+int g_dl_batch_done = 0;
+int g_dl_batch_failed = 0;
 
 /* Directory downloads are written to.  Resolved once at startup by
  * resolve_downloads_dir(): LOCAL_DOWNLOADS when the guest can write it
@@ -74,6 +75,25 @@ resolve_downloads_dir(void)
     else
         snprintf(g_downloads_dir, sizeof g_downloads_dir, "%s", LOCAL_DOWNLOADS_FALLBACK);
     LOG("[bookshelf] downloads dir = %s\n", g_downloads_dir);
+}
+
+/* Directory for cached cover PNGs.  Same parent as the config file
+ * (writable app dir on device, /tmp in the emulator). */
+char g_covers_dir[MAX_PATH_LEN];
+
+void
+resolve_covers_dir(void)
+{
+    char dir[600];
+    dirname_of(g_config_path, dir, sizeof dir);
+    snprintf(g_covers_dir, sizeof g_covers_dir, "%s/" COVERS_SUBDIR, dir);
+    /* World-writable: in the emulator the guest is a mapped non-root UID
+     * and the host-side tooling (tests, staging) must still be able to
+     * manage the cache under the sticky /tmp.  chmod covers the EEXIST
+     * case where mkdir ignores the mode. */
+    if (mkdir(g_covers_dir, 0777) != 0)
+        chmod(g_covers_dir, 0777);
+    LOG("[bookshelf] covers dir = %s\n", g_covers_dir);
 }
 
 /* Long-press detection state.  POINTERDOWN records the tile under the
@@ -172,10 +192,15 @@ parse_book_obj(const char *obj, Book *b)
     if (json_find_key(obj, "title", b->title, sizeof b->title) == NULL || b->title[0] == '\0') {
         json_find_key(obj, "summary", b->title, sizeof b->title);
     }
-    /* authors is a JSON array; take first. */
+    /* authors is a JSON array; take first.  If the server emits a
+     * plain string instead of an array, fall back to copying it
+     * directly. */
     char auth[160];
-    if (json_find_key(obj, "authors", auth, sizeof auth))
-        json_next_string(auth, b->author, sizeof b->author);
+    if (json_find_key(obj, "authors", auth, sizeof auth)) {
+        if (json_next_string(auth, b->author, sizeof b->author) == NULL && auth[0] != '\0' &&
+            auth[0] != '[')
+            snprintf(b->author, sizeof b->author, "%s", auth);
+    }
     json_find_key(obj, "series", b->series, sizeof b->series);
     json_find_key(obj, "seriesId", b->series_id, sizeof b->series_id);
     b->series_idx = json_find_float(obj, "seriesIdx", 0.0f);
@@ -205,106 +230,48 @@ parse_book_obj(const char *obj, Book *b)
     return 0;
 }
 
-/* Parse a JSON array of book objects starting at `arr_start` ('[').
- * For each book, either update an existing in-memory entry (matched by id)
- * or append a new one (up to MAX_BOOKS).  Returns the new count.
- */
-int
-parse_books_array(const char *arr_start)
+/* Balanced JSON object scanner — returns pointer to the opening '{'
+ * of the next top-level object at or after `p`, and sets *end_out to
+ * the matching '}'.  Respects quoted strings (including escapes) and
+ * nested braces/brackets so a '}' inside a string value or nested
+ * object doesn't terminate the scan early.  Returns NULL when no
+ * further object is found. */
+const char *
+json_next_object(const char *p, const char **end_out)
 {
-    int         n = g_lib_count;
-    const char *p = strchr(arr_start, '[');
-    if (!p)
-        return n;
-    while (n < MAX_BOOKS) {
-        const char *obj = strchr(p, '{');
-        if (!obj)
-            break;
-        const char *end = strchr(obj, '}');
-        if (!end)
-            break;
-        Book b;
-        if (parse_book_obj(obj, &b) == 0) {
-            /* Update an existing master entry in place (matched by id) so
-             * re-syncs refresh metadata without duplicating the book. */
-            int found = -1;
-            for (int i = 0; i < g_lib_count; i++) {
-                if (strcmp(g_lib[i].id, b.id) == 0) {
-                    found = i;
-                    break;
-                }
+    while (*p && *p != '{')
+        p++;
+    if (*p != '{')
+        return NULL;
+    const char *start = p;
+    int         depth = 0;
+    while (*p) {
+        if (*p == '"') {
+            p++;
+            while (*p && *p != '"') {
+                if (*p == '\\')
+                    p++;
+                p++;
             }
-            if (found >= 0)
-                g_lib[found] = b;
-            else
-                g_lib[g_lib_count++] = b;
-            n = g_lib_count;
+            if (*p == '"')
+                p++;
+            continue;
         }
-        p = end + 1;
-    }
-    return n;
-}
-
-void
-apply_books_from_added(const char *json, int known_count, const char known_ids[][MAX_ID_LEN])
-{
-    (void)known_count;
-    (void)known_ids;
-    /* Parse the "added" array (and "items" for /books).  Existing
-     * entries matched by id are updated in place; new entries are
-     * appended.  We also honour "removed" by dropping entries.
-     */
-    const char *p = strstr(json, "\"items\"");
-    if (p)
-        p = strchr(p, '[');
-    if (!p) {
-        p = strstr(json, "\"added\"");
-        if (p)
-            p = strchr(p, '[');
-    }
-    if (p)
-        parse_books_array(p);
-
-    /* Drop books listed in "removed". */
-    size_t removed_len = 0;
-    char  *removed = json_collect_id_list(json, "\"removed\"", &removed_len);
-    if (removed != NULL && removed_len > 0) {
-        int write = 0;
-        for (int read = 0; read < g_lib_count; read++) {
-            if (id_in_list(g_lib[read].id, removed))
-                continue;
-            if (write != read)
-                g_lib[write] = g_lib[read];
-            write++;
-        }
-        g_lib_count = write;
-    }
-    free(removed);
-
-    /* Drop books listed in "removed" by id. */
-    {
-        const char *q = strstr(json, "\"removedIds\"");
-        if (q) {
-            q = strchr(q, '[');
-            if (q) {
-                char *rids = json_collect_id_list(q, "]", NULL);
-                if (rids != NULL) {
-                    int write = 0;
-                    for (int read = 0; read < g_lib_count; read++) {
-                        if (id_in_list(g_lib[read].id, rids))
-                            continue;
-                        if (write != read)
-                            g_lib[write] = g_lib[read];
-                        write++;
-                    }
-                    g_lib_count = write;
-                    free(rids);
-                }
+        if (*p == '{' || *p == '[')
+            depth++;
+        else if (*p == '}' || *p == ']') {
+            depth--;
+            if (depth == 0) {
+                if (end_out)
+                    *end_out = p;
+                return start;
             }
         }
+        p++;
     }
-
-    LOG("[bookshelf] apply_books_from_added: master count=%d\n", g_lib_count);
+    if (end_out)
+        *end_out = p;
+    return start; /* unterminated; best effort */
 }
 
 /* ── /sync/delta POST ────────────────────────────────────────────────── */
@@ -314,45 +281,80 @@ do_sync(void)
 {
     LOG("[bookshelf] do_sync ENTER url_delta=%s\n", g_state.url_delta);
     g_state.sync_state = 1;
+    sync_set_active(1);
     snprintf(g_state.status, sizeof g_state.status, "%s", i18n("status.syncing"));
     /* A previous sync may have hit the server before its cover cache was
      * warm; give failed covers one more chance each sync. */
-    for (int i = 0; i < MAX_BOOKS; i++) {
+    for (int i = 0; i < NCOVER_SLOTS; i++) {
         if (g_covers[i].state == 3)
             g_covers[i].state = 0;
     }
 
-    char req_body[2048];
-    int  n = snprintf(req_body, sizeof req_body, "{\"known\":[");
-    for (int i = 0; i < g_lib_count && n < (int)sizeof(req_body) - 32; i++) {
-        n += snprintf(req_body + n, sizeof req_body - n, "%s\"%s\"", i ? "," : "", g_lib[i].id);
-    }
-    snprintf(req_body + n, sizeof req_body - n, "]}");
+    /* Cursor-based delta: each round fetches at most SYNC_BATCH books,
+     * writes them in one transaction and persists the cursor, so a
+     * 100k-book library syncs in bounded-RAM rounds and resumes after a
+     * crash. */
+    long long cursor = store_get_cursor();
+    int       more = 1;
+    int       rounds = 0;
+    while (more && rounds < 400) { /* 400 * SYNC_BATCH = 200k ceiling */
+        char body[128];
+        snprintf(body, sizeof body, "{\"cursor\":%lld,\"limit\":%d}", cursor, SYNC_BATCH);
+        char *resp = NULL;
+        int   rlen = 0;
+        if (http_post_timeout(g_state.url_delta, body, 60, &resp, &rlen) != 0 || resp == NULL) {
+            LOG("[bookshelf] do_sync FAILED: url=%s body=%p\n", g_state.url_delta, (void *)resp);
+            g_state.sync_state = 2;
+            snprintf(g_state.status, sizeof g_state.status, "%s", i18n("status.fail"));
+            sync_set_active(0);
+            if (resp)
+                free(resp);
+            return;
+        }
+        LOG("[bookshelf] do_sync: body=%p retsize=%d cursor=%lld\n", (void *)resp, rlen, cursor);
 
-    char *body = NULL;
-    int   retsize = 0;
-    if (http_post(g_state.url_delta, req_body, &body, &retsize) != 0 || !body) {
-        LOG("[bookshelf] do_sync FAILED: url=%s body=%p\n", g_state.url_delta, (void *)body);
-        g_state.sync_state = 2;
-        snprintf(g_state.status, sizeof g_state.status, "%s", i18n("status.fail"));
-        if (body)
-            free(body);
-        return;
+        store_begin();
+        const char *added = strstr(resp, "\"added\"");
+        if (added != NULL) {
+            const char *p = strchr(added, '[');
+            const char *end = NULL;
+            Book        tmp;
+            while (p != NULL && (p = json_next_object(p, &end)) != NULL) {
+                if (parse_book_obj(p, &tmp) == 0)
+                    store_upsert_book(&tmp);
+                p = end + 1;
+            }
+        }
+        const char *rem = strstr(resp, "\"removed\"");
+        if (rem != NULL) {
+            const char *p = strchr(rem, '[');
+            char        id[MAX_ID_LEN];
+            while (p != NULL && (p = json_next_string(p, id, sizeof id)) != NULL)
+                store_delete_book(id);
+        }
+        long long next = (long long)json_find_int(resp, "nextCursor", (int)cursor);
+        more = json_find_bool(resp, "more", 0);
+        cursor = next;
+        store_set_cursor(cursor);
+        store_commit();
+        free(resp);
+        rounds++;
     }
-    LOG("[bookshelf] do_sync: body=%p retsize=%d\n", (void *)body, retsize);
-    apply_books_from_added(body, 0, NULL);
-    free(body);
+    LOG("[bookshelf] do_sync: rounds=%d cursor=%lld\n", rounds, cursor);
 
-    apply_filter_and_sort();
+    view_rebuild();
+    if (g_state.page * view_pagesize() >= view_total())
+        g_state.page = 0;
 
     g_state.sync_state = 0;
+    sync_set_active(0);
     /* post state back (best-effort) */
-    char state_body[2048];
-    n = snprintf(state_body, sizeof state_body, "{\"deviceId\":\"pbemu\",\"known\":[");
-    for (int i = 0; i < g_lib_count && n < (int)sizeof(state_body) - 32; i++) {
-        n += snprintf(state_body + n, sizeof state_body - n, "%s\"%s\"", i ? "," : "", g_lib[i].id);
-    }
-    snprintf(state_body + n, sizeof state_body - n, "]}");
+    char state_body[160];
+    snprintf(state_body,
+             sizeof state_body,
+             "{\"deviceId\":\"pbemu\",\"cursor\":%lld,\"books\":%d}",
+             cursor,
+             store_count());
     char *resp = NULL;
     int   rl = 0;
     http_post(g_state.url_state, state_body, &resp, &rl);
@@ -360,19 +362,55 @@ do_sync(void)
         free(resp);
 }
 
-/* ── HTTP GET /books (for full re-fetch) ─────────────────────────────── */
+/* ── cover PNG cache ─────────────────────────────────────────────────── */
 
+/* Build the on-disk path for a cached cover PNG. */
 void
-do_fetch_all(void)
+cover_cache_path(const char *id, char *out, size_t cap)
 {
-    char *body = NULL;
-    int   retsize = 0;
-    if (http_get(g_state.url_books, &(int){0}, &body, &retsize) != 0 || !body) {
-        snprintf(g_state.status, sizeof g_state.status, "%s", i18n("status.fail"));
-        return;
-    }
-    apply_books_from_added(body, 0, NULL);
-    free(body);
-    apply_filter_and_sort();
+    /* Sanitise id: replace '/' with '_' so it's safe as a filename. */
+    char safe[MAX_ID_LEN];
+    snprintf(safe, sizeof safe, "%s", id);
+    for (char *p = safe; *p; p++)
+        if (*p == '/')
+            *p = '_';
+    snprintf(out, cap, "%s/%s.png", g_covers_dir, safe);
 }
 
+/* Try to load a cached cover PNG from disk.  Returns 0 on success
+ * (bitmap written to *out_bmp), -1 if no cache exists. */
+int
+cover_cache_load(const char *id, ibitmap **out_bmp)
+{
+    char path[MAX_PATH_LEN];
+    cover_cache_path(id, path, sizeof path);
+    if (access(path, R_OK) != 0) {
+        LOG("[bookshelf] cover_cache_load miss: access %s errno=%d\n", path, errno);
+        return -1;
+    }
+    ibitmap *bmp = LoadPNGStretch(path, 240, 360, 0, 0);
+    if (bmp == NULL) {
+        LOG("[bookshelf] cover_cache_load miss: LoadPNGStretch NULL for %s\n", path);
+        return -1;
+    }
+    *out_bmp = bmp;
+    return 0;
+}
+
+/* Write raw PNG bytes to the cover cache.  Creates the covers
+ * directory if needed. */
+void
+cover_cache_save(const char *id, const char *png_data, int len)
+{
+    if (png_data == NULL || len <= 0)
+        return;
+    char path[MAX_PATH_LEN];
+    cover_cache_path(id, path, sizeof path);
+    FILE *f = fopen(path, "wb");
+    if (f == NULL) {
+        LOG("[bookshelf] cover_cache_save: cannot write %s\n", path);
+        return;
+    }
+    fwrite(png_data, 1, (size_t)len, f);
+    fclose(f);
+}

@@ -14,25 +14,50 @@ book_local_path(const Book *b, char *out, size_t cap)
         snprintf(out, cap, "%s/%s", g_downloads_dir, b->id);
 }
 
-/* Look a book up in the master library by id (NULL if unknown). */
-Book *
-find_lib_book(const char *id)
-{
-    for (int i = 0; i < g_lib_count; i++)
-        if (strcmp(g_lib[i].id, id) == 0)
-            return &g_lib[i];
-    return NULL;
-}
-
-/* Sync a book's downloaded flag by probing its on-device file. */
+/* Sync a book's downloaded flag by probing its on-device file, in the
+ * store and in the caller's copy. */
 void
 refresh_downloaded(Book *b)
 {
     char path[MAX_PATH_LEN];
     book_local_path(b, path, sizeof path);
-    b->downloaded = (access(path, F_OK) == 0);
-    if (b->downloaded)
+    int dl = (access(path, F_OK) == 0);
+    store_set_downloaded(b->id, dl, dl ? path : "");
+    b->downloaded = dl;
+    if (dl)
         snprintf(b->local_path, sizeof b->local_path, "%s", path);
+}
+
+/* Re-probe every book's on-device file and resync its downloaded flag
+ * (bounded slices, one transaction).  Files can vanish or appear while
+ * the app is not running (tests clear the downloads dir, the reader or
+ * the user deletes files), so the flag must be reconciled at startup
+ * before anything counts "undownloaded" books. */
+void
+refresh_downloaded_flags(void)
+{
+    char ids[64][MAX_ID_LEN];
+    int  off = 0, got, changed = 0;
+    store_begin();
+    while ((got = store_next_ids(ids, 64, off)) > 0) {
+        for (int i = 0; i < got; i++) {
+            Book b;
+            if (!store_get_book(ids[i], &b))
+                continue;
+            char path[MAX_PATH_LEN];
+            book_local_path(&b, path, sizeof path);
+            int dl = (access(path, F_OK) == 0);
+            if (dl != b.downloaded) {
+                store_set_downloaded(ids[i], dl, dl ? path : "");
+                changed++;
+            }
+        }
+        off += got;
+        if (got < 64)
+            break;
+    }
+    store_commit();
+    LOG("[bookshelf] refresh_downloaded_flags: changed=%d\n", changed);
 }
 
 /* Find a download-queue entry by id (NULL if absent). */
@@ -45,6 +70,23 @@ find_download(const char *id)
     return NULL;
 }
 
+/* Drop every finished queue entry.  A manual (non-batch) download
+ * starts a fresh tally, so stale finished rows from the last batch
+ * must not inflate it or crowd the bounded queue out. */
+static void
+clear_finished_downloads(void)
+{
+    int w = 0;
+    for (int i = 0; i < g_download_count; i++) {
+        if (g_downloads[i].state == 2 || g_downloads[i].state == 3)
+            continue;
+        if (w != i)
+            g_downloads[w] = g_downloads[i];
+        w++;
+    }
+    g_download_count = w;
+}
+
 /* Add a book to the download queue (no-op if already queued/done) and
  * arm the drain timer. */
 void
@@ -53,6 +95,15 @@ enqueue_download(const Book *b)
     DownloadItem *d = find_download(b->id);
     if (d != NULL)
         return;
+    if (!g_dl_batch_active) {
+        /* Manual download: the retained tally of the last batch must
+         * not mask this one, and its finished rows must not inflate
+         * the fresh queue tally (or crowd it out entirely). */
+        g_dl_batch_total = 0;
+        g_dl_batch_done = 0;
+        g_dl_batch_failed = 0;
+        clear_finished_downloads();
+    }
     if (g_download_count >= MAX_DOWNLOADS)
         return;
     DownloadItem *n = &g_downloads[g_download_count++];
@@ -63,6 +114,26 @@ enqueue_download(const Book *b)
         g_download_armed = 1;
         SetWeakTimerEx("bdl", download_tick, NULL, 120);
     }
+    sync_set_active(1);
+}
+
+/* Drop the oldest finished queue entry to make room (batch mode keeps
+ * the queue bounded regardless of library size). */
+static void
+prune_finished_download(void)
+{
+    int best = -1;
+    for (int i = 0; i < g_download_count; i++) {
+        if (g_downloads[i].state == 2 || g_downloads[i].state == 3) {
+            best = i;
+            break;
+        }
+    }
+    if (best < 0)
+        return;
+    for (int i = best; i + 1 < g_download_count; i++)
+        g_downloads[i] = g_downloads[i + 1];
+    g_download_count--;
 }
 
 /* Download one book's file to disk (blocking).  Returns 1 on success. */
@@ -97,8 +168,8 @@ download_book_file(Book *b)
     fwrite(data, 1, (size_t)rsize, f);
     fclose(f);
     free(data);
+    store_set_downloaded(b->id, 1, path);
     b->downloaded = 1;
-    snprintf(b->local_path, sizeof b->local_path, "%s", path);
     LOG("[bookshelf] download_book_file OK id=%s path=%s bytes=%d\n", b->id, path, rsize);
     return 1;
 }
@@ -151,11 +222,17 @@ launch_reader(Book *b)
     NewTaskEx(full_path, args, app, b->title, NULL, 1u << 30, 0);
 }
 
-/* Press a book: download it if needed, then open it in the reader. */
+/* Press a book: download it if needed, then open it in the reader.
+ * Persists the downloaded flag so the next launch sees the file. */
 void
 book_press_action(Book *b)
 {
-    refresh_downloaded(b);
+    char path[MAX_PATH_LEN];
+    book_local_path(b, path, sizeof path);
+    int dl = (access(path, F_OK) == 0);
+    if (dl != b->downloaded)
+        store_set_downloaded(b->id, dl, dl ? path : "");
+    b->downloaded = dl;
     if (!b->downloaded) {
         snprintf(g_state.status, sizeof g_state.status, "%s", i18n("dl.in_progress"));
         if (!download_book_file(b)) {
@@ -166,23 +243,52 @@ book_press_action(Book *b)
     launch_reader(b);
 }
 
-/* Delete a book's local file (server metadata is untouched — there is no
- * delete endpoint).  Marks the book not-downloaded so it can be fetched
- * again on the next press. */
-void
-delete_book_file(Book *b)
+/* Enqueue the next bounded slice of undownloaded ids for the
+ * download-all batch, skipping ids that already own a queue entry
+ * (in flight, done, or failed).  The query is offset-free: ids whose
+ * file landed earlier shrink the "downloaded=0" result set, so any
+ * OFFSET cursor would skip books on later slices.  *got reports how
+ * many ids the store slice held so the caller can tell "drained" from
+ * "full slice, more to come".  Returns the number actually enqueued. */
+static int
+batch_enqueue_slice(int *got)
 {
-    char path[MAX_PATH_LEN];
-    book_local_path(b, path, sizeof path);
-    if (unlink(path) == 0)
-        LOG("[bookshelf] delete_book_file removed %s\n", path);
-    else
-        LOG("[bookshelf] delete_book_file unlink failed %s\n", path);
-    b->downloaded = 0;
-    b->local_path[0] = '\0';
-    DownloadItem *d = find_download(b->id);
-    if (d != NULL)
-        d->state = 3;
+    char ids[64][MAX_ID_LEN];
+    *got = store_next_undownloaded(ids, 64);
+    int enq = 0;
+    for (int i = 0; i < *got; i++) {
+        if (find_download(ids[i]) != NULL)
+            continue;
+        Book b;
+        if (!store_get_book(ids[i], &b))
+            continue;
+        if (g_download_count >= MAX_DOWNLOADS) {
+            prune_finished_download();
+            if (g_download_count >= MAX_DOWNLOADS)
+                break;
+        }
+        enqueue_download(&b);
+        enq++;
+    }
+    return enq;
+}
+
+/* Start (or restart) the download-all batch.  The first bounded slice
+ * is queued synchronously so the Downloads tab shows the whole batch
+ * right away; the drain timer tops the queue up as items finish. */
+void
+download_all_start(void)
+{
+    g_dl_batch_active = 1;
+    g_dl_batch_total = store_count_undownloaded();
+    g_dl_batch_done = 0;
+    int got = 0;
+    batch_enqueue_slice(&got);
+    if (!g_download_armed) {
+        g_download_armed = 1;
+        SetWeakTimerEx("bdl", download_tick, NULL, 300);
+    }
+    LOG("[bookshelf] download-all queued=%d\n", g_dl_batch_total);
 }
 
 /* Drain the download queue one item per tick so a "Download all" shows
@@ -201,6 +307,35 @@ download_tick(void *ctx)
         }
     }
     if (target == NULL) {
+        if (g_dl_batch_active) {
+            /* Batch mode: enqueue the next slice of undownloaded ids. */
+            int got = 0, enq = batch_enqueue_slice(&got);
+            if (enq > 0 || got == 64) {
+                if (enq == 0) {
+                    /* Full slice, nothing enqueued: every id already owns
+                     * a queue entry.  Prune one finished entry so the
+                     * queue makes room and the next slice can enqueue,
+                     * instead of re-arming forever on the same slice. */
+                    prune_finished_download();
+                }
+                /* Keep draining until every batch book settles.  The
+                 * last item of a slice finishing must not stop the
+                 * timer — the batch-enqueue branch runs only from this
+                 * tick. */
+                SetWeakTimerEx("bdl", download_tick, NULL, enq > 0 ? 120 : 300);
+                g_download_armed = 1;
+                return;
+            }
+            /* Keep the final tally on screen: zeroing the counters
+             * here made the bar fall back to queue-derived counts,
+             * and the pruned queue only holds the last slice (<=64) —
+             * "93 downloaded" snapped back to "64 downloaded".
+             * download_all_start() resets the counters for the next
+             * batch; a manual enqueue_download() clears them. */
+            g_dl_batch_active = 0;
+            LOG("[bookshelf] download-all batch complete\n");
+        }
+        sync_set_active(0);
         if (g_state.tab == TAB_DOWNLOADS)
             redraw_shelf();
         return;
@@ -209,37 +344,53 @@ download_tick(void *ctx)
     if (g_state.tab == TAB_DOWNLOADS)
         redraw_shelf();
 
-    Book *b = find_lib_book(target->id);
-    int   ok = 0;
-    if (b != NULL)
-        ok = download_book_file(b);
+    Book b;
+    int  ok = 0;
+    if (store_get_book(target->id, &b))
+        ok = download_book_file(&b);
     target->state = ok ? 2 : 3;
+    if (g_dl_batch_active) {
+        /* Successes and failures both settle a batch slot; the bar
+         * counts failures separately so it reaches full width even if
+         * some books fail. */
+        if (ok)
+            g_dl_batch_done++;
+        else
+            g_dl_batch_failed++;
+    }
 
     if (g_state.tab == TAB_DOWNLOADS)
         redraw_shelf();
     else
-        draw_tab_row(); /* refresh the pending-count badge */
+        draw_top_bar(); /* refresh the pending-count badge in top bar */
+    sync_set_active(downloads_pending() > 0);
 
-    /* More queued? keep draining. */
-    for (int i = 0; i < g_download_count; i++) {
-        if (g_downloads[i].state == 0) {
-            g_download_armed = 1;
-            SetWeakTimerEx("bdl", download_tick, NULL, 120);
-            break;
-        }
+    /* More work queued?  Also re-arm when the batch is still topping
+     * up: the last item of a slice finishing must not stop the drain
+     * timer — the batch-enqueue branch runs only from this tick. */
+    if (g_dl_batch_active || downloads_pending() > 0) {
+        g_download_armed = 1;
+        SetWeakTimerEx("bdl", download_tick, NULL, 120);
     }
 }
 
-/* Queue every member of a series (by series_id). */
+/* Queue every member of a series (by series_id), in bounded slices. */
 void
 download_series(const char *series_id)
 {
-    int n = 0;
-    for (int i = 0; i < g_lib_count; i++) {
-        if (strcmp(g_lib[i].series_id, series_id) == 0) {
-            enqueue_download(&g_lib[i]);
-            n++;
+    char ids[64][MAX_ID_LEN];
+    int  n = 0, off = 0, got;
+    while ((got = store_series_ids(series_id, ids, 64, off)) > 0) {
+        for (int i = 0; i < got; i++) {
+            Book b;
+            if (store_get_book(ids[i], &b)) {
+                enqueue_download(&b);
+                n++;
+            }
         }
+        off += got;
+        if (got < 64)
+            break;
     }
     LOG("[bookshelf] download_series %s queued=%d\n", series_id, n);
 }
@@ -248,12 +399,16 @@ download_series(const char *series_id)
 void
 delete_series(const char *series_id)
 {
-    int n = 0;
-    for (int i = 0; i < g_lib_count; i++) {
-        if (strcmp(g_lib[i].series_id, series_id) == 0) {
-            delete_book_file(&g_lib[i]);
+    char ids[64][MAX_ID_LEN];
+    int  n = 0, off = 0, got;
+    while ((got = store_series_ids(series_id, ids, 64, off)) > 0) {
+        for (int i = 0; i < got; i++) {
+            store_delete_book_file(ids[i]);
             n++;
         }
+        off += got;
+        if (got < 64)
+            break;
     }
     LOG("[bookshelf] delete_series %s removed=%d\n", series_id, n);
 }
@@ -295,19 +450,18 @@ draw_context_menu(void)
     DrawRect(px, py, pw, ph, BLACK);
     DrawRect(px + 1, py + 1, pw - 2, ph - 2, BLACK);
 
-    /* Title: series name or book title. */
+    /* Title: series name or book title, resolved from the store. */
+    static char title_buf[MAX_TITLE_LEN];
     const char *title;
     if (g_state.ctx_is_series) {
-        /* ctx_series_id holds a series id; recover the name from any member. */
-        title = "Series";
-        for (int i = 0; i < g_lib_count; i++) {
-            if (strcmp(g_lib[i].series_id, g_state.ctx_series_id) == 0) {
-                title = g_lib[i].series;
-                break;
-            }
-        }
+        store_series_name(g_state.ctx_series_id, title_buf, sizeof title_buf);
+        title = title_buf[0] != '\0' ? title_buf : "Series";
     } else {
-        title = g_state.books[g_state.ctx_book_idx].title;
+        Book tmp;
+        title_buf[0] = '\0';
+        if (store_get_book(g_state.ctx_book_id, &tmp))
+            snprintf(title_buf, sizeof title_buf, "%s", tmp.title);
+        title = title_buf;
     }
     ifont *tf = OpenFont(DEFAULTFONTB, 28, 0);
     if (tf != NULL) {
@@ -354,21 +508,21 @@ close_context(void)
 void
 open_context_for_tile(int vi)
 {
-    if (vi < 0 || vi >= g_view_count)
+    TileRow tr;
+    if (!view_fetch_row(vi, &tr))
         return;
-    const ViewTile *vt = &g_view[vi];
     g_state.ctx_open = 1;
-    g_state.ctx_is_series = vt->is_series;
-    if (vt->is_series) {
-        snprintf(g_state.ctx_series_id, sizeof g_state.ctx_series_id, "%s", vt->series_id);
-        g_state.ctx_book_idx = -1;
+    g_state.ctx_is_series = tr.is_series;
+    if (tr.is_series) {
+        snprintf(g_state.ctx_series_id, sizeof g_state.ctx_series_id, "%s", tr.series_id);
+        g_state.ctx_book_id[0] = '\0';
     } else {
-        g_state.ctx_book_idx = vt->book_idx;
+        snprintf(g_state.ctx_book_id, sizeof g_state.ctx_book_id, "%s", tr.book.id);
         g_state.ctx_series_id[0] = '\0';
     }
     draw_context_menu();
     FullUpdate();
-    LOG("[bookshelf] context menu open series=%d vi=%d\n", vt->is_series, vi);
+    LOG("[bookshelf] context menu open series=%d vi=%d\n", tr.is_series, vi);
 }
 
 /* Long-press timer fired with the finger still down: open the menu. */
@@ -398,7 +552,6 @@ on_tap_context(int x, int y)
     }
     int  item = (y - (py + CTX_TITLE_H)) / CTX_ITEM_H;
     int  is_series = g_state.ctx_is_series;
-    int  book_idx = g_state.ctx_book_idx;
     char series_id[MAX_ID_LEN];
     snprintf(series_id, sizeof series_id, "%s", g_state.ctx_series_id);
     g_state.ctx_open = 0;
@@ -409,16 +562,13 @@ on_tap_context(int x, int y)
         else if (item == 1)
             delete_series(series_id);
     } else {
-        Book *b = (book_idx >= 0 && book_idx < g_state.count) ? &g_state.books[book_idx] : NULL;
-        if (b != NULL) {
-            Book *lib = find_lib_book(b->id);
-            Book *target = lib ? lib : b;
+        Book b;
+        if (store_get_book(g_state.ctx_book_id, &b)) {
             if (item == 0)
-                enqueue_download(target);
+                enqueue_download(&b);
             else if (item == 1)
-                delete_book_file(target);
+                store_delete_book_file(b.id);
         }
     }
     redraw_shelf();
 }
-
