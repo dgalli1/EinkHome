@@ -43,6 +43,8 @@ static const char *const SCHEMA_SQL =
     " pos INTEGER PRIMARY KEY,"
     " kind INTEGER, book_id TEXT, series_id TEXT,"
     " series_name TEXT, series_count INTEGER);"
+    "CREATE TABLE IF NOT EXISTS search_history("
+    " term TEXT PRIMARY KEY, ts INTEGER);"
     "CREATE INDEX IF NOT EXISTS idx_books_title"
     " ON books(title COLLATE NOCASE, id);"
     "CREATE INDEX IF NOT EXISTS idx_books_author"
@@ -58,7 +60,7 @@ static const char *const SCHEMA_SQL =
 static void
 store_path(char *out, size_t cap)
 {
-    char dir[MAX_PATH_LEN * 2];
+    char dir[MAX_PATH_LEN];
     dirname_of(g_config_path, dir, sizeof dir);
     snprintf(out, cap, "%s/%s", dir, LIB_DB_FILENAME);
 }
@@ -236,7 +238,7 @@ store_open(void)
 
     /* One-time legacy JSON import. */
     char legacy[MAX_PATH_LEN * 2];
-    char dir[MAX_PATH_LEN * 2];
+    char dir[MAX_PATH_LEN];
     dirname_of(g_config_path, dir, sizeof dir);
     snprintf(legacy, sizeof legacy, "%s/%s", dir, LIB_LEGACY_FILENAME);
     FILE *f = fopen(legacy, "r");
@@ -631,6 +633,86 @@ store_series_ids(const char *series_id, char ids[][MAX_ID_LEN], int cap, int off
     return n;
 }
 
+/* ── search history ------------------------------------------------------- */
+
+/* Record a committed search term: dedupe on the term itself (re-adding a
+ * known term refreshes its timestamp, moving it to the front of the
+ * list), then trim the table to the newest SEARCH_HISTORY_MAX rows.
+ * Empty terms are ignored. */
+void
+store_search_add(const char *term)
+{
+    if (g_db == NULL || term == NULL || term[0] == '\0')
+        return;
+    sqlite3_stmt *st = NULL;
+    if (sqlite3_prepare_v2(g_db,
+                           "INSERT OR REPLACE INTO search_history(term, ts) VALUES(?1, ?2)",
+                           -1,
+                           &st,
+                           NULL) == SQLITE_OK) {
+        bind_text_trunc(st, 1, term);
+        sqlite3_bind_int64(st, 2, (sqlite3_int64)time(NULL));
+        sqlite3_step(st);
+        sqlite3_finalize(st);
+    }
+    /* Keep only the newest SEARCH_HISTORY_MAX rows (newest first by
+     * timestamp, ties broken by insert order). */
+    sqlite3_stmt *trim = NULL;
+    if (sqlite3_prepare_v2(g_db,
+                           "DELETE FROM search_history WHERE rowid NOT IN"
+                           " (SELECT rowid FROM search_history"
+                           "  ORDER BY ts DESC, rowid DESC LIMIT ?1)",
+                           -1,
+                           &trim,
+                           NULL) == SQLITE_OK) {
+        sqlite3_bind_int(trim, 1, SEARCH_HISTORY_MAX);
+        sqlite3_step(trim);
+        sqlite3_finalize(trim);
+    }
+}
+
+int
+store_search_count(void)
+{
+    if (g_db == NULL)
+        return 0;
+    sqlite3_stmt *st = NULL;
+    if (sqlite3_prepare_v2(g_db, "SELECT COUNT(*) FROM search_history", -1, &st, NULL) != SQLITE_OK)
+        return 0;
+    int n = 0;
+    if (sqlite3_step(st) == SQLITE_ROW)
+        n = sqlite3_column_int(st, 0);
+    sqlite3_finalize(st);
+    return n;
+}
+
+/* Slice of recent search terms, newest first.  Returns the number of
+ * terms written (< cap = no more history). */
+int
+store_search_list(char terms[][MAX_QUERY_LEN], int cap, int offset)
+{
+    if (g_db == NULL || cap <= 0)
+        return 0;
+    sqlite3_stmt *st = NULL;
+    if (sqlite3_prepare_v2(g_db,
+                           "SELECT term FROM search_history"
+                           " ORDER BY ts DESC, rowid DESC LIMIT ?1 OFFSET ?2",
+                           -1,
+                           &st,
+                           NULL) != SQLITE_OK)
+        return 0;
+    sqlite3_bind_int(st, 1, cap);
+    sqlite3_bind_int(st, 2, offset);
+    int n = 0;
+    while (n < cap && sqlite3_step(st) == SQLITE_ROW) {
+        const char *t = (const char *)sqlite3_column_text(st, 0);
+        snprintf(terms[n], MAX_QUERY_LEN, "%s", t ? t : "");
+        n++;
+    }
+    sqlite3_finalize(st);
+    return n;
+}
+
 /* ── sync cursor + batch transaction -------------------------------------- */
 
 long long
@@ -940,17 +1022,19 @@ view_total(void)
     return n;
 }
 
-/* Fill one TileRow from a joined view+books row. */
+/* Fill one TileRow from a joined view+books row.  BOOK_COLS_Q is 11
+ * columns (0..10), then v.kind=11, v.book_id=12, v.series_id=13,
+ * v.series_name=14, v.series_count=15. */
 static void
 fill_row_from_stmt(sqlite3_stmt *st, TileRow *tr)
 {
     memset(tr, 0, sizeof *tr);
-    fill_book_from_stmt(st, &tr->book); /* book cols first: 0..11 */
-    tr->is_series = sqlite3_column_int(st, 12);
-    snprintf(tr->series_id, sizeof tr->series_id, "%s", (const char *)sqlite3_column_text(st, 14));
+    fill_book_from_stmt(st, &tr->book); /* book cols first: 0..10 */
+    tr->is_series = sqlite3_column_int(st, 11);
+    snprintf(tr->series_id, sizeof tr->series_id, "%s", (const char *)sqlite3_column_text(st, 13));
     snprintf(
-        tr->series_name, sizeof tr->series_name, "%s", (const char *)sqlite3_column_text(st, 15));
-    tr->series_count = sqlite3_column_int(st, 16);
+        tr->series_name, sizeof tr->series_name, "%s", (const char *)sqlite3_column_text(st, 14));
+    tr->series_count = sqlite3_column_int(st, 15);
 }
 
 /* Read one page of the current view into rows[].  Returns the number of

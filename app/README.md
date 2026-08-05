@@ -332,9 +332,7 @@ the firmware with day-of-week + 24h time + down-arrow + lightbulb + battery):
 +--------------------------------------------------+ <- 0
 |  Wed 13:01                                       |   system top status bar
 +--------------------------------------------------+ <- ~28 px
-|  [⌂]                                  [⬇] [☰] |   TOP_BAR_H (128 px)
-+--------------------------------------------------+
-|  [Q] search...                                  |   SEARCH_ROW_H (88 px)
+|  [⌂]                    [Q] [⬇] [☰]            |   TOP_BAR_H (128 px)
 +--------------------------------------------------+
 |                                                  |
 |   [book]    [book]    [book]                     |
@@ -350,26 +348,32 @@ the firmware with day-of-week + 24h time + down-arrow + lightbulb + battery):
 The top bar style matches the firmware's standard `sudoku.app`
 header:
 
-* **Left** — a 96×96 house outline (home button).  Tapping returns to
-  the launcher (`CloseApp()`); while the Downloads view or a drilled-in
-  series is showing it acts as "back" instead.
-* **Center** — a title only while a drilled-in series (series name) or
-  the Downloads view ("Downloads") is showing; the plain library shelf
-  carries no title.
+* **Left** — a 96×96 house outline (home button).  While the Downloads
+  view, the Search page, or a drilled-in series is showing it acts as
+  "back"; on the plain library shelf it is a no-op (the app is the
+  home-screen replacement, so closing it there would drop the user to
+  the stock UI and, behind the boot wrapper, never come back).
+* **Center** — a title while a drilled-in series (series name), the
+  Downloads view ("Downloads"), the Search page ("Search"), or an
+  active search query (the query text, truncated) is showing; the plain
+  library shelf carries no title.
 * **Right** — a 96×96 solid black square with three white hamburger
   lines.  Tapping opens the in-app "More" menu (sort, view, sync).
 * **Left of the menu button** — a 96×96 downloads icon (down arrow
   into a tray, Firefox-style).  Tapping it opens the Downloads view
   (queued/finished downloads); it carries a pending-count badge while
   a download queue drains.
+* **Left of the downloads icon** — a 96×96 magnifying-glass icon.
+  Tapping it opens the Search page (input row + previous search
+  terms); the old full-width search row was dropped to reclaim the
+  vertical space for the shelf.
 
 On the Downloads view the hamburger is gone — the sub-navigation keeps
-only back (left), the Downloads title (center), and the right slot,
-which now holds the 96×96 sync button: a solid black square with two
-white arc arrows that rotate a few degrees per second while a sync or
-download is in flight.  Tapping it runs a library sync without leaving
-the view.
-
+only back (left), the Downloads title (center), and the right corner,
+which holds the 96×96 sync button (solid black square with two white
+arc arrows that rotate a few degrees per second while a sync or
+download is in flight).  The search icon sits directly left of it.
+Tapping the sync button runs a library sync without leaving the view.
 The "More" menu is a right-anchored 75%-width panel with the
 following items, in order: **Sync**, **Title A–Z**, **By author**,
 **By series**, **Recent**, **Grid**, **List**, **Download all**,
@@ -442,9 +446,16 @@ a NULL fb and does nothing.  `SetOrientation(0)` in `EVT_INIT` runs
 after the shim has attached the main framebuffer and produces the same
 end-state orientation (portrait) without the early-NULL-fb problem.
 
-Below the top bar is a **search** row.  Tapping it opens the
-firmware's native on-screen keyboard; pressing Enter (or the keyboard's
-OK button) filters the visible books by title or author.
+Search lives on its own sub-page, opened from the magnifying-glass
+icon in the top bar.  The page shows a search input row at the top;
+tapping it opens the firmware's native on-screen keyboard, and
+pressing Enter (or the keyboard's OK button) filters the visible books
+by title or author and returns to the shelf.  Below the input row the
+previously committed search terms are listed (newest first, capped at
+20, persisted in the library database); tapping a term re-runs that
+search immediately.  While a search is active the query is shown as
+the top-bar title, and the search page's input row is prefilled with
+it so the filter can be edited or cleared.
 
 The main area is a 3×2 grid of thumbnails.  Each tile shows the book
 cover (cached PNG while the real cover downloads, hatch placeholder
@@ -456,12 +467,17 @@ otherwise), the book title, the author, and a corner badge:
 The bottom bar is the pager: `n / total` and `<` / `>` buttons when
 there is more than one page of books.
 
-Tapping a thumbnail resolves the configured `open-with` app for the
-file's extension, fetches the file from the API (if not already on
-device), and launches the chosen app via `NewTaskEx()` with the
-downloaded path as the first argument.  In the API server config
-(`api/config/server.json`) the `open_with` table maps extensions to
-ordered candidate apps, e.g. `epub: [eink-reader, bookshelf]`.
+Tapping a thumbnail fetches the file from the API (if not already on
+device), then opens it through `OpenBook()` — the firmware's canonical
+book-open path, which routes the book to `reader_controller` and the
+default reader for the extension.  An explicitly selected third-party
+reader (KOReader) is still launched via `NewTaskEx()` with the book
+path as its argument.  (The API server's `open_with` table in
+`api/config/server.json` still maps extensions to candidate apps, but
+the device validates the resolved app exists and falls back to
+`OpenBook()` — the stock firmware has no `pdfviewer.app`, so the old
+`NewTaskEx("/ebrmain/bin/pdfviewer.app", …)` failed silently on PDFs.)
+
 
 **Applications** opens the in-app launcher: a scrollable column of the
 firmware's app groups (read from `apps_db.json` / `view.json`) plus any
@@ -479,14 +495,16 @@ English, German, French, Italian.  Add a new language by extending the
 ### Downloading and opening books
 
 1. User taps a tile.
-2. The app POSTs `{id, ext}` to `/api/v1/open-with`.  The server
-   returns `{app, url, ext}` for the first available reader in
-   `open_with[<ext>]`.
-3. The app `QuickDownload`s the file from the resolved URL (with the
-   bearer token appended as `?access_token=`) and saves it to
+2. The app `QuickDownload`s the file from the API (with the bearer
+   token appended as `?access_token=`) and saves it to
    `/mnt/ext1/system/bin/<id>.<ext>`.
-4. The app calls `NewTaskEx(app.app, args=[path], ...)` to launch the
-   reader.
+3. Standard reader (or Auto): the app calls
+   `OpenBook(path, NULL, 1)` — the firmware's canonical book-open
+   path; `reader_controller` picks the right reader for the extension
+   and brings it to the foreground with the book registered.
+4. Explicit third-party reader (KOReader): the app calls
+   `NewTaskEx(app, args=[app, path], ...)` with the stock launch
+   flags (0x25).
 
 ### Offline persistence (library store + cover cache)
 

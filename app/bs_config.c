@@ -176,7 +176,7 @@ char g_config_path[600];
 void
 resolve_config_path(const char *argv0)
 {
-    char primary[512];
+    char primary[600];
     primary[0] = '\0';
     if (argv0 != NULL && strchr(argv0, '/') != NULL) {
         char dir[512];

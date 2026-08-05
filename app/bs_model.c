@@ -65,7 +65,7 @@ int g_dl_batch_failed = 0;
 /* Directory downloads are written to.  Resolved once at startup by
  * resolve_downloads_dir(): LOCAL_DOWNLOADS when the guest can write it
  * (real device), else the /tmp fallback (emulator). */
-char g_downloads_dir[MAX_PATH_LEN];
+char g_downloads_dir[128];
 
 void
 resolve_downloads_dir(void)
@@ -79,12 +79,12 @@ resolve_downloads_dir(void)
 
 /* Directory for cached cover PNGs.  Same parent as the config file
  * (writable app dir on device, /tmp in the emulator). */
-char g_covers_dir[MAX_PATH_LEN];
+char g_covers_dir[COVERS_DIR_CAP];
 
 void
 resolve_covers_dir(void)
 {
-    char dir[600];
+    char dir[160];
     dirname_of(g_config_path, dir, sizeof dir);
     snprintf(g_covers_dir, sizeof g_covers_dir, "%s/" COVERS_SUBDIR, dir);
     /* World-writable: in the emulator the guest is a mapped non-root UID
@@ -195,7 +195,7 @@ parse_book_obj(const char *obj, Book *b)
     /* authors is a JSON array; take first.  If the server emits a
      * plain string instead of an array, fall back to copying it
      * directly. */
-    char auth[160];
+    char auth[sizeof b->author];
     if (json_find_key(obj, "authors", auth, sizeof auth)) {
         if (json_next_string(auth, b->author, sizeof b->author) == NULL && auth[0] != '\0' &&
             auth[0] != '[')

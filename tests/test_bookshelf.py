@@ -442,19 +442,22 @@ def test_bookshelf_launches_with_books(fresh_bookshelf):
 # ── top bar ────────────────────────────────────────────────────────────
 
 
-def test_home_button_closes_app(fresh_bookshelf):
-    """Tap home button, verify CloseApp triggers a respawn cycle.
+def test_home_button_noop_on_shelf(fresh_bookshelf):
+    """Tap the home button on the plain shelf, verify the app stays up.
 
-    Bookshelf is the launcher replacement: monitor.app respawns it
-    immediately after CloseApp().  The reliable proof is a new
-    log_open header (invocation count increments).
+    Bookshelf is the home-screen replacement: pressing home while
+    already on the library shelf must be a no-op.  Closing the app
+    there (the old CloseApp) drops the user into the stock UI and,
+    behind the boot wrapper, the app is never respawned — perceived
+    as a crash.  Proof: no new log_open header (invocation count
+    unchanged) and no respawn.
     """
     bs = fresh_bookshelf
     before = bs.invocation_count()
     bs.tap_home()
-    bs.wait_for_respawn(before, timeout=15.0)
-    # After respawn the new invocation must have completed EVT_INIT.
-    bs.assert_log_contains("EVT_INIT")
+    time.sleep(1.5)
+    assert bs.invocation_count() == before, "home on home must not respawn the app"
+    bs.assert_no_crash()
 
 
 def test_menu_button_opens_more_overlay(fresh_bookshelf):
@@ -685,10 +688,12 @@ def test_launcher_tap_app_launches_task(fresh_bookshelf):
 
 
 def test_search_tap_opens_keyboard(fresh_bookshelf):
-    """Tap search box, verify framebuffer changes (keyboard appears)."""
+    """Tap the search icon, then the input row; verify the keyboard
+    appears."""
     bs = fresh_bookshelf
     bs.tap_search_and_verify()
-
+    time.sleep(0.5)
+    bs.tap_search_input_and_verify()
 
 
 def test_launcher_drag_scrolls_body(fresh_bookshelf):
@@ -700,8 +705,10 @@ def test_launcher_drag_scrolls_body(fresh_bookshelf):
     bs.scroll_launcher_down()
     bs.wait_hash_change(before)
 
+
 def test_search_commit_filters_grid(fresh_bookshelf):
-    """Typing a query and committing it must actually filter the shelf.
+    """Typing a query on the Search page and committing it must actually
+    filter the shelf.
 
     Regression for the "search never searches" bug: OpenKeyboard() wrote
     the live keystrokes straight into g_state.query, and on commit the
@@ -712,13 +719,34 @@ def test_search_commit_filters_grid(fresh_bookshelf):
     committed text now survives into the filter pass.
     """
     bs = fresh_bookshelf
-    # kb = framebuffer with the on-screen keyboard up; the committed,
-    # filtered shelf must differ from it (keyboard gone + fewer tiles).
-    kb = bs.tap_search_and_verify()
+    # Open the Search page, then the input row's keyboard.
+    bs.tap_search_and_verify()
+    time.sleep(0.5)
+    kb = bs.tap_search_input_and_verify()
     bs.type_text("alpha", commit=True)
     bs.wait_hash_change(kb)
     # The committed query reached the filter (pre-fix this was empty).
     bs.assert_log_contains("query=`alpha`")
+
+
+def test_search_history_persists_and_reruns(fresh_bookshelf):
+    """A committed search is recorded and listed on the Search page;
+    tapping the term re-runs that search without the keyboard."""
+    bs = fresh_bookshelf
+    # Run a search first so history has an entry.
+    bs.tap_search_and_verify()
+    time.sleep(0.5)
+    bs.tap_search_input_and_verify()
+    bs.type_text("alpha", commit=True)
+    time.sleep(0.5)
+    # The Search page now lists "alpha" as a history term.
+    before = bs.frame_hash()
+    bs.tap_search()
+    bs.wait_hash_change(before)
+    time.sleep(0.5)
+    bs.tap_history_term(0)
+    time.sleep(0.5)
+    bs.assert_log_contains("search history tap: query=`alpha`")
 
 
 # ── book grid ──────────────────────────────────────────────────────────
@@ -730,8 +758,8 @@ def test_book_tap_triggers_open_with(fresh_bookshelf):
     _clear_downloads()
     bs.tap_book(0)
     time.sleep(3.0)
-    # A book press resolves the reader and launches it.
-    bs.assert_log_contains("launching reader app=")
+    # A book press resolves the reader and launches it (OpenBook path).
+    bs.assert_log_contains("launching reader")
     _kill_guest_tasks()
     _clear_downloads()
 
@@ -746,7 +774,7 @@ def test_book_tap_launches_reader(fresh_bookshelf):
     # cannot open, so the reader may crash/return immediately.
     # Verify the bookshelf side did its job: download + launch.
     bs.assert_log_contains("download_book_file OK")
-    bs.assert_log_contains("launching reader app=")
+    bs.assert_log_contains("launching reader")
     _kill_guest_tasks()
     _clear_downloads()
 
@@ -780,18 +808,20 @@ def test_pager_prev_returns_page(fresh_bookshelf):
 
 # ── back key (no overlay) ──────────────────────────────────────────────
 
-def test_back_key_closes_app(fresh_bookshelf):
-    """Press Back with no overlay, verify CloseApp triggers a respawn cycle.
+def test_back_key_noop_on_shelf(fresh_bookshelf):
+    """Press Back on the plain shelf, verify the app stays up.
 
-    Bookshelf is the launcher replacement: monitor.app respawns it
-    immediately after CloseApp().  The reliable proof is a new
-    log_open header (invocation count increments).
+    Same contract as the home button: back from the home shelf must
+    not CloseApp() (which, behind the boot wrapper, is never
+    respawned and reads as a crash).  Proof: invocation count
+    unchanged and no respawn.
     """
     bs = fresh_bookshelf
     before = bs.invocation_count()
     bs.send_back_key()
-    bs.wait_for_respawn(before, timeout=15.0)
-    bs.assert_log_contains("EVT_INIT")
+    time.sleep(1.5)
+    assert bs.invocation_count() == before, "back on home must not respawn the app"
+    bs.assert_no_crash()
 
 
 # ── crash safety ───────────────────────────────────────────────────────
@@ -1078,7 +1108,7 @@ def test_book_press_downloads_and_launches_reader(fresh_bookshelf):
     bs.tap_book(0)
     time.sleep(3.0)
     bs.assert_log_contains("download_book_file OK")
-    bs.assert_log_contains("launching reader app=")
+    bs.assert_log_contains("launching reader")
     assert len(_downloaded_files()) >= 1, "book file was not downloaded to device"
     _kill_guest_tasks()  # kill the launched reader
     _clear_downloads()

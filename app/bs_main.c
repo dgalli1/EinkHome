@@ -151,7 +151,6 @@ on_event(int type, int par1, int par2)
          * fetched books (and arms the per-tile cover fetcher). */
         do_sync();
         draw_top_bar();
-        draw_search_row();
         draw_grid();
         draw_pager();
         FullUpdate();
@@ -178,9 +177,10 @@ on_event(int type, int par1, int par2)
             return 1;
         }
         draw_top_bar();
-        draw_search_row();
         if (g_state.tab == TAB_DOWNLOADS)
             draw_downloads_tab();
+        else if (g_state.tab == TAB_SEARCH)
+            draw_search_tab();
         else
             draw_grid();
         draw_pager();
@@ -208,7 +208,7 @@ on_event(int type, int par1, int par2)
         g_lp_armed = 0;
         g_lp_vi = -1;
         if (g_state.tab == TAB_LIBRARY && !g_state.settings_open && !g_state.menu_open &&
-            !g_state.more_open && !g_state.ctx_open && !g_state.search_open) {
+            !g_state.more_open && !g_state.ctx_open) {
             int vi = hit_thumbnail(x, y);
             if (vi >= 0) {
                 g_lp_armed = 1;
@@ -249,13 +249,12 @@ on_event(int type, int par1, int par2)
 
     if (type == EVT_POINTERUP) {
         int x = par1, y = par2;
-        LOG("[bookshelf] EVT_POINTERUP x=%d y=%d menu=%d more=%d search=%d\n",
+        LOG("[bookshelf] EVT_POINTERUP x=%d y=%d menu=%d more=%d tab=%d\n",
             x,
             y,
             g_state.menu_open,
             g_state.more_open,
-            g_state.search_open);
-        /* Finger lifted — a pending long-press becomes a normal tap. */
+            (int)g_state.tab);
         g_lp_armed = 0;
         g_lp_vi = -1;
         /* Drop the release that opened the context menu (see longpress_tick). */
@@ -315,27 +314,20 @@ on_event(int type, int par1, int par2)
             return 1;
         }
 
-        /* Search input */
-        if (hit_search(x, y) == 1) {
-            g_state.search_open = 1;
-            snprintf(g_search_kb_buf, sizeof g_search_kb_buf, "%s", g_state.query);
-            OpenKeyboard(
-                "Search", g_search_kb_buf, sizeof g_search_kb_buf - 1, 0, keyboard_handler);
-            return 1;
-        }
-
-        /* Top-bar buttons — shared by both tabs (home/menu must work even
-         * while the Downloads tab is showing).  hit_top_bar returns:
-         *   1 = home  (left; back on the Downloads view / drilled series)
+        /* Top-bar buttons — shared by every tab.  hit_top_bar returns:
+         *   1 = home  (left; back on the Downloads/Search views or a
+         *              drilled series, no-op on the library shelf)
          *   3 = menu  (right, Library tab; opens the More overlay)
          *   2 = sync  (right, Downloads tab only; runs a library sync)
          *   4 = downloads icon (left of the menu button, Library tab)
+         *   5 = search icon (opens the Search sub-page)
          */
         int which = hit_top_bar(x, y);
         if (which == 1) {
-            if (g_state.tab == TAB_DOWNLOADS) {
+            if (g_state.tab == TAB_DOWNLOADS || g_state.tab == TAB_SEARCH) {
                 g_state.tab = TAB_LIBRARY;
                 g_state.page = 0;
+                g_state.search_kb = 0;
                 redraw_shelf();
                 return 1;
             }
@@ -343,8 +335,19 @@ on_event(int type, int par1, int par2)
                 drill_back();
                 return 1;
             }
-            /* Home — close the app and return to the launcher. */
-            CloseApp();
+            /* Home while already on the library shelf is a no-op, not a
+             * CloseApp().  This app is the home-screen replacement, so
+             * closing it here drops the user into the stock UI and —
+             * behind the boot wrapper, which guards respawn by PID file —
+             * the app never comes back; that reads as a crash. */
+            return 1;
+        }
+        if (which == 5) {
+            /* Open the Search sub-page from any tab. */
+            g_state.tab = TAB_SEARCH;
+            g_state.page = 0;
+            g_state.search_kb = 0;
+            redraw_shelf();
             return 1;
         }
         if (which == 3) {
@@ -390,10 +393,37 @@ on_event(int type, int par1, int par2)
         }
 
         /* Below the pager the body is tab-specific: the Downloads tab has
-         * no tappable rows, so swallow the tap; the Library tab falls
-         * through to the book-grid hit-test below. */
+         * no tappable rows, so swallow the tap.  The Search page owns its
+         * whole body: the input row opens the keyboard, a history term
+         * re-runs that search, anything else is swallowed.  The Library
+         * tab falls through to the book-grid hit-test below. */
         if (g_state.tab == TAB_DOWNLOADS)
             return 1;
+        if (g_state.tab == TAB_SEARCH) {
+            if (hit_search_input(x, y) == 1) {
+                g_state.search_kb = 1;
+                snprintf(g_search_kb_buf, sizeof g_search_kb_buf, "%s", g_state.query);
+                OpenKeyboard(
+                    "Search", g_search_kb_buf, sizeof g_search_kb_buf - 1, 0, keyboard_handler);
+                return 1;
+            }
+            int hi = hit_history(x, y);
+            if (hi >= 0) {
+                char terms[SEARCH_HISTORY_MAX][MAX_QUERY_LEN];
+                int  got = store_search_list(terms, SEARCH_HISTORY_MAX, 0);
+                if (hi < got) {
+                    snprintf(g_state.query, sizeof g_state.query, "%s", terms[hi]);
+                    store_search_add(g_state.query);
+                    LOG("[bookshelf] search history tap: query=`%s`\n", g_state.query);
+                    g_state.search_kb = 0;
+                    g_state.tab = TAB_LIBRARY;
+                    g_state.page = 0;
+                    view_rebuild();
+                    redraw_shelf();
+                }
+            }
+            return 1;
+        }
 
         /* Book tap */
         int idx = hit_thumbnail(x, y);
@@ -401,9 +431,9 @@ on_event(int type, int par1, int par2)
             on_tap_thumbnail(idx);
             draw_grid();
             PartialUpdate(0,
-                          g_state.panel_h + TOP_BAR_H + SEARCH_ROW_H,
+                          g_state.panel_h + TOP_BAR_H,
                           ScreenWidth(),
-                          ScreenHeight() - g_state.panel_h - TOP_BAR_H - SEARCH_ROW_H);
+                          ScreenHeight() - g_state.panel_h - TOP_BAR_H);
             return 1;
         }
         return 0;
@@ -433,17 +463,22 @@ on_event(int type, int par1, int par2)
                 redraw_shelf();
                 return 1;
             }
-            if (g_state.search_open) {
-                g_state.search_open = 0;
-                draw_search_row();
-                PartialUpdate(0, TOP_BAR_H, ScreenWidth(), SEARCH_ROW_H);
+            if (g_state.tab == TAB_SEARCH) {
+                /* Back from the Search page returns to the library,
+                 * keeping the active query filter in place. */
+                g_state.tab = TAB_LIBRARY;
+                g_state.page = 0;
+                g_state.search_kb = 0;
+                redraw_shelf();
                 return 1;
             }
             if (g_drilled_series[0] != '\0') {
                 drill_back();
                 return 1;
             }
-            CloseApp();
+            /* Back on the plain shelf: no-op, same reasoning as the home
+             * button above — closing the home replacement reads as a
+             * crash on the live device. */
             return 1;
         }
         return 0;
@@ -460,12 +495,20 @@ void
 keyboard_handler(char *buffer)
 {
     /* buffer aliases g_search_kb_buf (never g_state.query), so this copy
-     * is safe and the committed text survives into the filter pass. */
-    snprintf(g_state.query, sizeof g_state.query, "%s", buffer ? buffer : "");
-    LOG("[bookshelf] search commit: query=`%s`\n", g_state.query);
-    g_state.search_open = 0;
+     * is safe and the committed text survives into the filter pass.
+     * Only a real edit counts as a new search: a dismissed keyboard
+     * delivers the unchanged buffer, which must not pollute history. */
+    const char *t = buffer ? buffer : "";
+    if (strcmp(t, g_state.query) != 0 || t[0] == '\0') {
+        snprintf(g_state.query, sizeof g_state.query, "%s", t);
+        if (g_state.query[0] != '\0')
+            store_search_add(g_state.query);
+        LOG("[bookshelf] search commit: query=`%s`\n", g_state.query);
+    }
+    g_state.search_kb = 0;
+    g_state.tab = TAB_LIBRARY;
+    g_state.page = 0;
     view_rebuild();
-    /* redraw grid + search */
     /* The on-screen keyboard draws full-screen and wipes the top status
      * strip; re-stamp it before redraw_shelf() flushes so the panel
      * survives the commit redraw (redraw_shelf clears only from panel_h). */

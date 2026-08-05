@@ -236,7 +236,7 @@ lc_resolve(const char *p, const char *cur_dim, char *out, size_t cap)
             p2 = js_skip_ws(p2);
             if (*p2 == '}' || *p2 != '"')
                 break;
-            const char *ks = ++p2;
+            ++p2;
             while (*p2 && *p2 != '"') {
                 if (*p2 == '\\')
                     p2++;
@@ -837,7 +837,12 @@ launch_app(const LauncherItem *it)
         args[ai++] = (char *)it->params[i];
     args[ai] = NULL;
     LOG("[bookshelf] launching app path=%s base=%s params=%d\n", it->path, base, it->nparams);
-    NewTaskEx(it->path, ai ? args : NULL, base, it->text, NULL, 1u << 30, 0);
+    /* Flags 0x25: the same value the stock bookshelf passes to
+     * NewTaskEx() for app launches (TASK_HIDDEN | TASK_NOUPDATEONFOCUS |
+     * TASK_SINGLEINSTANCE | TASK_OUTOFSTACK).  The previous 1u<<30 bit
+     * is not a defined TASK_* flag and made monitor.app treat the task
+     * registration oddly on the live device. */
+    NewTaskEx(it->path, ai ? args : NULL, base, it->text, NULL, 0x25, 0);
 }
 
 void
@@ -897,7 +902,6 @@ drill_back(void)
     LOG("[bookshelf] drilled back to top level (view=%d)\n", g_view_total);
     FillArea(0, g_state.panel_h, ScreenWidth(), ScreenHeight() - g_state.panel_h, WHITE);
     draw_top_bar();
-    draw_search_row();
     draw_grid();
     draw_pager();
     FullUpdate();
@@ -922,7 +926,6 @@ on_tap_thumbnail(int vi)
             g_view_total);
         FillArea(0, g_state.panel_h, ScreenWidth(), ScreenHeight() - g_state.panel_h, WHITE);
         draw_top_bar();
-        draw_search_row();
         draw_grid();
         draw_pager();
         FullUpdate();

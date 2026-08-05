@@ -89,18 +89,25 @@ extern void iv_update_panel(int readingModeEnable);
 
 /* Layout constants — tuned for the 1072x1448 633 Era panel (300 DPI).
  * All sizes are generous for comfortable e-ink touch targets. */
-#define TOP_BAR_H    128
+#define TOP_BAR_H 128
+/* Search input row height — used only on the Search sub-page; the main
+ * shelf no longer carries a search row (the magnifier icon lives in the
+ * top bar). */
 #define SEARCH_ROW_H 88
 #define TAB_ROW_H    0 /* tab row removed; downloads via top-bar icon */
 #define PAGER_H      96
-#define THUMB_BORDER 4
-#define COLS         3
-#define ROWS         2
-#define PAGESIZE     (COLS * ROWS)
-#define CELL_MAX_H   600
-#define CELL_MAX_W   420
-#define CELL_MIN_H   280
-#define CELL_MIN_W   280
+/* History-term rows on the Search sub-page.  SEARCH_HISTORY_MAX caps
+ * how many previously committed queries are persisted (and shown). */
+#define SEARCH_HISTORY_ROW_H 96
+#define SEARCH_HISTORY_MAX   20
+#define THUMB_BORDER         4
+#define COLS                 3
+#define ROWS                 2
+#define PAGESIZE             (COLS * ROWS)
+#define CELL_MAX_H           600
+#define CELL_MAX_W           420
+#define CELL_MIN_H           280
+#define CELL_MIN_W           280
 
 /* List-view row height.  A list row is a single full-width band holding a
  * small cover + title + author, so it is much shorter than a grid cell and
@@ -129,7 +136,11 @@ extern void iv_update_panel(int readingModeEnable);
 #define LIB_DB_FILENAME     "bookshelf_lib.db"
 #define LIB_LEGACY_FILENAME "bookshelf_lib.json" /* pre-sqlite store */
 #define COVERS_SUBDIR       "covers"
-#define TEXT_AREA           52 /* vertical room below the cover for title+author */
+/* Capacity of g_covers_dir: the directory plus '/' + id + ".png" must
+ * fit a MAX_PATH_LEN path, so the dir array is bounded by the remainder
+ * (MAX_ID_LEN counts its NUL). */
+#define COVERS_DIR_CAP (MAX_PATH_LEN - MAX_ID_LEN - 4)
+#define TEXT_AREA      52 /* vertical room below the cover for title+author */
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
@@ -202,6 +213,7 @@ typedef enum {
 typedef enum {
     TAB_LIBRARY,   /* the cover grid / list */
     TAB_DOWNLOADS, /* active + finished downloads */
+    TAB_SEARCH,    /* search sub-page: input row + history terms */
 } MainTab;
 typedef struct {
     char  id[MAX_ID_LEN];
@@ -241,18 +253,17 @@ typedef struct {
     SortMode  sort;
     GroupMode group;
     Filter    filter;
-    ViewMode  view_mode; /* GRID = cover grid, LIST = one row per book */
-
-    int     menu_open;     /* hamburger overlay */
-    int     more_open;     /* right "..." overlay */
-    int     search_open;   /* search input is focused */
-    int     settings_open; /* full-screen settings overlay */
-    MainTab tab;           /* TAB_LIBRARY (grid) or TAB_DOWNLOADS */
-    int     launcher_open;
-    int     launcher_scroll; /* vertical scroll offset (px) of the launcher body */
-    int     launcher_drag_y; /* last POINTERMOVE y while dragging the launcher */
-    int     launcher_drag;   /* a drag is in progress (suppress tap on lift) */
-    int     launcher_moved;  /* finger travelled far enough to count as drag */
+    ViewMode  view_mode;     /* GRID = cover grid, LIST = one row per book */
+    int       menu_open;     /* hamburger overlay */
+    int       more_open;     /* right "..." overlay */
+    int       search_kb;     /* on-screen keyboard is editing the search input */
+    int       settings_open; /* full-screen settings overlay */
+    MainTab   tab;           /* TAB_LIBRARY / TAB_DOWNLOADS / TAB_SEARCH */
+    int       launcher_open;
+    int       launcher_scroll; /* vertical scroll offset (px) of the launcher body */
+    int       launcher_drag_y; /* last POINTERMOVE y while dragging the launcher */
+    int       launcher_drag;   /* a drag is in progress (suppress tap on lift) */
+    int       launcher_moved;  /* finger travelled far enough to count as drag */
 
     /* Context (long-press) menu.  ctx_open shows a centred modal sheet
      * over the tile named by ctx_book_id (a book) or ctx_series_id (a
@@ -341,8 +352,8 @@ extern int               g_cover_armed;
 extern DownloadItem      g_downloads[MAX_DOWNLOADS];
 extern int               g_download_count;
 extern int               g_download_armed;
-extern char              g_downloads_dir[MAX_PATH_LEN];
-extern char              g_covers_dir[MAX_PATH_LEN];
+extern char              g_downloads_dir[128];
+extern char              g_covers_dir[COVERS_DIR_CAP];
 extern int               g_lp_armed;
 extern int               g_lp_vi;
 extern int               g_lp_x;
@@ -411,6 +422,9 @@ int         store_next_undownloaded(char ids[][MAX_ID_LEN], int cap);
 int         store_next_ids(char ids[][MAX_ID_LEN], int cap, int offset);
 void        store_delete_book_file(const char *id);
 int         store_series_ids(const char *series_id, char ids[][MAX_ID_LEN], int cap, int offset);
+void        store_search_add(const char *term);
+int         store_search_count(void);
+int         store_search_list(char terms[][MAX_QUERY_LEN], int cap, int offset);
 void        view_rebuild(void);
 int         view_fetch_page(int page, TileRow *rows, int cap);
 int         view_fetch_row(int idx, TileRow *out);
@@ -422,7 +436,8 @@ void        draw_text_centered(ifont *f, int cx, int cy, const char *text, int c
 void        draw_button(
            int x, int y, int w, int h, int selected, const char *label, int label_size, int label_color);
 void draw_top_bar(void);
-void draw_search_row(void);
+void draw_search_icon(void);
+void draw_search_tab(void);
 int  downloads_pending(void);
 /* draw_tab_row removed — tab row no longer drawn */
 CoverSlot    *cover_slot(const char *id, int create);
@@ -441,6 +456,7 @@ void          draw_series_stack_badge(int cx, int cy, int cw, int ch, int count)
 void          draw_thumbnail(int x, int y, int w, int h, const TileRow *tr, int vi);
 int           downloads_rows(void);
 int           downloads_pagesize(void);
+int           history_pagesize(void);
 int           current_pages(void);
 void          draw_dl_progress(int x, int y, int w);
 void          draw_downloads_tab(void);
@@ -460,7 +476,9 @@ int           hit_top_bar(int x, int y);
 void          draw_download_icon(void);
 void          draw_sync_icon(void);
 void          sync_set_active(int on);
-int           hit_search(int x, int y);
+int           hit_search_icon(int x, int y);
+int           hit_search_input(int x, int y);
+int           hit_history(int x, int y);
 int           hit_thumbnail(int x, int y);
 int           hit_pager(int x, int y);
 void          on_tap_overlay_menu(int x, int y);

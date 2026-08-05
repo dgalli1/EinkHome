@@ -43,7 +43,7 @@ draw_top_bar(void)
     int home_w = 96;
     int home_x = 8;
     int home_y = y0 + (TOP_BAR_H - home_w) / 2;
-    if (g_drilled_series[0] != '\0' || g_state.tab == TAB_DOWNLOADS) {
+    if (g_drilled_series[0] != '\0' || g_state.tab == TAB_DOWNLOADS || g_state.tab == TAB_SEARCH) {
         /* Left-pointing chevron arrow. */
         int ax = home_x + 20;
         int ay = home_y + home_w / 2;
@@ -64,13 +64,13 @@ draw_top_bar(void)
         DrawLine(home_x + 37, home_y + 61, home_x + 53, home_y + 61, col);
         DrawLine(home_x + 53, home_y + 61, home_x + 53, home_y + 85, col);
     }
-
     /* Centered title — series name when drilled, Downloads label on the
-     * downloads page, nothing on the plain library shelf (the app name
-     * in the top bar was dropped per user request). */
+     * downloads page, "Search" on the search page, the active query on
+     * the filtered library shelf, nothing on the plain shelf (the app
+     * name in the top bar was dropped per user request). */
     ifont *tf = OpenFont(DEFAULTFONT, 44, 0);
     if (tf != NULL) {
-        char title[80];
+        char title[MAX_QUERY_LEN + 16];
         if (g_drilled_series[0] != '\0') {
             /* Series name is resolved once at drill time. */
             snprintf(title, sizeof title, "%s", g_drilled_series_name);
@@ -78,15 +78,40 @@ draw_top_bar(void)
                 snprintf(title, sizeof title, "Series");
         } else if (g_state.tab == TAB_DOWNLOADS) {
             snprintf(title, sizeof title, "%s", i18n("tab.downloads"));
+        } else if (g_state.tab == TAB_SEARCH) {
+            snprintf(title, sizeof title, "%s", i18n("tab.search"));
+        } else if (g_state.query[0] != '\0') {
+            /* The active filter shown as the shelf title. */
+            snprintf(title, sizeof title, "%s", g_state.query);
         } else {
             title[0] = '\0';
         }
         if (title[0] != '\0') {
+            /* Centre the title inside the free band between the flanking
+             * icon stacks (home/back left; search + downloads + menu right
+             * on the Library tab, search + sync on the Downloads tab).
+             * Centring on the whole screen width lets a long series name
+             * run under the right icons: the trim budget must be the band
+             * width, not w - 420, and the draw origin the band, not 0. */
+            int left_w = 8 + 96;
+            int right_w = (g_state.tab == TAB_DOWNLOADS) ? 8 + 2 * 96 : 8 + 3 * 96;
+            int band_w = w - left_w - right_w;
+            if (band_w < 64)
+                band_w = 64;
+            while (StringWidth(title) > band_w && strlen(title) > 4)
+                title[strlen(title) - 1] = '\0';
             SetFont(tf, col);
-            DrawString((w - StringWidth(title)) / 2, y0 + (TOP_BAR_H - 40) / 2, title);
+            DrawString(
+                left_w + (band_w - StringWidth(title)) / 2, y0 + (TOP_BAR_H - 40) / 2, title);
         }
         CloseFont(tf);
     }
+    if (g_state.tab == TAB_SEARCH) {
+        /* Search page: the input row owns search here, so no right
+         * icons — the corner stays empty (taps there fall through). */
+        return;
+    }
+    draw_search_icon();
     if (g_state.tab == TAB_DOWNLOADS) {
         /* Downloads view: the right slot hosts the sync glyph instead
          * of the hamburger — the sub-view has no More menu.  Tapping
@@ -150,7 +175,7 @@ draw_download_icon(void)
     if (pend > 0) {
         ifont *bf = OpenFont(DEFAULTFONTB, 22, 0);
         if (bf != NULL) {
-            char badge[8];
+            char badge[16];
             snprintf(badge, sizeof badge, "%d", pend);
             int bw = StringWidth(badge) + 12;
             int bx = ic_x + ic_w - bw - 2;
@@ -161,6 +186,44 @@ draw_download_icon(void)
             CloseFont(bf);
         }
     }
+}
+
+/* Magnifying-glass icon in the top bar (Library and Downloads tabs).
+ * Replaces the old separate search row: tapping it opens the Search
+ * sub-page (see on_event).  Line-art style matching home/downloads.
+ * Position: left of the downloads icon on the Library tab, left of the
+ * sync button on the Downloads view. */
+void
+draw_search_icon(void)
+{
+    int w = ScreenWidth();
+    int y0 = g_state.panel_h;
+    int col = BLACK;
+    int ic_w = 96;
+    int menu_x = w - 96 - 8;
+    int ic_x = (g_state.tab == TAB_DOWNLOADS) ? menu_x - ic_w : menu_x - 2 * ic_w;
+    int ic_y = y0 + (TOP_BAR_H - ic_w) / 2;
+    int cx = ic_x + ic_w / 2 - 5; /* ring centre, offset for the handle */
+    int cy = ic_y + ic_w / 2 - 5;
+    int r = 18;
+
+    /* Outlined ring (polyline; DrawCircle fills). */
+    int px = 0, py = 0;
+    for (int s = 0; s <= 16; s++) {
+        double a = s * 2 * M_PI / 16.0;
+        int    x = cx + (int)(r * cos(a));
+        int    yy = cy + (int)(r * sin(a));
+        if (s > 0) {
+            DrawLine(px, py, x, yy, col);
+            DrawLine(px, py + 1, x, yy + 1, col);
+        }
+        px = x;
+        py = yy;
+    }
+    /* Handle: double-width diagonal from the ring edge out to the
+     * corner of the icon box. */
+    DrawLine(cx + r - 4, cy + r - 4, cx + r + 10, cy + r + 10, col);
+    DrawLine(cx + r - 3, cy + r - 5, cx + r + 11, cy + r + 9, col);
 }
 
 /* Sync icon in the top bar — shown only while the Downloads view is
@@ -258,17 +321,23 @@ draw_sync_icon(void)
     }
 }
 
+/* Search sub-page body: the input row (magnifier + text box) at the
+ * top, then the previously committed search terms below.  Tapping the
+ * input opens the firmware keyboard; tapping a term re-runs that
+ * search (see on_event). */
 void
-draw_search_row(void)
+draw_search_tab(void)
 {
+    int top, bot, cell_w, cell_h;
+    (void)cell_w;
+    (void)cell_h;
+    grid_geom(&top, &bot, &cell_w, &cell_h);
     int w = ScreenWidth();
-    int y = g_state.panel_h + TOP_BAR_H;
-    FillArea(0, y, w, SEARCH_ROW_H, WHITE);
-    DrawLine(0, y + SEARCH_ROW_H - 1, w, y + SEARCH_ROW_H - 1, BLACK);
+    FillArea(0, top, w, bot - top, WHITE);
+    DrawLine(0, top, w, top, BLACK);
 
-    /* Magnifying-glass icon: outlined ring (polyline; DrawCircle fills)
-     * + diagonal handle. */
-    int gx = 30, gy = y + SEARCH_ROW_H / 2 - 8;
+    /* ── input row: magnifier icon + text box ── */
+    int gx = 30, gy = top + SEARCH_ROW_H / 2 - 8;
     int px = 0, py = 0;
     for (int s = 0; s <= 16; s++) {
         double a = s * 2 * M_PI / 16.0;
@@ -285,31 +354,67 @@ draw_search_row(void)
     DrawLine(gx + 10, gy + 9, gx + 23, gy + 22, BLACK);
 
     ifont *f = OpenFont(DEFAULTFONT, 28, 0);
-    if (f == NULL)
+    if (f != NULL) {
+        int tx = 64;
+        int tw = w - 128;
+        int ty = top + 10;
+        int th = SEARCH_ROW_H - 20;
+        DrawRect(tx, ty, tw, th, BLACK);
+        FillArea(tx + 1, ty + 1, tw - 2, th - 2, g_state.search_kb ? BLACK : WHITE);
+        if (g_state.query[0] != '\0') {
+            SetFont(f, g_state.search_kb ? WHITE : BLACK);
+            DrawString(tx + 10, ty + (th - 28) / 2 - 2, g_state.query);
+        } else if (!g_state.search_kb) {
+            SetFont(f, BLACK);
+            DrawString(tx + 10, ty + (th - 28) / 2 - 2, i18n("search.ph"));
+        }
+        /* cursor when the keyboard is editing the input */
+        if (g_state.search_kb) {
+            int cursor_x = tx + 10 + StringWidth(g_state.query) + 1;
+            DrawLine(cursor_x, ty + 6, cursor_x, ty + th - 6, WHITE);
+        }
+        CloseFont(f);
+    }
+
+    /* ── previously searched terms ── */
+    int n = store_search_count();
+    if (n == 0) {
+        ifont *ef = OpenFont(DEFAULTFONT, 28, 0);
+        if (ef != NULL) {
+            SetFont(ef, DGRAY);
+            const char *msg = i18n("search.empty");
+            DrawString((w - StringWidth(msg)) / 2, top + SEARCH_ROW_H + 60, msg);
+            CloseFont(ef);
+        }
         return;
-
-    /* text box border */
-    int tx = 64;
-    int tw = w - 128;
-    int ty = y + 10;
-    int th = SEARCH_ROW_H - 20;
-    DrawRect(tx, ty, tw, th, BLACK);
-    FillArea(tx + 1, ty + 1, tw - 2, th - 2, g_state.search_open ? BLACK : WHITE);
-
-    if (g_state.query[0] != '\0') {
-        SetFont(f, g_state.search_open ? WHITE : BLACK);
-        DrawString(tx + 10, ty + (th - 28) / 2 - 2, g_state.query);
-    } else if (!g_state.search_open) {
-        SetFont(f, BLACK);
-        DrawString(tx + 10, ty + (th - 28) / 2 - 2, i18n("search.ph"));
     }
-
-    /* cursor when focused */
-    if (g_state.search_open) {
-        int cursor_x = tx + 10 + StringWidth(g_state.query) + 1;
-        DrawLine(cursor_x, ty + 6, cursor_x, ty + th - 6, WHITE);
+    int ps = history_pagesize();
+    if (ps < 1)
+        ps = 1;
+    int pages = (n + ps - 1) / ps;
+    if (g_state.page >= pages)
+        g_state.page = pages - 1;
+    if (g_state.page < 0)
+        g_state.page = 0;
+    char terms[SEARCH_HISTORY_MAX][MAX_QUERY_LEN];
+    int  got = store_search_list(terms, SEARCH_HISTORY_MAX, g_state.page * ps);
+    int  y = top + SEARCH_ROW_H;
+    for (int i = 0; i < got && y + SEARCH_HISTORY_ROW_H <= bot; i++) {
+        ifont *tf = OpenFont(DEFAULTFONTB, 28, 0);
+        if (tf != NULL) {
+            SetFont(tf, BLACK);
+            char trunc[MAX_QUERY_LEN];
+            strncpy(trunc, terms[i], sizeof trunc - 1);
+            trunc[sizeof trunc - 1] = '\0';
+            int maxw = w - 80;
+            while (StringWidth(trunc) > maxw && strlen(trunc) > 4)
+                trunc[strlen(trunc) - 1] = '\0';
+            DrawString(24, y + (SEARCH_HISTORY_ROW_H - 28) / 2 - 2, trunc);
+            CloseFont(tf);
+        }
+        DrawLine(20, y + SEARCH_HISTORY_ROW_H - 1, w - 20, y + SEARCH_HISTORY_ROW_H - 1, LGRAY);
+        y += SEARCH_HISTORY_ROW_H;
     }
-    CloseFont(f);
 }
 
 /* Number of downloads still pending (queued or in flight) — shown as a
@@ -460,7 +565,7 @@ view_rows(void)
 {
     if (g_state.view_mode != VIEW_LIST)
         return ROWS;
-    int t = g_state.panel_h + TOP_BAR_H + SEARCH_ROW_H;
+    int t = g_state.panel_h + TOP_BAR_H;
     int b = ScreenHeight() - PAGER_H;
     if (g_state.menu_open || g_state.more_open)
         b = ScreenHeight();
@@ -482,7 +587,7 @@ void
 grid_geom(int *top, int *bot, int *cell_w, int *cell_h)
 {
     int w = ScreenWidth();
-    int t = g_state.panel_h + TOP_BAR_H + SEARCH_ROW_H;
+    int t = g_state.panel_h + TOP_BAR_H;
     int b = ScreenHeight() - PAGER_H;
     if (g_state.menu_open || g_state.more_open)
         b = ScreenHeight();
@@ -593,10 +698,11 @@ cover_schedule_next(void)
         }
     }
 }
-
-/* Blit a book's cover (decoded PNG or hatch fallback) into the given
- * rect.  Shared by the grid card and the list row so both modes
- * fetch/cache covers identically. */
+/* Blit a book's cover (decoded PNG or plain-outline fallback) into the
+ * given rect.  Shared by the grid card and the list row so both modes
+ * fetch/cache covers identically.  Until the bitmap arrives only the
+ * border is drawn — the old hatch fill made the placeholder read as a
+ * busy pattern and the device is too slow for decorative fills. */
 void
 blit_cover(int cx, int cy, int cw, int ch, const Book *b)
 {
@@ -605,8 +711,7 @@ blit_cover(int cx, int cy, int cw, int ch, const Book *b)
         StretchBitmap(cx, cy, cw, ch, s->cover_bmp, 0);
         return;
     }
-    for (int yy = cy; yy < cy + ch; yy += 8)
-        DrawLine(cx, yy, cx + cw, yy, LGRAY);
+    DrawRect(cx, cy, cw, ch, BLACK);
 }
 
 /* Series card decoration: draw the cover as the front book of a stack.
@@ -760,8 +865,19 @@ downloads_pagesize(void)
      * number of rows that fit below the progress bar. */
     return downloads_rows();
 }
+
+/* History-term rows that fit below the input row on the Search page. */
+int
+history_pagesize(void)
+{
+    int top, bot, cell_w, cell_h;
+    grid_geom(&top, &bot, &cell_w, &cell_h);
+    int rows = (bot - top - SEARCH_ROW_H) / SEARCH_HISTORY_ROW_H;
+    return rows < 1 ? 1 : rows;
+}
 /* Page count for the active tab: the library pages the cover grid, the
- * downloads tab pages the download list.  Always >= 1. */
+ * downloads tab pages the download list, the search page pages the
+ * history terms.  Always >= 1. */
 int
 current_pages(void)
 {
@@ -769,6 +885,9 @@ current_pages(void)
     if (g_state.tab == TAB_DOWNLOADS) {
         n = g_download_count;
         ps = downloads_pagesize();
+    } else if (g_state.tab == TAB_SEARCH) {
+        n = store_search_count();
+        ps = history_pagesize();
     } else {
         n = g_view_total;
         ps = view_pagesize();
@@ -940,8 +1059,8 @@ draw_downloads_tab(void)
     }
 }
 
-/* Repaint the whole shelf (top bar, search, tabs, body, pager) in the
- * current tab.  Centralises the sequence every state change needs. */
+/* Repaint the whole shelf (top bar, tabs, body, pager) in the current
+ * tab.  Centralises the sequence every state change needs. */
 void
 redraw_shelf(void)
 {
@@ -952,9 +1071,10 @@ redraw_shelf(void)
     }
     FillArea(0, g_state.panel_h, ScreenWidth(), ScreenHeight() - g_state.panel_h, WHITE);
     draw_top_bar();
-    draw_search_row();
     if (g_state.tab == TAB_DOWNLOADS)
         draw_downloads_tab();
+    else if (g_state.tab == TAB_SEARCH)
+        draw_search_tab();
     else
         draw_grid();
     draw_pager();
@@ -964,7 +1084,7 @@ redraw_shelf(void)
 void
 draw_grid(void)
 {
-    /* Layout: [system panel] [our top bar] [our search row] [grid] [pager].
+    /* Layout: [system panel] [our top bar] [grid] [pager].
      * The system panel renders at the TOP of the screen (PANEL_NO_FB_OFFSET
      * flag), occupying rows [0, panel_h).  Everything we draw is offset
      * below it; the pager sits at the very bottom with no reservation.
@@ -1070,7 +1190,7 @@ cover_tick(void *ctx)
         LOG("[bookshelf] cover_tick downloaded data=%p rsize=%d\n", (void *)data, rsize);
         if (data != NULL && rsize > 8) {
             /* Persist the raw PNG so the next launch can skip the
-             * network entirely. */
+     * network entirely. */
             cover_cache_save(bid, data, rsize);
             FILE *f = fopen(COVER_TMP, "wb");
             if (f != NULL) {
@@ -1252,8 +1372,8 @@ draw_overlay_more(void)
 void
 draw_status_line(void)
 {
-    /* Currently unused — status is shown via the search row placeholder
-     * and via sync-button feedback.  Kept as an extension point.
+    /* Currently unused — status is shown via sync-button feedback and
+     * the top-bar title (active query).  Kept as an extension point.
      */
 }
 
@@ -1272,7 +1392,7 @@ settings_keyboard_handler(char *buffer)
     const char *val = buffer ? buffer : "";
     if (g_settings_edit == 1) {
         /* Normalise a bare host[:port] into a full http:// URL so the
-         * endpoint builder always gets a scheme. */
+ * endpoint builder always gets a scheme. */
         if (strncmp(val, "http://", 7) != 0 && strncmp(val, "https://", 8) != 0) {
             char tmp[260];
             snprintf(tmp, sizeof tmp, "http://%s", val);

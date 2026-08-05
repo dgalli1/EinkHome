@@ -174,57 +174,55 @@ download_book_file(Book *b)
     return 1;
 }
 
-/* Launch the configured reader on an already-downloaded book. */
+/* Launch the configured reader on an already-downloaded book.
+ *
+ * The standard reader (and the auto default) goes through OpenBook() —
+ * the firmware's canonical book-open path.  OpenBook() routes the book
+ * to monitor.app / reader_controller, which picks the reader for the
+ * file type, registers the book with the task, and brings the reader to
+ * the foreground.  NewTaskEx() on the reader binary does none of that:
+ * it execs the app without a book-open request (the reader came up on
+ * its home screen), it never makes the task visible, and it fails
+ * silently when the resolved app does not exist on this firmware (the
+ * server's open-with table names pdfviewer, which the Era image does
+ * not ship — access() inside NewTaskEx then returns -1 and nothing
+ * happens).
+ *
+ * Only an explicitly selected third-party reader (KOReader) is still
+ * launched via NewTaskEx() — it is a standalone app that takes the book
+ * path as its argument and has no OpenBook integration.  argv[0] must
+ * be the program path: the task launcher passes the args array through
+ * as-is, so with only the book path in the array the reader would
+ * receive it as argv[0] and never see a book argument.  Flags 0x25
+ * (TASK_HIDDEN|TASK_NOUPDATEONFOCUS|TASK_SINGLEINSTANCE|TASK_OUTOFSTACK)
+ * match what reader_controller.app and the stock bookshelf pass to
+ * NewTaskEx() for app launches. */
 void
 launch_reader(Book *b)
 {
-    char app[80];
-    char full_path[160];
-    if (g_state.reader_pref > 0 && g_state.reader_pref <= g_reader_count) {
-        const char *rpath = g_readers[g_state.reader_pref - 1].path;
-        const char *rbase = strrchr(rpath, '/');
-        rbase = rbase ? rbase + 1 : rpath;
-        snprintf(app, sizeof app, "%s", rbase);
-        snprintf(full_path, sizeof full_path, "%s", rpath);
-    } else {
-        /* Auto: ask the server which app handles this extension. */
-        char body[160];
-        snprintf(body, sizeof body, "{\"id\":\"%s\",\"ext\":\"%s\"}", b->id, b->ext);
-        char *resp = NULL;
-        int   rl = 0;
-        char  resolved[64] = "eink-reader";
-        if (http_post(g_state.url_openwith, body, &resp, &rl) == 0 && resp) {
-            char tmp[64];
-            if (json_find_key(resp, "app", tmp, sizeof tmp))
-                snprintf(resolved, sizeof resolved, "%s", tmp);
-            free(resp);
-        }
-        size_t alen = strlen(resolved);
-        if (alen < 4 || strcmp(resolved + alen - 4, ".app") != 0)
-            snprintf(app, sizeof app, "%s.app", resolved);
-        else
-            snprintf(app, sizeof app, "%s", resolved);
-        /* Build full path from basename. */
-        if (strchr(app, '/') == NULL)
-            snprintf(full_path, sizeof full_path, "/ebrmain/bin/%s", app);
-        else
-            snprintf(full_path, sizeof full_path, "%s", app);
-    }
     char path[MAX_PATH_LEN];
     book_local_path(b, path, sizeof path);
-    char path_copy[MAX_PATH_LEN];
-    snprintf(path_copy, sizeof path_copy, "%s", path);
-    /* argv[0] must be the program path: the firmware's task launcher
-     * passes the args array through as-is, so with only the book path
-     * in the array the reader received it as argv[0] and never saw a
-     * book argument (the integrated reader then opened to its home
-     * screen instead of the book). */
-    char *args[3] = {full_path, path_copy, NULL};
-    LOG("[bookshelf] launching reader app=%s path=%s reader_pref=%d\n",
-        app,
-        path_copy,
+
+    const char *reader_path = NULL;
+    if (g_state.reader_pref > 0 && g_state.reader_pref <= g_reader_count)
+        reader_path = g_readers[g_state.reader_pref - 1].path;
+    if (reader_path != NULL && access(reader_path, X_OK) == 0 &&
+        strcmp(reader_path, READER_STD_PATH) != 0) {
+        const char *rbase = strrchr(reader_path, '/');
+        rbase = rbase ? rbase + 1 : reader_path;
+        char *args[3] = {(char *)reader_path, path, NULL};
+        LOG("[bookshelf] launching reader app=%s path=%s reader_pref=%d\n",
+            rbase,
+            path,
+            g_state.reader_pref);
+        NewTaskEx(reader_path, args, rbase, b->title, NULL, 0x25, 0);
+        return;
+    }
+
+    LOG("[bookshelf] launching reader via OpenBook path=%s reader_pref=%d\n",
+        path,
         g_state.reader_pref);
-    NewTaskEx(full_path, args, app, b->title, NULL, 1u << 30, 0);
+    OpenBook(path, NULL, 1);
 }
 
 /* Press a book: download it if needed, then open it in the reader.

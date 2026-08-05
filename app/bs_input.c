@@ -12,24 +12,48 @@ hit_top_bar(int x, int y)
     if (y < bar_top || y >= bar_bot)
         return -1;
     int w = ScreenWidth();
-    /* Left "home" button — 96×96 region, padded 8 px on the left. */
+    /* Left "home" button — 96×96 region, padded 8 px on the left.  On
+     * the Downloads / Search sub-views it is the back arrow. */
     if (x >= 8 && x < 8 + 96)
         return 1;
+    /* The Search page has no right-side icons — its corner is empty. */
+    if (g_state.tab == TAB_SEARCH)
+        return -1;
     /* Right 96×96 region, padded 8 px on the right: the hamburger/More
      * button on the Library tab, the sync button on the Downloads view
      * (the sub-view has no More menu — see draw_top_bar). */
     if (x >= w - 96 - 8 && x < w - 8)
         return g_state.tab == TAB_DOWNLOADS ? 2 : 3;
+    /* Search icon — 96×96 region: left of the downloads icon on the
+     * Library tab, left of the sync button on the Downloads view (the
+     * Downloads view's right corner is the sync slot). */
+    int s_lo = w - 96 - 8 - 2 * 96;
+    int s_hi = w - 96 - 8 - 96;
+    if (g_state.tab == TAB_DOWNLOADS) {
+        s_lo = w - 96 - 8 - 96;
+        s_hi = w - 96 - 8;
+    }
+    if (x >= s_lo && x < s_hi)
+        return 5;
     /* Downloads icon — 96×96 region left of the right button, Library
-     * tab only (the Downloads view fills the whole right corner with
-     * the sync button). */
+     * tab only (the Downloads view fills the right corner with the sync
+     * button). */
     if (g_state.tab != TAB_DOWNLOADS && x >= w - 96 - 8 - 96 && x < w - 96 - 8)
         return 4;
     return -1;
 }
 
+/* 1 when (x, y) is inside the top-bar search icon (the hit region is
+ * tab-dependent — see hit_top_bar). */
 int
-hit_search(int x, int y)
+hit_search_icon(int x, int y)
+{
+    return hit_top_bar(x, y) == 5;
+}
+
+/* 1 when (x, y) is inside the search input row on the Search page. */
+int
+hit_search_input(int x, int y)
 {
     int row_top = g_state.panel_h + TOP_BAR_H;
     int row_bot = row_top + SEARCH_ROW_H;
@@ -44,6 +68,31 @@ hit_search(int x, int y)
     if (y < ty || y >= ty + th)
         return -1;
     return 1;
+}
+
+/* 0-based index of the history term row tapped on the Search page, or
+ * -1 when the tap is outside the history list. */
+int
+hit_history(int x, int y)
+{
+    (void)x;
+    int top, bot, cell_w, cell_h;
+    (void)cell_w;
+    (void)cell_h;
+    grid_geom(&top, &bot, &cell_w, &cell_h);
+    int y0 = top + SEARCH_ROW_H;
+    if (y < y0)
+        return -1;
+    int ps = history_pagesize();
+    if (ps < 1)
+        ps = 1;
+    int rel = (y - y0) / SEARCH_HISTORY_ROW_H;
+    if (rel >= ps)
+        return -1;
+    int idx = g_state.page * ps + rel;
+    if (idx >= store_search_count())
+        return -1;
+    return idx;
 }
 
 int
