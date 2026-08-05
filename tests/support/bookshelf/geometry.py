@@ -34,8 +34,7 @@ MORE_GRID = 5
 MORE_LIST = 6
 MORE_DOWNLOAD_ALL = 7
 MORE_SETTINGS = 8
-MORE_SYSTEM = 9
-MORE_APPS = 10
+MORE_APPS = 9
 
 # ── Settings overlay layout (full-screen page) ────────────────────────
 SETTINGS_ROW_H = 120
@@ -54,7 +53,6 @@ CTX_TITLE_H = 72
 CTX_PAD = 24
 # ── Launcher overlay layout (must match bookshelf.c) ─────────────────
 LAUNCHER_HEADER_H = 104
-LAUNCHER_PAGER_H = 96
 LAUNCHER_COLS = 3
 LAUNCHER_GROUP_H = 64
 LAUNCHER_CELL_H = 232
@@ -79,7 +77,6 @@ __all__ = [
     "MORE_AUTHOR",
     "MORE_DOWNLOAD_ALL",
     "MORE_SETTINGS",
-    "MORE_SYSTEM",
     "MORE_GRID",
     "MORE_LIST",
     "MORE_RECENT",
@@ -96,7 +93,6 @@ __all__ = [
     "SETTINGS_ROW_H",
     "MORE_APPS",
     "LAUNCHER_HEADER_H",
-    "LAUNCHER_PAGER_H",
     "LAUNCHER_COLS",
     "LAUNCHER_GROUP_H",
     "LAUNCHER_CELL_H",
@@ -273,17 +269,12 @@ class BookshelfGeometry:
         return (16 + 80, by + 28)
 
     def launcher_first_app_center(self) -> tuple[int, int]:
-        """Centre of the first app cell on page 0 (after the first header)."""
+        """Centre of the first app cell (after the first header) at scroll 0."""
         cell_w = (self.screen_w - 2 * LAUNCHER_MARGIN) // LAUNCHER_COLS
         y = self.panel_h + LAUNCHER_HEADER_H + LAUNCHER_GROUP_H
         return (LAUNCHER_MARGIN + cell_w // 2, y + LAUNCHER_CELL_H // 2)
 
-    def launcher_pager_next_center(self) -> tuple[int, int]:
-        """Centre of the launcher next-page region."""
-        py = self.screen_h - LAUNCHER_PAGER_H
-        return (self.screen_w * 5 // 6, py + LAUNCHER_PAGER_H // 2)
-
-    def launcher_pager_prev_center(self) -> tuple[int, int]:
-        """Centre of the launcher prev-page region."""
-        py = self.screen_h - LAUNCHER_PAGER_H
-        return (self.screen_w // 6, py + LAUNCHER_PAGER_H // 2)
+    def launcher_body_center(self) -> tuple[int, int]:
+        """A point in the middle of the launcher's scrollable body."""
+        body_top = self.panel_h + LAUNCHER_HEADER_H
+        return (self.screen_w // 2, (body_top + self.screen_h) // 2)

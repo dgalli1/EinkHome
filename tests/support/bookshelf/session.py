@@ -13,7 +13,15 @@ from typing import TYPE_CHECKING
 
 from tests.support.reader.session import Session
 from tests.support.runtime_common import REPO_ROOT
-from tests.support.ui_input import IV_KEY_BACK, pointer_down, pointer_up, press_key, tap, type_text
+from tests.support.ui_input import (
+    IV_KEY_BACK,
+    pointer_down,
+    pointer_move,
+    pointer_up,
+    press_key,
+    tap,
+    type_text,
+)
 from tests.support.bookshelf.geometry import MORE_APPS, MORE_DOWNLOAD_ALL, MORE_SETTINGS
 
 if TYPE_CHECKING:
@@ -242,13 +250,13 @@ class BookshelfSession:
         else:
             self.tap_at(*self._g.launcher_first_app_center())
 
-    def tap_launcher_pager_next(self) -> None:
-        """Tap the launcher next-page region."""
-        self.tap_at(*self._g.launcher_pager_next_center())
-
-    def tap_launcher_pager_prev(self) -> None:
-        """Tap the launcher prev-page region."""
-        self.tap_at(*self._g.launcher_pager_prev_center())
+    def scroll_launcher_down(self) -> None:
+        """Drag the launcher body upward so the content scrolls down."""
+        cx, cy = self._g.launcher_body_center()
+        pointer_down(self.emulator, cx, cy)
+        for step in range(1, 6):
+            pointer_move(self.emulator, cx, cy - step * 40)
+        pointer_up(self.emulator, cx, cy - 200)
 
     # -- tap + verify helpers ---------------------------------------------
 
