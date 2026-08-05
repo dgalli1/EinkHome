@@ -127,8 +127,17 @@ class BookshelfSession:
         self.tap_at(*self._g.menu_button_center())
 
     def tap_search(self) -> None:
-        """Tap the search box."""
-        self.tap_at(*self._g.search_box_center())
+        """Tap the top-bar search icon (opens the Search sub-page)."""
+        self.tap_at(*self._g.search_icon_center())
+
+    def tap_search_input(self) -> None:
+        """Tap the search input row on the Search sub-page (opens the
+        on-screen keyboard)."""
+        self.tap_at(*self._g.search_input_center())
+
+    def tap_history_term(self, index: int) -> None:
+        """Tap history-term row *index* on the Search sub-page."""
+        self.tap_at(*self._g.search_history_center(index))
 
     def tap_book(self, index: int) -> None:
         """Tap book tile at grid *index* (0-based)."""
@@ -281,9 +290,15 @@ class BookshelfSession:
         )
 
     def tap_search_and_verify(self, *, timeout: float = 8.0) -> str:
-        """Tap search box and verify framebuffer changes (keyboard)."""
+        """Tap the search icon and verify the Search sub-page appears."""
         return self.tap_and_verify_change(
-            *self._g.search_box_center(), timeout=timeout
+            *self._g.search_icon_center(), timeout=timeout
+        )
+
+    def tap_search_input_and_verify(self, *, timeout: float = 8.0) -> str:
+        """Tap the search input row and verify the keyboard appears."""
+        return self.tap_and_verify_change(
+            *self._g.search_input_center(), timeout=timeout
         )
 
     def tap_book_and_verify(self, index: int, *, timeout: float = 8.0) -> str:

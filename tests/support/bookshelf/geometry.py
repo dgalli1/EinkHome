@@ -13,6 +13,7 @@ from dataclasses import dataclass
 # ── layout constants (must match bookshelf.c) ──────────────────────────
 TOP_BAR_H = 128
 SEARCH_ROW_H = 88
+SEARCH_HISTORY_ROW_H = 96  # history-term rows on the Search sub-page
 TAB_ROW_H = 0  # tab row removed; downloads via top-bar icon
 PAGER_H = 96
 BOTTOM_RESERVED = 0
@@ -85,8 +86,8 @@ __all__ = [
     "MORE_TITLE_AZ",
     "PAGER_H",
     "PAGESIZE",
-    "ROWS",
     "SEARCH_ROW_H",
+    "SEARCH_HISTORY_ROW_H",
     "TOP_BAR_H",
     "SETTINGS_BTN_H",
     "SETTINGS_ROW1_Y",
@@ -125,21 +126,40 @@ class BookshelfGeometry:
         there instead)."""
         return (self.screen_w - 8 - 48, self.panel_h + TOP_BAR_H // 2)
 
-    # ── search row ─────────────────────────────────────────────────────
+    # ── search (top-bar icon + Search sub-page) ───────────────────────
 
-    def search_box_center(self) -> tuple[int, int]:
-        """Centre of the search text box."""
+    def search_icon_center(self) -> tuple[int, int]:
+        """Centre of the 96×96 magnifying-glass icon in the top bar.
+        Library tab: left of the downloads icon; Downloads tab: left of
+        the sync button."""
+        if self.screen_w == 0:
+            return (0, 0)
+        x = self.screen_w - 8 - 96 - 2 * 96 + 48
+        return (x, self.panel_h + TOP_BAR_H // 2)
+
+    def search_input_center(self) -> tuple[int, int]:
+        """Centre of the search text box on the Search sub-page input
+        row (the row sits directly below the top bar)."""
         row_top = self.panel_h + TOP_BAR_H
         return (self.screen_w // 2, row_top + SEARCH_ROW_H // 2)
+
+    def search_history_center(self, index: int) -> tuple[int, int]:
+        """Centre of history-term row *index* (0-based within the
+        current page) on the Search sub-page."""
+        row_top = self.panel_h + TOP_BAR_H + SEARCH_ROW_H
+        return (
+            self.screen_w // 2,
+            row_top + index * SEARCH_HISTORY_ROW_H + SEARCH_HISTORY_ROW_H // 2,
+        )
 
     # ── book grid ──────────────────────────────────────────────────────
 
     def _grid_params(self) -> tuple[int, int, int]:
         """Return ``(grid_top, cell_w, cell_h)`` matching ``grid_geom()``."""
-        top = self.panel_h + TOP_BAR_H + SEARCH_ROW_H + TAB_ROW_H
+        top = self.panel_h + TOP_BAR_H + TAB_ROW_H
         bot = self.screen_h - PAGER_H
-        avail_h = bot - top - 8
         avail_w = self.screen_w - 16
+        avail_h = bot - top - 8
         cell_w = max(CELL_MIN_W, min(avail_w // COLS, CELL_MAX_W))
         cell_h = max(CELL_MIN_H, min(avail_h // ROWS, CELL_MAX_H))
         return top, cell_w, cell_h
