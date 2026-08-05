@@ -54,12 +54,14 @@ import http.server  # noqa: E402
 import json  # noqa: E402
 import re  # noqa: E402
 import socketserver  # noqa: E402
+import sqlite3  # noqa: E402
 import time  # noqa: E402
 import threading  # noqa: E402
 from typing import Any  # noqa: E402
 
 from providers.base import BookMeta  # noqa: E402
 from storage.cover_cache import CoverCache  # noqa: E402
+from storage.ledger import SyncLedger  # noqa: E402
 
 DEFAULT_CONFIG_PATH = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
@@ -100,6 +102,9 @@ def _default_config() -> dict[str, Any]:
             "default": ["eink-reader"],
         },
         "cover_cache_dir": ".cover-cache",
+        "ledger": {
+            "refresh_max_age_s": 30.0,
+        },
     }
 
 
@@ -552,44 +557,80 @@ class PbemuAPIServer(http.server.BaseHTTPRequestHandler):
         self._send(*_json(404, {"error": "not found", "path": full_path}))
 
     def _handle_sync_delta(self) -> None:
-        """POST /api/v1/sync/delta - return metadata-only diff for sync.
+        """POST /api/v1/sync/delta - cursor-based metadata-only sync.
 
-        The device sends its known book IDs + last-seen `updated_at`.
-        We return:
-          - `added`   : books the device hasn't seen (with full metadata)
-          - `removed` : book IDs the device has but we no longer have
-          - `updated` : books whose `updated_at` changed since `since`
+        Request:  {"cursor": <int>, "limit": <int>}   (cursor optional)
+        Response: {"added": [BookMeta...], "removed": ["id"...],
+                   "nextCursor": <int>, "more": <bool>,
+                   "serverTime": "...", "provider": "..."}
 
-        Files are NEVER included in the response.  Downloads happen
-        on-demand when the user opens a book (per the goal's "only on
-        request from the device" requirement).
+        The device stores only ``nextCursor`` (one integer) and replays
+        from there — no id lists cross the wire, so this scales to
+        100k+ books.  ``added`` carries full metadata for new/changed
+        rows; ``removed`` lists tombstoned ids.  Rows are served from
+        the on-disk ledger (SQLite), never from the provider directly,
+        so the endpoint stays fast even while the upstream is slow.
+        The ledger refreshes from the provider at most once per
+        ``ledger.refresh_max_age_s`` seconds.
         """
-        provider = self.app.provider
         body = self._read_body_json() or {}
-        known = set(body.get("known") or [])
-        since = body.get("since")
+        ledger = getattr(self.app, "ledger", None)
+        if ledger is None:
+            self._send(
+                *_json(
+                    503,
+                    {"error": "sync ledger unavailable", "more": False},
+                )
+            )
+            return
+        try:
+            cursor = int(body.get("cursor") or 0)
+        except (TypeError, ValueError):
+            cursor = 0
         try:
             limit = int(body.get("limit") or 500)
         except (TypeError, ValueError):
             limit = 500
-        all_books = provider.list_books(mode="all", limit=limit * 4)
-        have_ids = {b.id for b in all_books}
-        added = [b for b in all_books if b.id not in known]
-        updated = [
-            b
-            for b in all_books
-            if b.id in known and since and b.updated_at and b.updated_at > since
-        ]
-        removed = [bid for bid in known if bid not in have_ids]
+        limit = max(1, min(limit, 2000))
+        max_age = getattr(self.app, "ledger_max_age", 30.0)
+        try:
+            ledger.refresh(self.app.provider, max_age_s=max_age)
+        except Exception as exc:  # noqa: BLE001 — provider may be down
+            sys.stderr.write(f"sync/delta: ledger refresh failed: {exc}\n")
+        entries, more = ledger.delta(cursor, limit)
+        added: list[dict[str, Any]] = []
+        removed: list[str] = []
+        for e in entries:
+            if e.added_at is None:
+                removed.append(e.book_id)
+                continue
+            added.append(
+                {
+                    "id": e.book_id,
+                    "title": e.title,
+                    "authors": json.loads(e.authors),
+                    "series": e.series,
+                    "seriesId": e.series_id,
+                    "seriesIdx": e.series_idx,
+                    "format": e.format,
+                    "size": e.size,
+                    "cover": f"/api/v1/books/{e.book_id}/cover",
+                    "url": f"/api/v1/books/{e.book_id}/file",
+                    "addedAt": e.added_at,
+                    "blurhash": self.app.cover_cache.get_blurhash(e.book_id) or "",
+                }
+            )
+        next_cursor = entries[-1].rev if entries else cursor
         self._send(
             *_json(
                 200,
                 {
-                    "added": [_book_to_api(b, self.app.cover_cache) for b in added[:limit]],
-                    "updated": [_book_to_api(b, self.app.cover_cache) for b in updated[:limit]],
+                    "added": added,
                     "removed": removed,
+                    "nextCursor": next_cursor,
+                    "more": more,
                     "serverTime": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-                    "provider": provider.name,
+                    "provider": self.app.provider.name,
                 },
             )
         )
@@ -643,13 +684,15 @@ class PbemuAPIServer(http.server.BaseHTTPRequestHandler):
         )
 
 
-# -- 1x1 transparent PNG (placeholder for missing covers) --------------
+# -- 1x1 grey RGB PNG (placeholder for missing covers).  The bytes must
+# form a *valid* PNG (correct zlib LEN/NLEN): Pillow and the firmware's
+# LoadPNGStretch both reject a corrupt stream. ---------------------------
 
 
 _TINY_PNG = bytes.fromhex(
-    "0000000d49484452000000010000000108060000001f15c4"
-    "890000000d49444154789c63f8cf000000030001006f5b"
-    "2d3e0000000049454e44ae426082"
+    "0000000d4948445200000001000000010802000000907753"
+    "de0000000c49444154789c636868680000030401814bd3d2"
+    "100000000049454e44ae426082"
 )
 
 
@@ -678,8 +721,8 @@ def build_provider(cfg: dict[str, Any]):
 
 
 def build_default_app(cfg: dict[str, Any] | None = None) -> Any:
-    """Resolve config + provider + cover cache into a single
-    `_AppState` instance that the HTTP handler picks up.
+    """Resolve config + provider + cover cache + sync ledger into a
+    single ``_AppState`` instance that the HTTP handler picks up.
     """
     cfg = cfg or load_config()
     provider = build_provider(cfg)
@@ -687,6 +730,14 @@ def build_default_app(cfg: dict[str, Any] | None = None) -> Any:
     cache_root = cc_cfg.get("dir") or cfg.get("cover_cache_dir") or ".cover-cache"
     cache_age = cc_cfg.get("max_age_seconds", 7 * 24 * 3600)
     cover_cache = CoverCache(cache_root, cache_age)
+    ledger_cfg = cfg.get("ledger") or {}
+    ledger_path = ledger_cfg.get("path") or os.path.join(cache_root, "sync-ledger.db")
+    try:
+        os.makedirs(os.path.dirname(ledger_path) or ".", exist_ok=True)
+        ledger: SyncLedger | None = SyncLedger(ledger_path)
+    except sqlite3.Error as exc:
+        sys.stderr.write(f"ledger: cannot open {ledger_path}: {exc}\n")
+        ledger = None
     state: Any = type(
         "_AppState",
         (),
@@ -695,6 +746,8 @@ def build_default_app(cfg: dict[str, Any] | None = None) -> Any:
             "provider": provider,
             "cover_cache": cover_cache,
             "open_with": cfg.get("open_with") or {},
+            "ledger": ledger,
+            "ledger_max_age": float(ledger_cfg.get("refresh_max_age_s", 30.0)),
         },
     )()
     return state

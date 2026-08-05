@@ -35,6 +35,11 @@ def _make_app(tmp_path, token="test-token"):
                 "library_name": "test lib",
             }
         },
+        "cover_cache_dir": str(tmp_path / ".cover-cache"),
+        "ledger": {
+            "path": str(tmp_path / "sync-ledger.db"),
+            "refresh_max_age_s": 0,
+        },
     }
     return build_default_app(cfg)
 
@@ -150,16 +155,39 @@ def test_books_endpoint(server):
     assert data["items"][0]["title"] == "Test"
 
 
-def test_sync_delta_post(server):
+def test_sync_delta_cursor_protocol(server, tmp_path):
+    hdr = {"Authorization": "Bearer test-token"}
     status, body = _http_post(
-        server.url("/api/v1/sync/delta"),
-        {"known": []},
-        headers={"Authorization": "Bearer test-token"},
+        server.url("/api/v1/sync/delta"), {"cursor": 0, "limit": 500}, headers=hdr
     )
     assert status == 200
-    data = _json_or_default(body, {})
-    assert len(data["added"]) == 1
-    assert data["added"][0]["title"] == "Test"
+    data = json.loads(body)
+    assert [b["title"] for b in data["added"]] == ["Test"]
+    assert data["removed"] == []
+    assert data["more"] is False
+    cursor = data["nextCursor"]
+    assert cursor >= 1
+
+    # A new book appears in the next delta batch.
+    (tmp_path / "Second.epub").write_bytes(b"xyz")
+    status, body = _http_post(
+        server.url("/api/v1/sync/delta"), {"cursor": cursor}, headers=hdr
+    )
+    assert status == 200
+    data = json.loads(body)
+    assert [b["title"] for b in data["added"]] == ["Second"]
+    cursor = data["nextCursor"]
+
+    # Removing it produces a tombstone the device replays as a delete.
+    (tmp_path / "Second.epub").unlink()
+    status, body = _http_post(
+        server.url("/api/v1/sync/delta"), {"cursor": cursor}, headers=hdr
+    )
+    assert status == 200
+    data = json.loads(body)
+    assert data["added"] == []
+    assert len(data["removed"]) == 1
+    assert data["more"] is False
 
 
 def test_open_with_returns_app(server):
