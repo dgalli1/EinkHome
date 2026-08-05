@@ -30,7 +30,6 @@ from tests.support.bookshelf import (
     MORE_SYNC,
     MORE_TITLE_AZ,
     MORE_SETTINGS,
-    MORE_SYSTEM,
     MORE_APPS,
     BookshelfGeometry,
     BookshelfSession,
@@ -628,15 +627,6 @@ def test_settings_api_host_row_opens_keyboard(fresh_bookshelf):
     bs.wait_hash_change(before)
 
 
-def test_more_overlay_system_menu_launches_control_panel(fresh_bookshelf):
-    """Open More, tap System menu, verify control panel launches."""
-    bs = fresh_bookshelf
-    bs.tap_menu()
-    time.sleep(0.5)
-    before = bs.frame_hash()
-    bs.tap_more_item(MORE_SYSTEM)
-    bs.wait_hash_change(before)
-    bs.assert_log_contains("opening system control panel")
 
 
 # ── launcher (app grid) ───────────────────────────────────────────────
@@ -699,6 +689,16 @@ def test_search_tap_opens_keyboard(fresh_bookshelf):
     bs = fresh_bookshelf
     bs.tap_search_and_verify()
 
+
+
+def test_launcher_drag_scrolls_body(fresh_bookshelf):
+    """Dragging the launcher body vertically scrolls the app column."""
+    bs = fresh_bookshelf
+    bs.open_launcher()
+    time.sleep(0.5)
+    before = bs.frame_hash()
+    bs.scroll_launcher_down()
+    bs.wait_hash_change(before)
 
 def test_search_commit_filters_grid(fresh_bookshelf):
     """Typing a query and committing it must actually filter the shelf.
@@ -1565,7 +1565,6 @@ def test_legacy_json_store_migrates_to_sqlite(bookshelf_env):
                     "format": "epub",
                     "size": 123,
                     "addedAt": 1700000000,
-                    "blurhash": "",
                 },
                 {
                     "id": "legacy_b",
@@ -1577,7 +1576,6 @@ def test_legacy_json_store_migrates_to_sqlite(bookshelf_env):
                     "format": "epub",
                     "size": 456,
                     "addedAt": 1700000001,
-                    "blurhash": "",
                 },
             ]
         ),

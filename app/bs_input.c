@@ -142,14 +142,6 @@ on_tap_overlay_more(int x, int y)
         FullUpdate();
         return;
     }
-    /* System menu row launches the firmware's control panel dropdown. */
-    if (y >= MORE_Y0 + MORE_SYSTEM_IDX * MORE_ITEM_H &&
-        y < MORE_Y0 + (MORE_SYSTEM_IDX + 1) * MORE_ITEM_H) {
-        g_state.more_open = 0;
-        LOG("[bookshelf] opening system control panel\n");
-        OpenControlPanel(NULL);
-        return;
-    }
     /* Applications row opens the in-app launcher overlay. */
     if (y >= MORE_Y0 + MORE_APPS_IDX * MORE_ITEM_H &&
         y < MORE_Y0 + (MORE_APPS_IDX + 1) * MORE_ITEM_H) {

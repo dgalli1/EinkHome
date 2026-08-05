@@ -390,47 +390,40 @@ lc_translate(const char *raw, char *out, size_t cap)
 
 LauncherItem g_launcher_items[LAUNCHER_MAX_ITEMS];
 int          g_launcher_count;
-int          g_launcher_pages;
+int          g_launcher_body_h;
 int          g_launcher_built;
 
+/* Lay every item out in one continuous column (headers span the full
+ * width, app cells flow three per row).  The overlay scrolls this column
+ * vertically; nothing is paginated, so a group heading can never clip
+ * the last row of the previous group. */
 void
 launcher_layout(void)
 {
     int w = ScreenWidth();
-    int h = ScreenHeight();
-    int body_top = g_state.panel_h + LAUNCHER_HEADER_H;
-    int body_bot = h - LAUNCHER_PAGER_H;
     int cell_w = (w - 2 * LAUNCHER_MARGIN) / LAUNCHER_COLS;
-    int page = 0;
     int col = 0;
-    int y = body_top;
+    int y = 0;
 
     for (int i = 0; i < g_launcher_count; i++) {
         LauncherItem *it = &g_launcher_items[i];
         if (it->kind == 0) {
-            if (y + LAUNCHER_GROUP_H > body_bot) {
-                page++;
+            if (col > 0) {
+                /* Finish a partial row before the next heading so the
+                 * heading never overlaps the previous group's tiles. */
+                y += LAUNCHER_CELL_H;
                 col = 0;
-                y = body_top;
             }
-            it->page = page;
             it->x = LAUNCHER_MARGIN;
             it->y = y;
             it->w = w - 2 * LAUNCHER_MARGIN;
             it->h = LAUNCHER_GROUP_H;
             y += LAUNCHER_GROUP_H;
-            col = 0;
         } else {
             if (col >= LAUNCHER_COLS) {
                 col = 0;
                 y += LAUNCHER_CELL_H;
             }
-            if (y + LAUNCHER_CELL_H > body_bot) {
-                page++;
-                col = 0;
-                y = body_top;
-            }
-            it->page = page;
             it->x = LAUNCHER_MARGIN + col * cell_w;
             it->y = y;
             it->w = cell_w;
@@ -438,7 +431,9 @@ launcher_layout(void)
             col++;
         }
     }
-    g_launcher_pages = page + 1;
+    if (col > 0)
+        y += LAUNCHER_CELL_H;
+    g_launcher_body_h = y;
 }
 
 void
@@ -504,7 +499,7 @@ void
 launcher_build(void)
 {
     g_launcher_count = 0;
-    g_launcher_pages = 1;
+    g_launcher_body_h = 0;
 
     char *db = read_text_file("/mnt/ext1/system/config/desktop/apps_db.json");
     if (!db)
@@ -675,7 +670,9 @@ launcher_build(void)
     free(vw);
     launcher_layout();
     g_launcher_built = 1;
-    LOG("[bookshelf] launcher built: %d items, %d pages\n", g_launcher_count, g_launcher_pages);
+    LOG("[bookshelf] launcher built: %d items, %d body height\n",
+        g_launcher_count,
+        g_launcher_body_h);
 }
 
 /* -- launcher draw ------------------------------------------------------ */
@@ -714,8 +711,23 @@ draw_overlay_launcher(void)
 {
     int w = ScreenWidth();
     int h = ScreenHeight();
+    int body_top = g_state.panel_h + LAUNCHER_HEADER_H;
+    int body_h = h - body_top;
+
+    /* Clamp the scroll offset: the column's last row stops at the bottom
+     * edge; a column shorter than the window never scrolls. */
+    int max_scroll = g_launcher_body_h - body_h;
+    if (max_scroll < 0)
+        max_scroll = 0;
+    if (g_state.launcher_scroll < 0)
+        g_state.launcher_scroll = 0;
+    if (g_state.launcher_scroll > max_scroll)
+        g_state.launcher_scroll = max_scroll;
+    int scroll = g_state.launcher_scroll;
+
     FillArea(0, g_state.panel_h, w, h - g_state.panel_h, WHITE);
 
+    /* Fixed header: title + Back button. */
     FillArea(0, g_state.panel_h, w, LAUNCHER_HEADER_H, WHITE);
     DrawLine(0,
              g_state.panel_h + LAUNCHER_HEADER_H - 1,
@@ -741,21 +753,15 @@ draw_overlay_launcher(void)
         }
     }
 
-    int pg = g_state.launcher_page;
-    if (pg < 0)
-        pg = 0;
-    if (pg >= g_launcher_pages)
-        pg = g_launcher_pages - 1;
-    if (pg < 0)
-        pg = 0;
-
+    /* Scrollable body, clipped so rows never bleed into the header. */
+    SetClip(0, body_top, w, body_h);
     if (g_launcher_count == 0) {
         ifont *ef = OpenFont(DEFAULTFONT, 32, 0);
         if (ef) {
             SetFont(ef, BLACK);
             const char *empty = i18n("launcher.empty");
             int         tw = StringWidth(empty);
-            DrawString((w - tw) / 2, h / 2, empty);
+            DrawString((w - tw) / 2, body_top + body_h / 2, empty);
             CloseFont(ef);
         }
     }
@@ -764,22 +770,23 @@ draw_overlay_launcher(void)
     ifont *af = OpenFont(DEFAULTFONT, 24, 0);
     for (int i = 0; i < g_launcher_count; i++) {
         const LauncherItem *it = &g_launcher_items[i];
-        if (it->page != pg)
+        int                 sy = it->y - scroll + body_top;
+        if (sy + it->h <= body_top || sy >= h)
             continue;
         if (it->kind == 0) {
-            FillArea(it->x, it->y, it->w, it->h, WHITE);
-            DrawLine(it->x, it->y + it->h - 1, it->x + it->w, it->y + it->h - 1, BLACK);
+            FillArea(it->x, sy, it->w, it->h, WHITE);
+            DrawLine(it->x, sy + it->h - 1, it->x + it->w, sy + it->h - 1, BLACK);
             if (hf) {
                 SetFont(hf, BLACK);
-                DrawString(it->x + 12, it->y + (it->h - 28) / 2 - 2, it->text);
+                DrawString(it->x + 12, sy + (it->h - 28) / 2 - 2, it->text);
             }
         } else {
             int cx = it->x + it->w / 2;
-            int icon_cy = it->y + 12 + LAUNCHER_ICON_SZ / 2;
+            int icon_cy = sy + 12 + LAUNCHER_ICON_SZ / 2;
             draw_launcher_icon(cx, icon_cy, it->icon, it->text);
             if (af) {
                 SetFont(af, BLACK);
-                int ly = it->y + 12 + LAUNCHER_ICON_SZ + 8;
+                int ly = sy + 12 + LAUNCHER_ICON_SZ + 8;
                 int maxw = it->w - 8;
                 if (StringWidth(it->text) <= maxw) {
                     int tw = StringWidth(it->text);
@@ -811,29 +818,7 @@ draw_overlay_launcher(void)
         CloseFont(hf);
     if (af)
         CloseFont(af);
-
-    int py = h - LAUNCHER_PAGER_H;
-    FillArea(0, py, w, LAUNCHER_PAGER_H, WHITE);
-    DrawLine(0, py, w, py, BLACK);
-    if (g_launcher_pages > 1) {
-        char pbuf[32];
-        snprintf(pbuf, sizeof pbuf, "%d / %d", pg + 1, g_launcher_pages);
-        ifont *pf = OpenFont(DEFAULTFONT, 28, 0);
-        if (pf) {
-            SetFont(pf, BLACK);
-            int tw = StringWidth(pbuf);
-            DrawString((w - tw) / 2, py + (LAUNCHER_PAGER_H - 28) / 2 - 2, pbuf);
-            CloseFont(pf);
-        }
-        if (pg > 0) {
-            DrawLine(32, py + 28, 16, py + LAUNCHER_PAGER_H / 2, BLACK);
-            DrawLine(16, py + LAUNCHER_PAGER_H / 2, 32, py + LAUNCHER_PAGER_H - 28, BLACK);
-        }
-        if (pg < g_launcher_pages - 1) {
-            DrawLine(w - 32, py + 28, w - 16, py + LAUNCHER_PAGER_H / 2, BLACK);
-            DrawLine(w - 16, py + LAUNCHER_PAGER_H / 2, w - 32, py + LAUNCHER_PAGER_H - 28, BLACK);
-        }
-    }
+    SetClip(0, 0, w, h);
 }
 
 /* -- launcher hit-test + actions ---------------------------------------- */
@@ -858,32 +843,21 @@ launch_app(const LauncherItem *it)
 void
 on_tap_overlay_launcher(int x, int y)
 {
-    int w = ScreenWidth();
     int h = ScreenHeight();
+    int body_top = g_state.panel_h + LAUNCHER_HEADER_H;
     if (x >= 16 && x < 176 && y >= g_state.panel_h + (LAUNCHER_HEADER_H - 56) / 2 &&
         y < g_state.panel_h + (LAUNCHER_HEADER_H - 56) / 2 + 56) {
         launcher_close();
         return;
     }
-    int py = h - LAUNCHER_PAGER_H;
-    if (y >= py) {
-        if (x < w / 3 && g_state.launcher_page > 0) {
-            g_state.launcher_page--;
-            draw_overlay_launcher();
-            FullUpdate();
-        } else if (x >= 2 * w / 3 && g_state.launcher_page < g_launcher_pages - 1) {
-            g_state.launcher_page++;
-            draw_overlay_launcher();
-            FullUpdate();
-        }
+    if (y < body_top || y >= h)
         return;
-    }
-    int pg = g_state.launcher_page;
+    int by = y - body_top + g_state.launcher_scroll;
     for (int i = 0; i < g_launcher_count; i++) {
         const LauncherItem *it = &g_launcher_items[i];
-        if (it->page != pg || it->kind != 1)
+        if (it->kind != 1)
             continue;
-        if (x >= it->x && x < it->x + it->w && y >= it->y && y < it->y + it->h) {
+        if (x >= it->x && x < it->x + it->w && by >= it->y && by < it->y + it->h) {
             launcher_close();
             launch_app(it);
             return;
@@ -897,7 +871,9 @@ launcher_open_set(void)
     if (!g_launcher_built)
         launcher_build();
     g_state.launcher_open = 1;
-    g_state.launcher_page = 0;
+    g_state.launcher_scroll = 0;
+    g_state.launcher_drag = 0;
+    g_state.launcher_moved = 0;
     draw_overlay_launcher();
     FullUpdate();
 }
@@ -906,8 +882,11 @@ void
 launcher_close(void)
 {
     g_state.launcher_open = 0;
+    g_state.launcher_drag = 0;
+    g_state.launcher_moved = 0;
     redraw_shelf();
 }
+
 /* Pop out of a drilled-in series back to the collapsed top-level grid. */
 void
 drill_back(void)

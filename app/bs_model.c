@@ -215,7 +215,6 @@ parse_book_obj(const char *obj, Book *b)
         }
     }
     b->size = json_find_int(obj, "size", 0);
-    json_find_key(obj, "blurhash", b->blurhash, sizeof b->blurhash);
     b->added_at = json_find_int(obj, "addedAt", 0);
 
     /* Check if the file exists on local storage (resolved downloads dir). */

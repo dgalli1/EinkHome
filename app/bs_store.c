@@ -37,8 +37,7 @@ static const char *const SCHEMA_SQL =
     "CREATE TABLE IF NOT EXISTS books("
     " id TEXT PRIMARY KEY,"
     " title TEXT, author TEXT, series TEXT, series_id TEXT,"
-    " series_idx REAL, ext TEXT, size INTEGER, downloaded INTEGER,"
-    " local_path TEXT, blurhash TEXT, added_at INTEGER);"
+    " local_path TEXT, added_at INTEGER);"
     "CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT);"
     "CREATE TABLE IF NOT EXISTS view("
     " pos INTEGER PRIMARY KEY,"
@@ -62,6 +61,108 @@ store_path(char *out, size_t cap)
     char dir[MAX_PATH_LEN * 2];
     dirname_of(g_config_path, dir, sizeof dir);
     snprintf(out, cap, "%s/%s", dir, LIB_DB_FILENAME);
+}
+
+/* 1 when `table` has a column named `col` (per PRAGMA table_info). */
+static int
+store_has_column(const char *table, const char *col)
+{
+    char          sql[96];
+    sqlite3_stmt *st = NULL;
+    int           found = 0;
+    snprintf(sql, sizeof sql, "PRAGMA table_info(%s)", table);
+    if (sqlite3_prepare_v2(g_db, sql, -1, &st, NULL) != SQLITE_OK)
+        return 1; /* cannot introspect; assume present */
+    while (sqlite3_step(st) == SQLITE_ROW) {
+        const char *name = (const char *)sqlite3_column_text(st, 1);
+        if (name != NULL && strcmp(name, col) == 0) {
+            found = 1;
+            break;
+        }
+    }
+    sqlite3_finalize(st);
+    return found;
+}
+
+/* Stores created by older app builds predate some columns; CREATE TABLE
+ * IF NOT EXISTS leaves the old shape untouched, so add whatever is
+ * missing instead of failing the schema step. */
+static void
+store_migrate_columns(void)
+{
+    static const struct {
+        const char *col;
+        const char *type;
+    } mig[] = {
+        {"series_idx", "REAL"},
+        {"ext", "TEXT"},
+        {"size", "INTEGER"},
+        {"downloaded", "INTEGER"},
+        {"local_path", "TEXT"},
+        {"added_at", "INTEGER"},
+    };
+    int changed = 0;
+    for (size_t i = 0; i < sizeof mig / sizeof mig[0]; i++) {
+        int has = store_has_column("books", mig[i].col);
+        LOG("[bookshelf] store: dbg col=%s has=%d err=%s\n",
+            mig[i].col,
+            has,
+            g_db ? sqlite3_errmsg(g_db) : "?");
+        if (has)
+            continue;
+        char sql[128];
+        snprintf(sql, sizeof sql, "ALTER TABLE books ADD COLUMN %s %s", mig[i].col, mig[i].type);
+        if (sqlite3_exec(g_db, sql, NULL, NULL, NULL) != SQLITE_OK)
+            LOG("[bookshelf] store: migrate %s failed: %s\n", mig[i].col, sqlite3_errmsg(g_db));
+        else
+            changed = 1;
+    }
+    if (changed) {
+        /* Rows written before the migration carry no data in the new
+         * columns; a full re-sync repopulates them.  The marker makes
+         * the reset one-shot: otherwise every boot would reset the
+         * cursor and re-sync the whole library. */
+        store_set_cursor(0);
+        store_set_meta("schema_version", "2");
+        LOG("[bookshelf] store: schema migrated; sync cursor reset\n");
+    }
+}
+
+/* Persist one meta key/value pair (used for one-shot migration markers). */
+static int bind_text_trunc(sqlite3_stmt *st, int i, const char *s);
+
+void
+store_set_meta(const char *key, const char *value)
+{
+    if (g_db == NULL)
+        return;
+    sqlite3_stmt *st = NULL;
+    if (sqlite3_prepare_v2(
+            g_db, "INSERT OR REPLACE INTO meta(key, value) VALUES(?1, ?2)", -1, &st, NULL) !=
+        SQLITE_OK)
+        return;
+    bind_text_trunc(st, 1, key);
+    bind_text_trunc(st, 2, value);
+    sqlite3_step(st);
+    sqlite3_finalize(st);
+}
+
+int
+store_meta_value(const char *key, char *out, size_t cap)
+{
+    if (g_db == NULL)
+        return 0;
+    sqlite3_stmt *st = NULL;
+    if (sqlite3_prepare_v2(g_db, "SELECT value FROM meta WHERE key=?1", -1, &st, NULL) != SQLITE_OK)
+        return 0;
+    bind_text_trunc(st, 1, key);
+    int found = 0;
+    if (sqlite3_step(st) == SQLITE_ROW) {
+        snprintf(out, cap, "%s", (const char *)sqlite3_column_text(st, 0));
+        found = 1;
+    }
+    sqlite3_finalize(st);
+    return found;
 }
 
 /* ── open / close -------------------------------------------------------- */
@@ -106,11 +207,31 @@ store_open(void)
         return;
     }
 
+    /* Stores from older builds predate some columns; the index in
+     * SCHEMA_SQL would fail on them, so add missing columns first.
+     * `id` is present in every schema version, so it doubles as the
+     * table-exists probe (PRAGMA table_info is reliable here, a
+     * sqlite_master SELECT is not on the guest's sqlite).  The marker
+     * makes the migration one-shot: the cursor reset that follows a
+     * real schema change must not repeat on every boot. */
+    {
+        char ver[8] = "";
+        if (store_meta_value("schema_version", ver, sizeof ver) != 1 || strcmp(ver, "2") != 0) {
+            if (store_has_column("books", "id"))
+                store_migrate_columns();
+            store_set_meta("schema_version", "2");
+        }
+    }
     if (sqlite3_exec(g_db, SCHEMA_SQL, NULL, NULL, NULL) != SQLITE_OK) {
-        LOG("[bookshelf] store: schema failed: %s\n", sqlite3_errmsg(g_db));
-        sqlite3_close(g_db);
-        g_db = NULL;
-        return;
+        /* Introspection can miss a pre-existing table (e.g. a locked or
+         * partially-created db); migrate whatever is missing and retry. */
+        store_migrate_columns();
+        if (sqlite3_exec(g_db, SCHEMA_SQL, NULL, NULL, NULL) != SQLITE_OK) {
+            LOG("[bookshelf] store: schema failed: %s\n", sqlite3_errmsg(g_db));
+            sqlite3_close(g_db);
+            g_db = NULL;
+            return;
+        }
     }
 
     /* One-time legacy JSON import. */
@@ -176,8 +297,8 @@ store_upsert_book(const Book *b)
     if (sqlite3_prepare_v2(g_db,
                            "INSERT OR REPLACE INTO books("
                            "id,title,author,series,series_id,series_idx,"
-                           "ext,size,downloaded,local_path,blurhash,added_at)"
-                           " VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
+                           "ext,size,downloaded,local_path,added_at)"
+                           " VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
                            -1,
                            &st,
                            NULL) != SQLITE_OK)
@@ -192,8 +313,7 @@ store_upsert_book(const Book *b)
     sqlite3_bind_int(st, 8, b->size);
     sqlite3_bind_int(st, 9, downloaded);
     bind_text_trunc(st, 10, local_path);
-    bind_text_trunc(st, 11, b->blurhash);
-    sqlite3_bind_int64(st, 12, b->added_at);
+    sqlite3_bind_int64(st, 11, b->added_at);
     int rc = sqlite3_step(st);
     if (rc != SQLITE_DONE)
         LOG("[bookshelf] upsert FAILED id=%s rc=%d: %s\n", b->id, rc, sqlite3_errmsg(g_db));
@@ -245,17 +365,16 @@ fill_book_from_stmt(sqlite3_stmt *st, Book *b)
     b->size = sqlite3_column_int(st, 7);
     b->downloaded = sqlite3_column_int(st, 8);
     snprintf(b->local_path, sizeof b->local_path, "%s", (const char *)sqlite3_column_text(st, 9));
-    snprintf(b->blurhash, sizeof b->blurhash, "%s", (const char *)sqlite3_column_text(st, 10));
-    b->added_at = (long)sqlite3_column_int64(st, 11);
+    b->added_at = (long)sqlite3_column_int64(st, 10);
 }
 
 #define BOOK_COLS                                                                                  \
-    "id,title,author,series,series_id,series_idx,ext,size,downloaded,local_path,blurhash,added_at"
+    "id,title,author,series,series_id,series_idx,ext,size,downloaded,local_path,added_at"
 /* books columns qualified for the view JOIN (bare BOOK_COLS would leave
  * every column after the first unqualified and ambiguous). */
 #define BOOK_COLS_Q                                                                                \
     "b.id,b.title,b.author,b.series,b.series_id,b.series_idx,b.ext,b.size,b.downloaded,"           \
-    "b.local_path,b.blurhash,b.added_at"
+    "b.local_path,b.added_at"
 
 /* Fetch one book row by id.  Returns 1 when found, 0 otherwise. */
 int

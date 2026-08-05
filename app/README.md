@@ -373,7 +373,9 @@ the view.
 The "More" menu is a right-anchored 75%-width panel with the
 following items, in order: **Sync**, **Title A–Z**, **By author**,
 **By series**, **Recent**, **Grid**, **List**, **Download all**,
-**Settings**, **System menu**, **Applications**.
+**Settings**, **Applications**.  (A "System menu" entry existed while
+the firmware bar was unreliable; tapping the top status strip now opens
+the firmware control panel directly, so the entry was dropped.)
 
 ### How the firmware system status bars are enabled
 
@@ -416,16 +418,16 @@ g_state.panel_h = PanelHeight();  /* height reserved at the BOTTOM */
 Repaint();
 ```
 
-The status bar is **not** drawn by the app — `libinkview` does it
-automatically once the panel is enabled and the app is flagged as a
-reader.  Crucially, on this firmware the panel always renders at the
-**bottom** of the screen: bit 3 of the internal panel-state byte is
-clear after `SetPanelType(PANEL_ENABLED)`, and the only way to set it
-(`SetPanelType(9)`) also zeroes `fb_y_offset`, which makes the panel's
-inner draw function bail entirely (it treats `fb_y_offset==0` as "no
-panel").  So `panel_h` is a **bottom reservation**, not a top offset:
-our content starts at `y=0` and the pager is placed `panel_h` pixels
-above the bottom edge so it never overlaps the status bar.
+On the emulator `libinkview` paints the strip once the panel is enabled
+as above.  On a live device the panel painter never activates for this
+task (`PanelHeight()` returns 0 at `EVT_INIT`), so the app falls back to
+a **self-drawn** strip of the same height (`SELF_PANEL_H`): day + 24h
+time on the left, frontlight bulb + battery outline on the right, drawn
+by `draw_system_strip()`.  `stamp_panel()` picks the right painter at
+every place that previously called `iv_update_panel(0)`, and
+`g_state.panel_h` is forced to `SELF_PANEL_H` so the home row never sits
+flush against the top edge.  Tapping the strip (either painter) opens
+the firmware control panel, the same gesture as the stock UI.
 
 We deliberately **do not** call `SetPanelType(PANEL_DISABLED)` or
 `iv_fullscreen()`.  Without those the system panel stays visible —
@@ -445,8 +447,8 @@ firmware's native on-screen keyboard; pressing Enter (or the keyboard's
 OK button) filters the visible books by title or author.
 
 The main area is a 3×2 grid of thumbnails.  Each tile shows the book
-cover (blurhash placeholder or cached PNG while the real cover
-downloads), the book title, the author, and a corner badge:
+cover (cached PNG while the real cover downloads, hatch placeholder
+otherwise), the book title, the author, and a corner badge:
 
 * `v` — the book is downloaded locally (`/mnt/ext1/system/bin/<id>.<ext>` exists)
 * `R` — the book is remote-only (it lives in the API server)
@@ -460,6 +462,12 @@ device), and launches the chosen app via `NewTaskEx()` with the
 downloaded path as the first argument.  In the API server config
 (`api/config/server.json`) the `open_with` table maps extensions to
 ordered candidate apps, e.g. `epub: [eink-reader, bookshelf]`.
+
+**Applications** opens the in-app launcher: a scrollable column of the
+firmware's app groups (read from `apps_db.json` / `view.json`) plus any
+user-installed apps.  Drag vertically to scroll; a group heading always
+keeps its own row, so headings never clip the previous group's last row.
+Tapping a tile launches the app via `NewTaskEx()`.
 
 ### Languages
 

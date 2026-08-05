@@ -214,7 +214,12 @@ launch_reader(Book *b)
     book_local_path(b, path, sizeof path);
     char path_copy[MAX_PATH_LEN];
     snprintf(path_copy, sizeof path_copy, "%s", path);
-    char *args[2] = {path_copy, NULL};
+    /* argv[0] must be the program path: the firmware's task launcher
+     * passes the args array through as-is, so with only the book path
+     * in the array the reader received it as argv[0] and never saw a
+     * book argument (the integrated reader then opened to its home
+     * screen instead of the book). */
+    char *args[3] = {full_path, path_copy, NULL};
     LOG("[bookshelf] launching reader app=%s path=%s reader_pref=%d\n",
         app,
         path_copy,

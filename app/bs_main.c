@@ -51,6 +51,23 @@ on_event(int type, int par1, int par2)
         SetPanelTransparent(0);
         SetPanelType(PANEL_ENABLED | PANEL_NO_FB_OFFSET);
         g_state.panel_h = PanelHeight();
+        if (g_state.panel_h <= 0) {
+            /* Live device: the firmware's panel painter never activates
+             * for this task (PanelHeight()==0), so the stock strip is
+             * never drawn and our content would sit flush against the
+             * top edge.  Reserve the stock bar height and paint the
+             * strip ourselves (draw_system_strip). */
+            g_state.panel_h = SELF_PANEL_H;
+            g_self_panel = 1;
+        }
+        /* Test/debug override: force the self-drawn strip even when the
+         * firmware panel would paint, so the fallback path can be
+         * exercised in the emulator. */
+        if (getenv("PBEMU_SELF_PANEL") != NULL) {
+            g_state.panel_h = SELF_PANEL_H;
+            g_self_panel = 1;
+        }
+        LOG("[bookshelf] panel_h=%d self_panel=%d\n", g_state.panel_h, g_self_panel);
 
         /* Populate and render the panel content.  DrawPanel() fills in the
          * panel_conf content fields (the stock bookshelf.app calls
@@ -61,7 +78,7 @@ on_event(int type, int par1, int par2)
          * is_state_changed() is true, which it isn't on a fresh launch, so
          * we force it here.  Arg 0 = reading-mode disabled (normal bar). */
         DrawPanel(NULL, "Bookshelf", NULL, -1);
-        iv_update_panel(0);
+        stamp_panel();
 
         /* Force the firmware to actually draw the system panel now.
          * Repaint() enqueues EVT_SHOW (=23) on the event loop, which
@@ -149,7 +166,7 @@ on_event(int type, int par1, int par2)
          * iv_update_panel(0) directly ensures the clock/battery/wifi
          * strip is always present in the framebuffer before we draw
          * our content below it. */
-        iv_update_panel(0);
+        stamp_panel();
         if (g_state.launcher_open) {
             draw_overlay_launcher();
             FullUpdate();
@@ -177,14 +194,21 @@ on_event(int type, int par1, int par2)
 
     if (type == EVT_POINTERDOWN) {
         int x = par1, y = par2;
+        /* The launcher body is drag-scrolled: remember the press point so
+         * POINTERMOVE can translate the finger travel into scroll. */
+        if (g_state.launcher_open) {
+            g_state.launcher_drag = 1;
+            g_state.launcher_drag_y = y;
+            g_state.launcher_moved = 0;
+            return 1;
+        }
         /* Arm a long-press only on the Library tab's grid, and only when
          * no modal overlay is up.  The timer (longpress_tick) opens the
          * context menu if the finger stays put. */
         g_lp_armed = 0;
         g_lp_vi = -1;
         if (g_state.tab == TAB_LIBRARY && !g_state.settings_open && !g_state.menu_open &&
-            !g_state.more_open && !g_state.ctx_open && !g_state.search_open &&
-            !g_state.launcher_open) {
+            !g_state.more_open && !g_state.ctx_open && !g_state.search_open) {
             int vi = hit_thumbnail(x, y);
             if (vi >= 0) {
                 g_lp_armed = 1;
@@ -198,6 +222,19 @@ on_event(int type, int par1, int par2)
     }
 
     if (type == EVT_POINTERMOVE) {
+        if (g_state.launcher_open) {
+            if (g_state.launcher_drag) {
+                int dy = par2 - g_state.launcher_drag_y;
+                if (g_state.launcher_moved || dy > LAUNCHER_DRAG_SLOP || dy < -LAUNCHER_DRAG_SLOP) {
+                    g_state.launcher_moved = 1;
+                    g_state.launcher_scroll -= dy;
+                    g_state.launcher_drag_y = par2;
+                    draw_overlay_launcher();
+                    FullUpdate();
+                }
+            }
+            return 1;
+        }
         /* A drag away from the press point cancels the pending long-press
          * so scrolling/scrubbing never pops the context menu. */
         if (g_lp_armed) {
@@ -232,9 +269,14 @@ on_event(int type, int par1, int par2)
             on_tap_overlay_settings(x, y);
             return 1;
         }
-        /* Launcher overlay owns the whole screen while open. */
+        /* Launcher overlay owns the whole screen while open.  A lift that
+         * ended a scroll drag is not a tap. */
         if (g_state.launcher_open) {
-            on_tap_overlay_launcher(x, y);
+            int was_drag = g_state.launcher_moved;
+            g_state.launcher_drag = 0;
+            g_state.launcher_moved = 0;
+            if (!was_drag)
+                on_tap_overlay_launcher(x, y);
             return 1;
         }
 
@@ -427,7 +469,7 @@ keyboard_handler(char *buffer)
     /* The on-screen keyboard draws full-screen and wipes the top status
      * strip; re-stamp it before redraw_shelf() flushes so the panel
      * survives the commit redraw (redraw_shelf clears only from panel_h). */
-    iv_update_panel(0);
+    stamp_panel();
     redraw_shelf();
 }
 

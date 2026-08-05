@@ -59,7 +59,6 @@ const I18n g_i18n[] = {
     {"settings.tap_edit", "tap to edit", "tippen", "toucher", "tocca"},
     {"settings.installed", "installed", "installiert", "install\u00e9e", "installata"},
     {"settings.not_installed", "not found", "nicht da", "absente", "assente"},
-    {"action.system", "System menu", "Systemmen\u00fc", "Menu syst\u00e8me", "Menu sistema"},
     {"tab.library", "Library", "Bibliothek", "Biblioth\u00e8que", "Libreria"},
     {"tab.downloads", "Downloads", "Downloads", "T\u00e9l\u00e9chargements", "Download"},
     {"action.download_all",

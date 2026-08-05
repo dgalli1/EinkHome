@@ -162,11 +162,11 @@ scp ${SSH_COMMON} "${SRC_CFG}" "root@${DEVICE}:/mnt/ext1/applications/bookshelf.
 # makes the custom bookshelf appear on boot instead of requiring a
 # manual launch from the task list.
 WRAPPER="${HERE}/bookshelf-wrapper.sh"
-if [ -f "${WRAPPER}" ]; then
-	echo "==> deploying startup wrapper to /mnt/ext1/system/bin/bookshelf.app"
-	ssh ${SSH_COMMON} "root@${DEVICE}" 'mkdir -p /mnt/ext1/system/bin'
-	scp ${SSH_COMMON} "${WRAPPER}" "root@${DEVICE}:/mnt/ext1/system/bin/bookshelf.app"
-fi
+# if [ -f "${WRAPPER}" ]; then
+# 	echo "==> deploying startup wrapper to /mnt/ext1/system/bin/bookshelf.app"
+# 	ssh ${SSH_COMMON} "root@${DEVICE}" 'mkdir -p /mnt/ext1/system/bin'
+# 	scp ${SSH_COMMON} "${WRAPPER}" "root@${DEVICE}:/mnt/ext1/system/bin/bookshelf.app"
+# fi
 
 # Make the binaries executable, kill any stale copy, restart cleanly.
 # The `killall` is best-effort: it's OK if no process matches.

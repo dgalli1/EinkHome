@@ -10,7 +10,6 @@ from .geometry import (
     MORE_SYNC,
     MORE_TITLE_AZ,
     MORE_SETTINGS,
-    MORE_SYSTEM,
     MORE_APPS,
     BookshelfGeometry,
 )
@@ -26,7 +25,6 @@ __all__ = [
     "MORE_SYNC",
     "MORE_TITLE_AZ",
     "MORE_SETTINGS",
-    "MORE_SYSTEM",
     "MORE_APPS",
     "BookshelfGeometry",
     "BookshelfSession",

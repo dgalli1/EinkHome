@@ -325,58 +325,92 @@ downloads_pending(void)
     return n;
 }
 
-/* -- cover / blurhash helpers ----------------------------------------- */
+/* 1 = the firmware's panel painter never activated (PanelHeight()==0 at
+ * init, the live-device case); we draw the status strip ourselves. */
+int g_self_panel = 0;
 
-const char bh_base83[84] =
-    "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz#$%*+,-.:;=?@[]^_{|}~";
-
-int
-bh_value(char c)
+static void
+draw_circle_outline(int cx, int cy, int r)
 {
-    for (int i = 0; i < 83; i++) {
-        if (bh_base83[i] == c)
-            return i;
+    int px = cx + r, py = cy;
+    for (int s = 1; s <= 20; s++) {
+        double a = s * 2 * M_PI / 20.0;
+        int    x = cx + (int)(r * cos(a));
+        int    y = cy + (int)(r * sin(a));
+        DrawLine(px, py, x, y, BLACK);
+        px = x;
+        py = y;
     }
-    return -1;
 }
 
-int
-bh_decode83(const char *s, int n)
+/* Self-drawn replacement for the firmware status strip.  On the live
+ * device the panel painter never activates for this task, so without a
+ * fallback the screen would show no clock/battery bar and our home row
+ * would sit flush against the top edge.  Mirrors the stock collapsed
+ * bar: day + 24h time on the left, frontlight bulb + battery on the
+ * right, separator line at the bottom. */
+void
+draw_system_strip(void)
 {
-    int v = 0;
-    for (int i = 0; i < n; i++) {
-        int d = bh_value(s[i]);
-        if (d < 0)
-            return -1;
-        v = v * 83 + d;
+    int w = ScreenWidth();
+    int h = g_state.panel_h;
+
+    FillArea(0, 0, w, h, WHITE);
+    DrawLine(0, h - 1, w, h - 1, BLACK);
+
+    time_t    now = time(NULL);
+    struct tm tmv;
+    char      buf[32];
+    localtime_r(&now, &tmv);
+    strftime(buf, sizeof buf, "%a %H:%M", &tmv);
+    ifont *tf = OpenFont(DEFAULTFONT, 40, 0);
+    if (tf != NULL) {
+        SetFont(tf, BLACK);
+        DrawString(24, (h - 40) / 2, buf);
+        CloseFont(tf);
     }
-    return v;
+
+    /* Frontlight bulb: circle with short rays. */
+    int lx = w - 176;
+    int ly = h / 2;
+    draw_circle_outline(lx, ly, 12);
+    for (int a = 0; a < 8; a++) {
+        double ang = a * M_PI / 4.0 + M_PI / 8.0;
+        DrawLine(lx + (int)(16 * cos(ang)),
+                 ly + (int)(16 * sin(ang)),
+                 lx + (int)(22 * cos(ang)),
+                 ly + (int)(22 * sin(ang)),
+                 BLACK);
+    }
+
+    /* Battery: outline + nub + fill proportional to charge. */
+    int bw = 84, bh = 40;
+    int bx = w - 116;
+    int by = (h - bh) / 2;
+    DrawRect(bx, by, bw, bh, BLACK);
+    FillArea(bx + bw + 1, by + bh / 2 - 7, 6, 14, BLACK);
+    int lvl = GetBatteryPower();
+    if (lvl < 0)
+        lvl = 0;
+    if (lvl > 100)
+        lvl = 100;
+    int fw = (bw - 8) * lvl / 100;
+    if (fw > 0)
+        FillArea(bx + 4, by + 4, fw, bh - 8, BLACK);
 }
 
-float
-bh_s2l(int v)
+/* Paint the top status strip: firmware-painted when the panel painter
+ * is active (emulator), self-drawn when it never activates (device). */
+void
+stamp_panel(void)
 {
-    float x = v / 255.0f;
-    return x <= 0.04045f ? x / 12.92f : powf((x + 0.055f) / 1.055f, 2.4f);
+    if (g_self_panel)
+        draw_system_strip();
+    else
+        iv_update_panel(0);
 }
 
-int
-bh_l2s(float v)
-{
-    if (v < 0.0f)
-        v = 0.0f;
-    if (v > 1.0f)
-        v = 1.0f;
-    float s = v <= 0.0031308f ? 12.92f * v : 1.055f * powf(v, 1.0f / 2.4f) - 0.055f;
-    int   r = (int)(s * 255.0f + 0.5f);
-    return r < 0 ? 0 : (r > 255 ? 255 : r);
-}
-
-float
-bh_sign_pow(float v, float e)
-{
-    return (v >= 0.0f ? 1.0f : -1.0f) * powf(fabsf(v), e);
-}
+/* -- cover helpers ------------------------------------------------------ */
 
 static long cover_lru = 0;
 
@@ -404,10 +438,6 @@ cover_slot(const char *id, int create)
     if (empty->cover_bmp) {
         free(empty->cover_bmp);
         empty->cover_bmp = NULL;
-    }
-    if (empty->bh_bmp) {
-        free(empty->bh_bmp);
-        empty->bh_bmp = NULL;
     }
     memset(empty, 0, sizeof *empty);
     snprintf(empty->id, sizeof empty->id, "%s", id);
@@ -527,73 +557,6 @@ cover_rect(int tx, int ty, int tw, int th, int *cx, int *cy, int *cw, int *ch)
     *cy = ty + THUMB_BORDER;
 }
 
-/* Decode a blurhash string into a small 8-bit greyscale bitmap cached on
- * the slot.  Luminance of the reconstructed linear RGB gives a soft grey
- * placeholder that reads correctly on the 8-bit panel. */
-void
-bh_ensure(CoverSlot *s, const Book *b)
-{
-    if (s == NULL || b->blurhash[0] == '\0' || s->bh_bmp != NULL)
-        return;
-    int len = (int)strlen(b->blurhash);
-    int size_flag = bh_decode83(b->blurhash, 1);
-    if (size_flag < 0 || len < 6)
-        return;
-    int comp_x = (size_flag % 9) + 1;
-    int comp_y = (size_flag / 9) + 1;
-    int need = 4 + 2 * (comp_x * comp_y);
-    if (len < need || comp_x * comp_y > 81)
-        return;
-    int quant_max = bh_decode83(b->blurhash + 1, 1);
-    if (quant_max < 0)
-        return;
-    float max_ac = (quant_max + 1) / 166.0f;
-
-    float fac[81][3];
-    int   dc = bh_decode83(b->blurhash + 2, 4);
-    if (dc < 0)
-        return;
-    fac[0][0] = bh_s2l((dc >> 16) & 255);
-    fac[0][1] = bh_s2l((dc >> 8) & 255);
-    fac[0][2] = bh_s2l(dc & 255);
-    int pos = 6;
-    for (int k = 1; k < comp_x * comp_y; k++) {
-        int ac = bh_decode83(b->blurhash + pos, 2);
-        if (ac < 0)
-            return;
-        pos += 2;
-        int qr = ac / (19 * 19);
-        int qg = (ac / 19) % 19;
-        int qb = ac % 19;
-        fac[k][0] = bh_sign_pow((qr - 9.0f) / 9.0f, 2.0f) * max_ac;
-        fac[k][1] = bh_sign_pow((qg - 9.0f) / 9.0f, 2.0f) * max_ac;
-        fac[k][2] = bh_sign_pow((qb - 9.0f) / 9.0f, 2.0f) * max_ac;
-    }
-
-    ibitmap *bmp = NewBitmap8(BH_W, BH_H);
-    if (bmp == NULL)
-        return;
-    int scan = bmp->scanline;
-    for (int y = 0; y < BH_H; y++) {
-        for (int x = 0; x < BH_W; x++) {
-            float r = 0.0f, g = 0.0f, bl = 0.0f;
-            for (int j = 0; j < comp_y; j++) {
-                for (int i = 0; i < comp_x; i++) {
-                    float basis =
-                        cosf((float)M_PI * i * x / BH_W) * cosf((float)M_PI * j * y / BH_H);
-                    float *f = fac[i + j * comp_x];
-                    r += f[0] * basis;
-                    g += f[1] * basis;
-                    bl += f[2] * basis;
-                }
-            }
-            float lum = 0.2126f * r + 0.7152f * g + 0.0722f * bl;
-            bmp->data[y * scan + x] = (unsigned char)bh_l2s(lum);
-        }
-    }
-    s->bh_bmp = bmp;
-}
-
 /* Id of the i-th row of the current page (NULL past the end).  The page
  * rows live in g_rows[], filled by draw_grid / view_fetch_page. */
 static const char *
@@ -631,9 +594,9 @@ cover_schedule_next(void)
     }
 }
 
-/* Blit a book's cover (decoded PNG, blurhash placeholder, or hatch
- * fallback) into the given rect.  Shared by the grid card and the list
- * row so both modes fetch/cache covers identically. */
+/* Blit a book's cover (decoded PNG or hatch fallback) into the given
+ * rect.  Shared by the grid card and the list row so both modes
+ * fetch/cache covers identically. */
 void
 blit_cover(int cx, int cy, int cw, int ch, const Book *b)
 {
@@ -641,13 +604,6 @@ blit_cover(int cx, int cy, int cw, int ch, const Book *b)
     if (s != NULL && s->cover_bmp != NULL) {
         StretchBitmap(cx, cy, cw, ch, s->cover_bmp, 0);
         return;
-    }
-    if (b->blurhash[0] != '\0') {
-        bh_ensure(s, b);
-        if (s != NULL && s->bh_bmp != NULL) {
-            StretchBitmap(cx, cy, cw, ch, s->bh_bmp, 0);
-            return;
-        }
     }
     for (int yy = cy; yy < cy + ch; yy += 8)
         DrawLine(cx, yy, cx + cw, yy, LGRAY);
@@ -1269,7 +1225,6 @@ draw_overlay_more(void)
         "view.list",
         "action.download_all",
         "action.settings",
-        "action.system",
         "action.apps",
     };
     int n = (int)(sizeof labels / sizeof labels[0]);
@@ -1333,7 +1288,7 @@ settings_keyboard_handler(char *buffer)
     /* The on-screen keyboard draws full-screen and wipes the top status
      * strip; re-stamp it before the flush so the panel survives the commit
      * redraw (draw_overlay_settings clears only from panel_h). */
-    iv_update_panel(0);
+    stamp_panel();
     FullUpdate();
 }
 

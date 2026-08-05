@@ -113,31 +113,30 @@ extern void iv_update_panel(int readingModeEnable);
  * Applications.  (Title Z-A was removed per user request.) */
 #define MORE_Y0           96
 #define MORE_ITEM_H       88
-#define MORE_N_ITEMS      11
+#define MORE_N_ITEMS      10
 #define MORE_GRID_IDX     5
 #define MORE_LIST_IDX     6
 #define MORE_DLALL_IDX    7
 #define MORE_SETTINGS_IDX 8
-#define MORE_SYSTEM_IDX   9
-#define MORE_APPS_IDX     10
+#define MORE_APPS_IDX     9
 
-/* Cover / blurhash rendering.  On a greyscale framebuffer a blurhash
- * decoded to luminance blits as a soft grey placeholder; on a colour
- * framebuffer the same placeholder reads as a neutral grey while real
- * covers (loaded via LoadPNGStretch) render in full colour.  Covers are
- * fetched one per weak-timer tick so the event loop never blocks. */
-#define MAX_BLURHASH_LEN    48
+/* Cover rendering.  Real covers (loaded via LoadPNGStretch) are fetched
+ * one per weak-timer tick so the event loop never blocks; until then a
+ * hatch placeholder is drawn.  (Blurhash placeholders were removed — the
+ * device is too slow to usefully display them.) */
 #define COVER_TMP           "/tmp/.bcov.png"
 #define COVER_FETCH_MS      60
 #define LIB_DB_FILENAME     "bookshelf_lib.db"
 #define LIB_LEGACY_FILENAME "bookshelf_lib.json" /* pre-sqlite store */
 #define COVERS_SUBDIR       "covers"
-#define BH_W                24
-#define BH_H                36
 #define TEXT_AREA           52 /* vertical room below the cover for title+author */
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
+/* Height of the self-drawn status strip used when the firmware's panel
+ * painter never activates (PanelHeight()==0 on the live device).  Matches
+ * the stock collapsed bar height the emulator's PanelHeight() reports. */
+#define SELF_PANEL_H 106
 
 /* Long-press detection.  The emulator only injects POINTERDOWN/UP/MOVE
  * (the firmware-synthesised EVT_POINTERLONG never fires under qemu), so
@@ -215,7 +214,6 @@ typedef struct {
     int   size;
     int   downloaded;
     char  local_path[MAX_PATH_LEN];
-    char  blurhash[MAX_BLURHASH_LEN];
     long  added_at; /* unix epoch from server "addedAt"; 0 if absent */
 } Book;
 typedef struct {
@@ -251,7 +249,10 @@ typedef struct {
     int     settings_open; /* full-screen settings overlay */
     MainTab tab;           /* TAB_LIBRARY (grid) or TAB_DOWNLOADS */
     int     launcher_open;
-    int     launcher_page;
+    int     launcher_scroll; /* vertical scroll offset (px) of the launcher body */
+    int     launcher_drag_y; /* last POINTERMOVE y while dragging the launcher */
+    int     launcher_drag;   /* a drag is in progress (suppress tap on lift) */
+    int     launcher_moved;  /* finger travelled far enough to count as drag */
 
     /* Context (long-press) menu.  ctx_open shows a centred modal sheet
      * over the tile named by ctx_book_id (a book) or ctx_series_id (a
@@ -273,7 +274,6 @@ typedef struct {
 typedef struct {
     char     id[MAX_ID_LEN];
     ibitmap *cover_bmp;
-    ibitmap *bh_bmp;
     int      state;
     long     last_use; /* LRU counter for eviction */
 } CoverSlot;
@@ -307,16 +307,15 @@ typedef struct {
     char icon[64];
     char params[LAUNCHER_MAX_PARAMS][LAUNCHER_PARAM_LEN];
     int  nparams;
-    int  page;
     int  x, y, w, h;
 } LauncherItem;
-#define LAUNCHER_HEADER_H 104
-#define LAUNCHER_PAGER_H  96
-#define LAUNCHER_COLS     3
-#define LAUNCHER_GROUP_H  64
-#define LAUNCHER_CELL_H   232
-#define LAUNCHER_ICON_SZ  120
-#define LAUNCHER_MARGIN   16
+#define LAUNCHER_HEADER_H  104
+#define LAUNCHER_COLS      3
+#define LAUNCHER_GROUP_H   64
+#define LAUNCHER_CELL_H    232
+#define LAUNCHER_ICON_SZ   120
+#define LAUNCHER_MARGIN    16
+#define LAUNCHER_DRAG_SLOP 24 /* px of travel before a launcher drag counts */
 
 /* ── global variables ── */
 
@@ -352,14 +351,14 @@ extern int               g_ctx_suppress_up;
 extern char              g_argv0[256];
 extern ReaderCandidate   g_readers[MAX_READERS];
 extern int               g_reader_count;
-extern const char        bh_base83[84];
+extern int               g_self_panel; /* 1 = we draw the status strip ourselves */
 extern int               g_settings_edit;
 extern char              g_settings_kb_buf[260];
 extern const LcProfile   g_lcprof;
 extern const char *const lc_dims[];
 extern LauncherItem      g_launcher_items[LAUNCHER_MAX_ITEMS];
 extern int               g_launcher_count;
-extern int               g_launcher_pages;
+extern int               g_launcher_body_h; /* total laid-out body height */
 extern int               g_launcher_built;
 
 /* ── function prototypes ── */
@@ -402,6 +401,8 @@ void        store_delete_book(const char *id);
 void        store_set_downloaded(const char *id, int downloaded, const char *local_path);
 int         store_get_book(const char *id, Book *out);
 void        store_begin(void);
+void        store_set_meta(const char *key, const char *value);
+int         store_meta_value(const char *key, char *out, size_t cap);
 void        store_commit(void);
 void        store_series_name(const char *series_id, char *out, size_t cap);
 int         store_series_members(const char *series_id, Book *out, int cap);
@@ -424,19 +425,15 @@ void draw_top_bar(void);
 void draw_search_row(void);
 int  downloads_pending(void);
 /* draw_tab_row removed — tab row no longer drawn */
-int           bh_value(char c);
-int           bh_decode83(const char *s, int n);
-float         bh_s2l(int v);
-int           bh_l2s(float v);
-float         bh_sign_pow(float v, float e);
 CoverSlot    *cover_slot(const char *id, int create);
 int           view_cols(void);
+void          stamp_panel(void);
 int           view_rows(void);
 int           view_pagesize(void);
 void          grid_geom(int *top, int *bot, int *cell_w, int *cell_h);
 int           tile_rect_for_index(int idx, int *x, int *y, int *w, int *h);
 void          cover_rect(int tx, int ty, int tw, int th, int *cx, int *cy, int *cw, int *ch);
-void          bh_ensure(CoverSlot *s, const Book *b);
+void          draw_system_strip(void);
 void          cover_schedule_next(void);
 void          blit_cover(int cx, int cy, int cw, int ch, const Book *b);
 void          draw_series_stack_back(int cx, int cy, int cw, int ch);
