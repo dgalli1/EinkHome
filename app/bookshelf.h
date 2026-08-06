@@ -530,7 +530,6 @@ void          refresh_downloaded(Book *b);
 void          refresh_downloaded_flags(void);
 DownloadItem *find_download(const char *id);
 void          enqueue_download(const Book *b);
-int           download_book_file(Book *b);
 void          launch_reader(Book *b);
 void          book_press_action(Book *b);
 void          delete_book_file(Book *b);

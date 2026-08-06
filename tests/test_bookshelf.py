@@ -1062,6 +1062,99 @@ def _final_dl_progress(bs: BookshelfSession, before: str, total: int, *, timeout
         time.sleep(0.3)
     if last is None:
         raise AssertionError("no dl_progress line logged after completion")
+
+
+_DL_DELAY_PORT = 18767
+_DL_DELAY_CFG = REPO_ROOT / FIRMWARE / ".live" / "tmp" / "bookshelf.cfg"
+
+
+def _start_delayed_api_server() -> subprocess.Popen:  # type: ignore[type-arg]
+    """Mock API server whose file endpoint sleeps 3 s (simulates a slow
+    link) so the UI-responsiveness test can race a running download."""
+    log_path = REPO_ROOT / "build" / "pbemu-api-delay.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_fh = open(log_path, "w", encoding="utf-8")  # noqa: SIM115
+    env = _api_env()
+    env["PBEMU_MOCK_DL_DELAY_MS"] = "3000"
+    proc = subprocess.Popen(
+        [
+            sys.executable,
+            "-m",
+            "api.api.server",
+            "--host",
+            "0.0.0.0",
+            "--port",
+            str(_DL_DELAY_PORT),
+            "--provider",
+            "mock",
+            "--config",
+            str(REPO_ROOT / "tests" / "support" / "server-test.json"),
+        ],
+        cwd=REPO_ROOT,
+        env=env,
+        stdout=log_fh,
+        stderr=subprocess.STDOUT,
+    )
+    deadline = time.monotonic() + 10.0
+    while time.monotonic() < deadline:
+        try:
+            import urllib.request
+
+            req = urllib.request.Request(
+                f"http://127.0.0.1:{_DL_DELAY_PORT}/api/v1/healthz",
+                headers={"Authorization": f"Bearer {API_TOKEN}"},
+            )
+            urllib.request.urlopen(req, timeout=2)
+            return proc
+        except Exception:  # noqa: BLE001
+            time.sleep(0.3)
+    proc.kill()
+    raise RuntimeError(f"delayed API server did not start. Log:\n{log_path.read_text()}")
+
+
+def test_download_keeps_ui_responsive(fresh_bookshelf):
+    """A slow file download runs on a worker thread: the popup can be
+    dismissed and the UI keeps responding while the fetch is in flight,
+    and the file still lands afterwards.  Regression: downloads used to
+    block the event loop, freezing the frontend for the whole transfer."""
+    bs = fresh_bookshelf
+    _clear_downloads()
+    api = _start_delayed_api_server()
+    saved_cfg = None
+    try:
+        if _DL_DELAY_CFG.is_file():
+            saved_cfg = _DL_DELAY_CFG.read_text()
+        _DL_DELAY_CFG.unlink(missing_ok=True)
+        _DL_DELAY_CFG.write_text(
+            f"api_url=http://127.0.0.1:{_DL_DELAY_PORT}\napi_token={API_TOKEN}\n",
+            encoding="utf-8",
+        )
+        _restart_bookshelf(bs.emulator)
+        time.sleep(2.0)
+        bs.wait_for_stable()
+
+        before = bs.current_log()
+        bs.tap_book(0)
+        _wait_log_slice(bs, before, "draw_dl_popup")
+
+        # The 3 s file delay keeps the worker busy; the event loop must
+        # still process the dismiss tap well before the file lands.
+        before = bs.frame_hash()
+        bs.tap_at(*bs.geom.book_tile_center(0))  # dismiss the popup
+        bs.wait_hash_change(before)
+
+        # The download completes in the background and lands on disk.
+        _wait_log_count(bs, "download_book_file OK", 1, timeout=15.0)
+        assert len(_downloaded_files()) >= 1, "slow download never landed"
+    finally:
+        _DL_DELAY_CFG.unlink(missing_ok=True)
+        if saved_cfg is not None:
+            _DL_DELAY_CFG.write_text(saved_cfg, encoding="utf-8")
+            _DL_DELAY_CFG.chmod(0o666)
+        _stop_api_server(api)
+        _clear_downloads()
+
+
 def test_downloads_icon_opens_popup_when_busy(fresh_bookshelf):
     """The top-bar downloads icon opens the download-progress popup while
     downloads are queued; with nothing to show it is a no-op."""

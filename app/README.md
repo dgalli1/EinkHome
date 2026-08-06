@@ -488,9 +488,11 @@ Tapping a tile launches the app via `NewTaskEx()`.
 
 1. User taps a tile.
 2. If the file is not on device, the download-progress popup opens and
-   the app `QuickDownload`s the file from the API (with the bearer
-   token appended as `?access_token=`), saving it to
-   `/mnt/ext1/system/bin/<id>.<ext>`; when the queue drains the reader
+   the file fetch runs on a worker thread (`QuickDownload` with the
+   bearer token appended as `?access_token=`), saving to
+   `/mnt/ext1/system/bin/<id>.<ext>` — the event loop stays responsive
+   the whole time (the popup can be dismissed mid-download; the drain
+   continues in the background).  When the queue drains the reader
    opens automatically.
 3. Standard reader (or Auto): the app calls
    `OpenBook(path, NULL, 1)` — the firmware's canonical book-open
