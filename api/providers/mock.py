@@ -362,7 +362,12 @@ def _file_iter(path: str) -> Iterator[bytes]:
 
 def _synthetic_bytes(i: int) -> Iterator[bytes]:
     """Tiny deterministic payload for synthetic book downloads — big
-    enough to look like a file, small enough to stream instantly."""
+    enough to look like a file, small enough to stream instantly.
+    ``PBEMU_MOCK_DL_DELAY_MS`` (test hook) sleeps before the first chunk
+    to simulate a slow link so UI-responsiveness tests can run."""
+    delay_ms = float(os.environ.get("PBEMU_MOCK_DL_DELAY_MS", "0") or 0)
+    if delay_ms > 0:
+        time.sleep(delay_ms / 1000.0)
     header = f"SYNTHETIC BOOK #{i}\n".encode()
     yield header
     yield b"\x00" * max(0, 4096 - len(header))
