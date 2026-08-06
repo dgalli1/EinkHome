@@ -140,6 +140,7 @@ CONTAINER_FW_LIBZ="/work/U633_6.8.2817/ebrmain/cramfs/lib/libz.so.1.2.11"
 CONTAINER_FW_LIBC="/work/U633_6.8.2817/rootfs/lib/libc.so.6"
 CONTAINER_FW_LM="/work/U633_6.8.2817/rootfs/lib/libm.so.6"
 CONTAINER_FW_SQLITE="/work/U633_6.8.2817/ebrmain/lib/libsqlite3.so.0.8.6"
+CONTAINER_FW_PTHREAD="/work/U633_6.8.2817/rootfs/lib/libpthread.so.0"
 CONTAINER_SYSROOT="/work/U633_6.8.2817/rootfs"
 # Crt objects live with the cross compiler, not in the firmware rootfs.
 CRT_CROSS_DIR="/usr/lib/gcc-cross/arm-linux-gnueabi/12"
@@ -159,8 +160,8 @@ podman run --rm \
 	"-I${CONTAINER_SDK_INC}" \
 	"-I/work/bookshelf" \
 	"-I/usr/include" \
+	"-L${CONTAINER_SYSROOT}/lib" \
 	"-Wl,-rpath,${CONTAINER_SDK_LIB}" \
-	"-L${CONTAINER_SDK_LIB}" \
 	"--sysroot=${CONTAINER_SYSROOT}" \
 	-nostartfiles \
 	"${CRT1}" \
@@ -177,8 +178,8 @@ podman run --rm \
 	"${CONTAINER_SDK_LIB}/libhwconfig.so" \
 	"${CONTAINER_FW_LIBZ}" \
 	"${CONTAINER_FW_SQLITE}" \
-	"${CONTAINER_FW_LIBC}" \
 	"${CONTAINER_FW_LM}" \
+	"${CONTAINER_FW_PTHREAD}" \
 	-lgcc -lgcc_s \
 	"${CRTE}" \
 	"${CRTN}"
