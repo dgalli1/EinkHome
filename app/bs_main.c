@@ -292,14 +292,16 @@ on_event(int type, int par1, int par2)
             return 1;
         }
 
-        /* The download popup owns all taps while open: a tap dismisses
-         * it (the queue keeps draining in the background — the top-bar
-         * badge tracks it) or, when the book already finished, just
-         * closes it. */
+        /* The download popup owns all taps while open.  While any
+         * download is active it is modal — downloads never run in the
+         * background — so a tap is swallowed; once the queue drains
+         * (finished or failed) a tap closes it. */
         if (g_state.dl_popup) {
-            g_state.dl_popup = 0;
-            g_state.dl_popup_auto_open = 0;
-            redraw_shelf();
+            if (downloads_pending() == 0 && !g_dl_batch_active) {
+                g_state.dl_popup = 0;
+                g_state.dl_popup_auto_open = 0;
+                redraw_shelf();
+            }
             return 1;
         }
 
@@ -325,9 +327,8 @@ on_event(int type, int par1, int par2)
         /* Top-bar buttons.  hit_top_bar returns:
          *   1 = home  (left; back on the Search view or a drilled
          *              series, no-op on the library shelf)
+         *   2 = sync  (left of the menu button; runs a library sync)
          *   3 = menu  (right; opens the More overlay)
-         *   4 = downloads icon (left of the menu button; opens the
-         *       download-progress popup)
          *   5 = search icon (opens the Search sub-page)
          */
         int which = hit_top_bar(x, y);
@@ -364,14 +365,9 @@ on_event(int type, int par1, int par2)
             FullUpdate();
             return 1;
         }
-        if (which == 4) {
-            /* Downloads icon: show the progress popup when there is
-             * anything to show (pending or finished downloads). */
-            if (g_download_count > 0 || g_dl_batch_active) {
-                g_state.dl_popup = 1;
-                g_state.dl_popup_auto_open = 0;
-                redraw_shelf();
-            }
+        if (which == 2) {
+            do_sync();
+            redraw_shelf();
             return 1;
         }
 
@@ -456,9 +452,13 @@ on_event(int type, int par1, int par2)
                 return 1;
             }
             if (g_state.dl_popup) {
-                g_state.dl_popup = 0;
-                g_state.dl_popup_auto_open = 0;
-                redraw_shelf();
+                /* Modal while downloading; Back only closes a finished
+                 * popup. */
+                if (downloads_pending() == 0 && !g_dl_batch_active) {
+                    g_state.dl_popup = 0;
+                    g_state.dl_popup_auto_open = 0;
+                    redraw_shelf();
+                }
                 return 1;
             }
             if (g_state.settings_open) {

@@ -245,6 +245,7 @@ typedef struct {
 } TileRow;
 typedef struct {
     int  sync_state; /* 0 idle, 1 syncing, 2 error */
+    int  sync_angle; /* rotation (deg) of the top-bar sync arc */
     char status[160];
 
     int panel_h; /* height of the system status panel; 0 if hidden */
@@ -491,7 +492,8 @@ void          settings_draw_row(int y, const char *label, const char *value, int
 void          settings_draw_button(int y, const char *label, int filled);
 void          draw_overlay_settings(void);
 int           hit_top_bar(int x, int y);
-void          draw_download_icon(void);
+void          draw_sync_icon(void);
+void          sync_set_active(int on);
 int           hit_search_icon(int x, int y);
 int           hit_search_input(int x, int y);
 int           hit_history(int x, int y);

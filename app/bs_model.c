@@ -280,6 +280,7 @@ do_sync(void)
 {
     LOG("[bookshelf] do_sync ENTER url_delta=%s\n", g_state.url_delta);
     g_state.sync_state = 1;
+    sync_set_active(1);
     snprintf(g_state.status, sizeof g_state.status, "%s", i18n("status.syncing"));
     /* A previous sync may have hit the server before its cover cache was
      * warm; give failed covers one more chance each sync. */
@@ -304,6 +305,7 @@ do_sync(void)
             LOG("[bookshelf] do_sync FAILED: url=%s body=%p\n", g_state.url_delta, (void *)resp);
             g_state.sync_state = 2;
             snprintf(g_state.status, sizeof g_state.status, "%s", i18n("status.fail"));
+            sync_set_active(0);
             if (resp)
                 free(resp);
             return;
@@ -344,6 +346,7 @@ do_sync(void)
         g_state.page = 0;
 
     g_state.sync_state = 0;
+    sync_set_active(0);
     /* post state back (best-effort) */
     char state_body[160];
     snprintf(state_body,

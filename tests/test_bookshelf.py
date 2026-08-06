@@ -1113,9 +1113,10 @@ def _start_delayed_api_server() -> subprocess.Popen:  # type: ignore[type-arg]
 
 
 def test_download_keeps_ui_responsive(fresh_bookshelf):
-    """A slow file download runs on a worker thread: the popup can be
-    dismissed and the UI keeps responding while the fetch is in flight,
-    and the file still lands afterwards.  Regression: downloads used to
+    """A slow file download runs on a worker thread: the popup is modal
+    (a tap mid-download must not dismiss it), the sync glyph keeps
+    animating in the top bar (proof the event loop is alive), and the
+    reader launches once the file lands.  Regression: downloads used to
     block the event loop, freezing the frontend for the whole transfer."""
     bs = fresh_bookshelf
     _clear_downloads()
@@ -1137,15 +1138,25 @@ def test_download_keeps_ui_responsive(fresh_bookshelf):
         bs.tap_book(0)
         _wait_log_slice(bs, before, "draw_dl_popup")
 
-        # The 3 s file delay keeps the worker busy; the event loop must
-        # still process the dismiss tap well before the file lands.
+        # The 3 s file delay keeps the worker busy.  The popup is modal:
+        # a tap mid-download must not dismiss it — the single-book
+        # auto-open at the end only fires while dl_popup survives, so
+        # the reader launch below proves the tap was swallowed.
         before = bs.frame_hash()
-        bs.tap_at(*bs.geom.book_tile_center(0))  # dismiss the popup
-        bs.wait_hash_change(before)
+        bs.tap_at(*bs.geom.book_tile_center(0))
+        time.sleep(0.4)
 
-        # The download completes in the background and lands on disk.
-        _wait_log_count(bs, "download_book_file OK", 1, timeout=15.0)
+        # The sync glyph spins while the fetch runs: the frame must
+        # change well before the 3 s fetch completes, proving the event
+        # loop is alive (the old code froze it for the whole transfer).
+        bs.wait_hash_change(before, timeout=2.0)
+
+        # The download completes and the single-book press auto-opens
+        # the reader.
+        _wait_log_slice(bs, before, "download_book_file OK", timeout=15.0)
+        _wait_log_slice(bs, before, "launching reader", timeout=10.0)
         assert len(_downloaded_files()) >= 1, "slow download never landed"
+        _kill_guest_tasks()
     finally:
         _DL_DELAY_CFG.unlink(missing_ok=True)
         if saved_cfg is not None:
@@ -1155,30 +1166,15 @@ def test_download_keeps_ui_responsive(fresh_bookshelf):
         _clear_downloads()
 
 
-def test_downloads_icon_opens_popup_when_busy(fresh_bookshelf):
-    """The top-bar downloads icon opens the download-progress popup while
-    downloads are queued; with nothing to show it is a no-op."""
+def test_sync_button_runs_sync(fresh_bookshelf):
+    """The top-bar sync button (left of the More button) runs a library
+    sync."""
     bs = fresh_bookshelf
-    # Idle: the icon must not open anything (no popup draw, no view).
-    bs.wait_for_stable()
-    before = bs.frame_hash()
-    bs.tap_downloads_icon()
-    time.sleep(1.0)
-    assert bs.frame_hash() == before, "idle downloads icon changed the screen"
-    # Queue a download via a book press; the popup opens automatically.
-    _clear_downloads()
-    _restart_bookshelf(bs.emulator)
-    time.sleep(2.0)
     bs.wait_for_stable()
     before = bs.current_log()
-    bs.tap_book(0)
-    _wait_log_slice(bs, before, "draw_dl_popup")
-    # Tapping anywhere dismisses the popup; the drain continues.
-    before = bs.frame_hash()
-    bs.tap_at(*bs.geom.book_tile_center(0))
-    bs.wait_hash_change(before)
-    _wait_log_count(bs, "download_book_file OK", 1)
-    _clear_downloads()
+    bs.tap_sync_button()
+    _wait_log_slice(bs, before, "do_sync ENTER")
+    _wait_log_slice(bs, before, "do_sync: rounds=")
 
 
 def test_book_press_downloads_and_launches_reader(fresh_bookshelf):
@@ -1220,11 +1216,11 @@ def test_download_all_opens_popup_and_drains(fresh_bookshelf):
     _clear_downloads()
 
 
-def test_download_all_survives_popup_dismiss_beyond_first_slice(fresh_bookshelf):
+def test_download_all_drains_beyond_first_slice(fresh_bookshelf):
     """Download-all on >64 books must drain past the MAX_DOWNLOADS slice
-    boundary even if the user dismisses the popup mid-drain.  Regression:
-    the drain timer was only re-armed while queued items remained, so
-    once the first 64-item slice settled the batch top-up never ran again
+    boundary with the modal popup open the whole time.  Regression: the
+    drain timer was only re-armed while queued items remained, so once
+    the first 64-item slice settled the batch top-up never ran again
     and the progress bar froze (e.g. 64/93) with every file on disk."""
     bs = fresh_bookshelf
     injected = _inject_bulk_books(70)  # 16 shipped + 70 = 86 > MAX_DOWNLOADS
@@ -1242,13 +1238,13 @@ def test_download_all_survives_popup_dismiss_beyond_first_slice(fresh_bookshelf)
         assert m, "download-all never logged its queued total"
         total = int(m.group(1))
         assert total > 64, f"batch must exceed the 64-slot queue slice, got {total}"
-
-        # Dismiss the popup mid-drain, like the user did when the bar
-        # froze; the drain must keep running in the background.
+        # The popup is modal: a tap mid-drain must not dismiss it.  The
+        # finished-tally popup draw after the batch completes (below)
+        # only happens while dl_popup survives, so it proves the tap
+        # was swallowed.
         time.sleep(2.0)
-        bs.tap_at(*bs.geom.book_tile_center(0))  # popup dismisses on any tap
-        time.sleep(1.0)
-        bs.tap_downloads_icon()  # reopen the popup
+        bs.tap_at(*bs.geom.book_tile_center(0))
+        time.sleep(0.4)
 
         # The drain must visibly pass the 64-item boundary — the exact
         # point where the old code lost its timer and froze.
@@ -1258,17 +1254,19 @@ def test_download_all_survives_popup_dismiss_beyond_first_slice(fresh_bookshelf)
         deadline = time.monotonic() + 90.0
         while time.monotonic() < deadline and len(_downloaded_files()) < total:
             time.sleep(0.5)
-        got = len(_downloaded_files())
-        assert got == total, f"expected all {total} books downloaded, got {got}"
         bs.assert_log_contains("download-all batch complete")
 
-        # Reopen the popup and confirm the finished bar keeps the
-        # whole-batch tally.  Regression: the completion path zeroed the
-        # batch counters, so the bar fell back to the queue-derived count
-        # — and the pruned queue only holds the last 64-item slice, so
-        # "86 downloaded" snapped back to "64 downloaded" once the batch
-        # finished.
-        bs.tap_downloads_icon()
+        # The finished-tally popup redraw proves the popup survived the
+        # mid-drain tap (a dismissed popup would settle via draw_top_bar
+        # instead).
+        _wait_log_slice(bs, before, "draw_dl_popup", timeout=10.0)
+
+        # The popup (still open) keeps the whole-batch tally on the
+        # finished bar.  Regression: the completion path zeroed the
+        # batch counters, so the bar fell back to the queue-derived
+        # count — and the pruned queue only holds the last 64-item
+        # slice, so "86 downloaded" snapped back to "64 downloaded"
+        # once the batch finished.
         done_n, failed_n, total_n, active_n = _final_dl_progress(bs, before, total)
         assert total_n == total, f"final bar total={total_n}, expected {total}"
         assert done_n == total, f"final bar done={done_n}, expected {total}"

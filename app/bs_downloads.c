@@ -114,6 +114,7 @@ enqueue_download(const Book *b)
         g_download_armed = 1;
         SetWeakTimerEx("bdl", download_tick, NULL, 120);
     }
+    sync_set_active(1);
 }
 
 /* Drop the oldest finished queue entry to make room (batch mode keeps
@@ -361,6 +362,7 @@ download_tick(void *ctx)
             redraw_shelf();
         else
             draw_top_bar(); /* refresh the pending-count badge */
+        sync_set_active(downloads_pending() > 0 || g_dl_batch_active);
     }
 
     DownloadItem *target = NULL;
@@ -395,6 +397,7 @@ download_tick(void *ctx)
             g_dl_batch_active = 0;
             LOG("[bookshelf] download-all batch complete\n");
         }
+        sync_set_active(0);
         /* Queue drained.  A single-book press auto-opens the reader
          * once its file landed; any other popup stays up showing the
          * finished tally until the user taps it closed. */

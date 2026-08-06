@@ -244,9 +244,9 @@ class BookshelfGeometry:
 
     # ── top-bar right-corner buttons ──────────────────────────────────
 
-    def downloads_icon_center(self) -> tuple[int, int]:
-        """Centre of the 96×96 downloads icon, left of the More button.
-        Tapping it opens the download-progress popup."""
+    def sync_button_center(self) -> tuple[int, int]:
+        """Centre of the 96×96 sync button, left of the More button.
+        Runs a library sync."""
         return (self.screen_w - 152, self.panel_h + TOP_BAR_H // 2)
 
     # ── context (long-press) menu ─────────────────────────────────────

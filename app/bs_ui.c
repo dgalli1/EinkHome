@@ -110,7 +110,7 @@ draw_top_bar(void)
         return;
     }
     draw_search_icon();
-    draw_download_icon();
+    draw_sync_icon();
 
     /* Right "menu" button — 96×96 solid black square with three
      * white hamburger lines. */
@@ -127,62 +127,104 @@ draw_top_bar(void)
     FillArea(menu_cx - ml_w / 2, menu_cy + 13, ml_w, 6, WHITE);
 }
 
-/* Download icon in the top bar, left of the menu button: a Firefox-style
- * down arrow landing in a tray.  Tapping it opens the download progress
- * popup; the icon carries a pending-count badge while any download is
- * queued or in flight. */
+/* Sync button in the top bar, left of the menu button: a solid black
+ * square with two white arc arrows (a "refresh" glyph) that rotate a
+ * few degrees per second while a sync or download is in flight
+ * (sync_set_active arms the rotation timer).  Tapping it runs a
+ * library sync (see hit_top_bar). */
+static int
+sync_active(void)
+{
+    return g_state.sync_state == 1 || downloads_pending() > 0 || g_dl_batch_active;
+}
+
+static int
+sync_modal_open(void)
+{
+    return g_state.ctx_open || g_state.menu_open || g_state.more_open || g_state.settings_open ||
+           g_state.launcher_open;
+}
+
+static int spin_armed = 0;
+
+static void
+sync_spin_tick(void *ctx)
+{
+    (void)ctx;
+    if (!sync_active()) {
+        spin_armed = 0; /* nothing in flight — the glyph rests */
+        return;
+    }
+    g_state.sync_angle = (g_state.sync_angle + 15) % 360;
+    /* The glyph only exists on the Library tab; elsewhere the top bar
+     * is redrawn whole when the state that feeds it changes. */
+    if (!sync_modal_open() && g_state.tab != TAB_SEARCH) {
+        draw_sync_icon();
+        PartialUpdate(ScreenWidth() - 96 - 8 - 96, g_state.panel_h, 96, TOP_BAR_H);
+    }
+    SetWeakTimerEx("bspin", sync_spin_tick, NULL, 1000);
+}
+
 void
-draw_download_icon(void)
+sync_set_active(int on)
+{
+    /* Arm the 1s rotation timer exactly once per active stretch; repeated
+     * calls (every download tick) must not reset it or it never fires. */
+    if (on && sync_active() && !spin_armed) {
+        spin_armed = 1;
+        SetWeakTimerEx("bspin", sync_spin_tick, NULL, 1000);
+    }
+    if (!sync_modal_open() && g_state.tab != TAB_SEARCH) {
+        draw_sync_icon();
+        PartialUpdate(ScreenWidth() - 96 - 8 - 96, g_state.panel_h, 96, TOP_BAR_H);
+    }
+}
+
+void
+draw_sync_icon(void)
 {
     int w = ScreenWidth();
     int y0 = g_state.panel_h;
-    int col = BLACK;
-    int menu_x = w - 96 - 8;
     int ic_w = 96;
-    int ic_x = menu_x - ic_w;
+    int ic_x = w - ic_w - 8 - ic_w; /* left of the menu button */
     int ic_y = y0 + (TOP_BAR_H - ic_w) / 2;
+    FillArea(ic_x, ic_y, ic_w, ic_w, BLACK);
     int cx = ic_x + ic_w / 2;
     int cy = ic_y + ic_w / 2;
-
-    /* Shaft: three parallel vertical lines read as a solid stem. */
-    for (int t = -1; t <= 1; t++)
-        DrawLine(cx + t, cy - 28, cx + t, cy + 2, col);
-
-    /* Solid downward arrowhead: stacked horizontal slices tapering
-     * from the base to the point. */
-    int ah_w = 36, ah_h = 22;
-    for (int t = 0; t < ah_h; t++) {
-        int sw = ah_w * (ah_h - t) / ah_h;
-        FillArea(cx - sw / 2, cy + t, sw, 1, col);
-    }
-
-    /* Tray: a U under the arrowhead. */
-    FillArea(cx - 28, cy + 18, 3, 15, col);
-    FillArea(cx + 25, cy + 18, 3, 15, col);
-    FillArea(cx - 28, cy + 30, 56, 3, col);
-
-    /* pending badge */
-    int pend = downloads_pending();
-    if (pend > 0) {
-        ifont *bf = OpenFont(DEFAULTFONTB, 22, 0);
-        if (bf != NULL) {
-            char badge[16];
-            snprintf(badge, sizeof badge, "%d", pend);
-            int bw = StringWidth(badge) + 12;
-            int bx = ic_x + ic_w - bw - 2;
-            int by = ic_y + 2;
-            FillArea(bx, by, bw, 26, BLACK);
-            SetFont(bf, WHITE);
-            DrawString(bx + 6, by, badge);
-            CloseFont(bf);
+    int r = 28;
+    /* Two 120-degree arc arrows, rotated by g_state.sync_angle. */
+    for (int half = 0; half < 2; half++) {
+        int a0 = g_state.sync_angle + half * 180;
+        int px = 0, py = 0;
+        int ex = 0, ey = 0;
+        for (int s = 0; s <= 8; s++) {
+            double a = (a0 + s * 15) * M_PI / 180.0;
+            int    x = cx + (int)(r * cos(a));
+            int    y = cy + (int)(r * sin(a));
+            if (s > 0) {
+                DrawLine(px, py, x, y, WHITE);
+                DrawLine(px, py + 1, x, y + 1, WHITE);
+            }
+            px = x;
+            py = y;
+            if (s == 8) {
+                ex = x;
+                ey = y;
+            }
+        }
+        /* Arrowhead: two ticks trailing the tangent at the arc end. */
+        double ta = (a0 + 120) * M_PI / 180.0 + M_PI / 2.0;
+        for (int t = 0; t < 2; t++) {
+            double ha = ta + M_PI + (t ? 0.6 : -0.6);
+            DrawLine(ex, ey, ex + (int)(11 * cos(ha)), ey + (int)(11 * sin(ha)), WHITE);
         }
     }
 }
 
 /* Magnifying-glass icon in the top bar.  Replaces the old separate
  * search row: tapping it opens the Search sub-page (see on_event).
- * Line-art style matching home/downloads.  Position: left of the
- * downloads icon. */
+ * Line-art style matching home/sync.  Position: left of the sync
+ * button. */
 void
 draw_search_icon(void)
 {
@@ -895,17 +937,20 @@ draw_dl_progress(int x, int y, int w)
 /* Download-progress popup: a centred modal sheet over a dimmed shelf.
  * Title, the current item, the batch progress bar, and a status line.
  * Shown whenever downloads run (book press, context-menu Download,
- * Download all); a tap or Back dismisses it and the work continues in
- * the background (the top-bar badge tracks it).  When the popup was
- * opened by a single-book press (dl_popup_auto_open), download_tick()
- * launches the reader as soon as the queue drains. */
+ * Download all).  While any download is active the popup is
+ * non-dismissable — downloads never run in the background; once the
+ * queue drains a tap or Back closes it.  When the popup was opened by
+ * a single-book press (dl_popup_auto_open), download_tick() launches
+ * the reader as soon as the queue drains. */
 void
 draw_dl_popup(void)
 {
     int w = ScreenWidth();
     int h = ScreenHeight();
-    /* Dim mask below the top bar. */
-    for (int yy = g_state.panel_h; yy < h; yy += 2)
+    /* Dim the shelf body below the top bar, so the top-bar icons (the
+     * spinning sync glyph among them) stay fully visible while the
+     * download runs. */
+    for (int yy = g_state.panel_h + TOP_BAR_H; yy < h; yy += 2)
         DrawLine(0, yy, w, yy, LGRAY);
 
     int pw = w * 3 / 4;
@@ -959,7 +1004,7 @@ draw_dl_popup(void)
         SetFont(sf, DGRAY);
         const char *hint;
         if (active > 0)
-            hint = i18n("dl.tap_dismiss");
+            hint = i18n("dl.in_progress");
         else if (failed > 0 && done + failed >= total)
             hint = i18n("dl.failed");
         else

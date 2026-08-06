@@ -356,11 +356,10 @@ header:
   truncated) is showing; the plain library shelf carries no title.
 * **Right** — a 96×96 solid black square with three white hamburger
   lines.  Tapping opens the in-app "More" menu (sort, view, sync).
-* **Left of the menu button** — a 96×96 downloads icon (down arrow
-  into a tray, Firefox-style).  Tapping it opens the download-progress
-  popup while downloads are queued or finished; it carries a
-  pending-count badge while a download queue drains.
-* **Left of the downloads icon** — a 96×96 magnifying-glass icon.
+* **Left of the menu button** — a 96×96 sync button (solid black square
+  with two white arc arrows that rotate while a sync or download is in
+  flight).  Tapping it runs a library sync.
+* **Left of the sync button** — a 96×96 magnifying-glass icon.
   Tapping it opens the Search page (input row + previous search
   terms); the old full-width search row was dropped to reclaim the
   vertical space for the shelf.
@@ -462,13 +461,14 @@ Tapping a book that is not yet on device shows the download-progress
 popup (a centred sheet with the queue/batch progress bar); when the
 file lands, the reader opens automatically.  Already-downloaded books
 open immediately.  The download popup is also shown by **Download all**
-(More menu), the context-menu **Download**, and the top-bar downloads
-icon; a tap or Back dismisses it while the queue keeps draining in the
-background (the icon's badge tracks it).  The opening itself goes
-through `OpenBook()` — the firmware's canonical book-open path, which
-routes the book to `reader_controller` and the default reader for the
-extension.  An explicitly selected third-party reader (KOReader) is
-still launched via `NewTaskEx()` with the book path as its argument.
+(More menu) and the context-menu **Download**.  While any download is
+active the popup is modal — downloads never run in the background —
+and a tap or Back closes it only once the queue has drained.  The
+opening itself goes through `OpenBook()` — the firmware's canonical
+book-open path, which routes the book to `reader_controller` and the
+default reader for the extension.  An explicitly selected third-party
+reader (KOReader) is still launched via `NewTaskEx()` with the book
+path as its argument.
 (The API server's `open_with` table in `api/config/server.json` still
 maps extensions to candidate apps, but the device validates the resolved
 app exists and falls back to `OpenBook()` — the stock firmware has no
@@ -491,8 +491,8 @@ Tapping a tile launches the app via `NewTaskEx()`.
    the file fetch runs on a worker thread (`QuickDownload` with the
    bearer token appended as `?access_token=`), saving to
    `/mnt/ext1/system/bin/<id>.<ext>` — the event loop stays responsive
-   the whole time (the popup can be dismissed mid-download; the drain
-   continues in the background).  When the queue drains the reader
+   the whole time, and the popup is modal until the queue drains (no
+   background downloads).  When the queue drains the reader
    opens automatically.
 3. Standard reader (or Auto): the app calls
    `OpenBook(path, NULL, 1)` — the firmware's canonical book-open

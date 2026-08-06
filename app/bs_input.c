@@ -23,11 +23,11 @@ hit_top_bar(int x, int y)
      * button. */
     if (x >= w - 96 - 8 && x < w - 8)
         return 3;
-    /* Downloads icon — 96×96 region left of the menu button; opens the
-     * download-progress popup. */
+    /* Sync button — 96×96 region left of the menu button; runs a
+     * library sync. */
     if (x >= w - 96 - 8 - 96 && x < w - 96 - 8)
-        return 4;
-    /* Search icon — 96×96 region left of the downloads icon; opens the
+        return 2;
+    /* Search icon — 96×96 region left of the sync button; opens the
      * Search sub-page. */
     if (x >= w - 96 - 8 - 2 * 96 && x < w - 96 - 8 - 96)
         return 5;
