@@ -114,7 +114,6 @@ enqueue_download(const Book *b)
         g_download_armed = 1;
         SetWeakTimerEx("bdl", download_tick, NULL, 120);
     }
-    sync_set_active(1);
 }
 
 /* Drop the oldest finished queue entry to make room (batch mode keeps
@@ -225,8 +224,11 @@ launch_reader(Book *b)
     OpenBook(path, NULL, 1);
 }
 
-/* Press a book: download it if needed, then open it in the reader.
- * Persists the downloaded flag so the next launch sees the file. */
+/* Press a book (single tap or context-menu Open): if the file is not
+ * on device, show the download-progress popup, queue the download, and
+ * auto-open the reader when the queue drains (see download_tick).
+ * Already-downloaded books open immediately.  Persists the downloaded
+ * flag so the next launch sees the file. */
 void
 book_press_action(Book *b)
 {
@@ -237,15 +239,15 @@ book_press_action(Book *b)
         store_set_downloaded(b->id, dl, dl ? path : "");
     b->downloaded = dl;
     if (!b->downloaded) {
-        snprintf(g_state.status, sizeof g_state.status, "%s", i18n("dl.in_progress"));
-        if (!download_book_file(b)) {
-            snprintf(g_state.status, sizeof g_state.status, "%s", i18n("dl.failed"));
-            return;
-        }
+        g_state.dl_popup = 1;
+        g_state.dl_popup_auto_open = 1;
+        snprintf(g_state.dl_popup_book_id, sizeof g_state.dl_popup_book_id, "%s", b->id);
+        enqueue_download(b);
+        redraw_shelf(); /* draws the popup on top */
+        return;
     }
     launch_reader(b);
 }
-
 /* Enqueue the next bounded slice of undownloaded ids for the
  * download-all batch, skipping ids that already own a queue entry
  * (in flight, done, or failed).  The query is offset-free: ids whose
@@ -277,8 +279,9 @@ batch_enqueue_slice(int *got)
 }
 
 /* Start (or restart) the download-all batch.  The first bounded slice
- * is queued synchronously so the Downloads tab shows the whole batch
- * right away; the drain timer tops the queue up as items finish. */
+ * is queued synchronously so the popup shows the whole batch right
+ * away; the drain timer tops the queue up as items finish.  The popup
+ * opens here (no auto-open — a batch never launches a reader). */
 void
 download_all_start(void)
 {
@@ -291,12 +294,15 @@ download_all_start(void)
         g_download_armed = 1;
         SetWeakTimerEx("bdl", download_tick, NULL, 300);
     }
+    g_state.dl_popup = 1;
+    g_state.dl_popup_auto_open = 0;
+    redraw_shelf();
     LOG("[bookshelf] download-all queued=%d\n", g_dl_batch_total);
 }
 
-/* Drain the download queue one item per tick so a "Download all" shows
- * live progress on the Downloads tab instead of blocking the UI for the
- * whole batch. */
+/* Drain the download queue one item per tick so a download (single book
+ * or a "Download all" batch) shows live progress in the popup instead
+ * of blocking the UI. */
 void
 download_tick(void *ctx)
 {
@@ -338,13 +344,28 @@ download_tick(void *ctx)
             g_dl_batch_active = 0;
             LOG("[bookshelf] download-all batch complete\n");
         }
-        sync_set_active(0);
-        if (g_state.tab == TAB_DOWNLOADS)
-            redraw_shelf();
+        /* Queue drained.  A single-book press auto-opens the reader
+         * once its file landed; any other popup stays up showing the
+         * finished tally until the user taps it closed. */
+        if (g_state.dl_popup) {
+            if (g_state.dl_popup_auto_open) {
+                Book b;
+                if (store_get_book(g_state.dl_popup_book_id, &b) && b.downloaded) {
+                    g_state.dl_popup = 0;
+                    g_state.dl_popup_auto_open = 0;
+                    redraw_shelf();
+                    LOG("[bookshelf] popup drain complete, launching reader id=%s\n", b.id);
+                    launch_reader(&b);
+                    return;
+                }
+            }
+            redraw_shelf(); /* popup shows the finished/failed state */
+            return;
+        }
         return;
     }
     target->state = 1;
-    if (g_state.tab == TAB_DOWNLOADS)
+    if (g_state.dl_popup)
         redraw_shelf();
 
     Book b;
@@ -362,22 +383,23 @@ download_tick(void *ctx)
             g_dl_batch_failed++;
     }
 
-    if (g_state.tab == TAB_DOWNLOADS)
+    if (g_state.dl_popup)
         redraw_shelf();
     else
         draw_top_bar(); /* refresh the pending-count badge in top bar */
-    sync_set_active(downloads_pending() > 0);
 
     /* More work queued?  Also re-arm when the batch is still topping
-     * up: the last item of a slice finishing must not stop the drain
-     * timer — the batch-enqueue branch runs only from this tick. */
-    if (g_dl_batch_active || downloads_pending() > 0) {
+     * up, and always once more while the popup is open so the
+     * queue-drained branch can finalise (auto-open the reader or show
+     * the finished tally) after the last item settles. */
+    if (g_dl_batch_active || downloads_pending() > 0 || g_state.dl_popup) {
         g_download_armed = 1;
         SetWeakTimerEx("bdl", download_tick, NULL, 120);
     }
 }
 
-/* Queue every member of a series (by series_id), in bounded slices. */
+/* Queue every member of a series (by series_id), in bounded slices, and
+ * open the download-progress popup so the drain is visible. */
 void
 download_series(const char *series_id)
 {
@@ -395,6 +417,8 @@ download_series(const char *series_id)
         if (got < 64)
             break;
     }
+    g_state.dl_popup = 1;
+    g_state.dl_popup_auto_open = 0;
     LOG("[bookshelf] download_series %s queued=%d\n", series_id, n);
 }
 
@@ -432,8 +456,9 @@ context_geom(int *px, int *py, int *pw, int *ph, int n_items)
 int
 context_item_count(void)
 {
-    /* Both the book and series menus offer exactly two actions. */
-    return 2;
+    /* A book offers Open + Download + Delete; a series card offers
+     * Download all + Delete series. */
+    return g_state.ctx_is_series ? 2 : 3;
 }
 
 /* Draw the long-press context menu over a dimmed shelf. */
@@ -478,13 +503,14 @@ draw_context_menu(void)
     }
     DrawLine(px + CTX_PAD, py + CTX_TITLE_H - 1, px + pw - CTX_PAD, py + CTX_TITLE_H - 1, LGRAY);
 
-    const char *labels[2];
+    const char *labels[3];
     if (g_state.ctx_is_series) {
         labels[0] = i18n("ctx.download_all");
         labels[1] = i18n("ctx.delete_series");
     } else {
-        labels[0] = i18n("ctx.download");
-        labels[1] = i18n("ctx.delete");
+        labels[0] = i18n("ctx.open");
+        labels[1] = i18n("ctx.download");
+        labels[2] = i18n("ctx.delete");
     }
     ifont *f = OpenFont(DEFAULTFONTB, 30, 0);
     if (f == NULL)
@@ -567,10 +593,17 @@ on_tap_context(int x, int y)
     } else {
         Book b;
         if (store_get_book(g_state.ctx_book_id, &b)) {
-            if (item == 0)
+            if (item == 0) {
+                /* Open works exactly like a single tap: download if
+                 * needed (with the progress popup), then launch. */
+                book_press_action(&b);
+            } else if (item == 1) {
+                g_state.dl_popup = 1;
+                g_state.dl_popup_auto_open = 0;
                 enqueue_download(&b);
-            else if (item == 1)
+            } else if (item == 2) {
                 store_delete_book_file(b.id);
+            }
         }
     }
     redraw_shelf();

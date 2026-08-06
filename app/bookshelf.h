@@ -18,6 +18,7 @@
  */
 
 #include <inkview.h>
+#include <hwconfig.h>
 
 #include <ctype.h>
 #include <stdarg.h>
@@ -39,6 +40,14 @@
  * strip stays blank.  The argument is the reading-mode-enable flag passed
  * through to the panel draw callback (0 for the normal collapsed bar). */
 extern void iv_update_panel(int readingModeEnable);
+
+/* libinkview also exports the canvas lock API but the public SDK header
+ * omits it.  GetCanvas() (declared in inkview.h) returns the active draw
+ * canvas; the QPA bridge (eink-reader) writes RGB24 pixels straight into
+ * the canvas to bypass libinkview's 8-bit draw pipeline — the only way
+ * an app gets colour on the Kaleido panel. */
+extern void lockCanvasDrawing(void);
+extern void unlockCanvasDrawing(void);
 
 /* ── configuration ───────────────────────────────────────────────────── */
 
@@ -159,9 +168,9 @@ extern void iv_update_panel(int readingModeEnable);
 /* Finger travel (px) that cancels a pending long-press (a drag, not a
  * hold). */
 #define LONGPRESS_SLOP 24
-
 /* Context (long-press) menu — a centred modal sheet.  A book offers
- * Download + Delete; a series card offers Download all + Delete series. */
+ * Open + Download + Delete; a series card offers Download all + Delete
+ * series. */
 #define CTX_ITEM_H    96
 #define CTX_TITLE_H   72
 #define CTX_PAD       24
@@ -172,8 +181,8 @@ extern void iv_update_panel(int readingModeEnable);
  * still models a queue so a multi-book "Download all" can show every
  * pending item and tick them off one per timer tick. */
 #define MAX_DOWNLOADS 64
-/* Height reserved at the top of the Downloads tab body for the single
- * batch progress bar (one bar covering every open download). */
+/* Height reserved inside the download popup for the batch progress bar
+ * (one bar covering every open download). */
 #define DL_BAR_H 56
 
 typedef struct {
@@ -211,9 +220,8 @@ typedef enum {
     VIEW_LIST,
 } ViewMode;
 typedef enum {
-    TAB_LIBRARY,   /* the cover grid / list */
-    TAB_DOWNLOADS, /* active + finished downloads */
-    TAB_SEARCH,    /* search sub-page: input row + history terms */
+    TAB_LIBRARY, /* the cover grid / list */
+    TAB_SEARCH,  /* search sub-page: input row + history terms */
 } MainTab;
 typedef struct {
     char  id[MAX_ID_LEN];
@@ -237,7 +245,6 @@ typedef struct {
 } TileRow;
 typedef struct {
     int  sync_state; /* 0 idle, 1 syncing, 2 error */
-    int  sync_angle; /* rotation (deg) of the top-bar sync arc */
     char status[160];
 
     int panel_h; /* height of the system status panel; 0 if hidden */
@@ -258,7 +265,7 @@ typedef struct {
     int       more_open;     /* right "..." overlay */
     int       search_kb;     /* on-screen keyboard is editing the search input */
     int       settings_open; /* full-screen settings overlay */
-    MainTab   tab;           /* TAB_LIBRARY / TAB_DOWNLOADS / TAB_SEARCH */
+    MainTab   tab;           /* TAB_LIBRARY / TAB_SEARCH */
     int       launcher_open;
     int       launcher_scroll; /* vertical scroll offset (px) of the launcher body */
     int       launcher_drag_y; /* last POINTERMOVE y while dragging the launcher */
@@ -272,6 +279,15 @@ typedef struct {
     int  ctx_is_series;
     char ctx_book_id[MAX_ID_LEN]; /* book the context menu is open on */
     char ctx_series_id[MAX_ID_LEN];
+
+    /* Download-progress popup.  dl_popup shows a centred modal sheet
+     * with the queue/batch progress bar whenever downloads are running
+     * (book tap, context-menu Download, Download all).  dl_popup_auto_open
+     * is set when the popup was opened by pressing a single book: when
+     * the queue drains, the reader launches for dl_popup_book_id. */
+    int  dl_popup;
+    int  dl_popup_auto_open;
+    char dl_popup_book_id[MAX_ID_LEN];
 
     /* Reader selection.  reader_pref == 0 means "Auto" (honour the
      * server's open-with resolution); otherwise it is a 1-based index
@@ -362,7 +378,8 @@ extern int               g_ctx_suppress_up;
 extern char              g_argv0[256];
 extern ReaderCandidate   g_readers[MAX_READERS];
 extern int               g_reader_count;
-extern int               g_self_panel; /* 1 = we draw the status strip ourselves */
+extern int               g_self_panel;    /* 1 = we draw the status strip ourselves */
+extern int               g_display_color; /* 1 = colour display (device_display_colormask) */
 extern int               g_settings_edit;
 extern char              g_settings_kb_buf[260];
 extern const LcProfile   g_lcprof;
@@ -432,6 +449,7 @@ int         view_total(void);
 void        cover_cache_path(const char *id, char *out, size_t cap);
 int         cover_cache_load(const char *id, ibitmap **out_bmp);
 void        cover_cache_save(const char *id, const char *png_data, int len);
+ibitmap    *load_cover_scaled(const char *path);
 void        draw_text_centered(ifont *f, int cx, int cy, const char *text, int color);
 void        draw_button(
            int x, int y, int w, int h, int selected, const char *label, int label_size, int label_color);
@@ -440,26 +458,26 @@ void draw_search_icon(void);
 void draw_search_tab(void);
 int  downloads_pending(void);
 /* draw_tab_row removed — tab row no longer drawn */
-CoverSlot    *cover_slot(const char *id, int create);
-int           view_cols(void);
-void          stamp_panel(void);
-int           view_rows(void);
-int           view_pagesize(void);
-void          grid_geom(int *top, int *bot, int *cell_w, int *cell_h);
-int           tile_rect_for_index(int idx, int *x, int *y, int *w, int *h);
-void          cover_rect(int tx, int ty, int tw, int th, int *cx, int *cy, int *cw, int *ch);
-void          draw_system_strip(void);
-void          cover_schedule_next(void);
-void          blit_cover(int cx, int cy, int cw, int ch, const Book *b);
-void          draw_series_stack_back(int cx, int cy, int cw, int ch);
-void          draw_series_stack_badge(int cx, int cy, int cw, int ch, int count);
-void          draw_thumbnail(int x, int y, int w, int h, const TileRow *tr, int vi);
-int           downloads_rows(void);
-int           downloads_pagesize(void);
-int           history_pagesize(void);
-int           current_pages(void);
-void          draw_dl_progress(int x, int y, int w);
-void          draw_downloads_tab(void);
+CoverSlot *cover_slot(const char *id, int create);
+int        view_cols(void);
+void       stamp_panel(void);
+int        view_rows(void);
+int        view_pagesize(void);
+void       grid_geom(int *top, int *bot, int *cell_w, int *cell_h);
+int        tile_rect_for_index(int idx, int *x, int *y, int *w, int *h);
+void       cover_rect(int tx, int ty, int tw, int th, int *cx, int *cy, int *cw, int *ch);
+void       draw_system_strip(void);
+void       cover_schedule_next(void);
+void       blit_cover(int cx, int cy, int cw, int ch, const Book *b);
+void       draw_series_stack_back(int cx, int cy, int cw, int ch);
+void       draw_series_stack_badge(int cx, int cy, int cw, int ch, int count);
+void       draw_thumbnail(int x, int y, int w, int h, const TileRow *tr, int vi);
+int        history_pagesize(void);
+int        current_pages(void);
+/* draw_downloads_tab removed — the Downloads page is gone; the progress
+ * bar lives in the download popup (draw_dl_popup). */
+void          draw_dl_popup(void);
+void          dl_progress_metrics(int *total, int *done, int *failed, int *active);
 void          redraw_shelf(void);
 void          draw_grid(void);
 void          cover_tick(void *ctx);
@@ -474,8 +492,6 @@ void          settings_draw_button(int y, const char *label, int filled);
 void          draw_overlay_settings(void);
 int           hit_top_bar(int x, int y);
 void          draw_download_icon(void);
-void          draw_sync_icon(void);
-void          sync_set_active(int on);
 int           hit_search_icon(int x, int y);
 int           hit_search_input(int x, int y);
 int           hit_history(int x, int y);

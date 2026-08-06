@@ -45,9 +45,9 @@ char g_search_kb_buf[MAX_QUERY_LEN];
 CoverSlot g_covers[NCOVER_SLOTS];
 int       g_cover_armed = 0;
 
-/* One queued/finished download shown on the Downloads tab.  Downloads
- * run synchronously on the event loop, so the queue is drained one item
- * per timer tick; `state` records the outcome so the tab can show a
+/* One queued/finished download in the drain queue.  Downloads run
+ * synchronously on the event loop, so the queue is drained one item
+ * per timer tick; `state` records the outcome so the popup can show a
  * running tally of what finished.  state: 0 queued, 1 in flight,
  * 2 done, 3 failed. */
 
@@ -280,7 +280,6 @@ do_sync(void)
 {
     LOG("[bookshelf] do_sync ENTER url_delta=%s\n", g_state.url_delta);
     g_state.sync_state = 1;
-    sync_set_active(1);
     snprintf(g_state.status, sizeof g_state.status, "%s", i18n("status.syncing"));
     /* A previous sync may have hit the server before its cover cache was
      * warm; give failed covers one more chance each sync. */
@@ -305,7 +304,6 @@ do_sync(void)
             LOG("[bookshelf] do_sync FAILED: url=%s body=%p\n", g_state.url_delta, (void *)resp);
             g_state.sync_state = 2;
             snprintf(g_state.status, sizeof g_state.status, "%s", i18n("status.fail"));
-            sync_set_active(0);
             if (resp)
                 free(resp);
             return;
@@ -346,7 +344,6 @@ do_sync(void)
         g_state.page = 0;
 
     g_state.sync_state = 0;
-    sync_set_active(0);
     /* post state back (best-effort) */
     char state_body[160];
     snprintf(state_body,
@@ -376,6 +373,29 @@ cover_cache_path(const char *id, char *out, size_t cap)
     snprintf(out, cap, "%s/%s.png", g_covers_dir, safe);
 }
 
+/* Decode a cover PNG scaled to 240x360.  On a colour display the decode
+ * stays RGB24 — the same choice the stock bookshelf.app makes via
+ * device_display_colormask() — so covers keep their colour; on a
+ * greyscale display the 8-bit decode is used as before.  The caller
+ * frees the returned bitmap. */
+ibitmap *
+load_cover_scaled(const char *path)
+{
+    if (!g_display_color)
+        return LoadPNGStretch(path, 240, 360, 0, 0);
+    ibitmap *full = LoadPNGToFormat(path, kFmtRGB24);
+    if (full == NULL)
+        return NULL;
+    LOG("[bookshelf] load_cover_scaled RGB24 full depth=%d %dx%d\n",
+        full->depth,
+        full->width,
+        full->height);
+    ibitmap *small = BitmapStretchCopy(full, 0, 0, full->width, full->height, 240, 360);
+    free(full);
+    if (small != NULL)
+        LOG("[bookshelf] load_cover_scaled RGB24 small depth=%d\n", small->depth);
+    return small;
+}
 /* Try to load a cached cover PNG from disk.  Returns 0 on success
  * (bitmap written to *out_bmp), -1 if no cache exists. */
 int
@@ -387,9 +407,9 @@ cover_cache_load(const char *id, ibitmap **out_bmp)
         LOG("[bookshelf] cover_cache_load miss: access %s errno=%d\n", path, errno);
         return -1;
     }
-    ibitmap *bmp = LoadPNGStretch(path, 240, 360, 0, 0);
+    ibitmap *bmp = load_cover_scaled(path);
     if (bmp == NULL) {
-        LOG("[bookshelf] cover_cache_load miss: LoadPNGStretch NULL for %s\n", path);
+        LOG("[bookshelf] cover_cache_load miss: load_cover_scaled NULL for %s\n", path);
         return -1;
     }
     *out_bmp = bmp;

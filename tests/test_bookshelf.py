@@ -230,10 +230,13 @@ def _start_emulator() -> Emulator:
     )
     time.sleep(1)
 
-    # Start with --network=host
+    # Start with --network=host.  The U633 is a colour device: advertise
+    # the 24-bit framebuffer so the guest's RGB24 cover decodes render
+    # (and the app's device_display_colormask() path is exercised).
     env = _pbemu_env()
     env["PBEMU_NO_KEEPID"] = "1"
     env["PBEMU_PODMAN_ARGS"] = "--network=host"
+    env["SHIM_PBEMU_COLOR_FB"] = "1"
     subprocess.run(
         [
             sys.executable,
@@ -1059,72 +1062,61 @@ def _final_dl_progress(bs: BookshelfSession, before: str, total: int, *, timeout
         time.sleep(0.3)
     if last is None:
         raise AssertionError("no dl_progress line logged after completion")
-    return tuple(int(v) for v in last)
-
-
-def test_downloads_icon_toggles_view(fresh_bookshelf):
-    """The top-bar downloads icon opens the Downloads view (empty state)
-    and the top-bar back arrow returns to the Library grid."""
+def test_downloads_icon_opens_popup_when_busy(fresh_bookshelf):
+    """The top-bar downloads icon opens the download-progress popup while
+    downloads are queued; with nothing to show it is a no-op."""
     bs = fresh_bookshelf
+    # Idle: the icon must not open anything (no popup draw, no view).
+    bs.wait_for_stable()
     before = bs.frame_hash()
     bs.tap_downloads_icon()
-    bs.wait_hash_change(before)
-    bs.assert_log_contains("draw_grid")  # still alive; view body repainted
-    before2 = bs.frame_hash()
-    bs.tap_home()  # downloads icon is Library-tab-only; back arrow closes the view
-    bs.wait_hash_change(before2)
-
-
-def test_sync_button_only_on_downloads_tab(fresh_bookshelf):
-    """The right-corner hamburger (Library tab) opens the More menu, while
-    the same slot on the Downloads tab is a sync button that re-syncs
-    without leaving the view — and there is no More menu there."""
-    bs = fresh_bookshelf
-    # Library tab: right corner = hamburger → More overlay (framebuffer
-    # change proves the overlay drew; the open tap itself logs more=0,
-    # the pre-tap state).
-    bs.tap_menu_and_verify()
-    # Dismiss it and open the Downloads view.
-    before = bs.frame_hash()
-    bs.send_back_key()
-    bs.wait_hash_change(before)
-    before = bs.frame_hash()
-    bs.tap_downloads_icon()
-    bs.wait_hash_change(before)
-    # Downloads tab: right corner = sync button → do_sync, stay on the view.
+    time.sleep(1.0)
+    assert bs.frame_hash() == before, "idle downloads icon changed the screen"
+    # Queue a download via a book press; the popup opens automatically.
+    _clear_downloads()
+    _restart_bookshelf(bs.emulator)
+    time.sleep(2.0)
+    bs.wait_for_stable()
     before = bs.current_log()
-    bs.tap_sync_button()
-    _wait_log_slice(bs, before, "do_sync ENTER")
-    _wait_log_slice(bs, before, "draw_downloads")
+    bs.tap_book(0)
+    _wait_log_slice(bs, before, "draw_dl_popup")
+    # Tapping anywhere dismisses the popup; the drain continues.
+    before = bs.frame_hash()
+    bs.tap_at(*bs.geom.book_tile_center(0))
+    bs.wait_hash_change(before)
+    _wait_log_count(bs, "download_book_file OK", 1)
+    _clear_downloads()
 
 
 def test_book_press_downloads_and_launches_reader(fresh_bookshelf):
-    """Pressing a book downloads it (if needed) then launches the reader."""
+    """Pressing a book shows the download popup, downloads it, then
+    auto-opens the reader when the queue drains."""
     bs = fresh_bookshelf
     _clear_downloads()
     _restart_bookshelf(bs.emulator)
     time.sleep(2.0)
     bs.wait_for_stable()
+    before = bs.current_log()
     bs.tap_book(0)
-    time.sleep(3.0)
-    bs.assert_log_contains("download_book_file OK")
-    bs.assert_log_contains("launching reader")
+    _wait_log_slice(bs, before, "draw_dl_popup")
+    _wait_log_slice(bs, before, "download_book_file OK", timeout=20.0)
+    _wait_log_slice(bs, before, "launching reader", timeout=20.0)
     assert len(_downloaded_files()) >= 1, "book file was not downloaded to device"
     _kill_guest_tasks()  # kill the launched reader
     _clear_downloads()
 
 
-def test_download_all_queues_library_and_switches_tab(fresh_bookshelf):
-    """Download-all queues every book and jumps to the Downloads tab."""
+def test_download_all_opens_popup_and_drains(fresh_bookshelf):
+    """Download-all queues every book and shows the progress popup."""
     bs = fresh_bookshelf
     _clear_downloads()
     _restart_bookshelf(bs.emulator)
     time.sleep(2.0)
     bs.wait_for_stable()
-    before = bs.frame_hash()
+    before = bs.current_log()
     bs.tap_download_all()
-    bs.wait_hash_change(before)
-    bs.assert_log_contains("download-all queued=")
+    _wait_log_slice(bs, before, "download-all queued=")
+    _wait_log_slice(bs, before, "draw_dl_popup")
     # Let the queue drain one-per-tick, then confirm files landed on disk.
     deadline = time.monotonic() + 30
     while time.monotonic() < deadline and len(_downloaded_files()) < 16:
@@ -1135,12 +1127,12 @@ def test_download_all_queues_library_and_switches_tab(fresh_bookshelf):
     _clear_downloads()
 
 
-def test_download_all_survives_tab_switch_beyond_first_slice(fresh_bookshelf):
+def test_download_all_survives_popup_dismiss_beyond_first_slice(fresh_bookshelf):
     """Download-all on >64 books must drain past the MAX_DOWNLOADS slice
-    boundary even if the user switches tabs mid-drain.  Regression: the
-    drain timer was only re-armed while queued items remained, so once
-    the first 64-item slice settled the batch top-up never ran again and
-    the progress bar froze (e.g. 64/93) with every file on disk."""
+    boundary even if the user dismisses the popup mid-drain.  Regression:
+    the drain timer was only re-armed while queued items remained, so
+    once the first 64-item slice settled the batch top-up never ran again
+    and the progress bar froze (e.g. 64/93) with every file on disk."""
     bs = fresh_bookshelf
     injected = _inject_bulk_books(70)  # 16 shipped + 70 = 86 > MAX_DOWNLOADS
     try:
@@ -1158,12 +1150,12 @@ def test_download_all_survives_tab_switch_beyond_first_slice(fresh_bookshelf):
         total = int(m.group(1))
         assert total > 64, f"batch must exceed the 64-slot queue slice, got {total}"
 
-        # Switch away and back mid-drain, like the user did when the bar
-        # froze; the drain must keep running off-screen.
+        # Dismiss the popup mid-drain, like the user did when the bar
+        # froze; the drain must keep running in the background.
         time.sleep(2.0)
-        bs.tap_home()  # → Library tab
+        bs.tap_at(*bs.geom.book_tile_center(0))  # popup dismisses on any tap
         time.sleep(1.0)
-        bs.tap_downloads_icon()  # → Downloads tab
+        bs.tap_downloads_icon()  # reopen the popup
 
         # The drain must visibly pass the 64-item boundary — the exact
         # point where the old code lost its timer and froze.
@@ -1177,13 +1169,12 @@ def test_download_all_survives_tab_switch_beyond_first_slice(fresh_bookshelf):
         assert got == total, f"expected all {total} books downloaded, got {got}"
         bs.assert_log_contains("download-all batch complete")
 
-        # Force one more Downloads-tab redraw and confirm the finished
-        # bar keeps the whole-batch tally.  Regression: the completion
-        # path zeroed the batch counters, so the bar fell back to the
-        # queue-derived count — and the pruned queue only holds the
-        # last 64-item slice, so "86 downloaded" snapped back to
-        # "64 downloaded" once the batch finished.
-        bs.tap_home()
+        # Reopen the popup and confirm the finished bar keeps the
+        # whole-batch tally.  Regression: the completion path zeroed the
+        # batch counters, so the bar fell back to the queue-derived count
+        # — and the pruned queue only holds the last 64-item slice, so
+        # "86 downloaded" snapped back to "64 downloaded" once the batch
+        # finished.
         bs.tap_downloads_icon()
         done_n, failed_n, total_n, active_n = _final_dl_progress(bs, before, total)
         assert total_n == total, f"final bar total={total_n}, expected {total}"
@@ -1195,39 +1186,25 @@ def test_download_all_survives_tab_switch_beyond_first_slice(fresh_bookshelf):
         _clear_downloads()
 
 
-def test_downloads_tab_pages(fresh_bookshelf):
-    """The Downloads tab pages its single-column list, and the pager buttons
-    advance and rewind it.  Regression for the tab that previously ignored
-    paging (its body was drawn but never re-paginated on Next/Prev)."""
+def test_book_longpress_open(fresh_bookshelf):
+    """Long-press a book → context menu → Open works like a single tap:
+    download (with the popup) then launch the reader."""
     bs = fresh_bookshelf
     _clear_downloads()
     _restart_bookshelf(bs.emulator)
     time.sleep(2.0)
     bs.wait_for_stable()
-
-    # Queue 16 and jump to the Downloads tab; the synchronous redraw logs
-    # the page count.  Parse the *largest* page count seen in the slice so
-    # a fast-draining queue (tiny mock files, 120ms/item) can't hide the
-    # multi-page initial state.
+    before = bs.frame_hash()
+    bs.long_press_book(0)
+    bs.wait_hash_change(before)
+    bs.assert_log_contains("context menu open series=0")
     before = bs.current_log()
-    bs.tap_download_all()
-    _wait_log_slice(bs, before, "draw_downloads page=0 pages=")
-    slice0 = bs.current_log()[len(before):]
-    counts = [int(m) for m in re.findall(r"draw_downloads page=0 pages=(\d+)", slice0)]
-    assert counts and max(counts) >= 2, (
-        f"Downloads tab never reported >=2 pages for 16 items (saw {counts})"
-    )
-
-    # Tap Next with no intervening sleep (so the list is still long enough
-    # to have a page 1) and confirm the page advances.
-    before2 = bs.current_log()
-    bs.tap_pager_next()
-    _wait_log_slice(bs, before2, "draw_downloads page=1")
-
-    # And Prev returns to page 0.
-    before3 = bs.current_log()
-    bs.tap_pager_prev()
-    _wait_log_slice(bs, before3, "draw_downloads page=0")
+    bs.tap_context_item(0)  # Open
+    _wait_log_slice(bs, before, "draw_dl_popup")
+    _wait_log_slice(bs, before, "launching reader")
+    bs.assert_log_contains("download_book_file OK")
+    assert len(_downloaded_files()) >= 1
+    _kill_guest_tasks()  # kill the launched reader
     _clear_downloads()
 
 
@@ -1242,9 +1219,10 @@ def test_book_longpress_download(fresh_bookshelf):
     bs.long_press_book(0)
     bs.wait_hash_change(before)
     bs.assert_log_contains("context menu open series=0")
-    bs.tap_context_item(0)  # Download
-    time.sleep(3.0)
-    bs.assert_log_contains("download_book_file OK")
+    before = bs.current_log()
+    bs.tap_context_item(1)  # Download (0 is Open)
+    _wait_log_slice(bs, before, "draw_dl_popup")
+    _wait_log_count(bs, "download_book_file OK", 1)
     assert len(_downloaded_files()) >= 1
     _clear_downloads()
 
@@ -1255,17 +1233,19 @@ def test_book_longpress_delete(fresh_bookshelf):
     _clear_downloads()
     _restart_bookshelf(bs.emulator)
     time.sleep(2.0)
-    bs.wait_for_stable()
     # First download the book so there is something to delete.
     bs.long_press_book(0)
     time.sleep(1.0)
-    bs.tap_context_item(0)  # Download
-    time.sleep(3.0)
+    bs.tap_context_item(1)  # Download (0 is Open)
+    _wait_log_count(bs, "download_book_file OK", 1)
     assert len(_downloaded_files()) >= 1, "setup download failed"
-    # Now delete it via the context menu.
+    # Dismiss the popup (the download kept it open), then delete via the
+    # context menu.
+    bs.tap_at(*bs.geom.book_tile_center(0))
+    time.sleep(0.5)
     bs.long_press_book(0)
     time.sleep(1.0)
-    bs.tap_context_item(1)  # Delete
+    bs.tap_context_item(2)  # Delete
     time.sleep(2.0)
     bs.assert_log_contains("delete_book_file removed")
     assert len(_downloaded_files()) == 0, "delete did not remove the file"
@@ -1287,7 +1267,9 @@ def test_series_longpress_download_all(fresh_bookshelf):
         bs.long_press_book(pos)
         bs.wait_hash_change(before)
         bs.assert_log_contains("context menu open series=1")
-        bs.tap_context_item(0)  # Download all
+        before = bs.current_log()
+        bs.tap_context_item(0, n_items=2)  # Download all
+        _wait_log_slice(bs, before, "draw_dl_popup")
         bs.assert_log_contains("download_series")
         bs.assert_log_contains("queued=2")
         _wait_log_count(bs, "download_book_file OK", 2)
@@ -1311,13 +1293,16 @@ def test_series_longpress_delete(fresh_bookshelf):
         # Download the series first so delete has files to remove.
         bs.long_press_book(pos)
         time.sleep(1.0)
-        bs.tap_context_item(0)  # Download all
+        bs.tap_context_item(0, n_items=2)  # Download all
         _wait_log_count(bs, "download_book_file OK", 2)
         removed_before = bs.current_log().count("delete_book_file removed")
-        # Now delete the whole series.
+        # Dismiss the popup (the download kept it open), then delete the
+        # whole series.
+        bs.tap_at(*bs.geom.book_tile_center(pos))
+        time.sleep(0.5)
         bs.long_press_book(pos)
         time.sleep(1.0)
-        bs.tap_context_item(1)  # Delete series
+        bs.tap_context_item(1, n_items=2)  # Delete series
         time.sleep(2.0)
         bs.assert_log_contains("delete_series")
         removed_after = bs.current_log().count("delete_book_file removed")
@@ -1480,13 +1465,16 @@ def _offline_pager_check(bs) -> None:
 
 
 def _offline_downloads_roundtrip(bs, invocations: int) -> None:
-    """Downloads view opens via the top-bar downloads icon and closes via
-    the top-bar back arrow — all without a process respawn."""
+    """Search sub-page opens via the top-bar search icon and closes via the
+    top-bar back arrow — all without a process respawn.  (The former
+    Downloads-view roundtrip is gone: the downloads page was removed and
+    the downloads icon now opens a progress popup, which offline has
+    nothing to show.)"""
     snap = bs.current_log()
     before = bs.frame_hash()
-    bs.tap_downloads_icon()
+    bs.tap_search()
     bs.wait_hash_change(before)
-    _wait_log_slice(bs, snap, "draw_downloads")
+    _wait_log_slice(bs, snap, "draw_search_tab")
     snap = bs.current_log()
     before = bs.frame_hash()
     bs.tap_home()
@@ -1495,8 +1483,6 @@ def _offline_downloads_roundtrip(bs, invocations: int) -> None:
     assert bs.invocation_count() == invocations, (
         "offline navigation triggered CloseApp/respawn"
     )
-
-
 def _seed_online_series(bs, emulator) -> str:
     """Seed a two-book series online so the store carries a collapsed
     series card and cover_tick caches its member cover; return the id."""

@@ -114,6 +114,12 @@ on_event(int type, int par1, int par2)
         view_rebuild();             /* render from the local db even if sync fails */
         LOG("[bookshelf] config_path=%s\n", g_config_path);
         g_state.reader_pref = reader_pref_from_path(g_cfg_reader);
+        /* Colour display?  The PB Color reports a nonzero colormask
+         * while the fb ioctl claims 8bpp; the stock bookshelf uses
+         * device_display_colormask() to pick RGB24 cover decodes, so do
+         * the same (see load_cover_scaled). */
+        g_display_color = (device_display_colormask() != 0);
+        LOG("[bookshelf] display_colormask=%d\n", g_display_color);
         LOG("[bookshelf] reader_pref=%d (cfg `%s`)\n", g_state.reader_pref, g_cfg_reader);
 
         /* Try firmware language env (PB sets LANG=en_US.utf8 etc). */
@@ -177,13 +183,13 @@ on_event(int type, int par1, int par2)
             return 1;
         }
         draw_top_bar();
-        if (g_state.tab == TAB_DOWNLOADS)
-            draw_downloads_tab();
-        else if (g_state.tab == TAB_SEARCH)
+        if (g_state.tab == TAB_SEARCH)
             draw_search_tab();
         else
             draw_grid();
         draw_pager();
+        if (g_state.dl_popup)
+            draw_dl_popup();
         if (g_state.menu_open)
             draw_overlay_menu();
         else if (g_state.more_open)
@@ -208,7 +214,7 @@ on_event(int type, int par1, int par2)
         g_lp_armed = 0;
         g_lp_vi = -1;
         if (g_state.tab == TAB_LIBRARY && !g_state.settings_open && !g_state.menu_open &&
-            !g_state.more_open && !g_state.ctx_open) {
+            !g_state.more_open && !g_state.ctx_open && !g_state.dl_popup) {
             int vi = hit_thumbnail(x, y);
             if (vi >= 0) {
                 g_lp_armed = 1;
@@ -286,6 +292,17 @@ on_event(int type, int par1, int par2)
             return 1;
         }
 
+        /* The download popup owns all taps while open: a tap dismisses
+         * it (the queue keeps draining in the background — the top-bar
+         * badge tracks it) or, when the book already finished, just
+         * closes it. */
+        if (g_state.dl_popup) {
+            g_state.dl_popup = 0;
+            g_state.dl_popup_auto_open = 0;
+            redraw_shelf();
+            return 1;
+        }
+
         /* Overlay taps take priority; outside-of-panel taps close. */
         if (g_state.menu_open) {
             on_tap_overlay_menu(x, y);
@@ -305,26 +322,17 @@ on_event(int type, int par1, int par2)
             }
             return 1;
         }
-        /* Top system strip (the status bar with clock, battery, etc.).
-         * Tapping anywhere on it opens the firmware control panel — the
-         * same gesture as the real device. */
-        if (y < g_state.panel_h) {
-            LOG("[bookshelf] system bar tapped -> control panel\n");
-            OpenControlPanel(NULL);
-            return 1;
-        }
-
-        /* Top-bar buttons — shared by every tab.  hit_top_bar returns:
-         *   1 = home  (left; back on the Downloads/Search views or a
-         *              drilled series, no-op on the library shelf)
-         *   3 = menu  (right, Library tab; opens the More overlay)
-         *   2 = sync  (right, Downloads tab only; runs a library sync)
-         *   4 = downloads icon (left of the menu button, Library tab)
+        /* Top-bar buttons.  hit_top_bar returns:
+         *   1 = home  (left; back on the Search view or a drilled
+         *              series, no-op on the library shelf)
+         *   3 = menu  (right; opens the More overlay)
+         *   4 = downloads icon (left of the menu button; opens the
+         *       download-progress popup)
          *   5 = search icon (opens the Search sub-page)
          */
         int which = hit_top_bar(x, y);
         if (which == 1) {
-            if (g_state.tab == TAB_DOWNLOADS || g_state.tab == TAB_SEARCH) {
+            if (g_state.tab == TAB_SEARCH) {
                 g_state.tab = TAB_LIBRARY;
                 g_state.page = 0;
                 g_state.search_kb = 0;
@@ -343,7 +351,7 @@ on_event(int type, int par1, int par2)
             return 1;
         }
         if (which == 5) {
-            /* Open the Search sub-page from any tab. */
+            /* Open the Search sub-page. */
             g_state.tab = TAB_SEARCH;
             g_state.page = 0;
             g_state.search_kb = 0;
@@ -356,20 +364,19 @@ on_event(int type, int par1, int par2)
             FullUpdate();
             return 1;
         }
-        if (which == 2) {
-            do_sync();
-            redraw_shelf();
-            return 1;
-        }
         if (which == 4) {
-            g_state.tab = TAB_DOWNLOADS;
-            g_state.page = 0;
-            redraw_shelf();
+            /* Downloads icon: show the progress popup when there is
+             * anything to show (pending or finished downloads). */
+            if (g_download_count > 0 || g_dl_batch_active) {
+                g_state.dl_popup = 1;
+                g_state.dl_popup_auto_open = 0;
+                redraw_shelf();
+            }
             return 1;
         }
 
-        /* Pager — shared by both tabs; the page count is per-tab, so the
-         * same buttons page the downloads list on that tab. */
+        /* Pager — the page count is per-tab (library grid / search
+         * history). */
         int pg = hit_pager(x, y);
         if (pg == -1) {
             g_state.page--;
@@ -392,13 +399,11 @@ on_event(int type, int par1, int par2)
             return 1;
         }
 
-        /* Below the pager the body is tab-specific: the Downloads tab has
-         * no tappable rows, so swallow the tap.  The Search page owns its
-         * whole body: the input row opens the keyboard, a history term
-         * re-runs that search, anything else is swallowed.  The Library
-         * tab falls through to the book-grid hit-test below. */
-        if (g_state.tab == TAB_DOWNLOADS)
-            return 1;
+        /* Below the pager the body is tab-specific.  The Search page
+         * owns its whole body: the input row opens the keyboard, a
+         * history term re-runs that search, anything else is swallowed.
+         * The Library tab falls through to the book-grid hit-test
+         * below. */
         if (g_state.tab == TAB_SEARCH) {
             if (hit_search_input(x, y) == 1) {
                 g_state.search_kb = 1;
@@ -429,11 +434,16 @@ on_event(int type, int par1, int par2)
         int idx = hit_thumbnail(x, y);
         if (idx >= 0) {
             on_tap_thumbnail(idx);
-            draw_grid();
-            PartialUpdate(0,
-                          g_state.panel_h + TOP_BAR_H,
-                          ScreenWidth(),
-                          ScreenHeight() - g_state.panel_h - TOP_BAR_H);
+            /* book_press_action already flushed the download popup when
+             * the book had to be fetched; repainting the grid here would
+             * wipe it. */
+            if (!g_state.dl_popup) {
+                draw_grid();
+                PartialUpdate(0,
+                              g_state.panel_h + TOP_BAR_H,
+                              ScreenWidth(),
+                              ScreenHeight() - g_state.panel_h - TOP_BAR_H);
+            }
             return 1;
         }
         return 0;
@@ -443,6 +453,12 @@ on_event(int type, int par1, int par2)
         if (par1 == IV_KEY_BACK || par1 == IV_KEY_PREV) {
             if (g_state.ctx_open) {
                 close_context();
+                return 1;
+            }
+            if (g_state.dl_popup) {
+                g_state.dl_popup = 0;
+                g_state.dl_popup_auto_open = 0;
+                redraw_shelf();
                 return 1;
             }
             if (g_state.settings_open) {

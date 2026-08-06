@@ -317,9 +317,7 @@ The binary syncs metadata on startup (the EVT_INIT handler calls
 `do_sync()` before the first draw), so the shelf populates without a
 manual tap.  The local store is opened and the grid built from it
 *before* the network sync, so an unreachable API still shows the
-cached library.  Subsequent syncs are triggered via **⋯** → **Sync**,
-or via the sync button in the top-bar right corner while the Downloads
-view is showing.
+cached library.  Subsequent syncs are triggered via **⋯** → **Sync**.
 
 ## UI
 
@@ -348,32 +346,25 @@ the firmware with day-of-week + 24h time + down-arrow + lightbulb + battery):
 The top bar style matches the firmware's standard `sudoku.app`
 header:
 
-* **Left** — a 96×96 house outline (home button).  While the Downloads
-  view, the Search page, or a drilled-in series is showing it acts as
-  "back"; on the plain library shelf it is a no-op (the app is the
-  home-screen replacement, so closing it there would drop the user to
-  the stock UI and, behind the boot wrapper, never come back).
+* **Left** — a 96×96 house outline (home button).  While the Search
+  page or a drilled-in series is showing it acts as "back"; on the
+  plain library shelf it is a no-op (the app is the home-screen
+  replacement, so closing it there would drop the user to the stock UI
+  and, behind the boot wrapper, never come back).
 * **Center** — a title while a drilled-in series (series name), the
-  Downloads view ("Downloads"), the Search page ("Search"), or an
-  active search query (the query text, truncated) is showing; the plain
-  library shelf carries no title.
+  Search page ("Search"), or an active search query (the query text,
+  truncated) is showing; the plain library shelf carries no title.
 * **Right** — a 96×96 solid black square with three white hamburger
   lines.  Tapping opens the in-app "More" menu (sort, view, sync).
 * **Left of the menu button** — a 96×96 downloads icon (down arrow
-  into a tray, Firefox-style).  Tapping it opens the Downloads view
-  (queued/finished downloads); it carries a pending-count badge while
-  a download queue drains.
+  into a tray, Firefox-style).  Tapping it opens the download-progress
+  popup while downloads are queued or finished; it carries a
+  pending-count badge while a download queue drains.
 * **Left of the downloads icon** — a 96×96 magnifying-glass icon.
   Tapping it opens the Search page (input row + previous search
   terms); the old full-width search row was dropped to reclaim the
   vertical space for the shelf.
 
-On the Downloads view the hamburger is gone — the sub-navigation keeps
-only back (left), the Downloads title (center), and the right corner,
-which holds the 96×96 sync button (solid black square with two white
-arc arrows that rotate a few degrees per second while a sync or
-download is in flight).  The search icon sits directly left of it.
-Tapping the sync button runs a library sync without leaving the view.
 The "More" menu is a right-anchored 75%-width panel with the
 following items, in order: **Sync**, **Title A–Z**, **By author**,
 **By series**, **Recent**, **Grid**, **List**, **Download all**,
@@ -467,16 +458,22 @@ otherwise), the book title, the author, and a corner badge:
 The bottom bar is the pager: `n / total` and `<` / `>` buttons when
 there is more than one page of books.
 
-Tapping a thumbnail fetches the file from the API (if not already on
-device), then opens it through `OpenBook()` — the firmware's canonical
-book-open path, which routes the book to `reader_controller` and the
-default reader for the extension.  An explicitly selected third-party
-reader (KOReader) is still launched via `NewTaskEx()` with the book
-path as its argument.  (The API server's `open_with` table in
-`api/config/server.json` still maps extensions to candidate apps, but
-the device validates the resolved app exists and falls back to
-`OpenBook()` — the stock firmware has no `pdfviewer.app`, so the old
-`NewTaskEx("/ebrmain/bin/pdfviewer.app", …)` failed silently on PDFs.)
+Tapping a book that is not yet on device shows the download-progress
+popup (a centred sheet with the queue/batch progress bar); when the
+file lands, the reader opens automatically.  Already-downloaded books
+open immediately.  The download popup is also shown by **Download all**
+(More menu), the context-menu **Download**, and the top-bar downloads
+icon; a tap or Back dismisses it while the queue keeps draining in the
+background (the icon's badge tracks it).  The opening itself goes
+through `OpenBook()` — the firmware's canonical book-open path, which
+routes the book to `reader_controller` and the default reader for the
+extension.  An explicitly selected third-party reader (KOReader) is
+still launched via `NewTaskEx()` with the book path as its argument.
+(The API server's `open_with` table in `api/config/server.json` still
+maps extensions to candidate apps, but the device validates the resolved
+app exists and falls back to `OpenBook()` — the stock firmware has no
+`pdfviewer.app`, so the old `NewTaskEx("/ebrmain/bin/pdfviewer.app", …)`
+failed silently on PDFs.)
 
 
 **Applications** opens the in-app launcher: a scrollable column of the
@@ -487,17 +484,14 @@ Tapping a tile launches the app via `NewTaskEx()`.
 
 ### Languages
 
-The UI auto-detects language from the firmware's `LANG` environment
-variable and translates all of the visible strings.  Supported today:
-English, German, French, Italian.  Add a new language by extending the
-`g_i18n` table near the top of `bookshelf.c`.
-
-### Downloading and opening books
+### Downloading, opening, and deleting books
 
 1. User taps a tile.
-2. The app `QuickDownload`s the file from the API (with the bearer
-   token appended as `?access_token=`) and saves it to
-   `/mnt/ext1/system/bin/<id>.<ext>`.
+2. If the file is not on device, the download-progress popup opens and
+   the app `QuickDownload`s the file from the API (with the bearer
+   token appended as `?access_token=`), saving it to
+   `/mnt/ext1/system/bin/<id>.<ext>`; when the queue drains the reader
+   opens automatically.
 3. Standard reader (or Auto): the app calls
    `OpenBook(path, NULL, 1)` — the firmware's canonical book-open
    path; `reader_controller` picks the right reader for the extension
@@ -505,6 +499,9 @@ English, German, French, Italian.  Add a new language by extending the
 4. Explicit third-party reader (KOReader): the app calls
    `NewTaskEx(app, args=[app, path], ...)` with the stock launch
    flags (0x25).
+5. Long-pressing a tile opens the context menu: a book offers
+   **Open** (same as a single tap), **Download**, **Delete**; a series
+   card offers **Download all** / **Delete series**.
 
 ### Offline persistence (library store + cover cache)
 
@@ -524,9 +521,19 @@ the store instead —
   buffers;
 - series cards are collapsed in SQL (one card per multi-member
   series, representative = highest volume);
-- cover PNGs are cached under `covers/<id>.png` and blitted through
-  a small LRU of decoded bitmaps, never one per book.
 
+- cover PNGs are cached under `covers/<id>.png` and blitted through
+  a small LRU of decoded bitmaps, never one per book.  On a colour
+  display (`device_display_colormask() != 0`, e.g. the PocketBook
+  Color 633) covers decode as RGB24 — the same choice the stock
+  bookshelf.app makes — and are written straight into the libinkview
+  canvas (RGB byte order, nearest-neighbour scale), because libinkview's
+  own 8-bit draw pipeline flattens 24-bit bitmaps to greyscale.  The
+  QPA bridge that eink-reader uses writes the canvas the same way,
+  which is how it renders colour thumbnails.  Greyscale displays keep
+  the 8-bit decode and the normal StretchBitmap path.  (The colour
+  signal is `device_display_colormask()`, not the framebuffer ioctl —
+  the ioctl reports 8bpp on some Colour hardware.)
 On boot the app opens the store, re-probes every book's on-device
 file to resync its `downloaded` flag (files can vanish or appear
 while the app is away), and builds the grid from the store *before*

@@ -43,7 +43,7 @@ draw_top_bar(void)
     int home_w = 96;
     int home_x = 8;
     int home_y = y0 + (TOP_BAR_H - home_w) / 2;
-    if (g_drilled_series[0] != '\0' || g_state.tab == TAB_DOWNLOADS || g_state.tab == TAB_SEARCH) {
+    if (g_drilled_series[0] != '\0' || g_state.tab == TAB_SEARCH) {
         /* Left-pointing chevron arrow. */
         int ax = home_x + 20;
         int ay = home_y + home_w / 2;
@@ -64,10 +64,10 @@ draw_top_bar(void)
         DrawLine(home_x + 37, home_y + 61, home_x + 53, home_y + 61, col);
         DrawLine(home_x + 53, home_y + 61, home_x + 53, home_y + 85, col);
     }
-    /* Centered title — series name when drilled, Downloads label on the
-     * downloads page, "Search" on the search page, the active query on
-     * the filtered library shelf, nothing on the plain shelf (the app
-     * name in the top bar was dropped per user request). */
+    /* Centered title — series name when drilled, "Search" on the search
+     * page, the active query on the filtered library shelf, nothing on
+     * the plain shelf (the app name in the top bar was dropped per user
+     * request). */
     ifont *tf = OpenFont(DEFAULTFONT, 44, 0);
     if (tf != NULL) {
         char title[MAX_QUERY_LEN + 16];
@@ -76,8 +76,6 @@ draw_top_bar(void)
             snprintf(title, sizeof title, "%s", g_drilled_series_name);
             if (title[0] == '\0')
                 snprintf(title, sizeof title, "Series");
-        } else if (g_state.tab == TAB_DOWNLOADS) {
-            snprintf(title, sizeof title, "%s", i18n("tab.downloads"));
         } else if (g_state.tab == TAB_SEARCH) {
             snprintf(title, sizeof title, "%s", i18n("tab.search"));
         } else if (g_state.query[0] != '\0') {
@@ -88,13 +86,13 @@ draw_top_bar(void)
         }
         if (title[0] != '\0') {
             /* Centre the title inside the free band between the flanking
-             * icon stacks (home/back left; search + downloads + menu right
-             * on the Library tab, search + sync on the Downloads tab).
-             * Centring on the whole screen width lets a long series name
-             * run under the right icons: the trim budget must be the band
-             * width, not w - 420, and the draw origin the band, not 0. */
+             * icon stacks (home/back left; search + downloads + menu
+             * right).  Centring on the whole screen width lets a long
+             * series name run under the right icons: the trim budget
+             * must be the band width, not w - 420, and the draw origin
+             * the band, not 0. */
             int left_w = 8 + 96;
-            int right_w = (g_state.tab == TAB_DOWNLOADS) ? 8 + 2 * 96 : 8 + 3 * 96;
+            int right_w = 8 + 3 * 96;
             int band_w = w - left_w - right_w;
             if (band_w < 64)
                 band_w = 64;
@@ -112,34 +110,27 @@ draw_top_bar(void)
         return;
     }
     draw_search_icon();
-    if (g_state.tab == TAB_DOWNLOADS) {
-        /* Downloads view: the right slot hosts the sync glyph instead
-         * of the hamburger — the sub-view has no More menu.  Tapping
-         * it runs a sync (see hit_top_bar). */
-        draw_sync_icon();
-    } else {
-        draw_download_icon();
+    draw_download_icon();
 
-        /* Right "menu" button — 96×96 solid black square with three
-         * white hamburger lines. */
-        int menu_w = 96;
-        int menu_x = w - menu_w - 8;
-        int menu_y = y0 + (TOP_BAR_H - menu_w) / 2;
-        int menu_cx = menu_x + menu_w / 2;
-        int menu_cy = menu_y + menu_w / 2;
-        int menu_r = menu_w / 2;
-        FillArea(menu_cx - menu_r, menu_cy - menu_r, menu_r * 2, menu_r * 2, col);
-        int ml_w = 44;
-        FillArea(menu_cx - ml_w / 2, menu_cy - 19, ml_w, 6, WHITE);
-        FillArea(menu_cx - ml_w / 2, menu_cy - 3, ml_w, 6, WHITE);
-        FillArea(menu_cx - ml_w / 2, menu_cy + 13, ml_w, 6, WHITE);
-    }
+    /* Right "menu" button — 96×96 solid black square with three
+     * white hamburger lines. */
+    int menu_w = 96;
+    int menu_x = w - menu_w - 8;
+    int menu_y = y0 + (TOP_BAR_H - menu_w) / 2;
+    int menu_cx = menu_x + menu_w / 2;
+    int menu_cy = menu_y + menu_w / 2;
+    int menu_r = menu_w / 2;
+    FillArea(menu_cx - menu_r, menu_cy - menu_r, menu_r * 2, menu_r * 2, col);
+    int ml_w = 44;
+    FillArea(menu_cx - ml_w / 2, menu_cy - 19, ml_w, 6, WHITE);
+    FillArea(menu_cx - ml_w / 2, menu_cy - 3, ml_w, 6, WHITE);
+    FillArea(menu_cx - ml_w / 2, menu_cy + 13, ml_w, 6, WHITE);
 }
 
-/* Download icon in the top bar (Library view only), left of the menu
- * button: a Firefox-style down arrow landing in a tray.  Tapping it
- * opens the Downloads view; the icon carries a pending-count badge
- * while any download is queued or in flight. */
+/* Download icon in the top bar, left of the menu button: a Firefox-style
+ * down arrow landing in a tray.  Tapping it opens the download progress
+ * popup; the icon carries a pending-count badge while any download is
+ * queued or in flight. */
 void
 draw_download_icon(void)
 {
@@ -188,11 +179,10 @@ draw_download_icon(void)
     }
 }
 
-/* Magnifying-glass icon in the top bar (Library and Downloads tabs).
- * Replaces the old separate search row: tapping it opens the Search
- * sub-page (see on_event).  Line-art style matching home/downloads.
- * Position: left of the downloads icon on the Library tab, left of the
- * sync button on the Downloads view. */
+/* Magnifying-glass icon in the top bar.  Replaces the old separate
+ * search row: tapping it opens the Search sub-page (see on_event).
+ * Line-art style matching home/downloads.  Position: left of the
+ * downloads icon. */
 void
 draw_search_icon(void)
 {
@@ -201,7 +191,7 @@ draw_search_icon(void)
     int col = BLACK;
     int ic_w = 96;
     int menu_x = w - 96 - 8;
-    int ic_x = (g_state.tab == TAB_DOWNLOADS) ? menu_x - ic_w : menu_x - 2 * ic_w;
+    int ic_x = menu_x - 2 * ic_w;
     int ic_y = y0 + (TOP_BAR_H - ic_w) / 2;
     int cx = ic_x + ic_w / 2 - 5; /* ring centre, offset for the handle */
     int cy = ic_y + ic_w / 2 - 5;
@@ -226,101 +216,6 @@ draw_search_icon(void)
     DrawLine(cx + r - 3, cy + r - 5, cx + r + 11, cy + r + 9, col);
 }
 
-/* Sync icon in the top bar — shown only while the Downloads view is
- * up, taking the hamburger's slot (the sub-view has no More menu).
- * Two white arc arrows (a "refresh" glyph) on a solid black square
- * that rotate a few degrees per second while a sync or download is in
- * flight (sync_set_active arms the rotation timer).  Tapping it runs
- * a sync (see hit_top_bar). */
-static int
-sync_active(void)
-{
-    return g_state.sync_state == 1 || downloads_pending() > 0;
-}
-
-static int
-sync_modal_open(void)
-{
-    return g_state.ctx_open || g_state.menu_open || g_state.more_open || g_state.settings_open ||
-           g_state.launcher_open;
-}
-
-static int spin_armed = 0;
-
-static void
-sync_spin_tick(void *ctx)
-{
-    (void)ctx;
-    if (!sync_active()) {
-        spin_armed = 0; /* nothing in flight — the glyph rests */
-        return;
-    }
-    g_state.sync_angle = (g_state.sync_angle + 15) % 360;
-    /* The glyph only exists on the Downloads view; elsewhere the top
-     * bar is redrawn whole when the state that feeds it changes. */
-    if (!sync_modal_open() && g_state.tab == TAB_DOWNLOADS) {
-        draw_sync_icon();
-        PartialUpdate(ScreenWidth() - 96 - 8, g_state.panel_h, 96, TOP_BAR_H);
-    }
-    SetWeakTimerEx("bspin", sync_spin_tick, NULL, 1000);
-}
-
-void
-sync_set_active(int on)
-{
-    /* Arm the 1s rotation timer exactly once per active stretch; repeated
-     * calls (every download tick) must not reset it or it never fires. */
-    if (on && sync_active() && !spin_armed) {
-        spin_armed = 1;
-        SetWeakTimerEx("bspin", sync_spin_tick, NULL, 1000);
-    }
-    if (!sync_modal_open() && g_state.tab == TAB_DOWNLOADS) {
-        draw_sync_icon();
-        PartialUpdate(ScreenWidth() - 96 - 8, g_state.panel_h, 96, TOP_BAR_H);
-    }
-}
-
-void
-draw_sync_icon(void)
-{
-    int w = ScreenWidth();
-    int y0 = g_state.panel_h;
-    int ic_w = 96;
-    int ic_x = w - ic_w - 8;
-    int ic_y = y0 + (TOP_BAR_H - ic_w) / 2;
-    FillArea(ic_x, ic_y, ic_w, ic_w, BLACK);
-    int cx = ic_x + ic_w / 2;
-    int cy = ic_y + ic_w / 2;
-    int r = 28;
-    /* Two 120-degree arc arrows, rotated by g_state.sync_angle. */
-    for (int half = 0; half < 2; half++) {
-        int a0 = g_state.sync_angle + half * 180;
-        int px = 0, py = 0;
-        int ex = 0, ey = 0;
-        for (int s = 0; s <= 8; s++) {
-            double a = (a0 + s * 15) * M_PI / 180.0;
-            int    x = cx + (int)(r * cos(a));
-            int    y = cy + (int)(r * sin(a));
-            if (s > 0) {
-                DrawLine(px, py, x, y, WHITE);
-                DrawLine(px, py + 1, x, y + 1, WHITE);
-            }
-            px = x;
-            py = y;
-            if (s == 8) {
-                ex = x;
-                ey = y;
-            }
-        }
-        /* Arrowhead: two ticks trailing the tangent at the arc end. */
-        double ta = (a0 + 120) * M_PI / 180.0 + M_PI / 2.0;
-        for (int t = 0; t < 2; t++) {
-            double ha = ta + M_PI + (t ? 0.6 : -0.6);
-            DrawLine(ex, ey, ex + (int)(11 * cos(ha)), ey + (int)(11 * sin(ha)), WHITE);
-        }
-    }
-}
-
 /* Search sub-page body: the input row (magnifier + text box) at the
  * top, then the previously committed search terms below.  Tapping the
  * input opens the firmware keyboard; tapping a term re-runs that
@@ -335,6 +230,7 @@ draw_search_tab(void)
     int w = ScreenWidth();
     FillArea(0, top, w, bot - top, WHITE);
     DrawLine(0, top, w, top, BLACK);
+    LOG("[bookshelf] draw_search_tab page=%d\n", g_state.page);
 
     /* ── input row: magnifier icon + text box ── */
     int gx = 30, gy = top + SEARCH_ROW_H / 2 - 8;
@@ -418,8 +314,7 @@ draw_search_tab(void)
 }
 
 /* Number of downloads still pending (queued or in flight) — shown as a
- * badge on the Downloads tab so the user can see work is in progress
- * without switching tabs. */
+ * badge on the downloads icon so the user can see work is in progress. */
 int
 downloads_pending(void)
 {
@@ -549,6 +444,10 @@ cover_slot(const char *id, int create)
     empty->last_use = ++cover_lru;
     return empty;
 }
+
+/* 1 = the display is colour-capable (device_display_colormask() != 0);
+ * covers decode as RGB24 then.  Resolved once at EVT_INIT. */
+int g_display_color = 0;
 
 /* Mode-aware layout accessors.  Grid mode keeps the fixed 3×2 cover
  * layout; list mode is a single column of short full-width rows, so it
@@ -698,16 +597,49 @@ cover_schedule_next(void)
         }
     }
 }
-/* Blit a book's cover (decoded PNG or plain-outline fallback) into the
- * given rect.  Shared by the grid card and the list row so both modes
- * fetch/cache covers identically.  Until the bitmap arrives only the
- * border is drawn — the old hatch fill made the placeholder read as a
- * busy pattern and the device is too slow for decorative fills. */
+/* Blit an RGB24 cover directly into the libinkview canvas, bypassing
+ * the 8-bit draw pipeline (iv_area flattens 24-bit sources to grey).
+ * The QPA bridge that eink-reader uses does exactly this, and it is the
+ * only way an app gets colour on the Kaleido panel.  Nearest-neighbour
+ * scale to the tile rect; the canvas must be 24bpp, else fall back. */
+static void
+blit_cover_color24(int cx, int cy, int cw, int ch, const ibitmap *src)
+{
+    icanvas *cv = GetCanvas();
+    if (cv == NULL || cv->depth != 24 || cv->addr == 0)
+        return;
+    uint8_t *base = (uint8_t *)(uintptr_t)cv->addr;
+    lockCanvasDrawing();
+    for (int y = 0; y < ch; y++) {
+        int sy = (y * src->height) / ch;
+        if (sy >= src->height)
+            sy = src->height - 1;
+        uint8_t       *dst = base + (size_t)(cy + y) * (size_t)cv->scanline + (size_t)cx * 3u;
+        const uint8_t *row = src->data + (size_t)sy * (size_t)src->scanline;
+        for (int x = 0; x < cw; x++) {
+            int sx = (x * src->width) / cw;
+            if (sx >= src->width)
+                sx = src->width - 1;
+            /* The 24-bit bitmap from LoadPNGToFormat is already in the
+             * fb's byte order (RGB); writing it verbatim keeps the
+             * colours correct on the device and in the viewer. */
+            dst[x * 3u + 0] = row[sx * 3u + 0];
+            dst[x * 3u + 1] = row[sx * 3u + 1];
+            dst[x * 3u + 2] = row[sx * 3u + 2];
+        }
+    }
+    unlockCanvasDrawing();
+}
+
 void
 blit_cover(int cx, int cy, int cw, int ch, const Book *b)
 {
     CoverSlot *s = cover_slot(b->id, 1);
     if (s != NULL && s->cover_bmp != NULL) {
+        if (s->cover_bmp->depth == 24) {
+            blit_cover_color24(cx, cy, cw, ch, s->cover_bmp);
+            return;
+        }
         StretchBitmap(cx, cy, cw, ch, s->cover_bmp, 0);
         return;
     }
@@ -845,28 +777,8 @@ draw_thumbnail(int x, int y, int w, int h, const TileRow *tr, int vi)
     }
 }
 
-/* Rows of download entries that fit in the body once the progress bar is
- * reserved.  Drives the downloads page size so paging never lands on a
- * half-clipped row. */
-int
-downloads_rows(void)
-{
-    int top, bot, cell_w, cell_h;
-    grid_geom(&top, &bot, &cell_w, &cell_h);
-    int usable = bot - top - DL_BAR_H - 8;
-    int rows = usable / 96;
-    return rows < 1 ? 1 : rows;
-}
-
-int
-downloads_pagesize(void)
-{
-    /* The downloads list is a single column, so one page is exactly the
-     * number of rows that fit below the progress bar. */
-    return downloads_rows();
-}
-
 /* History-term rows that fit below the input row on the Search page. */
+
 int
 history_pagesize(void)
 {
@@ -876,16 +788,12 @@ history_pagesize(void)
     return rows < 1 ? 1 : rows;
 }
 /* Page count for the active tab: the library pages the cover grid, the
- * downloads tab pages the download list, the search page pages the
- * history terms.  Always >= 1. */
+ * search page pages the history terms.  Always >= 1. */
 int
 current_pages(void)
 {
     int n, ps;
-    if (g_state.tab == TAB_DOWNLOADS) {
-        n = g_download_count;
-        ps = downloads_pagesize();
-    } else if (g_state.tab == TAB_SEARCH) {
+    if (g_state.tab == TAB_SEARCH) {
         n = store_search_count();
         ps = history_pagesize();
     } else {
@@ -898,11 +806,11 @@ current_pages(void)
     return pages < 1 ? 1 : pages;
 }
 
-/* Single batch progress bar pinned to the top of the Downloads tab: one
- * bar for the whole open batch, filled by done/total, with a striped
- * overlay on the unfilled portion while anything is still in flight. */
+/* Tally the open download queue (falling back to the whole-batch tally
+ * when a download-all batch is active, since the queue only holds the
+ * current slice).  Shared by the popup bar and its status line. */
 void
-draw_dl_progress(int x, int y, int w)
+dl_progress_metrics(int *total_out, int *done_out, int *failed_out, int *active_out)
 {
     int total = 0, done = 0, failed = 0, active = 0;
     for (int i = 0; i < g_download_count; i++) {
@@ -914,9 +822,6 @@ draw_dl_progress(int x, int y, int w)
         if (g_downloads[i].state == 0 || g_downloads[i].state == 1)
             active++;
     }
-    /* In batch mode the queue only holds the current slice; report the
-     * whole-batch tally instead (failures included, so the bar still
-     * reaches full width when some books fail). */
     if (g_dl_batch_total > 0) {
         total = g_dl_batch_total;
         done = g_dl_batch_done;
@@ -934,6 +839,25 @@ draw_dl_progress(int x, int y, int w)
         failed,
         total,
         active);
+    if (total_out)
+        *total_out = total;
+    if (done_out)
+        *done_out = done;
+    if (failed_out)
+        *failed_out = failed;
+    if (active_out)
+        *active_out = active;
+}
+
+/* Single batch progress bar for the download popup: one bar for the
+ * whole open batch, filled by done/total, with a striped overlay on the
+ * unfilled portion while anything is still in flight.  The bar spans
+ * [x, x+w); the label sits above it. */
+void
+draw_dl_progress(int x, int y, int w)
+{
+    int total = 0, done = 0, failed = 0, active = 0;
+    dl_progress_metrics(&total, &done, &failed, &active);
     if (total <= 0)
         return;
 
@@ -954,113 +878,100 @@ draw_dl_progress(int x, int y, int w)
     int bar_h = DL_BAR_H - label_h - 6;
     if (bar_h < 8)
         bar_h = 8;
-    int bar_w = w - 2 * x;
-    if (bar_w < 16)
-        bar_w = 16;
-    DrawRect(x, bar_y, bar_w, bar_h, BLACK);
+    if (w < 16)
+        w = 16;
+    DrawRect(x, bar_y, w, bar_h, BLACK);
     int settled = done + failed;
-    int fill = (settled * bar_w) / total;
+    int fill = (settled * w) / total;
     if (fill > 2)
         FillArea(x + 1, bar_y + 1, fill - 2, bar_h - 2, BLACK);
     /* Striped "in progress" overlay across the unfinished portion. */
     if (active > 0) {
-        for (int sx = x + 1 + fill; sx < x + bar_w - 1; sx += 6)
+        for (int sx = x + 1 + fill; sx < x + w - 1; sx += 6)
             DrawLine(sx, bar_y + 1, sx + 2, bar_y + bar_h - 2, DGRAY);
     }
 }
 
+/* Download-progress popup: a centred modal sheet over a dimmed shelf.
+ * Title, the current item, the batch progress bar, and a status line.
+ * Shown whenever downloads run (book press, context-menu Download,
+ * Download all); a tap or Back dismisses it and the work continues in
+ * the background (the top-bar badge tracks it).  When the popup was
+ * opened by a single-book press (dl_popup_auto_open), download_tick()
+ * launches the reader as soon as the queue drains. */
 void
-draw_downloads_tab(void)
+draw_dl_popup(void)
 {
-    int top, bot, cell_w, cell_h;
-    (void)cell_w;
-    (void)cell_h;
-    grid_geom(&top, &bot, &cell_w, &cell_h);
     int w = ScreenWidth();
-    FillArea(0, top, w, bot - top, WHITE);
-    DrawLine(0, top, w, top, BLACK);
+    int h = ScreenHeight();
+    /* Dim mask below the top bar. */
+    for (int yy = g_state.panel_h; yy < h; yy += 2)
+        DrawLine(0, yy, w, yy, LGRAY);
 
-    /* Page the list — the pager below is wired to current_pages(). */
-    int ps = downloads_pagesize();
-    if (ps < 1)
-        ps = 1;
-    int pages = (g_download_count + ps - 1) / ps;
-    if (g_state.page >= pages)
-        g_state.page = pages - 1;
-    if (g_state.page < 0)
-        g_state.page = 0;
-    LOG("[bookshelf] draw_downloads page=%d pages=%d count=%d\n",
-        g_state.page,
-        pages,
+    int pw = w * 3 / 4;
+    int ph = 320;
+    int px = (w - pw) / 2;
+    LOG("[bookshelf] draw_dl_popup open auto_open=%d count=%d\n",
+        g_state.dl_popup_auto_open,
         g_download_count);
+    int py = (h - ph) / 2;
+    FillArea(px, py, pw, ph, WHITE);
+    DrawRect(px, py, pw, ph, BLACK);
+    DrawRect(px + 1, py + 1, pw - 2, ph - 2, BLACK);
 
-    if (g_download_count == 0) {
-        ifont *f = OpenFont(DEFAULTFONT, 30, 0);
-        if (f != NULL) {
-            SetFont(f, DGRAY);
-            const char *msg = i18n("dl.empty");
-            DrawString((w - StringWidth(msg)) / 2, top + 60, msg);
-            CloseFont(f);
+    ifont *tf = OpenFont(DEFAULTFONTB, 30, 0);
+    if (tf != NULL) {
+        SetFont(tf, BLACK);
+        DrawString(px + CTX_PAD, py + 18, i18n("dl.title"));
+        CloseFont(tf);
+    }
+    DrawLine(px + CTX_PAD, py + CTX_TITLE_H - 1, px + pw - CTX_PAD, py + CTX_TITLE_H - 1, LGRAY);
+
+    /* Current item: the first queued/in-flight entry, else the last one. */
+    const DownloadItem *cur = NULL;
+    for (int i = 0; i < g_download_count; i++) {
+        if (g_downloads[i].state == 0 || g_downloads[i].state == 1) {
+            cur = &g_downloads[i];
+            break;
         }
-        return;
+    }
+    if (cur == NULL && g_download_count > 0)
+        cur = &g_downloads[g_download_count - 1];
+    if (cur != NULL) {
+        ifont *cf = OpenFont(DEFAULTFONTB, 26, 0);
+        if (cf != NULL) {
+            SetFont(cf, BLACK);
+            char trunc[MAX_TITLE_LEN];
+            snprintf(trunc, sizeof trunc, "%s", cur->title);
+            while (StringWidth(trunc) > pw - 2 * CTX_PAD && strlen(trunc) > 4)
+                trunc[strlen(trunc) - 1] = '\0';
+            DrawString(px + CTX_PAD, py + CTX_TITLE_H + 22, trunc);
+            CloseFont(cf);
+        }
     }
 
-    /* Progress bar pinned to the top of the body; rows start below it. */
-    draw_dl_progress(20, top + 4, w);
+    draw_dl_progress(px + CTX_PAD, py + CTX_TITLE_H + 64, pw - 2 * CTX_PAD);
 
-    int first = g_state.page * ps;
-    int last = first + ps;
-    if (last > g_download_count)
-        last = g_download_count;
-
-    int row_h = 96;
-    int y = top + DL_BAR_H + 8;
-    for (int i = first; i < last && y + row_h <= bot; i++) {
-        const DownloadItem *d = &g_downloads[i];
-        ifont              *tf = OpenFont(DEFAULTFONTB, 28, 0);
-        if (tf != NULL) {
-            SetFont(tf, BLACK);
-            char trunc[MAX_TITLE_LEN];
-            snprintf(trunc, sizeof trunc, "%s", d->title);
-            int maxw = w - 260;
-            while (StringWidth(trunc) > maxw && strlen(trunc) > 4)
-                trunc[strlen(trunc) - 1] = '\0';
-            DrawString(20, y + (row_h - 28) / 2 - 2, trunc);
-            CloseFont(tf);
-        }
-        const char *st;
-        int         scol;
-        switch (d->state) {
-        case 1:
-            st = i18n("dl.in_progress");
-            scol = BLACK;
-            break;
-        case 2:
-            st = i18n("dl.done");
-            scol = DGRAY;
-            break;
-        case 3:
-            st = i18n("dl.failed");
-            scol = BLACK;
-            break;
-        default:
-            st = i18n("dl.queued");
-            scol = DGRAY;
-            break;
-        }
-        ifont *sf = OpenFont(DEFAULTFONT, 24, 0);
-        if (sf != NULL) {
-            SetFont(sf, scol);
-            DrawString(w - 20 - StringWidth(st), y + (row_h - 24) / 2 - 2, st);
-            CloseFont(sf);
-        }
-        DrawLine(20, y + row_h - 1, w - 20, y + row_h - 1, LGRAY);
-        y += row_h;
+    int total = 0, done = 0, failed = 0, active = 0;
+    dl_progress_metrics(&total, &done, &failed, &active);
+    ifont *sf = OpenFont(DEFAULTFONT, 22, 0);
+    if (sf != NULL) {
+        SetFont(sf, DGRAY);
+        const char *hint;
+        if (active > 0)
+            hint = i18n("dl.tap_dismiss");
+        else if (failed > 0 && done + failed >= total)
+            hint = i18n("dl.failed");
+        else
+            hint = i18n("dl.tap_close");
+        DrawString(px + CTX_PAD, py + CTX_TITLE_H + 64 + DL_BAR_H + 12, hint);
+        CloseFont(sf);
     }
 }
 
-/* Repaint the whole shelf (top bar, tabs, body, pager) in the current
- * tab.  Centralises the sequence every state change needs. */
+/* Repaint the whole shelf (top bar, body, pager) in the current tab,
+ * then the download popup on top when one is open.  Centralises the
+ * sequence every state change needs. */
 void
 redraw_shelf(void)
 {
@@ -1071,13 +982,13 @@ redraw_shelf(void)
     }
     FillArea(0, g_state.panel_h, ScreenWidth(), ScreenHeight() - g_state.panel_h, WHITE);
     draw_top_bar();
-    if (g_state.tab == TAB_DOWNLOADS)
-        draw_downloads_tab();
-    else if (g_state.tab == TAB_SEARCH)
+    if (g_state.tab == TAB_SEARCH)
         draw_search_tab();
     else
         draw_grid();
     draw_pager();
+    if (g_state.dl_popup)
+        draw_dl_popup();
     FullUpdate();
 }
 
@@ -1196,9 +1107,9 @@ cover_tick(void *ctx)
             if (f != NULL) {
                 fwrite(data, 1, (size_t)rsize, f);
                 fclose(f);
-                LOG("[bookshelf] cover_tick LoadPNGStretch begin\n");
-                bmp = LoadPNGStretch(COVER_TMP, 240, 360, 0, 0);
-                LOG("[bookshelf] cover_tick LoadPNGStretch done bmp=%p\n", (void *)bmp);
+                LOG("[bookshelf] cover_tick load_cover_scaled begin\n");
+                bmp = load_cover_scaled(COVER_TMP);
+                LOG("[bookshelf] cover_tick load_cover_scaled done bmp=%p\n", (void *)bmp);
             }
         }
         if (data != NULL) {
@@ -1223,7 +1134,8 @@ cover_tick(void *ctx)
      * on-screen blit is skipped while a modal owns the framebuffer, so a
      * single-tile PartialUpdate can't punch a hole through the overlay's
      * dim mask (the full redraw on close then shows the now-cached cover). */
-    int modal = g_state.ctx_open || g_state.menu_open || g_state.more_open || g_state.settings_open;
+    int modal = g_state.ctx_open || g_state.menu_open || g_state.more_open ||
+                g_state.settings_open || g_state.dl_popup;
     LOG("[bookshelf] cover_tick blit begin modal=%d\n", modal);
 
     int tx, ty, tw, th;
