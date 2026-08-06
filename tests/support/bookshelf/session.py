@@ -170,10 +170,10 @@ class BookshelfSession:
         """Long-press book tile at grid *index* to open its context menu."""
         self.long_press_at(*self._g.book_tile_center(index), hold=hold)
 
-    def tap_downloads_icon(self) -> None:
-        """Open the download-progress popup via the top-bar downloads
-        icon."""
-        self.tap_at(*self._g.downloads_icon_center())
+    def tap_sync_button(self) -> None:
+        """Tap the top-bar sync button (left of the More button); runs a
+        library sync."""
+        self.tap_at(*self._g.sync_button_center())
 
     def tap_context_item(self, item: int, n_items: int | None = None) -> None:
         """Tap context-menu item *item* (0=Open, 1=Download, 2=Delete for
