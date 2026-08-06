@@ -177,13 +177,20 @@ dl_thread_main(void *arg)
                 job->path,
                 rsize);
         } else {
-            LOG("[bookshelf] download_book_file fopen FAILED path=%s\n", job->path);
+            LOG("[bookshelf] download_book_file fopen FAILED id=%s path=%s errno=%d\n",
+                job->id,
+                job->path,
+                errno);
         }
         free(data);
     } else {
         if (data != NULL)
             free(data);
-        LOG("[bookshelf] download_book_file FAILED id=%s\n", job->id);
+        LOG("[bookshelf] download_book_file FAILED id=%s url=%s rsize=%d errno=%d\n",
+            job->id,
+            job->url,
+            rsize,
+            errno);
     }
     __atomic_store_n(&g_dl_thread_ok, ok ? 1 : -1, __ATOMIC_RELEASE);
     __atomic_store_n(&g_dl_thread_running, 0, __ATOMIC_RELEASE);
@@ -266,13 +273,39 @@ book_press_action(Book *b)
     }
     launch_reader(b);
 }
+/* True when the current batch already attempted *id* and it failed.
+ * Failed books keep their downloaded flag at 0, so without this guard
+ * the next slice would re-enqueue them and the batch would loop over
+ * the failing books forever. */
+static int
+batch_failed_id(const char *id)
+{
+    for (int i = 0; i < g_dl_batch_failed_count; i++)
+        if (strcmp(g_dl_batch_failed_ids[i], id) == 0)
+            return 1;
+    return 0;
+}
+
+static void
+batch_note_failed(const char *id)
+{
+    if (g_dl_batch_failed_count >=
+        (int)(sizeof g_dl_batch_failed_ids / sizeof g_dl_batch_failed_ids[0]))
+        return; /* set full: the drain treats the slice as exhausted */
+    snprintf(g_dl_batch_failed_ids[g_dl_batch_failed_count++],
+             sizeof g_dl_batch_failed_ids[0],
+             "%s",
+             id);
+}
+
 /* Enqueue the next bounded slice of undownloaded ids for the
  * download-all batch, skipping ids that already own a queue entry
- * (in flight, done, or failed).  The query is offset-free: ids whose
- * file landed earlier shrink the "downloaded=0" result set, so any
- * OFFSET cursor would skip books on later slices.  *got reports how
- * many ids the store slice held so the caller can tell "drained" from
- * "full slice, more to come".  Returns the number actually enqueued. */
+ * (in flight, done, or failed) or that the batch already failed.  The
+ * query is offset-free: ids whose file landed earlier shrink the
+ * "downloaded=0" result set, so any OFFSET cursor would skip books on
+ * later slices.  *got reports how many ids the store slice held so the
+ * caller can tell "drained" from "full slice, more to come".  Returns
+ * the number actually enqueued. */
 static int
 batch_enqueue_slice(int *got)
 {
@@ -281,6 +314,8 @@ batch_enqueue_slice(int *got)
     int enq = 0;
     for (int i = 0; i < *got; i++) {
         if (find_download(ids[i]) != NULL)
+            continue;
+        if (batch_failed_id(ids[i]))
             continue;
         Book b;
         if (!store_get_book(ids[i], &b))
@@ -306,6 +341,7 @@ download_all_start(void)
     g_dl_batch_active = 1;
     g_dl_batch_total = store_count_undownloaded();
     g_dl_batch_done = 0;
+    g_dl_batch_failed_count = 0;
     int got = 0;
     batch_enqueue_slice(&got);
     if (!g_download_armed) {
@@ -350,11 +386,14 @@ download_tick(void *ctx)
             if (g_dl_batch_active) {
                 /* Successes and failures both settle a batch slot; the
                  * bar counts failures separately so it reaches full
-                 * width even if some books fail. */
+                 * width even if some books fail.  A failure is recorded
+                 * so the batch never re-enqueues the book. */
                 if (ok == 1)
                     g_dl_batch_done++;
-                else
+                else {
                     g_dl_batch_failed++;
+                    batch_note_failed(d->id);
+                }
             }
         }
         g_dl_thread_id[0] = '\0';
@@ -376,12 +415,14 @@ download_tick(void *ctx)
         if (g_dl_batch_active) {
             /* Batch mode: enqueue the next slice of undownloaded ids. */
             int got = 0, enq = batch_enqueue_slice(&got);
-            if (enq > 0 || got == 64) {
+            int settled = g_dl_batch_done + g_dl_batch_failed;
+            if (enq > 0 || (got == 64 && settled < g_dl_batch_total)) {
                 if (enq == 0) {
                     /* Full slice, nothing enqueued: every id already owns
-                     * a queue entry.  Prune one finished entry so the
-                     * queue makes room and the next slice can enqueue,
-                     * instead of re-arming forever on the same slice. */
+                     * a queue entry or already failed.  Prune one
+                     * finished entry so the queue makes room and the
+                     * next slice can enqueue, instead of re-arming
+                     * forever on the same slice. */
                     prune_finished_download();
                 }
                 /* Keep draining until every batch book settles. */
@@ -389,11 +430,12 @@ download_tick(void *ctx)
                 g_download_armed = 1;
                 return;
             }
-            /* Keep the final tally on screen: zeroing the counters
-             * here made the bar fall back to queue-derived counts,
-             * and the pruned queue only holds the last slice (<=64).
-             * download_all_start() resets the counters for the next
-             * batch; a manual enqueue_download() clears them. */
+            /* Every batch book has settled (done + failed == total):
+             * end the batch.  Keep the final tally on screen — zeroing
+             * the counters here made the bar fall back to queue-derived
+             * counts, and the pruned queue only holds the last slice
+             * (<=64).  download_all_start() resets the counters for the
+             * next batch; a manual enqueue_download() clears them. */
             g_dl_batch_active = 0;
             LOG("[bookshelf] download-all batch complete\n");
         }

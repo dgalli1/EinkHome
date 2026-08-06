@@ -96,6 +96,7 @@ const I18n g_i18n[] = {
      "T\u00e9l\u00e9chargement %d / %d",
      "Download %d / %d"},
     {"dl.complete", "%d downloaded", "%d geladen", "%d t\u00e9l\u00e9charg\u00e9s", "%d scaricati"},
+    {"dl.failed_count", "%d failed", "%d fehlgeschlagen", "%d \u00e9chec(s)", "%d falliti"},
     {"dl.title", "Download", "Download", "T\u00e9l\u00e9chargement", "Download"},
     {"dl.tap_close",
      "Tap to close",

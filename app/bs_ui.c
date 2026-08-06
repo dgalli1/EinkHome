@@ -908,6 +908,8 @@ draw_dl_progress(int x, int y, int w)
     char   label[48];
     if (active > 0)
         snprintf(label, sizeof label, i18n("dl.progress"), done, total);
+    else if (failed > 0 && done == 0)
+        snprintf(label, sizeof label, i18n("dl.failed_count"), failed);
     else
         snprintf(label, sizeof label, i18n("dl.complete"), done);
     if (f != NULL) {

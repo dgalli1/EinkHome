@@ -364,6 +364,8 @@ extern int               g_dl_batch_active;       /* download-all batch mode */
 extern int               g_dl_batch_total;
 extern int               g_dl_batch_done;
 extern int               g_dl_batch_failed;
+extern char              g_dl_batch_failed_ids[MAX_DOWNLOADS * 4][MAX_ID_LEN];
+extern int               g_dl_batch_failed_count;
 void                     download_all_start(void);
 extern int               g_cover_armed;
 extern DownloadItem      g_downloads[MAX_DOWNLOADS];

@@ -56,11 +56,16 @@ int          g_download_count = 0;
 int          g_download_armed = 0;
 
 /* Download-all batch bookkeeping: total = undownloaded count at queue
- * time, done/failed = settled downloads. */
-int g_dl_batch_active = 0;
-int g_dl_batch_total = 0;
-int g_dl_batch_done = 0;
-int g_dl_batch_failed = 0;
+ * time, done/failed = settled downloads.  failed_ids records every book
+ * the batch already attempted and failed, so the next slice never
+ * re-enqueues them (their downloaded flag stays 0, so without this the
+ * batch would loop over the failing books forever). */
+int  g_dl_batch_active = 0;
+int  g_dl_batch_total = 0;
+int  g_dl_batch_done = 0;
+int  g_dl_batch_failed = 0;
+char g_dl_batch_failed_ids[MAX_DOWNLOADS * 4][MAX_ID_LEN];
+int  g_dl_batch_failed_count = 0;
 
 /* Directory downloads are written to.  Resolved once at startup by
  * resolve_downloads_dir(): LOCAL_DOWNLOADS when the guest can write it

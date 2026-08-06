@@ -1623,6 +1623,40 @@ def _restore_cfg(saved_cfg: str | None) -> None:
         _OFFLINE_CFG.chmod(0o666)  # guest (container UID) rewrites it later
 
 
+
+def test_download_all_failures_finish_not_loop(fresh_bookshelf):
+    """With the API unreachable every batch item fails, but the batch
+    must settle each book exactly once and complete — it must not loop
+    re-enqueuing the failed books forever.  Regression: failed books
+    keep their downloaded flag at 0, so the next slice used to return
+    them again and the drain never ended."""
+    bs = fresh_bookshelf
+    _clear_downloads()
+    saved = _set_dead_cfg()
+    try:
+        _restart_bookshelf(bs.emulator)
+        time.sleep(2.0)
+        bs.wait_for_stable()
+        before = bs.current_log()
+        bs.tap_download_all()
+        _wait_log_slice(bs, before, "download-all queued=", timeout=20.0)
+        m = re.search(r"download-all queued=(\d+)", bs.current_log()[len(before):])
+        assert m, "download-all never logged its queued total"
+        total = int(m.group(1))
+        assert total > 0
+        # Every item fails fast (connection refused); the batch must
+        # settle all of them and complete without looping.
+        _wait_log_slice(bs, before, "download-all batch complete", timeout=30.0)
+        failed = bs.current_log()[len(before):].count("download_book_file FAILED")
+        assert failed == total, (
+            f"batch attempted {failed} downloads, expected exactly {total} "
+            "(looping over failures)"
+        )
+    finally:
+        _restore_cfg(saved)
+        _clear_downloads()
+
+
 def test_offline_boot_renders_cached_library(bookshelf_env):
     """Full offline e2e: with the API unreachable, bookshelf boots from the
     on-disk library store + cover cache and stays fully navigable — series
