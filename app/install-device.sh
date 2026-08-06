@@ -17,10 +17,13 @@
 #   1. Builds the ARM binary if `build/bookshelf.app` is missing.
 #   2. Writes a fresh `build/bookshelf.cfg` with the resolved api_url
 #      and api_token=pbemu-dev-token (matches api/config/server.json).
-#   3. SCPs both files into `/mnt/ext1/applications/` on the device.
-#   4. Renames the binary on-device to `books.app` so the firmware's
-#      launcher dispatches to OUR binary instead of its built-in
-#      bookshelf.app (which would shadow it).
+#   3. SCPs both into `/mnt/ext1/system/bin/` on the device, named
+#      `bookshelf.app` / `bookshelf.cfg`.
+#   4. The binary IS the home task: monitor.app checks
+#      /mnt/ext1/system/bin/bookshelf.app before the firmware's
+#      /ebrmain/bin/bookshelf.app, so Home opens OUR app.  Installed
+#      directly (no wrapper script) so the reader's book-open handshake
+#      keeps working.
 #   5. chmod +x and restarts any already-running copy.
 #
 # This script intentionally does NOT auto-rebuild the binary — `run.sh`
@@ -144,43 +147,36 @@ api_url=${API_URL}
 api_token=pbemu-dev-token
 EOF
 
-echo "==> staging to ${DEVICE}:/mnt/ext1/applications/"
+echo "==> staging to ${DEVICE}:/mnt/ext1/system/bin/"
 echo "    api_url = ${API_URL}"
 
-# Push both files.  The destination name is `books.app`, NOT
-# `bookshelf.app` — PocketBook's launcher dispatches by basename, so
-# keeping our name as `bookshelf.app` would re-launch the firmware's
-# original and silently exit.
-scp ${SSH_COMMON} "${SRC_APP}" "root@${DEVICE}:/mnt/ext1/applications/books.app"
-scp ${SSH_COMMON} "${SRC_CFG}" "root@${DEVICE}:/mnt/ext1/applications/bookshelf.cfg"
+# Push the binary and config.  The destination IS
+# /mnt/ext1/system/bin/bookshelf.app: monitor.app resolves the home app
+# by checking that path BEFORE the firmware's /ebrmain/bin/bookshelf.app
+# (verified in the launcher disassembly at 0x33b48–0x33b74), so the
+# binary installed there becomes the HOME task, registered under the
+# app name "bookshelf.app" — pressing the Home button anywhere brings
+# OUR bookshelf to the foreground (taskmgr's main_menu action), not the
+# stock UI.  The binary is installed directly — no script wrapper: a
+# wrapper's exec would register the home task as the wrapper, which
+# breaks the reader's book-open handshake (the reader shows an
+# hourglass and closes).  If the binary is ever missing, the launcher
+# falls back to the stock /ebrmain/bin/bookshelf.app on its own.
+scp ${SSH_COMMON} "${SRC_APP}" "root@${DEVICE}:/mnt/ext1/system/bin/bookshelf.app"
+scp ${SSH_COMMON} "${SRC_CFG}" "root@${DEVICE}:/mnt/ext1/system/bin/bookshelf.cfg"
 
-# Deploy the startup wrapper.  monitor.app resolves the home app by
-# checking /mnt/ext1/system/bin/bookshelf.app BEFORE the firmware's
-# /ebrmain/bin/bookshelf.app (verified in the launcher disassembly).
-# The wrapper launches our books.app in the background, then execs the
-# real firmware bookshelf so the stock UI keeps working.  This is what
-# makes the custom bookshelf appear on boot instead of requiring a
-# manual launch from the task list.
-WRAPPER="${HERE}/bookshelf-wrapper.sh"
-# if [ -f "${WRAPPER}" ]; then
-# 	echo "==> deploying startup wrapper to /mnt/ext1/system/bin/bookshelf.app"
-# 	ssh ${SSH_COMMON} "root@${DEVICE}" 'mkdir -p /mnt/ext1/system/bin'
-# 	scp ${SSH_COMMON} "${WRAPPER}" "root@${DEVICE}:/mnt/ext1/system/bin/bookshelf.app"
-# fi
-
-# Make the binaries executable, kill any stale copy, restart cleanly.
+# Make the binary executable, kill any stale copy, restart cleanly.
 # The `killall` is best-effort: it's OK if no process matches.
 ssh ${SSH_COMMON} "root@${DEVICE}" sh -c '
 	set -e
-	chmod +x /mnt/ext1/applications/books.app
-	if [ -f /mnt/ext1/system/bin/bookshelf.app ]; then chmod +x /mnt/ext1/system/bin/bookshelf.app; fi
+	chmod +x /mnt/ext1/system/bin/bookshelf.app
 	# Clear any stale log so the next run is easy to read.
 	: >/mnt/ext1/applications/bookshelf.log
-	killall books.app 2>/dev/null || true
+	killall bookshelf.app 2>/dev/null || true
 	sleep 1
 '
 
 echo "==> installed.  verify with:"
 echo "    ssh root@${DEVICE} 'tail -f /mnt/ext1/applications/bookshelf.log'"
-echo "    reboot the device; the custom bookshelf launches on startup"
-echo "    alongside the stock library (wrapper execs the firmware bookshelf)."
+echo "    reboot the device; the custom bookshelf IS the home screen"
+echo "    (Home button opens it; the binary is the home task directly)."

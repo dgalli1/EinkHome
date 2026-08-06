@@ -225,7 +225,7 @@ otherwise (e.g. the emulator's non-root guest) they fall back to
 launch.
 
 For a real PocketBook, use the bundled `install-device.sh` script to
-push the binary + config and install the startup wrapper:
+push the binary + config and install it as the home screen:
 
 ```bash
 bookshelf/install-device.sh <device-ip>            # auto-detects host LAN ip
@@ -239,39 +239,27 @@ The script:
   once beforehand),
 * writes a fresh `build/bookshelf.cfg` with `api_url` set to the
   host's primary LAN IPv4 (or the override you pass),
-* scps the binary + config into `/mnt/ext1/applications/`,
-* renames the binary on-device to **`books.app`**, not `bookshelf.app`,
-  because PocketBook's launcher dispatches by basename — leaving the
-  original name there would launch the firmware's built-in
-  bookshelf.app and silently exit,
-* deploys **`bookshelf-wrapper.sh`** to
-  `/mnt/ext1/system/bin/bookshelf.app` — the startup hook that makes
-  the custom bookshelf launch on boot (see below),
-* clears the on-device log and kills any stale `books.app` so the
+* scps the binary + config into `/mnt/ext1/system/bin/` as
+  **`bookshelf.app`** / `bookshelf.cfg` — the home-task override path
+  (see below),
+* clears the on-device log and kills any stale `bookshelf.app` so the
   next launch starts clean.
 
-### Startup wrapper (auto-launch on boot)
+### Home-task override (auto-launch on boot)
 
 The firmware's launcher, `monitor.app`, resolves the home/startup app
 by checking `/mnt/ext1/system/bin/bookshelf.app` **before** the
 read-only `/ebrmain/bin/bookshelf.app` (verified in the launcher's
 disassembly at `0x33b48`–`0x33b74`). `/mnt/ext1` is the writable user
-partition, so dropping a file there overrides the boot path with no
-root, no flash, and no signing.
-
-`bookshelf-wrapper.sh` is installed at that override path. On every
-boot it:
-
-1. launches the custom bookshelf (`/mnt/ext1/applications/books.app`)
-   in the background, fire-and-forget, guarded by a PID file so it
-   never spawns duplicates;
-2. `exec`s the **real** firmware bookshelf with the original argv, so
-   the stock library UI keeps working exactly as before.
-
-The result: the custom bookshelf runs as a separate task alongside the
-stock home screen. If it crashes, nothing breaks — the stock bookshelf
-is the one `monitor.app` is actually tracking, so the crash-loop guard
-(`bookshelf.self.check`) never trips on our app.
+partition, so dropping our binary there makes **our bookshelf the home
+task**, registered under the app name `bookshelf.app`: pressing the
+Home button anywhere brings OUR bookshelf to the foreground (taskmgr's
+`main_menu` action), not the stock UI.  The binary is installed
+directly — no wrapper script — because a wrapper's `exec` would
+register the home task as the wrapper, which breaks the reader's
+book-open handshake (the built-in reader shows an hourglass and
+closes).  If the binary is ever missing, the launcher falls back to the
+stock `/ebrmain/bin/bookshelf.app` on its own.
 
 To remove everything and restore the stock boot path:
 
@@ -283,14 +271,14 @@ bookshelf/uninstall-device.sh <device-ip>
 Or do the install by hand:
 
 ```bash
-scp build/bookshelf.app        root@<device-ip>:/mnt/ext1/applications/books.app
-scp build/bookshelf.cfg        root@<device-ip>:/mnt/ext1/applications/
-scp bookshelf/bookshelf-wrapper.sh root@<device-ip>:/mnt/ext1/system/bin/bookshelf.app
-ssh root@<device-ip> 'chmod +x /mnt/ext1/applications/books.app /mnt/ext1/system/bin/bookshelf.app'
+scp build/bookshelf.app        root@<device-ip>:/mnt/ext1/system/bin/bookshelf.app
+scp build/bookshelf.cfg        root@<device-ip>:/mnt/ext1/system/bin/bookshelf.cfg
+ssh root@<device-ip> 'chmod +x /mnt/ext1/system/bin/bookshelf.app'
 ```
 
 Edit the config to point at your API server before copying if you're
 not using `install-device.sh`.
+
 
 The next `monitor.app` respawn will log the resolved URL on stderr:
 

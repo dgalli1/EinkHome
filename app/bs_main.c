@@ -324,6 +324,15 @@ on_event(int type, int par1, int par2)
             }
             return 1;
         }
+        /* Top system strip (the status bar with clock, battery, etc.).
+         * Tapping anywhere on it opens the firmware control panel — the
+         * same gesture as the real device. */
+        if (y < g_state.panel_h) {
+            LOG("[bookshelf] system bar tapped -> control panel\n");
+            OpenControlPanel(NULL);
+            return 1;
+        }
+
         /* Top-bar buttons.  hit_top_bar returns:
          *   1 = home  (left; back on the Search view or a drilled
          *              series, no-op on the library shelf)
