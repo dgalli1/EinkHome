@@ -171,19 +171,17 @@ class BookshelfSession:
         self.long_press_at(*self._g.book_tile_center(index), hold=hold)
 
     def tap_downloads_icon(self) -> None:
-        """Open the Downloads view via the top-bar downloads icon (Library
-        tab only; on the Downloads tab that slot is empty — the back arrow
-        returns to the Library)."""
+        """Open the download-progress popup via the top-bar downloads
+        icon."""
         self.tap_at(*self._g.downloads_icon_center())
 
-    def tap_sync_button(self) -> None:
-        """Tap the sync button shown in the top-bar right corner while the
-        Downloads tab is open (runs a library sync)."""
-        self.tap_at(*self._g.sync_button_center())
+    def tap_context_item(self, item: int, n_items: int | None = None) -> None:
+        """Tap context-menu item *item* (0=Open, 1=Download, 2=Delete for
+        a book; 0=Download all, 1=Delete series for a series card)."""
+        if n_items is None:
+            n_items = 3  # book menus default to three rows
+        self.tap_at(*self._g.context_item_center(item, n_items=n_items))
 
-    def tap_context_item(self, item: int) -> None:
-        """Tap context-menu item *item* (0=download, 1=delete)."""
-        self.tap_at(*self._g.context_item_center(item))
 
     def tap_download_all(self) -> None:
         """Open the More overlay and tap Download all."""

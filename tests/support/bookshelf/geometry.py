@@ -122,21 +122,18 @@ class BookshelfGeometry:
 
     def menu_button_center(self) -> tuple[int, int]:
         """Centre of the 96×96 More (hamburger) button, right side of top
-        bar (Library tab only; the Downloads tab shows the sync button
-        there instead)."""
+        bar."""
         return (self.screen_w - 8 - 48, self.panel_h + TOP_BAR_H // 2)
 
     # ── search (top-bar icon + Search sub-page) ───────────────────────
 
     def search_icon_center(self) -> tuple[int, int]:
-        """Centre of the 96×96 magnifying-glass icon in the top bar.
-        Library tab: left of the downloads icon; Downloads tab: left of
-        the sync button."""
+        """Centre of the 96×96 magnifying-glass icon in the top bar,
+        left of the downloads icon."""
         if self.screen_w == 0:
             return (0, 0)
         x = self.screen_w - 8 - 96 - 2 * 96 + 48
         return (x, self.panel_h + TOP_BAR_H // 2)
-
     def search_input_center(self) -> tuple[int, int]:
         """Centre of the search text box on the Search sub-page input
         row (the row sits directly below the top bar)."""
@@ -248,17 +245,11 @@ class BookshelfGeometry:
     # ── top-bar right-corner buttons ──────────────────────────────────
 
     def downloads_icon_center(self) -> tuple[int, int]:
-        """Centre of the 96×96 downloads icon (Library tab only), left of
-        the More button."""
+        """Centre of the 96×96 downloads icon, left of the More button.
+        Tapping it opens the download-progress popup."""
         return (self.screen_w - 152, self.panel_h + TOP_BAR_H // 2)
 
-    def sync_button_center(self) -> tuple[int, int]:
-        """Centre of the 96×96 sync button shown on the Downloads tab in
-        the top-bar right corner (the hamburger's Library-tab slot)."""
-        return (self.screen_w - 8 - 48, self.panel_h + TOP_BAR_H // 2)
-
     # ── context (long-press) menu ─────────────────────────────────────
-    # Centred modal sheet: width = 3/4 screen, height = title + N items.
 
     def context_item_center(self, item: int, n_items: int = 2) -> tuple[int, int]:
         """Centre of context-menu item *item* (0-based) in a sheet of
