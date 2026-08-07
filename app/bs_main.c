@@ -2,7 +2,43 @@
 
 #include "bookshelf.h"
 
+/* Exported by the firmware's libinkview but absent from this SDK
+ * vintage's headers (and its bundled lib).  Weak so the link succeeds
+ * either way; the guard skips the call if the runtime library lacks it. */
+extern void IvSetAppCapability(int caps) __attribute__((weak));
+extern void SetDefaultOrientation(int n) __attribute__((weak));
+
 /* ── event loop ──────────────────────────────────────────────────────── */
+
+/* The stock bookshelf asks monitor.app to start the resident firmware
+ * services (reader_controller, taskmgr, control_panel_mgr, explorer,
+ * update_desktop_data, ...) by sending MSG_START_SERVICES (0x600) over
+ * iv_ipc_cmd() during its init; monitor's main loop then launches each
+ * service itself and binds the global-request target (the control-panel
+ * Task Manager button's destination, [state+0x439c] in monitor).  A fresh
+ * boot whose home task never sends it leaves only scanner + bookshelf
+ * running — taskmgr never opens and OpenBook's reader_controller poll
+ * times out.  We replicate the stock call verbatim; launching the
+ * services ourselves via NewTaskEx() does NOT work (monitor never binds
+ * the request target for tasks it didn't start). */
+
+/* One-shot deferred init work (see the EVT_INIT comments): ask monitor
+ * to start the resident firmware services the way the stock bookshelf
+ * does, then run the first sync.  The firmware's main-menu task binding
+ * must not wait on the network. */
+static void
+init_sync_tick(void *ctx)
+{
+    (void)ctx;
+    /* The stock desktop sends MSG_START_SERVICES (0x600) to monitor
+     * during its init; monitor then launches reader_controller, taskmgr,
+     * control_panel_mgr, explorer, update_desktop_data and binds the
+     * global-request target.  Without it a fresh boot runs only scanner
+     * + bookshelf.  iv_ipc_cmd() is the stock's exact transport. */
+    iv_ipc_cmd(MSG_START_SERVICES, 0);
+    do_sync();
+    redraw_shelf();
+}
 
 int
 on_event(int type, int par1, int par2)
@@ -21,35 +57,19 @@ on_event(int type, int par1, int par2)
          * query PanelHeight() once so all subsequent draws can
          * start below it without per-frame work.
          *
-         * The SDK docstring for SetCurrentApplicationAttribute notes
-         * that APPLICATION_READER "affects behaviour of panel, for
-         * proper work, set this attribute before first access to
-         * panel API".  Without it the firmware may treat us as a
-         * generic "shell" task (no bottom status bar) instead of a
-         * reader-style app (with the persistent Tue 23:13 + battery
-         * strip).  Setting it matches what the original sudoku.app
-         * and dictionary do.
+         * Note: the stock bookshelf does NOT set the
+         * APPLICATION_READER attribute (that is the eink-reader's
+         * panel mode); we deliberately match the stock registration
+         * so the firmware's service startup treats our home task the
+         * same way.
          */
-        SetCurrentApplicationAttribute(APPLICATION_READER, 1);
 
-        /* Set the framebuffer orientation FIRST.  SetOrientation()
-         * recomputes the per-task iv_fbinfo (clearing the framebuffer to
-         * white and resetting fb_y_offset to 0).  We run it before
-         * SetPanelType() so the panel config lands on the final fb layout
-         * and is not clobbered by the orientation reset. */
-        SetOrientation(0);
-
-        /* Enable the reader-style status bar at the TOP of the screen.
-         * SetShowPanelReader(1) sets the panel_conf show flag (offset 0x30)
-         * and re-applies the current panel type.  SetPanelType() with the
-         * PANEL_NO_FB_OFFSET bit (the same value eink-reader.app uses,
-         * PANEL_ENABLED | 1<<3 == 10) keeps fb_y_offset at 0 and makes the
-         * firmware's panel painter draw the strip at y=0 (top) instead of
-         * the bottom.  Our layout offsets every surface below panel_h. */
-        SetShowPanelReader(1);
-        SetPanelSeparatorEnabled(1);
-        SetPanelTransparent(0);
-        SetPanelType(PANEL_ENABLED | PANEL_NO_FB_OFFSET);
+        /* Orientation and panel type are registered in main() BEFORE
+         * InkViewMain(), exactly where the stock bookshelf does it
+         * (SetOrientation(0); SetDefaultOrientation(-1); SetPanelType(1)).
+         * Doing it inside EVT_INIT corrupts the per-task fbinfo on the
+         * live device (ScreenHeight() then reports the panel height and
+         * the layout collapses into the system bar's rows). */
         g_state.panel_h = PanelHeight();
         if (g_state.panel_h <= 0) {
             /* Live device: the firmware's panel painter never activates
@@ -150,12 +170,18 @@ on_event(int type, int par1, int par2)
         }
 
         build_endpoint_urls();
-
         /* Auto-sync on first launch so the shelf populates without a
-         * manual tap.  do_sync() blocks on the network here exactly as
-         * it does from the menu path; the draw below then renders the
-         * fetched books (and arms the per-tile cover fetcher). */
-        do_sync();
+         * manual tap.  The sync is DEFERRED to a one-shot timer: a
+         * blocking network sync inside EVT_INIT (up to 60 s per round
+         * when the API is unreachable) delays the firmware's main-menu
+         * task binding on the real device, which leaves the
+         * global-request target unset — the control-panel Task Manager
+         * button and the reader_controller service both fail (taskmgr
+         * never opens; OpenBook's reader_controller poll times out).
+         * EVT_INIT returns immediately like the stock bookshelf; the
+         * shelf renders from the local store first and init_sync_tick
+         * refreshes it once the sync settles. */
+        SetWeakTimerEx("initsync", init_sync_tick, NULL, 100);
         draw_top_bar();
         draw_grid();
         draw_pager();
@@ -235,8 +261,12 @@ on_event(int type, int par1, int par2)
                     g_state.launcher_moved = 1;
                     g_state.launcher_scroll -= dy;
                     g_state.launcher_drag_y = par2;
+                    /* Draw the new scroll position into the framebuffer
+                     * but do NOT flush.  A FullUpdate here per move event
+                     * takes 300-500ms on e-ink and looks broken; the
+                     * stock firmware draws during the drag and refreshes
+                     * once on finger lift (see the POINTERUP path). */
                     draw_overlay_launcher();
-                    FullUpdate();
                 }
             }
             return 1;
@@ -280,8 +310,24 @@ on_event(int type, int par1, int par2)
             int was_drag = g_state.launcher_moved;
             g_state.launcher_drag = 0;
             g_state.launcher_moved = 0;
-            if (!was_drag)
+            if (was_drag) {
+                /* Clamp the scroll to the laid-out body height, then
+                 * flush the framebuffer drawn during the drag — the
+                 * single refresh the stock firmware performs on lift. */
+                int body_top = g_state.panel_h + LAUNCHER_HEADER_H;
+                int body_h = ScreenHeight() - body_top;
+                int max_scroll = g_launcher_body_h - body_h;
+                if (max_scroll < 0)
+                    max_scroll = 0;
+                if (g_state.launcher_scroll < 0)
+                    g_state.launcher_scroll = 0;
+                if (g_state.launcher_scroll > max_scroll)
+                    g_state.launcher_scroll = max_scroll;
+                draw_overlay_launcher();
+                FullUpdate();
+            } else {
                 on_tap_overlay_launcher(x, y);
+            }
             return 1;
         }
 
@@ -455,7 +501,51 @@ on_event(int type, int par1, int par2)
     }
 
     if (type == EVT_KEYPRESS) {
-        if (par1 == IV_KEY_BACK || par1 == IV_KEY_PREV) {
+        int is_page_key = (par1 == IV_KEY_PREV || par1 == IV_KEY_NEXT || par1 == IV_KEY_PREV2 ||
+                           par1 == IV_KEY_NEXT2);
+
+        /* Hamburger button toggles the group-filter drawer (the left
+         * overlay).  It stays inert while a full-screen or modal sheet
+         * is up so it can never fight the active surface. */
+        if (par1 == IV_KEY_MENU) {
+            if (!g_state.settings_open && !g_state.ctx_open && !g_state.dl_popup &&
+                !g_state.launcher_open) {
+                g_state.menu_open = !g_state.menu_open;
+                if (g_state.menu_open) {
+                    draw_overlay_menu();
+                    FullUpdate();
+                } else {
+                    redraw_shelf();
+                }
+            }
+            return 1;
+        }
+
+        /* Home: this app is the home task (see bookshelf-wrapper.sh —
+         * monitor.app launches it as "bookshelf.app"), so the
+         * taskmanager foregrounds us globally when Home is pressed.
+         * A Home key that reaches us while we are already foreground
+         * is a no-op; closing here would read as a crash. */
+        if (par1 == IV_KEY_HOME)
+            return 1;
+
+        /* Page-turn buttons paginate the shelf.  With a modal open they
+         * fall through to the Back logic below (close the topmost
+         * sheet), matching how the stock bookshelf treats them. */
+        if (is_page_key && !g_state.ctx_open && !g_state.dl_popup && !g_state.settings_open &&
+            !g_state.launcher_open && !g_state.menu_open && !g_state.more_open) {
+            int pages = current_pages();
+            if ((par1 == IV_KEY_NEXT || par1 == IV_KEY_NEXT2) && g_state.page + 1 < pages) {
+                g_state.page++;
+                redraw_shelf();
+            } else if ((par1 == IV_KEY_PREV || par1 == IV_KEY_PREV2) && g_state.page > 0) {
+                g_state.page--;
+                redraw_shelf();
+            }
+            return 1;
+        }
+
+        if (par1 == IV_KEY_BACK || is_page_key) {
             if (g_state.ctx_open) {
                 close_context();
                 return 1;
@@ -551,17 +641,24 @@ main(int argc, char **argv)
         g_argv0[0] = '\0';
     log_open(g_argv0);
 
-    /* Note: the original firmware's bookshelf.app imports
-     * SetDefaultOrientation and calls it before InkViewMain(), but
-     * calling set_fb_orientation() that early hits a NULL fb on the
-     * pbemu shim (and may have issues on real devices where the fb
-     * isn't attached until the task is registered).  We instead call
-     * SetOrientation(0) inside EVT_INIT, after the shim has attached
-     * the main framebuffer (see the attach_shm log lines that precede
-     * EVT_INIT).  This produces an identical end-state orientation
-     * (portrait) without the early-NULL-fb problem.
-     */
-
+    /* Register exactly like the stock bookshelf's main():
+     *   InitInkview(0x4110); IvSetAppCapability(1);
+     *   SetOrientation(0); SetDefaultOrientation(-1); SetPanelType(1);
+     * then run the framework.  The orientation/panel registration MUST
+     * happen before InkViewMain() attaches the task: on the live device
+     * doing it inside EVT_INIT corrupts the per-task fbinfo (the panel
+     * painter then fights our content for the top rows and
+     * ScreenHeight() collapses).  SetOrientation()/
+     * SetDefaultOrientation() are NULL-fb-safe at this point (the
+     * firmware lib logs and returns when hw_getframebuffer() is still
+     * NULL), which is exactly why the stock app can call them here. */
+    InitInkview(0x4110);
+    if (IvSetAppCapability != NULL)
+        IvSetAppCapability(1);
+    SetOrientation(0);
+    if (SetDefaultOrientation != NULL)
+        SetDefaultOrientation(-1);
+    SetPanelType(1); /* the stock bookshelf's literal value */
     InkViewMain(on_event);
     log_close();
     return 0;
