@@ -248,7 +248,7 @@ typedef struct {
     int  sync_angle; /* rotation (deg) of the top-bar sync arc */
     char status[160];
 
-    int panel_h; /* height of the system status panel; 0 if hidden */
+    int panel_h; /* height of the system status panel at the BOTTOM of the screen */
 
     char query[MAX_QUERY_LEN];
 
@@ -464,6 +464,7 @@ int  downloads_pending(void);
 CoverSlot *cover_slot(const char *id, int create);
 int        view_cols(void);
 void       stamp_panel(void);
+int        content_bottom(void);
 int        view_rows(void);
 int        view_pagesize(void);
 void       grid_geom(int *top, int *bot, int *cell_w, int *cell_h);
@@ -521,6 +522,7 @@ void          lc_translate(const char *raw, char *out, size_t cap);
 void          launcher_layout(void);
 void          launcher_add_app(const char *apps_body, const char *id);
 void          launcher_build(void);
+void          launcher_scan_ext1_apps(void);
 void          draw_launcher_icon(int cx, int cy, const char *icon_name, const char *title);
 void          draw_overlay_launcher(void);
 void          launch_app(const LauncherItem *it);

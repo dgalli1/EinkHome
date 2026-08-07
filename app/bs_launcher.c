@@ -344,6 +344,8 @@ lc_token_en(const char *tok)
         {"@PBOnleiheLibrary", "Onleihe"},
         {"@General", "General"},
         {"@Games", "Games"},
+        {"@Users", "Users"},
+        {"@Empty", "Empty"},
     };
     for (size_t i = 0; i < sizeof tab / sizeof tab[0]; i++) {
         if (strcmp(tok, tab[i].k) == 0)
@@ -495,6 +497,81 @@ launcher_add_app(const char *apps_body, const char *id)
     g_launcher_count++;
 }
 
+/* 1 when an app item with the given path is already in the launcher
+ * list (the firmware's GetUnregisteredUserApplication() matches user
+ * apps by full path the same way). */
+static int
+launcher_has_path(const char *path)
+{
+    for (int i = 0; i < g_launcher_count; i++) {
+        if (g_launcher_items[i].kind == 1 && strcmp(g_launcher_items[i].path, path) == 0)
+            return 1;
+    }
+    return 0;
+}
+
+/* 1 when a user-apps group header is already present. */
+static int
+launcher_has_user_header(void)
+{
+    for (int i = 0; i < g_launcher_count; i++) {
+        if (g_launcher_items[i].kind == 0 && (strcmp(g_launcher_items[i].text, "User") == 0 ||
+                                              strcmp(g_launcher_items[i].text, "Users") == 0))
+            return 1;
+    }
+    return 0;
+}
+
+/* Register user-installed apps from /mnt/ext1/applications that the
+ * firmware has not (yet) recorded in view.json.  This mirrors the stock
+ * bookshelf's AppDataManager::scanUnregisteredUserApplication(): it
+ * walks the directory for *.app files (regular files or symlinks) and
+ * appends each one that is not already in the list by path, under a
+ * "Users" group header (the firmware's "@Users" group).  Without this,
+ * freshly installed apps never show up until the firmware's own
+ * bookshelf has run and rewritten the desktop JSONs. */
+void
+launcher_scan_ext1_apps(void)
+{
+    DIR *d = opendir("/mnt/ext1/applications");
+    if (d == NULL)
+        return;
+    struct dirent *e;
+    while ((e = readdir(d)) != NULL) {
+        size_t len = strlen(e->d_name);
+        if (len <= 4)
+            continue;
+        if (strcasecmp(e->d_name + len - 4, ".app") != 0)
+            continue;
+        char path[160];
+        snprintf(path, sizeof path, "/mnt/ext1/applications/%s", e->d_name);
+        struct stat st;
+        if (iv_stat(path, &st) != 0)
+            continue;
+        if (launcher_has_path(path))
+            continue;
+        if (g_launcher_count >= LAUNCHER_MAX_ITEMS)
+            break;
+        if (!launcher_has_user_header()) {
+            LauncherItem *hdr = &g_launcher_items[g_launcher_count++];
+            memset(hdr, 0, sizeof *hdr);
+            hdr->kind = 0;
+            snprintf(hdr->text, sizeof hdr->text, "Users");
+        }
+        LauncherItem *it = &g_launcher_items[g_launcher_count];
+        memset(it, 0, sizeof *it);
+        it->kind = 1;
+        size_t tl = len - 4;
+        if (tl >= sizeof it->text)
+            tl = sizeof it->text - 1;
+        memcpy(it->text, e->d_name, tl);
+        it->text[tl] = '\0';
+        snprintf(it->path, sizeof it->path, "%s", path);
+        g_launcher_count++;
+    }
+    closedir(d);
+}
+
 void
 launcher_build(void)
 {
@@ -635,7 +712,7 @@ launcher_build(void)
                         LauncherItem *hdr = &g_launcher_items[g_launcher_count++];
                         memset(hdr, 0, sizeof *hdr);
                         hdr->kind = 0;
-                        snprintf(hdr->text, sizeof hdr->text, "User");
+                        snprintf(hdr->text, sizeof hdr->text, "Users");
                         user_hdr_added = 1;
                     }
                     LauncherItem *it = &g_launcher_items[g_launcher_count];
@@ -665,6 +742,11 @@ launcher_build(void)
                 p++;
         }
     }
+
+    /* Register user apps from /mnt/ext1/applications that the firmware
+     * has not recorded in view.json yet (same scan the stock bookshelf
+     * runs in AppDataManager::scanUnregisteredUserApplication). */
+    launcher_scan_ext1_apps();
 
     free(db);
     free(vw);
@@ -710,9 +792,9 @@ void
 draw_overlay_launcher(void)
 {
     int w = ScreenWidth();
-    int h = ScreenHeight();
-    int body_top = g_state.panel_h + LAUNCHER_HEADER_H;
-    int body_h = h - body_top;
+    int h = content_bottom();
+    int body_top = LAUNCHER_HEADER_H;
+    int body_h = content_bottom() - body_top;
 
     /* Clamp the scroll offset: the column's last row stops at the bottom
      * edge; a column shorter than the window never scrolls. */
@@ -725,25 +807,21 @@ draw_overlay_launcher(void)
         g_state.launcher_scroll = max_scroll;
     int scroll = g_state.launcher_scroll;
 
-    FillArea(0, g_state.panel_h, w, h - g_state.panel_h, WHITE);
+    FillArea(0, 0, w, content_bottom(), WHITE);
 
     /* Fixed header: title + Back button. */
-    FillArea(0, g_state.panel_h, w, LAUNCHER_HEADER_H, WHITE);
-    DrawLine(0,
-             g_state.panel_h + LAUNCHER_HEADER_H - 1,
-             w,
-             g_state.panel_h + LAUNCHER_HEADER_H - 1,
-             BLACK);
+    FillArea(0, 0, w, LAUNCHER_HEADER_H, WHITE);
+    DrawLine(0, LAUNCHER_HEADER_H - 1, w, LAUNCHER_HEADER_H - 1, BLACK);
     ifont *tf = OpenFont(DEFAULTFONTB, 36, 0);
     if (tf) {
         SetFont(tf, BLACK);
         const char *title = i18n("launcher.title");
         int         tw = StringWidth(title);
-        DrawString((w - tw) / 2, g_state.panel_h + (LAUNCHER_HEADER_H - 36) / 2, title);
+        DrawString((w - tw) / 2, (LAUNCHER_HEADER_H - 36) / 2, title);
         CloseFont(tf);
     }
     {
-        int bx = 16, by = g_state.panel_h + (LAUNCHER_HEADER_H - 56) / 2, bw = 160, bh = 56;
+        int bx = 16, by = (LAUNCHER_HEADER_H - 56) / 2, bw = 160, bh = 56;
         DrawRect(bx, by, bw, bh, BLACK);
         ifont *bf = OpenFont(DEFAULTFONTB, 28, 0);
         if (bf) {
@@ -848,14 +926,13 @@ launch_app(const LauncherItem *it)
 void
 on_tap_overlay_launcher(int x, int y)
 {
-    int h = ScreenHeight();
-    int body_top = g_state.panel_h + LAUNCHER_HEADER_H;
-    if (x >= 16 && x < 176 && y >= g_state.panel_h + (LAUNCHER_HEADER_H - 56) / 2 &&
-        y < g_state.panel_h + (LAUNCHER_HEADER_H - 56) / 2 + 56) {
+    int body_top = LAUNCHER_HEADER_H;
+    if (x >= 16 && x < 176 && y >= (LAUNCHER_HEADER_H - 56) / 2 &&
+        y < (LAUNCHER_HEADER_H - 56) / 2 + 56) {
         launcher_close();
         return;
     }
-    if (y < body_top || y >= h)
+    if (y < body_top || y >= content_bottom())
         return;
     int by = y - body_top + g_state.launcher_scroll;
     for (int i = 0; i < g_launcher_count; i++) {
@@ -900,7 +977,7 @@ drill_back(void)
     g_state.page = g_state.saved_page;
     view_rebuild();
     LOG("[bookshelf] drilled back to top level (view=%d)\n", g_view_total);
-    FillArea(0, g_state.panel_h, ScreenWidth(), ScreenHeight() - g_state.panel_h, WHITE);
+    FillArea(0, 0, ScreenWidth(), content_bottom(), WHITE);
     draw_top_bar();
     draw_grid();
     draw_pager();
@@ -924,7 +1001,7 @@ on_tap_thumbnail(int vi)
         LOG("[bookshelf] drilled into series '%s' (%d books)\n",
             g_drilled_series_name,
             g_view_total);
-        FillArea(0, g_state.panel_h, ScreenWidth(), ScreenHeight() - g_state.panel_h, WHITE);
+        FillArea(0, 0, ScreenWidth(), content_bottom(), WHITE);
         draw_top_bar();
         draw_grid();
         draw_pager();

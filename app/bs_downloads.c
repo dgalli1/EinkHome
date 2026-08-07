@@ -581,9 +581,8 @@ void
 draw_context_menu(void)
 {
     int w = ScreenWidth();
-    int h = ScreenHeight();
-    /* Dim mask. */
-    for (int yy = g_state.panel_h; yy < h; yy += 2)
+    /* Dim mask over the whole app content area (panel band stays). */
+    for (int yy = 0; yy < content_bottom(); yy += 2)
         DrawLine(0, yy, w, yy, LGRAY);
 
     int n = context_item_count();

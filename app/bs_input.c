@@ -7,7 +7,7 @@
 int
 hit_top_bar(int x, int y)
 {
-    int bar_top = g_state.panel_h;
+    int bar_top = 0; /* top bar sits at the very top; the panel is at the bottom */
     int bar_bot = bar_top + TOP_BAR_H;
     if (y < bar_top || y >= bar_bot)
         return -1;
@@ -46,7 +46,7 @@ hit_search_icon(int x, int y)
 int
 hit_search_input(int x, int y)
 {
-    int row_top = g_state.panel_h + TOP_BAR_H;
+    int row_top = TOP_BAR_H;
     int row_bot = row_top + SEARCH_ROW_H;
     if (y < row_top || y >= row_bot)
         return -1;
@@ -113,8 +113,7 @@ hit_thumbnail(int x, int y)
 int
 hit_pager(int x, int y)
 {
-    int h = ScreenHeight();
-    int y0 = h - PAGER_H;
+    int y0 = content_bottom() - PAGER_H;
     if (y < y0 || y >= y0 + PAGER_H)
         return 0;
     int w = ScreenWidth();
@@ -145,7 +144,6 @@ on_tap_overlay_menu(int x, int y)
         g_state.menu_open = 0;
         return;
     }
-    y -= g_state.panel_h;
     for (int i = 0; i < 4; i++) {
         if (y >= y0 + i * item_h && y < y0 + i * item_h + item_h) {
             g_state.group = (GroupMode)i;
@@ -166,7 +164,6 @@ on_tap_overlay_more(int x, int y)
         g_state.more_open = 0;
         return;
     }
-    y -= g_state.panel_h;
     if (y >= MORE_Y0 && y < MORE_Y0 + MORE_ITEM_H) {
         g_state.more_open = 0;
         do_sync();
@@ -245,7 +242,6 @@ void
 on_tap_overlay_settings(int x, int y)
 {
     (void)x; /* rows span the full content width; only y matters */
-    y -= g_state.panel_h;
 
     int y_row1 = 112;
     int y_row2 = y_row1 + SETTINGS_ROW_H;

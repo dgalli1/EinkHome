@@ -466,16 +466,17 @@ def test_home_button_noop_on_shelf(fresh_bookshelf):
 def test_header_tap_opens_control_panel(fresh_bookshelf):
     """Tapping the system status strip (clock/battery) opens the
     firmware control panel.  Regression: the handler was dropped in the
-    popup commit, silently breaking the header tap for the self-drawn
+    popup commit, silently breaking the strip tap for the self-drawn
     strip case (the live device, where the firmware panel never
     activates).  In the emulator the firmware's panel intercepts the
-    tap itself, so this only runs when the app draws the strip."""
+    tap itself, so this only runs when the app draws the strip.  The
+    strip lives at the BOTTOM of the screen (stock type-1 panel)."""
     bs = fresh_bookshelf
     log = bs.current_log()
     if "self_panel=1" not in log:
         pytest.skip("firmware panel active: the tap is handled by the firmware")
     before = bs.current_log()
-    bs.tap_at(bs.geom.screen_w // 2, bs.geom.panel_h // 2)
+    bs.tap_at(bs.geom.screen_w // 2, bs.geom.screen_h - bs.geom.panel_h // 2)
     _wait_log_slice(bs, before, "system bar tapped -> control panel")
 
 
