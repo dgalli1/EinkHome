@@ -532,6 +532,7 @@ class KavitaProvider(Provider):
             summary=chapter.get("summary") or series.get("summary"),
             language=None,
             file_format=ext,
+            file_name=os.path.basename(chosen.get("filePath") or "") or None,
             file_size=size,
             page_count=pages,
             cover_url=f"/api/v1/books/{book_id}/cover",

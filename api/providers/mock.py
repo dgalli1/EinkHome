@@ -240,6 +240,7 @@ class MockProvider(Provider):
             summary=f"Mock book from {entry['abs']}",
             language=None,
             file_format=ext,
+            file_name=entry["name"],
             file_size=entry["size"],
             page_count=0,
             cover_url=f"/api/v1/books/{book_id}/cover",

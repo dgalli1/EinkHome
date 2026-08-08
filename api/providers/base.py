@@ -55,6 +55,10 @@ class BookMeta:
     file_format: str = "epub"
     """Lowercase extension without the dot. Used to drive the open-with
     picker on the device."""
+    file_name: str | None = None
+    """Original filename as stored on the provider (e.g. the Kavita
+    MangaFile's fileName).  The device saves downloads under this name
+    instead of the opaque book id when present."""
     file_size: int = 0
     page_count: int = 0
     cover_url: str | None = None

@@ -81,6 +81,7 @@ class LedgerEntry:
     series_idx: float | None
     format: str
     size: int
+    file_name: str | None = None
 
 
 def fingerprint(meta: BookMeta) -> str:
@@ -95,6 +96,7 @@ def fingerprint(meta: BookMeta) -> str:
             meta.series_id or "",
             repr(meta.series_index),
             meta.file_format or "",
+            meta.file_name or "",
             str(meta.file_size),
             meta.added_at or "",
         )
@@ -112,8 +114,15 @@ class SyncLedger:
             "CREATE TABLE IF NOT EXISTS books("
             "id TEXT PRIMARY KEY, rev INTEGER UNIQUE, added_at TEXT, "
             "title TEXT, authors TEXT, series TEXT, series_id TEXT, "
-            "series_idx REAL, format TEXT, size INTEGER, fp TEXT)"
+            "series_idx REAL, format TEXT, size INTEGER, fp TEXT, "
+            "file_name TEXT)"
         )
+        # Ledgers created before file_name existed get the column added;
+        # the fingerprint change below then re-emits every row with it.
+        try:
+            self.con.execute("ALTER TABLE books ADD COLUMN file_name TEXT")
+        except sqlite3.OperationalError:
+            pass  # column already present
         self.con.execute(
             "CREATE TABLE IF NOT EXISTS state(key TEXT PRIMARY KEY, value INTEGER)"
         )
@@ -192,8 +201,8 @@ class SyncLedger:
             next_rev += 1
         self.con.executemany(
             "INSERT OR IGNORE INTO books(id, rev, added_at, title, authors, "
-            "series, series_id, series_idx, format, size, fp) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            "series, series_id, series_idx, format, size, fp, file_name) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
             rows,
         )
         self._state_set("next_rev", next_rev)
@@ -205,8 +214,8 @@ class SyncLedger:
         for meta in metas:
             self.con.execute(
                 "UPDATE books SET rev=?, added_at=?, title=?, authors=?, "
-                "series=?, series_id=?, series_idx=?, format=?, size=?, fp=? "
-                "WHERE id=?",
+                "series=?, series_id=?, series_idx=?, format=?, size=?, fp=?, "
+                "file_name=? WHERE id=?",
                 (
                     next_rev,
                     meta.added_at,
@@ -218,6 +227,7 @@ class SyncLedger:
                     meta.file_format,
                     meta.file_size,
                     fingerprint(meta),
+                    meta.file_name,
                     meta.id,
                 ),
             )
@@ -250,6 +260,7 @@ class SyncLedger:
             meta.file_format,
             meta.file_size,
             fingerprint(meta),
+            meta.file_name,
         )
 
     def _state_get(self, key: str) -> int:
@@ -271,7 +282,7 @@ class SyncLedger:
         plus whether more entries remain beyond the batch."""
         rows = self.con.execute(
             "SELECT rev, id, added_at, title, authors, series, series_id, "
-            "series_idx, format, size FROM books "
+            "series_idx, format, size, file_name FROM books "
             "WHERE rev > ? ORDER BY rev LIMIT ?",
             (cursor, limit + 1),
         ).fetchall()
@@ -288,6 +299,7 @@ class SyncLedger:
                 series_idx=r[7],
                 format=r[8] or "",
                 size=r[9] or 0,
+                file_name=r[10],
             )
             for r in rows[:limit]
         ]
