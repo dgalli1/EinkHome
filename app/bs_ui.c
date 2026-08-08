@@ -29,6 +29,127 @@ draw_button(
     }
 }
 
+/* ── top bar ─────────────────────────────────────────────────────────── */
+
+/* Line-art globe (Kavita / online): circle, equator, meridian.  Drawn
+ * in the common 52x52 icon box. */
+static void
+draw_globe_icon(int x, int y, int col)
+{
+    int cx = x + 26, cy = y + 26, r = 24;
+    int px = 0, py = 0;
+    for (int s = 0; s <= 16; s++) {
+        double a = s * 2 * M_PI / 16.0;
+        int    xx = cx + (int)(r * cos(a));
+        int    yy = cy + (int)(r * sin(a));
+        if (s > 0) {
+            DrawLine(px, py, xx, yy, col);
+            DrawLine(px, py + 1, xx, yy + 1, col);
+        }
+        px = xx;
+        py = yy;
+    }
+    /* equator */
+    px = py = 0;
+    for (int s = 0; s <= 16; s++) {
+        double a = s * 2 * M_PI / 16.0;
+        int    xx = cx + (int)(r * cos(a));
+        int    yy = cy + (int)(r * 0.42 * sin(a));
+        if (s > 0) {
+            DrawLine(px, py, xx, yy, col);
+            DrawLine(px, py + 1, xx, yy + 1, col);
+        }
+        px = xx;
+        py = yy;
+    }
+    /* meridian */
+    px = py = 0;
+    for (int s = 0; s <= 16; s++) {
+        double a = s * 2 * M_PI / 16.0;
+        int    xx = cx + (int)(r * 0.42 * cos(a));
+        int    yy = cy + (int)(r * sin(a));
+        if (s > 0) {
+            DrawLine(px, py, xx, yy, col);
+            DrawLine(px, py + 1, xx, yy + 1, col);
+        }
+        px = xx;
+        py = yy;
+    }
+}
+
+/* Line-art open book (Local): two pages over a spine, in the 52x52
+ * icon box. */
+static void
+draw_book_icon(int x, int y, int col)
+{
+    int cx = x + 26, cy = y + 26;
+    DrawLine(cx - 24, cy + 20, cx - 24, cy - 16, col);
+    DrawLine(cx - 24, cy - 16, cx, cy - 6, col);
+    DrawLine(cx + 24, cy + 20, cx + 24, cy - 16, col);
+    DrawLine(cx + 24, cy - 16, cx, cy - 6, col);
+    DrawLine(cx - 24, cy + 20, cx, cy + 24, col);
+    DrawLine(cx + 24, cy + 20, cx, cy + 24, col);
+}
+
+/* Line-art folder (Folder source): tab + body, in the 52x52 icon
+ * box. */
+static void
+draw_folder_icon(int x, int y, int col)
+{
+    DrawLine(x + 3, y + 10, x + 3, y + 50, col);
+    DrawLine(x + 3, y + 50, x + 49, y + 50, col);
+    DrawLine(x + 49, y + 50, x + 49, y + 10, col);
+    DrawLine(x + 49, y + 10, x + 21, y + 10, col);
+    DrawLine(x + 21, y + 10, x + 21, y + 4, col);
+    DrawLine(x + 21, y + 4, x + 3, y + 4, col);
+    DrawLine(x + 3, y + 4, x + 3, y + 10, col);
+}
+
+/* Short label of the active source (shown in the button). */
+static const char *
+source_short_label(void)
+{
+    switch (g_state.source) {
+    case SOURCE_LOCAL:
+        return i18n("source.local");
+    case SOURCE_FOLDER:
+        return i18n("source.folder");
+    default:
+        return i18n("source.kavita");
+    }
+}
+
+/* The source button: the active library source's icon + label.  The
+ * chooser opens on tap (hit_top_bar → 6). */
+static void
+draw_source_button(void)
+{
+    int col = BLACK;
+    int x0 = SOURCE_BTN_X;
+    FillArea(x0, 0, SOURCE_BTN_W, TOP_BAR_H, WHITE);
+    int cy = TOP_BAR_H / 2;
+    /* Icon in the common 52px box, bottom-aligned with the house icon
+     * next to it; label at a larger font beside it. */
+    int ic_x = x0 + 8, ic_y = cy - 24;
+    switch (g_state.source) {
+    case SOURCE_LOCAL:
+        draw_book_icon(ic_x, ic_y, col);
+        break;
+    case SOURCE_FOLDER:
+        draw_folder_icon(ic_x, ic_y, col);
+        break;
+    default:
+        draw_globe_icon(ic_x, ic_y, col);
+        break;
+    }
+    ifont *f = OpenFont(DEFAULTFONT, 30, 0);
+    if (f != NULL) {
+        SetFont(f, col);
+        DrawString(ic_x + 60, cy - 15, source_short_label());
+        CloseFont(f);
+    }
+}
+
 void
 draw_top_bar(void)
 {
@@ -39,31 +160,42 @@ draw_top_bar(void)
     FillArea(0, y0, w, TOP_BAR_H, WHITE);
     DrawLine(0, y0 + TOP_BAR_H, w, y0 + TOP_BAR_H, col);
 
-    /* Left button: back-arrow when drilled, house icon otherwise. */
+    /* Left button: back-arrow when drilled into a series or on the
+     * Search page, the stock house icon otherwise.  Both are drawn
+     * inside the common 52x52 icon box centred in the button, matching
+     * the other top-bar icons. */
     int home_w = 96;
     int home_x = 8;
     int home_y = y0 + (TOP_BAR_H - home_w) / 2;
+    int hcx = home_x + home_w / 2;
+    int hcy = home_y + home_w / 2;
     if (g_drilled_series[0] != '\0' || g_state.tab == TAB_SEARCH) {
         /* Left-pointing chevron arrow. */
-        int ax = home_x + 20;
-        int ay = home_y + home_w / 2;
-        DrawLine(ax, ay, ax + 30, ay - 30, col);
-        DrawLine(ax, ay, ax + 30, ay + 30, col);
-        DrawLine(ax + 4, ay, ax + 34, ay - 30, col);
-        DrawLine(ax + 4, ay, ax + 34, ay + 30, col);
+        int ax = hcx - 8;
+        int ay = hcy;
+        DrawLine(ax, ay, ax + 26, ay - 26, col);
+        DrawLine(ax, ay, ax + 26, ay + 26, col);
+        DrawLine(ax + 4, ay, ax + 30, ay - 26, col);
+        DrawLine(ax + 4, ay, ax + 30, ay + 26, col);
     } else {
-        /* house outline (pentagon + floor break for door) */
-        DrawLine(home_x + 5, home_y + 29, home_x + 5, home_y + 85, col);
-        DrawLine(home_x + 5, home_y + 29, home_x + 48, home_y - 8, col);
-        DrawLine(home_x + 48, home_y - 8, home_x + 91, home_y + 29, col);
-        DrawLine(home_x + 91, home_y + 29, home_x + 91, home_y + 85, col);
-        DrawLine(home_x + 5, home_y + 85, home_x + 37, home_y + 85, col);
-        DrawLine(home_x + 53, home_y + 85, home_x + 91, home_y + 85, col);
+        /* house outline (pentagon + floor break for door), scaled to
+         * the icon box */
+        DrawLine(hcx - 24, hcy + 8, hcx - 24, hcy + 26, col);
+        DrawLine(hcx - 24, hcy + 8, hcx, hcy - 24, col);
+        DrawLine(hcx, hcy - 24, hcx + 24, hcy + 8, col);
+        DrawLine(hcx + 24, hcy + 8, hcx + 24, hcy + 26, col);
+        DrawLine(hcx - 24, hcy + 26, hcx - 8, hcy + 26, col);
+        DrawLine(hcx + 8, hcy + 26, hcx + 24, hcy + 26, col);
         /* door */
-        DrawLine(home_x + 37, home_y + 85, home_x + 37, home_y + 61, col);
-        DrawLine(home_x + 37, home_y + 61, home_x + 53, home_y + 61, col);
-        DrawLine(home_x + 53, home_y + 61, home_x + 53, home_y + 85, col);
+        DrawLine(hcx - 8, hcy + 26, hcx - 8, hcy + 12, col);
+        DrawLine(hcx - 8, hcy + 12, hcx + 8, hcy + 12, col);
+        DrawLine(hcx + 8, hcy + 12, hcx + 8, hcy + 26, col);
     }
+    /* Source button right of the house: the active library source as a
+     * small icon plus its label (globe = Kavita, book = Local,
+     * folder = Folder). */
+    draw_source_button();
+
     /* Centered title — series name when drilled, "Search" on the search
      * page, the active query on the filtered library shelf, nothing on
      * the plain shelf (the app name in the top bar was dropped per user
@@ -71,13 +203,19 @@ draw_top_bar(void)
     ifont *tf = OpenFont(DEFAULTFONT, 44, 0);
     if (tf != NULL) {
         char title[MAX_QUERY_LEN + 16];
-        if (g_drilled_series[0] != '\0') {
-            /* Series name is resolved once at drill time. */
-            snprintf(title, sizeof title, "%s", g_drilled_series_name);
-            if (title[0] == '\0')
-                snprintf(title, sizeof title, "Series");
-        } else if (g_state.tab == TAB_SEARCH) {
+        if (g_state.tab == TAB_SEARCH) {
             snprintf(title, sizeof title, "%s", i18n("tab.search"));
+        } else if (g_state.source == SOURCE_FOLDER && g_browse_open) {
+            /* The file browser shows its current directory as the
+             * title, like the shelf shows the active query — relative
+             * to /mnt/ext1 (the mount point is hidden from the user). */
+            char shown[96];
+            user_path_display(g_browse_path, shown, sizeof shown);
+            size_t plen = strlen(shown);
+            if (plen > sizeof title - 1)
+                plen = sizeof title - 1;
+            memcpy(title, shown, plen);
+            title[plen] = '\0';
         } else if (g_state.query[0] != '\0') {
             /* The active filter shown as the shelf title. */
             snprintf(title, sizeof title, "%s", g_state.query);
@@ -86,12 +224,12 @@ draw_top_bar(void)
         }
         if (title[0] != '\0') {
             /* Centre the title inside the free band between the flanking
-             * icon stacks (home/back left; search + downloads + menu
+             * icon stacks (home + source left; search + downloads + menu
              * right).  Centring on the whole screen width lets a long
              * series name run under the right icons: the trim budget
              * must be the band width, not w - 420, and the draw origin
              * the band, not 0. */
-            int left_w = 8 + 96;
+            int left_w = 8 + 96 + 8 + SOURCE_BTN_W;
             int right_w = 8 + 3 * 96;
             int band_w = w - left_w - right_w;
             if (band_w < 64)
@@ -113,7 +251,7 @@ draw_top_bar(void)
     draw_sync_icon();
 
     /* Right "menu" button — three black hamburger lines on the white
-     * top bar. */
+     * top bar, sized to the common icon box. */
     int menu_w = 96;
     int menu_x = w - menu_w - 8;
     int menu_y = y0 + (TOP_BAR_H - menu_w) / 2;
@@ -121,10 +259,10 @@ draw_top_bar(void)
     int menu_cy = menu_y + menu_w / 2;
     int menu_r = menu_w / 2;
     FillArea(menu_cx - menu_r, menu_cy - menu_r, menu_r * 2, menu_r * 2, WHITE);
-    int ml_w = 44;
-    FillArea(menu_cx - ml_w / 2, menu_cy - 19, ml_w, 6, col);
+    int ml_w = 48;
+    FillArea(menu_cx - ml_w / 2, menu_cy - 21, ml_w, 6, col);
     FillArea(menu_cx - ml_w / 2, menu_cy - 3, ml_w, 6, col);
-    FillArea(menu_cx - ml_w / 2, menu_cy + 13, ml_w, 6, col);
+    FillArea(menu_cx - ml_w / 2, menu_cy + 15, ml_w, 6, col);
 }
 
 /* Sync button in the top bar, left of the menu button: two black arc
@@ -191,7 +329,7 @@ draw_sync_icon(void)
     FillArea(ic_x, ic_y, ic_w, ic_w, WHITE);
     int cx = ic_x + ic_w / 2;
     int cy = ic_y + ic_w / 2;
-    int r = 28;
+    int r = 22; /* arcs fit the common 52px icon box */
     /* Two 120-degree arc arrows, rotated by g_state.sync_angle. */
     for (int half = 0; half < 2; half++) {
         int a0 = g_state.sync_angle + half * 180;
@@ -237,7 +375,7 @@ draw_search_icon(void)
     int ic_y = y0 + (TOP_BAR_H - ic_w) / 2;
     int cx = ic_x + ic_w / 2 - 5; /* ring centre, offset for the handle */
     int cy = ic_y + ic_w / 2 - 5;
-    int r = 18;
+    int r = 20; /* ring + handle fit the common 52px icon box */
 
     /* Outlined ring (polyline; DrawCircle fills). */
     int px = 0, py = 0;
@@ -738,6 +876,26 @@ draw_series_stack_badge(int cx, int cy, int cw, int ch, int count)
     }
 }
 
+/* Reading-progress bar inside the bottom of a cover: a thin black
+ * track with a black fill proportional to the percent read (0..100).
+ * Progress comes from the firmware's books_settings table, which both
+ * the integrated reader and the KOReader pocketbooksync plugin write. */
+static void
+draw_progress_bar(int cx, int cy, int cw, int ch, int pct)
+{
+    int bar_h = cw >= 150 ? 10 : 6;
+    if (pct < 0)
+        pct = 0;
+    if (pct > 100)
+        pct = 100;
+    int by = cy + ch - bar_h;
+    FillArea(cx, by, cw, bar_h, WHITE);
+    DrawRect(cx, by, cw, bar_h, BLACK);
+    int fill = cw * pct / 100;
+    if (fill >= 2)
+        FillArea(cx + 1, by + 1, fill - 2, bar_h - 2, BLACK);
+}
+
 void
 draw_thumbnail(int x, int y, int w, int h, const TileRow *tr, int vi)
 {
@@ -761,6 +919,7 @@ draw_thumbnail(int x, int y, int w, int h, const TileRow *tr, int vi)
         blit_cover(cx, cy, cww, chh, b);
         if (tr->is_series)
             draw_series_stack_badge(cx, cy, cww, chh, tr->series_count);
+        draw_progress_bar(cx, cy, cww, chh, progress_percent(b->local_path));
         int tx0 = cx + cww + 16;
         int tw0 = (x + w - pad) - tx0;
         if (tw0 < 64)
@@ -802,6 +961,9 @@ draw_thumbnail(int x, int y, int w, int h, const TileRow *tr, int vi)
     /* Series cards: badge + outline on top of the cover. */
     if (tr->is_series)
         draw_series_stack_badge(cx, cy, cw, ch, tr->series_count);
+
+    /* Reading progress: a black bar at the cover's bottom edge. */
+    draw_progress_bar(cx, cy, cw, ch, progress_percent(b->local_path));
 
     /* Caption: series name for cards, title for books. */
     int         cap_y = cy + ch + 6;
@@ -1119,9 +1281,12 @@ redraw_shelf(void)
     draw_top_bar();
     if (g_state.tab == TAB_SEARCH)
         draw_search_tab();
+    else if (g_state.source == SOURCE_FOLDER && g_browse_open)
+        draw_browse();
     else
         draw_grid();
-    draw_pager();
+    if (g_state.source != SOURCE_FOLDER)
+        draw_pager();
     if (g_state.dl_popup)
         draw_dl_popup();
     flush_content();
@@ -1211,13 +1376,29 @@ cover_tick(void *ctx)
         return;
     CoverSlot *s = cover_slot(bid, 1);
     LOG("[bookshelf] cover_tick target=%d id=%s slot=%p\n", target, bid, (void *)s);
-    s->state = 1;
+
+    /* Local (filesystem) books have no remote cover: extract the
+     * embedded cover image (EPUB) when the format has one, otherwise
+     * the tile keeps the placeholder. */
+    Book cbook;
+    int  local_book = !store_get_book(bid, &cbook) || strcmp(cbook.source, "kavita") != 0;
+    s->state = local_book ? 3 : 1;
 
     ibitmap *bmp = NULL;
-
-    /* Try the on-disk cover cache first — avoids a network round-trip
-     * when the cover was fetched in a previous session. */
-    if (cover_cache_load(bid, &bmp) == 0) {
+    if (local_book) {
+        /* The raw extracted cover is cached on disk next to the PNG
+         * cache; only unknown books hit the zip parser. */
+        char cover_path[MAX_PATH_LEN];
+        cover_raw_path(bid, cover_path, sizeof cover_path);
+        if (access(cover_path, R_OK) != 0 && cbook.local_path[0] != '\0') {
+            if (extract_book_cover(cbook.local_path, cbook.ext, cover_path, sizeof cover_path) != 0)
+                cover_path[0] = '\0'; /* extraction failed; no cover */
+        }
+        if (cover_path[0] != '\0' && access(cover_path, R_OK) == 0) {
+            bmp = load_image_scaled(cover_path);
+            LOG("[bookshelf] cover_tick cover id=%s bmp=%p\n", bid, (void *)bmp);
+        }
+    } else if (cover_cache_load(bid, &bmp) == 0) {
         LOG("[bookshelf] cover_tick cache hit id=%s\n", bid);
     } else {
         char url[MAX_URL_LEN + 128];
@@ -1419,6 +1600,63 @@ draw_status_line(void)
      */
 }
 
+/* ── source chooser ──────────────────────────────────────────────────── */
+
+int g_source_open = 0;
+
+/* Sheet geometry of the source chooser (top-bar button right of home):
+ * a centred 3/4-width sheet with the title row and three source rows. */
+void
+source_geom(int *px, int *py, int *pw, int *ph)
+{
+    int w = ScreenWidth();
+    *pw = w * 3 / 4;
+    *ph = 72 + 3 * 96 + 24;
+    *px = (w - *pw) / 2;
+    *py = (content_bottom() - *ph) / 2;
+}
+
+void
+draw_overlay_source(void)
+{
+    int w = ScreenWidth();
+    int pw, ph, px, py;
+    source_geom(&px, &py, &pw, &ph);
+
+    /* Dim the content area behind the sheet. */
+    for (int yy = 0; yy < content_bottom(); yy += 2)
+        DrawLine(0, yy, w, yy, LGRAY);
+    FillArea(px, py, pw, ph, WHITE);
+    DrawRect(px, py, pw, ph, BLACK);
+    DrawRect(px + 1, py + 1, pw - 2, ph - 2, BLACK);
+
+    ifont *tf = OpenFont(DEFAULTFONTB, 32, 0);
+    if (tf != NULL) {
+        SetFont(tf, BLACK);
+        DrawString(px + CTX_PAD, py + 18, i18n("source.title"));
+        CloseFont(tf);
+    }
+    DrawLine(px + CTX_PAD, py + 64, px + pw - CTX_PAD, py + 64, LGRAY);
+
+    const char *labels[3] = {
+        i18n("source.kavita"),
+        i18n("source.local"),
+        i18n("source.folder"),
+    };
+    int y0 = py + 80;
+    for (int i = 0; i < 3; i++) {
+        int sel = (g_state.source == i);
+        FillArea(px + 12, y0 + i * 96, pw - 24, 96 - 12, sel ? BLACK : WHITE);
+        DrawRect(px + 12, y0 + i * 96, pw - 24, 96 - 12, sel ? BLACK : WHITE);
+        ifont *f = OpenFont(DEFAULTFONTB, 28, 0);
+        if (f != NULL) {
+            SetFont(f, sel ? WHITE : BLACK);
+            DrawString(px + 32, y0 + i * 96 + (96 - 28) / 2 - 2, labels[i]);
+            CloseFont(f);
+        }
+    }
+}
+
 /* ── settings overlay ────────────────────────────────────────────────── */
 
 /* Which settings row currently owns the on-screen keyboard:
@@ -1522,10 +1760,10 @@ draw_overlay_settings(void)
     DrawLine(0, 92, w, 92, BLACK);
 
     /* Downloads folder: the pending picker choice, else the resolved
-     * effective directory. */
+     * effective directory — shown relative to /mnt/ext1. */
     char        dl_shown[256];
     const char *dl = g_settings_dl_dir[0] ? g_settings_dl_dir : g_downloads_dir;
-    snprintf(dl_shown, sizeof dl_shown, "%s", dl);
+    user_path_display(dl, dl_shown, sizeof dl_shown);
     while (StringWidth(dl_shown) > w - 2 * 32 - 16 && strlen(dl_shown) > 4)
         dl_shown[strlen(dl_shown) - 1] = '\0';
 

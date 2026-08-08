@@ -134,7 +134,20 @@ on_event(int type, int par1, int par2)
         resolve_covers_dir();
         store_open();
         refresh_downloaded_flags(); /* files may have changed while we were away */
-        view_rebuild();             /* render from the local db even if sync fails */
+        progress_reload();          /* reader progress from the explorer DB */
+        /* A local source renders from the on-device library directly;
+         * the Local source imports it, the Folder source opens a file
+         * browser (drawn on EVT_SHOW). */
+        if (g_state.source == SOURCE_LOCAL)
+            local_import_scanner();
+        else if (g_state.source == SOURCE_FOLDER) {
+            /* The Folder source is a live browser now; drop any rows
+             * the old per-folder import left behind.  The browser is
+             * always rooted at /mnt/ext1. */
+            store_delete_source("folder");
+            browse_start(BROWSE_ROOT);
+        }
+        view_rebuild(); /* render from the local db even if sync fails */
         LOG("[bookshelf] config_path=%s\n", g_config_path);
         g_state.reader_pref = reader_pref_from_path(g_cfg_reader);
         /* Colour display?  The PB Color reports a nonzero colormask
@@ -201,6 +214,14 @@ on_event(int type, int par1, int par2)
          * strip is always present in the framebuffer before we draw
          * our content below it. */
         stamp_panel();
+        /* The user may have been reading with the integrated reader or
+         * KOReader while we were away — refresh their progress. */
+        progress_reload();
+        if (g_source_open) {
+            draw_overlay_source();
+            FullUpdate();
+            return 1;
+        }
         if (g_state.launcher_open) {
             draw_overlay_launcher();
             FullUpdate();
@@ -219,9 +240,12 @@ on_event(int type, int par1, int par2)
         draw_top_bar();
         if (g_state.tab == TAB_SEARCH)
             draw_search_tab();
+        else if (g_state.source == SOURCE_FOLDER && g_browse_open)
+            draw_browse();
         else
             draw_grid();
-        draw_pager();
+        if (g_state.source != SOURCE_FOLDER)
+            draw_pager();
         if (g_state.dl_popup)
             draw_dl_popup();
         if (g_state.menu_open)
@@ -234,6 +258,13 @@ on_event(int type, int par1, int par2)
 
     if (type == EVT_POINTERDOWN) {
         int x = par1, y = par2;
+        /* The file browser body is drag-scrolled like the launcher; a
+         * press on the top bar above it is a button press, not a
+         * scroll. */
+        /* The source chooser is tap-only; swallow the press so nothing
+         * underneath arms (long-press, drag). */
+        if (g_source_open)
+            return 1;
         /* The download-folder picker body is drag-scrolled like the
          * launcher: remember the press point so POINTERMOVE can
          * translate the finger travel into scroll. */
@@ -249,6 +280,15 @@ on_event(int type, int par1, int par2)
             g_state.launcher_drag = 1;
             g_state.launcher_drag_y = y;
             g_state.launcher_moved = 0;
+            return 1;
+        }
+        /* The file browser body is drag-scrolled like the launcher; a
+         * press on the top bar above it is a button press, not a
+         * scroll. */
+        if (g_browse_open && g_state.source == SOURCE_FOLDER && y >= TOP_BAR_H) {
+            g_browse_drag = 1;
+            g_browse_drag_y = y;
+            g_browse_moved = 0;
             return 1;
         }
         /* Arm a long-press only on the Library tab's grid, and only when
@@ -271,6 +311,19 @@ on_event(int type, int par1, int par2)
     }
 
     if (type == EVT_POINTERMOVE) {
+        if (g_browse_open && g_state.source == SOURCE_FOLDER) {
+            if (g_browse_drag) {
+                int dy = par2 - g_browse_drag_y;
+                if (g_browse_moved || dy > LAUNCHER_DRAG_SLOP || dy < -LAUNCHER_DRAG_SLOP) {
+                    g_browse_moved = 1;
+                    g_browse_scroll -= dy;
+                    g_browse_drag_y = par2;
+                    /* Draw, do NOT flush; the refresh happens on lift. */
+                    draw_browse();
+                }
+            }
+            return 1;
+        }
         if (g_folder_open) {
             if (g_folder_drag) {
                 int dy = par2 - g_folder_drag_y;
@@ -331,6 +384,25 @@ on_event(int type, int par1, int par2)
             return 1;
         }
 
+        /* The file browser body is drag-scrolled; a lift that ended a
+         * scroll drag is not a tap.  Plain taps fall through to the
+         * normal top-bar / body routing below. */
+        if (g_browse_open && g_state.source == SOURCE_FOLDER && g_browse_moved) {
+            g_browse_drag = 0;
+            g_browse_moved = 0;
+            if (g_browse_scroll < 0)
+                g_browse_scroll = 0;
+            draw_browse();
+            flush_content();
+            return 1;
+        }
+        g_browse_drag = 0;
+        g_browse_moved = 0;
+        /* The source chooser owns all taps while open. */
+        if (g_source_open) {
+            on_tap_source(x, y);
+            return 1;
+        }
         /* The download-folder picker owns the screen while open (it
          * sits on top of the settings page).  A lift that ended a
          * scroll drag is not a tap. */
@@ -445,11 +517,12 @@ on_event(int type, int par1, int par2)
         }
 
         /* Top-bar buttons.  hit_top_bar returns:
-         *   1 = home  (left; back on the Search view or a drilled
+         *   1 = back  (left; back on the Search view or a drilled
          *              series, no-op on the library shelf)
          *   2 = sync  (left of the menu button; runs a library sync)
          *   3 = menu  (right; opens the More overlay)
          *   5 = search icon (opens the Search sub-page)
+         *   6 = source chooser
          */
         int which = hit_top_bar(x, y);
         if (which == 1) {
@@ -479,6 +552,13 @@ on_event(int type, int par1, int par2)
             redraw_shelf();
             return 1;
         }
+        if (which == 6) {
+            /* Source chooser (Kavita / Local / Folder). */
+            g_source_open = 1;
+            draw_overlay_source();
+            flush_content();
+            return 1;
+        }
         if (which == 3) {
             g_state.more_open = 1;
             draw_overlay_more();
@@ -488,6 +568,13 @@ on_event(int type, int par1, int par2)
         if (which == 2) {
             do_sync();
             redraw_shelf();
+            return 1;
+        }
+
+        /* Folder-source file browser: the top-bar buttons were handled
+         * above; any other body tap navigates or opens an entry. */
+        if (g_browse_open && g_state.source == SOURCE_FOLDER) {
+            on_tap_browse(x, y);
             return 1;
         }
 
@@ -571,7 +658,7 @@ on_event(int type, int par1, int par2)
          * is up so it can never fight the active surface. */
         if (par1 == IV_KEY_MENU) {
             if (!g_state.settings_open && !g_state.ctx_open && !g_state.dl_popup &&
-                !g_state.launcher_open && !g_folder_open) {
+                !g_state.launcher_open && !g_folder_open && !g_browse_open) {
                 g_state.menu_open = !g_state.menu_open;
                 if (g_state.menu_open) {
                     draw_overlay_menu();
@@ -595,8 +682,8 @@ on_event(int type, int par1, int par2)
          * fall through to the Back logic below (close the topmost
          * sheet), matching how the stock bookshelf treats them. */
         if (is_page_key && !g_state.ctx_open && !g_state.dl_popup && !g_state.settings_open &&
-            !g_state.launcher_open && !g_state.menu_open && !g_state.more_open &&
-            !g_folder_open) {
+            !g_state.launcher_open && !g_state.menu_open && !g_state.more_open && !g_folder_open &&
+            !g_source_open && !g_browse_open) {
             int pages = current_pages();
             if ((par1 == IV_KEY_NEXT || par1 == IV_KEY_NEXT2) && g_state.page + 1 < pages) {
                 g_state.page++;
@@ -609,6 +696,25 @@ on_event(int type, int par1, int par2)
         }
 
         if (par1 == IV_KEY_BACK || is_page_key) {
+            /* The file browser: Back ascends, at the root it opens the
+             * source chooser; page keys scroll the list. */
+            if (g_browse_open && g_state.source == SOURCE_FOLDER) {
+                if (is_page_key) {
+                    int fwd = par1 == IV_KEY_NEXT || par1 == IV_KEY_NEXT2;
+                    browse_page(fwd ? 1 : -1);
+                } else if (!browse_up()) {
+                    g_browse_open = 0;
+                    g_source_open = 1;
+                    draw_overlay_source();
+                    flush_content();
+                }
+                return 1;
+            }
+            if (g_source_open) {
+                g_source_open = 0;
+                redraw_shelf();
+                return 1;
+            }
             if (g_state.ctx_open) {
                 close_context();
                 return 1;

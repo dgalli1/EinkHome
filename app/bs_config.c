@@ -118,6 +118,13 @@ cfg_set_kv(const char *key, const char *value, void *user)
         snprintf(g_cfg_reader, sizeof g_cfg_reader, "%s", value);
     } else if (strcmp(key, "downloads_dir") == 0 || strcmp(key, "download_dir") == 0) {
         snprintf(g_cfg_downloads_dir, sizeof g_cfg_downloads_dir, "%s", value);
+    } else if (strcmp(key, "source") == 0) {
+        if (strcmp(value, "local") == 0)
+            g_state.source = SOURCE_LOCAL;
+        else if (strcmp(value, "folder") == 0)
+            g_state.source = SOURCE_FOLDER;
+        else
+            g_state.source = SOURCE_KAVITA;
     } else {
         LOG("[bookshelf] config: unknown key `%s`\n", key);
     }

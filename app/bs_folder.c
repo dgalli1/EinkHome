@@ -122,7 +122,9 @@ draw_overlay_folder(void)
     if (pf != NULL) {
         SetFont(pf, DGRAY);
         char trunc[256];
-        snprintf(trunc, sizeof trunc, "%s", g_folder_path);
+        /* Show the path relative to /mnt/ext1 — the mount point is
+         * hidden from the user. */
+        user_path_display(g_folder_path, trunc, sizeof trunc);
         while (StringWidth(trunc) > w - 64 && strlen(trunc) > 4)
             trunc[strlen(trunc) - 1] = '\0';
         DrawString(32, 76, trunc);
@@ -192,8 +194,7 @@ draw_overlay_folder(void)
     }
 }
 
-/* Commit the browsed folder as the pending settings value and return
- * to the settings page (which stays open beneath the picker). */
+/* Commit the browsed folder as the pending downloads-folder setting. */
 static void
 folder_commit(void)
 {

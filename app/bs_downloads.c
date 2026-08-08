@@ -4,23 +4,61 @@
 
 /* ── downloads, delete, context menu, long-press ───────────────────── */
 
-/* Local path a book downloads to (matches the open-with launch path). */
+/* Local path a book downloads to (matches the open-with launch path).
+ * Prefers the provider's original filename (sanitized to a bare
+ * basename) so the file is recognizable in the downloads folder;
+ * falls back to <id>.<ext> when the server sent no filename. */
 void
 book_local_path(const Book *b, char *out, size_t cap)
 {
+    if (b->filename[0] != '\0' && strcmp(b->filename, ".") != 0 && strcmp(b->filename, "..") != 0) {
+        char   sanitized[MAX_PATH_LEN];
+        size_t n = 0;
+        for (const char *p = b->filename; *p != '\0' && n + 1 < sizeof sanitized; p++) {
+            char c = *p;
+            if (c == '/')
+                c = '_';
+            if (c < 0x20 || c == 0x7f)
+                continue;
+            sanitized[n++] = c;
+        }
+        sanitized[n] = '\0';
+        if (n > 0) {
+            snprintf(out, cap, "%s/%s", g_downloads_dir, sanitized);
+            return;
+        }
+    }
     if (b->ext[0])
         snprintf(out, cap, "%s/%s.%s", g_downloads_dir, b->id, b->ext);
     else
         snprintf(out, cap, "%s/%s", g_downloads_dir, b->id);
 }
 
+/* Path of an existing download: the book's stored local_path when the
+ * file is still on disk there, else the current downloads folder.
+ * Needed because the downloads folder can move (the default changed
+ * from /mnt/ext1/system/bin to /mnt/ext1/Downloads, or the user picked
+ * another folder in Settings) — books fetched before the move live at
+ * their stored location and must stay openable without re-downloading.
+ * New downloads always land at the current folder (book_local_path). */
+void
+book_existing_path(const Book *b, char *out, size_t cap)
+{
+    if (b->local_path[0] != '\0' && access(b->local_path, F_OK) == 0) {
+        snprintf(out, cap, "%s", b->local_path);
+        return;
+    }
+    book_local_path(b, out, cap);
+}
+
 /* Sync a book's downloaded flag by probing its on-device file, in the
- * store and in the caller's copy. */
+ * store and in the caller's copy.  The stored location counts as
+ * downloaded too — see book_existing_path. */
 void
 refresh_downloaded(Book *b)
 {
     char path[MAX_PATH_LEN];
-    book_local_path(b, path, sizeof path);
+    book_existing_path(b, path, sizeof path);
     int dl = (access(path, F_OK) == 0);
     store_set_downloaded(b->id, dl, dl ? path : "");
     b->downloaded = dl;
@@ -47,6 +85,13 @@ refresh_downloaded_flags(void)
             char path[MAX_PATH_LEN];
             book_local_path(&b, path, sizeof path);
             int dl = (access(path, F_OK) == 0);
+            if (!dl && b.local_path[0] != '\0' && access(b.local_path, F_OK) == 0) {
+                /* File still at its stored location although the
+                 * downloads folder has moved; keep it downloaded and
+                 * keep the stored path (see book_existing_path). */
+                dl = 1;
+                snprintf(path, sizeof path, "%s", b.local_path);
+            }
             if (dl != b.downloaded) {
                 store_set_downloaded(ids[i], dl, dl ? path : "");
                 changed++;
@@ -225,7 +270,10 @@ void
 launch_reader(Book *b)
 {
     char path[MAX_PATH_LEN];
-    book_local_path(b, path, sizeof path);
+    /* Open the file where it actually lives (stored location when the
+     * downloads folder moved since the fetch), not just the current
+     * folder's path. */
+    book_existing_path(b, path, sizeof path);
 
     const char *reader_path = NULL;
     if (g_state.reader_pref > 0 && g_state.reader_pref <= g_reader_count)
@@ -260,6 +308,13 @@ book_press_action(Book *b)
     char path[MAX_PATH_LEN];
     book_local_path(b, path, sizeof path);
     int dl = (access(path, F_OK) == 0);
+    if (!dl && b->local_path[0] != '\0' && access(b->local_path, F_OK) == 0) {
+        /* The file lives at its stored location (downloads folder
+         * moved since the fetch); it is downloaded and opens from
+         * there — see book_existing_path. */
+        dl = 1;
+        snprintf(path, sizeof path, "%s", b->local_path);
+    }
     if (dl != b->downloaded)
         store_set_downloaded(b->id, dl, dl ? path : "");
     b->downloaded = dl;

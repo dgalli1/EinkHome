@@ -91,7 +91,7 @@ if [ "${DO_BUILD}" = "1" ] || [ ! -f "${SRC_APP}" ]; then
 	echo "==> building ${SRC_APP}"
 	BS_SRCS=""
 	for _f in bs_i18n.c bs_config.c bs_model.c bs_net.c bs_ui.c \
-		bs_input.c bs_launcher.c bs_downloads.c bs_folder.c bs_store.c bs_main.c; do
+		bs_input.c bs_launcher.c bs_downloads.c bs_folder.c bs_local.c bs_browse.c bs_extract.c bs_progress.c bs_store.c bs_main.c; do
 		BS_SRCS="${BS_SRCS:+${BS_SRCS} }${HERE}/${_f}"
 	done
 	# shellcheck disable=SC2086

@@ -230,6 +230,11 @@ typedef enum {
     TAB_LIBRARY, /* the cover grid / list */
     TAB_SEARCH,  /* search sub-page: input row + history terms */
 } MainTab;
+typedef enum {
+    SOURCE_KAVITA = 0, /* remote server (Kavita) library */
+    SOURCE_LOCAL = 1,  /* books indexed by the firmware's scanner.app */
+    SOURCE_FOLDER = 2, /* books scanned from a user-picked folder */
+} SourceMode;
 typedef struct {
     char  id[MAX_ID_LEN];
     char  title[MAX_TITLE_LEN];
@@ -241,7 +246,13 @@ typedef struct {
     int   size;
     int   downloaded;
     char  local_path[MAX_PATH_LEN];
-    long  added_at; /* unix epoch from server "addedAt"; 0 if absent */
+    /* Original filename on the provider (saved downloads use it instead
+     * of the opaque id); empty → id-based name. */
+    char filename[MAX_PATH_LEN];
+    /* Source this book came from: "kavita" (server sync), "local"
+     * (scanner.app library), "folder" (user-picked folder scan). */
+    char source[16];
+    long added_at; /* unix epoch from server "addedAt"; 0 if absent */
 } Book;
 typedef struct {
     int  is_series;
@@ -302,6 +313,10 @@ typedef struct {
      * into g_readers[] naming the app to launch directly. */
     int reader_pref;
 
+    /* Library source (top-bar button right of home): which books the
+     * shelf shows and where downloads come from. */
+    int source; /* SOURCE_KAVITA / SOURCE_LOCAL / SOURCE_FOLDER */
+
     int page;       /* current page (0-based) */
     int saved_page; /* library page to restore on drill-back */
 
@@ -332,6 +347,13 @@ typedef struct {
 #define FOLDER_BTN_H    96
 #define FOLDER_BTN_PAD  24
 #define FOLDER_MAX_DIRS 128
+/* Root of the folder-source file browser and the Local source scan. */
+#define BROWSE_ROOT "/mnt/ext1"
+/* Source button (right of the house): the active library source as a
+ * small icon + label (globe = Kavita, book = Local, folder = Folder).
+ * Wider than the old bare-icon button because it carries text. */
+#define SOURCE_BTN_X 112
+#define SOURCE_BTN_W 176
 typedef struct {
     const char *device;
     const char *partner;
@@ -369,7 +391,6 @@ extern FILE        *g_log;
 extern char         g_cfg_reader[220];
 extern char         g_config_path[600];
 extern char         g_drilled_series[MAX_ID_LEN];
-extern char         g_drilled_series_name[48];
 extern State        g_state;
 extern char         g_search_kb_buf[MAX_QUERY_LEN];
 extern CoverSlot    g_covers[NCOVER_SLOTS];
@@ -430,6 +451,33 @@ void        resolve_downloads_dir(void);
 void        detect_readers(void);
 int         reader_pref_from_path(const char *value);
 int         save_config_file(void);
+void        local_import_scanner(void);
+int         extract_book_meta(const char *path,
+                              const char *ext,
+                              char       *title,
+                              size_t      title_cap,
+                              char       *author,
+                              size_t      author_cap);
+int         extract_book_cover(const char *path, const char *ext, char *out_path, size_t out_cap);
+ibitmap    *load_image_scaled(const char *path);
+void        progress_reload(void);
+int         progress_percent(const char *path);
+void        draw_overlay_source(void);
+int         on_tap_source(int x, int y);
+void        source_geom(int *px, int *py, int *pw, int *ph);
+extern int  g_source_open;
+void        browse_start(const char *dir);
+void        draw_browse(void);
+int         on_tap_browse(int x, int y);
+int         browse_up(void);
+void        browse_page(int dir);
+const char *user_path_display(const char *path, char *out, size_t cap);
+extern int  g_browse_open;
+extern char g_browse_path[256];
+extern int  g_browse_scroll;
+extern int  g_browse_drag;
+extern int  g_browse_drag_y;
+extern int  g_browse_moved;
 int         http_get(const char *url, int *status_out, char **body_out, int *len_out);
 int         http_post(const char *url, const char *body, char **resp_out, int *resp_len);
 int
@@ -450,33 +498,38 @@ long long   store_get_cursor(void);
 void        store_set_cursor(long long cursor);
 int         store_upsert_book(const Book *b);
 void        store_delete_book(const char *id);
-void        store_set_downloaded(const char *id, int downloaded, const char *local_path);
-int         store_get_book(const char *id, Book *out);
-void        store_begin(void);
-void        store_set_meta(const char *key, const char *value);
-int         store_meta_value(const char *key, char *out, size_t cap);
-void        store_commit(void);
-void        store_series_name(const char *series_id, char *out, size_t cap);
-int         store_series_members(const char *series_id, Book *out, int cap);
-int         store_count_undownloaded(void);
-int         store_next_undownloaded(char ids[][MAX_ID_LEN], int cap);
-int         store_next_ids(char ids[][MAX_ID_LEN], int cap, int offset);
-void        store_delete_book_file(const char *id);
-int         store_series_ids(const char *series_id, char ids[][MAX_ID_LEN], int cap, int offset);
-void        store_search_add(const char *term);
-int         store_search_count(void);
-int         store_search_list(char terms[][MAX_QUERY_LEN], int cap, int offset);
-void        view_rebuild(void);
-int         view_fetch_page(int page, TileRow *rows, int cap);
-int         view_fetch_row(int idx, TileRow *out);
-int         view_total(void);
-void        cover_cache_path(const char *id, char *out, size_t cap);
-int         cover_cache_load(const char *id, ibitmap **out_bmp);
-void        cover_cache_save(const char *id, const char *png_data, int len);
-ibitmap    *load_cover_scaled(const char *path);
-void        draw_text_centered(ifont *f, int cx, int cy, const char *text, int color);
-void        draw_button(
-           int x, int y, int w, int h, int selected, const char *label, int label_size, int label_color);
+void        store_delete_source(const char *source);
+int         store_local_meta_get(
+            const char *id, char *title, size_t title_cap, char *author, size_t author_cap);
+void     store_local_meta_put(const char *id, const char *title, const char *author);
+void     store_set_downloaded(const char *id, int downloaded, const char *local_path);
+int      store_get_book(const char *id, Book *out);
+void     store_begin(void);
+void     store_set_meta(const char *key, const char *value);
+int      store_meta_value(const char *key, char *out, size_t cap);
+void     store_commit(void);
+void     store_series_name(const char *series_id, char *out, size_t cap);
+int      store_series_members(const char *series_id, Book *out, int cap);
+int      store_count_undownloaded(void);
+int      store_next_undownloaded(char ids[][MAX_ID_LEN], int cap);
+int      store_next_ids(char ids[][MAX_ID_LEN], int cap, int offset);
+void     store_delete_book_file(const char *id);
+int      store_series_ids(const char *series_id, char ids[][MAX_ID_LEN], int cap, int offset);
+void     store_search_add(const char *term);
+int      store_search_count(void);
+int      store_search_list(char terms[][MAX_QUERY_LEN], int cap, int offset);
+void     view_rebuild(void);
+int      view_fetch_page(int page, TileRow *rows, int cap);
+int      view_fetch_row(int idx, TileRow *out);
+int      view_total(void);
+void     cover_cache_path(const char *id, char *out, size_t cap);
+void     cover_raw_path(const char *id, char *out, size_t cap);
+int      cover_cache_load(const char *id, ibitmap **out_bmp);
+void     cover_cache_save(const char *id, const char *png_data, int len);
+ibitmap *load_cover_scaled(const char *path);
+void     draw_text_centered(ifont *f, int cx, int cy, const char *text, int color);
+void     draw_button(
+        int x, int y, int w, int h, int selected, const char *label, int label_size, int label_color);
 void draw_top_bar(void);
 void draw_search_icon(void);
 void draw_search_tab(void);
@@ -568,6 +621,7 @@ void          launcher_close(void);
 void          drill_back(void);
 void          on_tap_thumbnail(int vi);
 void          book_local_path(const Book *b, char *out, size_t cap);
+void          book_existing_path(const Book *b, char *out, size_t cap);
 void          refresh_downloaded(Book *b);
 void          refresh_downloaded_flags(void);
 DownloadItem *find_download(const char *id);

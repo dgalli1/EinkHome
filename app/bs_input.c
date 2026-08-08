@@ -12,10 +12,14 @@ hit_top_bar(int x, int y)
     if (y < bar_top || y >= bar_bot)
         return -1;
     int w = ScreenWidth();
-    /* Left "home" button — 96×96 region, padded 8 px on the left.  On
-     * the Search sub-view it is the back arrow. */
+    /* Left button — 96×96 region, padded 8 px on the left: a back
+     * arrow on the Search sub-view or a drilled series, a no-op
+     * otherwise (the home icon was removed). */
     if (x >= 8 && x < 8 + 96)
         return 1;
+    /* Source button — icon + label right of the house button. */
+    if (x >= SOURCE_BTN_X && x < SOURCE_BTN_X + SOURCE_BTN_W)
+        return 6;
     /* The Search page has no right-side icons — its corner is empty. */
     if (g_state.tab == TAB_SEARCH)
         return -1;
@@ -218,6 +222,50 @@ on_tap_overlay_more(int x, int y)
     }
     g_state.more_open = 0;
     return 0;
+}
+
+/* Handle a tap on the source chooser.  Row 0/1 switch the library
+ * source directly (Kavita / scanner-local); row 2 opens the folder
+ * picker — the picked directory becomes the folder source.  A tap
+ * outside the sheet dismisses.  Returns 1 (the chooser owns the
+ * screen while open). */
+int
+on_tap_source(int x, int y)
+{
+    int pw, ph, px, py;
+    source_geom(&px, &py, &pw, &ph);
+    if (x < px || x >= px + pw || y < py || y >= py + ph) {
+        g_source_open = 0;
+        redraw_shelf();
+        return 1;
+    }
+    int row = (y - (py + 80)) / 96;
+    if (row < 0 || row >= 3)
+        return 1;
+    g_source_open = 0;
+    if (row == 0) {
+        g_state.source = SOURCE_KAVITA;
+        g_browse_open = 0;
+        g_browse_drag = 0;
+        save_config_file();
+        do_sync();
+        redraw_shelf();
+    } else if (row == 1) {
+        g_state.source = SOURCE_LOCAL;
+        g_browse_open = 0;
+        g_browse_drag = 0;
+        save_config_file();
+        do_sync();
+        redraw_shelf();
+    } else {
+        /* Folder source: the browser is always rooted at /mnt/ext1 —
+         * the user only has this partition, so there is no base
+         * directory to choose. */
+        g_state.source = SOURCE_FOLDER;
+        save_config_file();
+        browse_start(BROWSE_ROOT);
+    }
+    return 1;
 }
 
 /* Close the settings overlay and repaint the shelf beneath it.  A

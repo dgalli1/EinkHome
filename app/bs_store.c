@@ -37,7 +37,8 @@ static const char *const SCHEMA_SQL =
     "CREATE TABLE IF NOT EXISTS books("
     " id TEXT PRIMARY KEY,"
     " title TEXT, author TEXT, series TEXT, series_id TEXT,"
-    " local_path TEXT, added_at INTEGER);"
+    " local_path TEXT, added_at INTEGER,"
+    " filename TEXT, source TEXT);"
     "CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT);"
     "CREATE TABLE IF NOT EXISTS view("
     " pos INTEGER PRIMARY KEY,"
@@ -45,6 +46,9 @@ static const char *const SCHEMA_SQL =
     " series_name TEXT, series_count INTEGER);"
     "CREATE TABLE IF NOT EXISTS search_history("
     " term TEXT PRIMARY KEY, ts INTEGER);"
+    "CREATE TABLE IF NOT EXISTS local_meta("
+    " id TEXT PRIMARY KEY,"
+    " title TEXT, author TEXT);"
     "CREATE INDEX IF NOT EXISTS idx_books_title"
     " ON books(title COLLATE NOCASE, id);"
     "CREATE INDEX IF NOT EXISTS idx_books_author"
@@ -102,6 +106,8 @@ store_migrate_columns(void)
         {"downloaded", "INTEGER"},
         {"local_path", "TEXT"},
         {"added_at", "INTEGER"},
+        {"filename", "TEXT"},
+        {"source", "TEXT"},
     };
     int changed = 0;
     for (size_t i = 0; i < sizeof mig / sizeof mig[0]; i++) {
@@ -299,8 +305,9 @@ store_upsert_book(const Book *b)
     if (sqlite3_prepare_v2(g_db,
                            "INSERT OR REPLACE INTO books("
                            "id,title,author,series,series_id,series_idx,"
-                           "ext,size,downloaded,local_path,added_at)"
-                           " VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+                           "ext,size,downloaded,local_path,added_at,"
+                           "filename,source)"
+                           " VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
                            -1,
                            &st,
                            NULL) != SQLITE_OK)
@@ -316,6 +323,8 @@ store_upsert_book(const Book *b)
     sqlite3_bind_int(st, 9, downloaded);
     bind_text_trunc(st, 10, local_path);
     sqlite3_bind_int64(st, 11, b->added_at);
+    bind_text_trunc(st, 12, b->filename);
+    bind_text_trunc(st, 13, b->source[0] ? b->source : "kavita");
     int rc = sqlite3_step(st);
     if (rc != SQLITE_DONE)
         LOG("[bookshelf] upsert FAILED id=%s rc=%d: %s\n", b->id, rc, sqlite3_errmsg(g_db));
@@ -332,6 +341,67 @@ store_delete_book(const char *id)
     if (sqlite3_prepare_v2(g_db, "DELETE FROM books WHERE id=?1", -1, &st, NULL) != SQLITE_OK)
         return;
     bind_text_trunc(st, 1, id);
+    sqlite3_step(st);
+    sqlite3_finalize(st);
+}
+
+/* Drop every book of one source (local imports replace wholesale, so a
+ * re-scan never leaves stale entries behind). */
+void
+store_delete_source(const char *source)
+{
+    if (g_db == NULL)
+        return;
+    sqlite3_stmt *st = NULL;
+    if (sqlite3_prepare_v2(g_db, "DELETE FROM books WHERE source=?1", -1, &st, NULL) != SQLITE_OK)
+        return;
+    bind_text_trunc(st, 1, source);
+    sqlite3_step(st);
+    sqlite3_finalize(st);
+}
+
+/* Extracted-metadata cache for local books, keyed by the stable
+ * fld_<hash> id.  Survives re-imports so a rescan never re-parses a
+ * book whose metadata is already known.  Returns 1 on hit. */
+int
+store_local_meta_get(const char *id, char *title, size_t title_cap, char *author, size_t author_cap)
+{
+    if (g_db == NULL)
+        return 0;
+    sqlite3_stmt *st = NULL;
+    if (sqlite3_prepare_v2(
+            g_db, "SELECT title, author FROM local_meta WHERE id=?1", -1, &st, NULL) != SQLITE_OK)
+        return 0;
+    bind_text_trunc(st, 1, id);
+    int hit = sqlite3_step(st) == SQLITE_ROW;
+    if (hit) {
+        const char *t = (const char *)sqlite3_column_text(st, 0);
+        const char *a = (const char *)sqlite3_column_text(st, 1);
+        if (title != NULL && title_cap > 0)
+            snprintf(title, title_cap, "%s", t != NULL ? t : "");
+        if (author != NULL && author_cap > 0)
+            snprintf(author, author_cap, "%s", a != NULL ? a : "");
+    }
+    sqlite3_finalize(st);
+    return hit;
+}
+
+void
+store_local_meta_put(const char *id, const char *title, const char *author)
+{
+    if (g_db == NULL)
+        return;
+    sqlite3_stmt *st = NULL;
+    if (sqlite3_prepare_v2(g_db,
+                           "INSERT OR REPLACE INTO local_meta(id, title, author)"
+                           " VALUES(?1, ?2, ?3)",
+                           -1,
+                           &st,
+                           NULL) != SQLITE_OK)
+        return;
+    bind_text_trunc(st, 1, id);
+    bind_text_trunc(st, 2, title != NULL ? title : "");
+    bind_text_trunc(st, 3, author != NULL ? author : "");
     sqlite3_step(st);
     sqlite3_finalize(st);
 }
@@ -368,15 +438,18 @@ fill_book_from_stmt(sqlite3_stmt *st, Book *b)
     b->downloaded = sqlite3_column_int(st, 8);
     snprintf(b->local_path, sizeof b->local_path, "%s", (const char *)sqlite3_column_text(st, 9));
     b->added_at = (long)sqlite3_column_int64(st, 10);
+    snprintf(b->filename, sizeof b->filename, "%s", (const char *)sqlite3_column_text(st, 11));
+    snprintf(b->source, sizeof b->source, "%s", (const char *)sqlite3_column_text(st, 12));
 }
 
 #define BOOK_COLS                                                                                  \
-    "id,title,author,series,series_id,series_idx,ext,size,downloaded,local_path,added_at"
+    "id,title,author,series,series_id,series_idx,ext,size,downloaded,local_path,added_at,"         \
+    "filename,source"
 /* books columns qualified for the view JOIN (bare BOOK_COLS would leave
  * every column after the first unqualified and ambiguous). */
 #define BOOK_COLS_Q                                                                                \
     "b.id,b.title,b.author,b.series,b.series_id,b.series_idx,b.ext,b.size,b.downloaded,"           \
-    "b.local_path,b.added_at"
+    "b.local_path,b.added_at,b.filename,b.source"
 
 /* Fetch one book row by id.  Returns 1 when found, 0 otherwise. */
 int
@@ -539,7 +612,9 @@ store_delete_book_file(const char *id)
     if (!store_get_book(id, &b))
         return;
     char path[MAX_PATH_LEN];
-    book_local_path(&b, path, sizeof path);
+    /* Remove the file where it actually lives (the stored location may
+     * predate a downloads-folder change). */
+    book_existing_path(&b, path, sizeof path);
     if (unlink(path) == 0)
         LOG("[bookshelf] delete_book_file removed %s\n", path);
     else
@@ -807,6 +882,13 @@ view_where(char *sql, size_t cap, int qbind)
                  qbind,
                  qbind);
     }
+    /* Only the active source's books are visible; rows written before
+     * the source column existed are kavita books.  The value comes from
+     * a fixed enum, so no quoting concerns. */
+    const char *src = g_state.source == SOURCE_LOCAL    ? "local"
+                      : g_state.source == SOURCE_FOLDER ? "folder"
+                                                        : "kavita";
+    snprintf(sql + strlen(sql), cap - strlen(sql), " AND COALESCE(source,'kavita')='%s'", src);
 }
 
 static const char *
@@ -1022,19 +1104,19 @@ view_total(void)
     return n;
 }
 
-/* Fill one TileRow from a joined view+books row.  BOOK_COLS_Q is 11
- * columns (0..10), then v.kind=11, v.book_id=12, v.series_id=13,
- * v.series_name=14, v.series_count=15. */
+/* Fill one TileRow from a joined view+books row.  BOOK_COLS_Q is 13
+ * columns (0..12), then v.kind=13, v.book_id=14, v.series_id=15,
+ * v.series_name=16, v.series_count=17. */
 static void
 fill_row_from_stmt(sqlite3_stmt *st, TileRow *tr)
 {
     memset(tr, 0, sizeof *tr);
-    fill_book_from_stmt(st, &tr->book); /* book cols first: 0..10 */
-    tr->is_series = sqlite3_column_int(st, 11);
-    snprintf(tr->series_id, sizeof tr->series_id, "%s", (const char *)sqlite3_column_text(st, 13));
+    fill_book_from_stmt(st, &tr->book); /* book cols first: 0..12 */
+    tr->is_series = sqlite3_column_int(st, 13);
+    snprintf(tr->series_id, sizeof tr->series_id, "%s", (const char *)sqlite3_column_text(st, 15));
     snprintf(
-        tr->series_name, sizeof tr->series_name, "%s", (const char *)sqlite3_column_text(st, 14));
-    tr->series_count = sqlite3_column_int(st, 15);
+        tr->series_name, sizeof tr->series_name, "%s", (const char *)sqlite3_column_text(st, 16));
+    tr->series_count = sqlite3_column_int(st, 17);
 }
 
 /* Read one page of the current view into rows[].  Returns the number of

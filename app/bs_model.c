@@ -11,7 +11,6 @@
  */
 
 char g_drilled_series[MAX_ID_LEN]; /* "" = top level */
-char g_drilled_series_name[48];    /* display name while drilled */
 
 /* Current page of view rows, shared by the draw loop and the cover
  * fetcher.  Single-threaded event loop, so one static page buffer is
@@ -223,6 +222,11 @@ save_config_file(void)
     const char *dl_dir = g_settings_dl_dir[0] ? g_settings_dl_dir : g_cfg_downloads_dir;
     if (dl_dir[0] != '\0')
         fprintf(f, "downloads_dir=%s\n", dl_dir);
+    fprintf(f,
+            "source=%s\n",
+            g_state.source == SOURCE_LOCAL    ? "local"
+            : g_state.source == SOURCE_FOLDER ? "folder"
+                                              : "kavita");
     if (g_state.reader_pref > 0 && g_state.reader_pref <= g_reader_count)
         fprintf(f, "reader=%s\n", g_readers[g_state.reader_pref - 1].path);
     else
@@ -268,6 +272,15 @@ parse_book_obj(const char *obj, Book *b)
     }
     b->size = json_find_int(obj, "size", 0);
     b->added_at = json_find_int(obj, "addedAt", 0);
+    /* Server books come from the remote library; local imports set
+     * their own source. */
+    snprintf(b->source, sizeof b->source, "kavita");
+    json_find_key(obj, "filename", b->filename, sizeof b->filename);
+    /* Sanitize to a bare basename right away: the downloads path is
+     * built from this and must stay inside the downloads dir. */
+    char *slash = strrchr(b->filename, '/');
+    if (slash != NULL)
+        memmove(b->filename, slash + 1, strlen(slash + 1) + 1);
 
     /* Check if the file exists on local storage (resolved downloads dir). */
     char path[MAX_PATH_LEN];
@@ -341,13 +354,24 @@ do_sync(void)
             g_covers[i].state = 0;
     }
 
+    long long cursor = store_get_cursor();
+
+    /* Local sources have no server: sync = (re)import the on-device
+     * library (all of /mnt/ext1), or nothing for the live Folder file
+     * browser. */
+    if (g_state.source == SOURCE_LOCAL) {
+        local_import_scanner();
+        goto synced;
+    }
+    if (g_state.source == SOURCE_FOLDER)
+        goto synced;
+
     /* Cursor-based delta: each round fetches at most SYNC_BATCH books,
      * writes them in one transaction and persists the cursor, so a
      * 100k-book library syncs in bounded-RAM rounds and resumes after a
      * crash. */
-    long long cursor = store_get_cursor();
-    int       more = 1;
-    int       rounds = 0;
+    int more = 1;
+    int rounds = 0;
     while (more && rounds < 400) { /* 400 * SYNC_BATCH = 200k ceiling */
         char body[128];
         snprintf(body, sizeof body, "{\"cursor\":%lld,\"limit\":%d}", cursor, SYNC_BATCH);
@@ -393,12 +417,17 @@ do_sync(void)
     }
     LOG("[bookshelf] do_sync: rounds=%d cursor=%lld\n", rounds, cursor);
 
+synced:
     view_rebuild();
     if (g_state.page * view_pagesize() >= view_total())
         g_state.page = 0;
 
     g_state.sync_state = 0;
     sync_set_active(0);
+    /* The server progress report only makes sense for the remote
+     * source. */
+    if (g_state.source != SOURCE_KAVITA)
+        return;
     /* post state back (best-effort) */
     char state_body[160];
     snprintf(state_body,
@@ -428,6 +457,20 @@ cover_cache_path(const char *id, char *out, size_t cap)
     snprintf(out, cap, "%s/%s.png", g_covers_dir, safe);
 }
 
+/* Path of the raw extracted cover for a local book (the exact bytes the
+ * extractor pulled from the file — PNG or JPEG).  Persisting it makes
+ * cover_tick skip the zip parse on every later view. */
+void
+cover_raw_path(const char *id, char *out, size_t cap)
+{
+    char safe[MAX_ID_LEN];
+    snprintf(safe, sizeof safe, "%s", id);
+    for (char *p = safe; *p; p++)
+        if (*p == '/')
+            *p = '_';
+    snprintf(out, cap, "%s/%s.raw", g_covers_dir, safe);
+}
+
 /* Decode a cover PNG scaled to 240x360.  On a colour display the decode
  * stays RGB24 — the same choice the stock bookshelf.app makes via
  * device_display_colormask() — so covers keep their colour; on a
@@ -451,6 +494,28 @@ load_cover_scaled(const char *path)
         LOG("[bookshelf] load_cover_scaled RGB24 small depth=%d\n", small->depth);
     return small;
 }
+/* Decode a cover image scaled to 240x360.  Sniffs PNG vs JPEG; on a
+ * colour display the decode stays RGB24 (same choice as
+ * load_cover_scaled).  The caller frees the returned bitmap. */
+ibitmap *
+load_image_scaled(const char *path)
+{
+    FILE         *f = fopen(path, "rb");
+    unsigned char magic[8] = {0};
+    if (f != NULL) {
+        fread(magic, 1, sizeof magic, f);
+        fclose(f);
+    }
+    int         is_png = magic[0] == 0x89 && magic[1] == 'P' && magic[2] == 'N' && magic[3] == 'G';
+    PixelFormat fmt = g_display_color ? kFmtRGB24 : kFmtGrayscale8;
+    ibitmap    *full = is_png ? LoadPNGToFormat(path, fmt) : LoadJPEGToFormat(path, fmt);
+    if (full == NULL)
+        return NULL;
+    ibitmap *small = BitmapStretchCopy(full, 0, 0, full->width, full->height, 240, 360);
+    free(full);
+    return small;
+}
+
 /* Try to load a cached cover PNG from disk.  Returns 0 on success
  * (bitmap written to *out_bmp), -1 if no cache exists. */
 int

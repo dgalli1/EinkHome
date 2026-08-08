@@ -1039,13 +1039,10 @@ on_tap_thumbnail(int vi)
     /* Series card → drill into the series. */
     if (tr.is_series) {
         snprintf(g_drilled_series, sizeof g_drilled_series, "%s", tr.series_id);
-        snprintf(g_drilled_series_name, sizeof g_drilled_series_name, "%s", tr.series_name);
         g_state.saved_page = g_state.page;
         g_state.page = 0;
         view_rebuild();
-        LOG("[bookshelf] drilled into series '%s' (%d books)\n",
-            g_drilled_series_name,
-            g_view_total);
+        LOG("[bookshelf] drilled into series '%s' (%d books)\n", tr.series_name, g_view_total);
         FillArea(0, 0, ScreenWidth(), content_bottom(), WHITE);
         draw_top_bar();
         draw_grid();
