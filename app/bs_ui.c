@@ -112,24 +112,24 @@ draw_top_bar(void)
     draw_search_icon();
     draw_sync_icon();
 
-    /* Right "menu" button — 96×96 solid black square with three
-     * white hamburger lines. */
+    /* Right "menu" button — three black hamburger lines on the white
+     * top bar. */
     int menu_w = 96;
     int menu_x = w - menu_w - 8;
     int menu_y = y0 + (TOP_BAR_H - menu_w) / 2;
     int menu_cx = menu_x + menu_w / 2;
     int menu_cy = menu_y + menu_w / 2;
     int menu_r = menu_w / 2;
-    FillArea(menu_cx - menu_r, menu_cy - menu_r, menu_r * 2, menu_r * 2, col);
+    FillArea(menu_cx - menu_r, menu_cy - menu_r, menu_r * 2, menu_r * 2, WHITE);
     int ml_w = 44;
-    FillArea(menu_cx - ml_w / 2, menu_cy - 19, ml_w, 6, WHITE);
-    FillArea(menu_cx - ml_w / 2, menu_cy - 3, ml_w, 6, WHITE);
-    FillArea(menu_cx - ml_w / 2, menu_cy + 13, ml_w, 6, WHITE);
+    FillArea(menu_cx - ml_w / 2, menu_cy - 19, ml_w, 6, col);
+    FillArea(menu_cx - ml_w / 2, menu_cy - 3, ml_w, 6, col);
+    FillArea(menu_cx - ml_w / 2, menu_cy + 13, ml_w, 6, col);
 }
 
-/* Sync button in the top bar, left of the menu button: a solid black
- * square with two white arc arrows (a "refresh" glyph) that rotate a
- * few degrees per second while a sync or download is in flight
+/* Sync button in the top bar, left of the menu button: two black arc
+ * arrows (a "refresh" glyph) on the white top bar, rotating a few
+ * degrees per second while a sync or download is in flight
  * (sync_set_active arms the rotation timer).  Tapping it runs a
  * library sync (see hit_top_bar). */
 static int
@@ -188,7 +188,7 @@ draw_sync_icon(void)
     int ic_w = 96;
     int ic_x = w - ic_w - 8 - ic_w; /* left of the menu button */
     int ic_y = y0 + (TOP_BAR_H - ic_w) / 2;
-    FillArea(ic_x, ic_y, ic_w, ic_w, BLACK);
+    FillArea(ic_x, ic_y, ic_w, ic_w, WHITE);
     int cx = ic_x + ic_w / 2;
     int cy = ic_y + ic_w / 2;
     int r = 28;
@@ -202,8 +202,8 @@ draw_sync_icon(void)
             int    x = cx + (int)(r * cos(a));
             int    y = cy + (int)(r * sin(a));
             if (s > 0) {
-                DrawLine(px, py, x, y, WHITE);
-                DrawLine(px, py + 1, x, y + 1, WHITE);
+                DrawLine(px, py, x, y, BLACK);
+                DrawLine(px, py + 1, x, y + 1, BLACK);
             }
             px = x;
             py = y;
@@ -216,7 +216,7 @@ draw_sync_icon(void)
         double ta = (a0 + 120) * M_PI / 180.0 + M_PI / 2.0;
         for (int t = 0; t < 2; t++) {
             double ha = ta + M_PI + (t ? 0.6 : -0.6);
-            DrawLine(ex, ey, ex + (int)(11 * cos(ha)), ey + (int)(11 * sin(ha)), WHITE);
+            DrawLine(ex, ey, ex + (int)(11 * cos(ha)), ey + (int)(11 * sin(ha)), BLACK);
         }
     }
 }

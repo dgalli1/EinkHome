@@ -360,11 +360,11 @@ header:
 * **Center** — a title while a drilled-in series (series name), the
   Search page ("Search"), or an active search query (the query text,
   truncated) is showing; the plain library shelf carries no title.
-* **Right** — a 96×96 solid black square with three white hamburger
-  lines.  Tapping opens the in-app "More" menu (sort, view, sync).
-* **Left of the menu button** — a 96×96 sync button (solid black square
-  with two white arc arrows that rotate while a sync or download is in
-  flight).  Tapping it runs a library sync.
+* **Right** — a 96×96 hit area with three black hamburger lines.
+  Tapping opens the in-app "More" menu (sort, view, sync).
+* **Left of the menu button** — a 96×96 sync hit area with two black
+  arc arrows that rotate while a sync or download is in flight.
+  Tapping it runs a library sync.
 * **Left of the sync button** — a 96×96 magnifying-glass icon.
   Tapping it opens the Search page (input row + previous search
   terms); the old full-width search row was dropped to reclaim the
