@@ -21,6 +21,7 @@ from tests.support.runtime import (  # noqa: E402
     CONTAINER,
     PODMAN,
     Emulator,
+    container_running,
     container_sh,
     detect_firmware,
 )
@@ -28,8 +29,8 @@ from tests.support.runtime import (  # noqa: E402
 
 del CONTAINER  # imported for re-export discovery only
 
-
 _READER_APP = "/workspace/firmware/ebrmain/bin/eink-reader.app"
+_CUSTOM_HOME_APP = "/mnt/ext1/system/bin/bookshelf.app"
 
 
 def pytest_collection_modifyitems(config, items):
@@ -106,23 +107,51 @@ def _wait_ready_emulator(
 def _assert_reader_prerequisites() -> None:
     binary = container_sh(f"test -x {_READER_APP} && echo ok", check=False)
     assert "ok" in binary.stdout, "eink-reader.app missing from firmware"
+    custom = container_sh(
+        f"test -x {_CUSTOM_HOME_APP} && echo yes", check=False
+    )
+    if "yes" in custom.stdout:
+        pytest.skip(
+            "custom bookshelf home staged on the user partition: the stock "
+            "recent-book open flow these tests drive is unavailable"
+        )
 
 
-@pytest.fixture(scope="session", name="emulator")
-def _emulator_fixture() -> Iterator[Emulator]:
-    """Provide one session-scoped headless emulator instance."""
-    instance = _boot_emulator(detect_firmware())
+@pytest.fixture(scope="session", name="_emulator_holder")
+def _emulator_holder_fixture() -> Iterator[dict]:
+    """Session-lifetime holder for the shared emulator instance."""
+    holder: dict = {}
     try:
-        yield instance
+        yield holder
     finally:
-        instance.stop()
+        instance = holder.get("instance")
+        if instance is not None:
+            instance.stop()
 
 
-@pytest.fixture(scope="session", name="emulator_reader")
-def _emulator_reader_fixture(emulator: Emulator) -> Emulator:
-    """Session-scoped emulator with reader prerequisites verified once."""
+def _shared_emulator(holder: dict) -> Emulator:
+    """Return the shared emulator, rebooting it if a module (e.g. the
+    bookshelf e2e suite, which runs the emulator with its own flags and
+    stops it on module teardown) tore the container down."""
+    instance = holder.get("instance")
+    if instance is None or not container_running():
+        instance = _boot_emulator(detect_firmware())
+        holder["instance"] = instance
+    return instance
+
+
+@pytest.fixture(name="emulator")
+def _emulator_fixture(_emulator_holder: dict) -> Emulator:
+    """Provide the shared headless emulator, self-healing across modules."""
+    return _shared_emulator(_emulator_holder)
+
+
+@pytest.fixture(scope="module", name="emulator_reader")
+def _emulator_reader_fixture(_emulator_holder: dict) -> Emulator:
+    """Shared emulator with reader prerequisites verified per module."""
+    instance = _shared_emulator(_emulator_holder)
     _assert_reader_prerequisites()
-    return emulator
+    return instance
 
 
 @pytest.fixture(autouse=True)
