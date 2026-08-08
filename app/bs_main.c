@@ -285,7 +285,7 @@ on_event(int type, int par1, int par2)
         /* The file browser body is drag-scrolled like the launcher; a
          * press on the top bar above it is a button press, not a
          * scroll. */
-        if (g_browse_open && g_state.source == SOURCE_FOLDER && y >= TOP_BAR_H) {
+        if (g_browse_open && g_state.source == SOURCE_FOLDER && y >= TOP_BAR_H + TOP_BAR_PAD) {
             g_browse_drag = 1;
             g_browse_drag_y = y;
             g_browse_moved = 0;
@@ -642,7 +642,10 @@ on_event(int type, int par1, int par2)
              * wipe it. */
             if (!g_state.dl_popup) {
                 draw_grid();
-                PartialUpdate(0, TOP_BAR_H, ScreenWidth(), content_bottom() - TOP_BAR_H);
+                PartialUpdate(0,
+                              TOP_BAR_H + TOP_BAR_PAD,
+                              ScreenWidth(),
+                              content_bottom() - TOP_BAR_H - TOP_BAR_PAD);
             }
             return 1;
         }

@@ -99,7 +99,9 @@ extern void unlockCanvasDrawing(void);
 
 /* Layout constants — tuned for the 1072x1448 633 Era panel (300 DPI).
  * All sizes are generous for comfortable e-ink touch targets. */
-#define TOP_BAR_H 128
+#define TOP_BAR_H 96
+/* White gap between the top bar's bottom border and the shelf body. */
+#define TOP_BAR_PAD 12
 /* Search input row height — used only on the Search sub-page; the main
  * shelf no longer carries a search row (the magnifier icon lives in the
  * top bar). */

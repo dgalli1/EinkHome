@@ -50,7 +50,7 @@ hit_search_icon(int x, int y)
 int
 hit_search_input(int x, int y)
 {
-    int row_top = TOP_BAR_H;
+    int row_top = TOP_BAR_H + TOP_BAR_PAD;
     int row_bot = row_top + SEARCH_ROW_H;
     if (y < row_top || y >= row_bot)
         return -1;

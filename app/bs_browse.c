@@ -135,7 +135,7 @@ browse_load(void)
 static int
 browse_rows_visible(void)
 {
-    int avail = content_bottom() - TOP_BAR_H - 8;
+    int avail = content_bottom() - (TOP_BAR_H + TOP_BAR_PAD) - 8;
     int rows = avail / FOLDER_ROW_H;
     return rows < 1 ? 1 : rows;
 }
@@ -237,7 +237,7 @@ void
 draw_browse(void)
 {
     int w = ScreenWidth();
-    int top = TOP_BAR_H;
+    int top = TOP_BAR_H + TOP_BAR_PAD;
     int bottom = content_bottom();
     int rows = browse_rows_visible();
 
@@ -289,9 +289,9 @@ int
 on_tap_browse(int x, int y)
 {
     (void)x; /* rows span the full width; only y matters */
-    if (y < TOP_BAR_H)
+    if (y < TOP_BAR_H + TOP_BAR_PAD)
         return 1;
-    int idx = (y - (TOP_BAR_H + 8)) / FOLDER_ROW_H + g_browse_scroll;
+    int idx = (y - (TOP_BAR_H + TOP_BAR_PAD + 8)) / FOLDER_ROW_H + g_browse_scroll;
     if (idx < 0 || idx >= g_browse_count)
         return 1;
     if (g_browse_is_dir[idx])

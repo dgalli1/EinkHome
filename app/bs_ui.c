@@ -263,6 +263,14 @@ draw_top_bar(void)
     FillArea(menu_cx - ml_w / 2, menu_cy - 21, ml_w, 6, col);
     FillArea(menu_cx - ml_w / 2, menu_cy - 3, ml_w, 6, col);
     FillArea(menu_cx - ml_w / 2, menu_cy + 15, ml_w, 6, col);
+
+    /* Vertical separators between the buttons, top to bottom border.
+     * Drawn last so no button's white fill covers them. */
+    DrawLine(8 + 96 + 4, y0, 8 + 96 + 4, y0 + TOP_BAR_H, col);
+    DrawLine(SOURCE_BTN_X + SOURCE_BTN_W, y0, SOURCE_BTN_X + SOURCE_BTN_W, y0 + TOP_BAR_H, col);
+    DrawLine(w - 296, y0, w - 296, y0 + TOP_BAR_H, col);
+    DrawLine(w - 200, y0, w - 200, y0 + TOP_BAR_H, col);
+    DrawLine(w - 104, y0, w - 104, y0 + TOP_BAR_H, col);
 }
 
 /* Sync button in the top bar, left of the menu button: two black arc
@@ -657,7 +665,7 @@ view_rows(void)
 {
     if (g_state.view_mode != VIEW_LIST)
         return ROWS;
-    int t = TOP_BAR_H;
+    int t = TOP_BAR_H + TOP_BAR_PAD;
     int b = content_bottom() - PAGER_H;
     if (g_state.menu_open || g_state.more_open)
         b = content_bottom();
@@ -679,7 +687,7 @@ void
 grid_geom(int *top, int *bot, int *cell_w, int *cell_h)
 {
     int w = ScreenWidth();
-    int t = TOP_BAR_H;
+    int t = TOP_BAR_H + TOP_BAR_PAD;
     int b = content_bottom() - PAGER_H;
     if (g_state.menu_open || g_state.more_open)
         b = content_bottom();
