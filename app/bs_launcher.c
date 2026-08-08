@@ -915,12 +915,49 @@ launch_app(const LauncherItem *it)
         args[ai++] = (char *)it->params[i];
     args[ai] = NULL;
     LOG("[bookshelf] launching app path=%s base=%s params=%d\n", it->path, base, it->nparams);
-    /* Flags 0x25: the same value the stock bookshelf passes to
-     * NewTaskEx() for app launches (TASK_HIDDEN | TASK_NOUPDATEONFOCUS |
-     * TASK_SINGLEINSTANCE | TASK_OUTOFSTACK).  The previous 1u<<30 bit
-     * is not a defined TASK_* flag and made monitor.app treat the task
-     * registration oddly on the live device. */
-    NewTaskEx(it->path, ai ? args : NULL, base, it->text, NULL, 0x25, 0);
+    /*
+     * Flags 0xa5 = TASK_HIDDEN | TASK_NOUPDATEONFOCUS | TASK_OUTOFSTACK |
+     * TASK_MAKEACTIVE.  TASK_MAKEACTIVE is the load-bearing bit: without it
+     * monitor.app registers the launched task but never brings it to the
+     * foreground, so a plain `NewTaskEx(…, 0x25, …)` leaves the app running
+     * invisibly in the background.  That is exactly how the browser worked
+     * (webbrowser.sh delegates to openbook → start.app, whose launch carries
+     * TASK_MAKEACTIVE) while calc.app appeared to "not start" (direct ELF
+     * launch with 0x25, no activation).  The pre-0x25 flags match what the
+     * stock bookshelf passes; the previous 1u<<30 bit is not a defined
+     * TASK_* flag and made monitor.app treat the task registration oddly on
+     * the live device. */
+    /*
+     * Draw a centered hourglass and leave it up while the app starts; the
+     * launched task (TASK_MAKEACTIVE) overwrites it once it becomes the
+     * foreground task and draws.  The caller suppresses the shelf redraw for
+     * this path, so the screen freezes on the hourglass instead of falling
+     * back to a static shelf that makes a slow launch look like a no-op.
+     *
+     * The firmware's own ShowHourglassForceAt() is not used here: its
+     * animation is driven by monitor.app via REQ_HOURGLASS and never lands
+     * in the app framebuffer (verified: nothing appears).  Drawing the
+     * theme's hourglass bitmap directly with DrawBitmap() is guaranteed to
+     * show on any build.
+     */
+    {
+        ibitmap *hg = GetResource("hourglass", NULL);
+        if (hg != NULL) {
+            int x = (ScreenWidth() - hg->width) / 2;
+            int y = (content_bottom() - hg->height) / 2;
+            /* White backing so the glyph reads over the frozen launcher. */
+            FillArea(x - 12, y - 12, hg->width + 24, hg->height + 24, WHITE);
+            DrawRect(x - 12, y - 12, hg->width + 24, hg->height + 24, BLACK);
+            DrawBitmap(x, y, hg);
+            PartialUpdate(x - 12, y - 12, hg->width + 24, hg->height + 24);
+        }
+    }
+    if (NewTaskEx(it->path, ai ? args : NULL, base, it->text, NULL, 0x25 | TASK_MAKEACTIVE, 0) < 0) {
+        /* Launch failed: drop the hourglass and bring the launcher back so
+         * the user is not stuck staring at an indefinite spinner. */
+        HideHourglass();
+        launcher_open_set();
+    }
 }
 
 void
@@ -940,7 +977,14 @@ on_tap_overlay_launcher(int x, int y)
         if (it->kind != 1)
             continue;
         if (x >= it->x && x < it->x + it->w && by >= it->y && by < it->y + it->h) {
-            launcher_close();
+            /* Launch the app.  Close the launcher state WITHOUT redrawing
+             * the shelf: launch_app() puts up a centered hourglass that
+             * stays until the launched task draws.  A redraw here would
+             * flash the shelf back and make a slow app start look like the
+             * tap did nothing. */
+            g_state.launcher_open = 0;
+            g_state.launcher_drag = 0;
+            g_state.launcher_moved = 0;
             launch_app(it);
             return;
         }
