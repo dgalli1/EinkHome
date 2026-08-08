@@ -261,6 +261,19 @@ book-open handshake (the built-in reader shows an hourglass and
 closes).  If the binary is ever missing, the launcher falls back to the
 stock `/ebrmain/bin/bookshelf.app` on its own.
 
+**Auxiliary firmware services.**  The stock boot starts the resident
+background services (`taskmgr`, `reader_controller`, `control_panel_mgr`,
+`explorer`, `update_desktop_data`) as part of the home task's init
+handshake; a fresh boot with our binary as the home task does not
+trigger that startup, which leaves the control-panel Task Manager
+button without a target and makes OpenBook's `reader_controller` poll
+time out.  Our bookshelf therefore launches those services itself from
+its deferred init (`launch_aux_services()`), using `NewTaskEx` with
+`TASK_BACKGROUND` flags — the same approach the emulator's shim uses for
+`reader_controller` (`ensure_reader_controller_task()`).  Once the
+services are resident (they relaunch on every bookshelf start), the
+Task Manager button and the book-open chain behave like stock.
+
 To remove everything and restore the stock boot path:
 
 ```bash
@@ -301,34 +314,39 @@ ssh root@<device-ip> 'tail -f /mnt/ext1/applications/bookshelf.log'
 
 ### Initial sync is automatic
 
-The binary syncs metadata on startup (the EVT_INIT handler calls
-`do_sync()` before the first draw), so the shelf populates without a
-manual tap.  The local store is opened and the grid built from it
-*before* the network sync, so an unreachable API still shows the
-cached library.  Subsequent syncs are triggered via **⋯** → **Sync**.
+The binary syncs metadata on startup — deferred to a one-shot timer so
+`EVT_INIT` returns immediately (a blocking network sync inside init
+delays the firmware's main-menu task binding on the real device, which
+breaks the control-panel Task Manager button and the
+`reader_controller`-based book-open chain).  The local store is opened
+and the grid built from it *before* the network sync, so an unreachable
+API still shows the cached library, and the shelf refreshes once the
+deferred sync settles.  Subsequent syncs are triggered via **⋯** →
+**Sync**.
 
 ## UI
 
-The on-screen layout has four regions stacked vertically below the
-system status bar.  The firmware's `libinkview` draws that bar at the
-**top** of the screen (day + 24h time, sync/wifi/frontlight/battery
-icons) into rows `[0, panel_h)`; the guest keeps the full physical
-height (`ScreenHeight()` = 1448) and every app surface is offset below
-the bar by `panel_h` (the pager sits at `ScreenHeight() - PAGER_H`):
+The on-screen layout has four regions stacked vertically in the
+guest's logical space, which spans `[0, ScreenHeight() - panel_h)` —
+the firmware draws the system status bar (day + 24h time + down-arrow
++ lightbulb + battery) into the TOP band `[0, panel_h)` of the
+framebuffer and offsets all app drawing below it (draws past the
+logical bottom wrap around to the top, so every surface must stay
+inside the logical space):
 
 ```
 +--------------------------------------------------+ <- 0
 |  Fr 23:05      ⌄      (sync) wifi 💡 63% 🔋     |   system status bar (firmware, TOP)
 +--------------------------------------------------+ <- panel_h (~106)
-|  [⌂]                    [Q] [⬇] [☰]            |   TOP_BAR_H (128 px)
+|  [⌂]                    [Q] [⬇] []            |   TOP_BAR_H (128 px)
 +--------------------------------------------------+
 |                                                  |
 |   [book]    [book]    [book]                     |
 |   [book]    [book]    [book]                     |   3×2 grid of thumbnails
 |                                                  |
 +--------------------------------------------------+
-|              <  1 / 9  >                          |   PAGER_H (96) at the bottom
-+--------------------------------------------------+ <- ScreenHeight
+|              <  1 / 9  >                          |   PAGER_H (96)
++--------------------------------------------------+ <- ScreenHeight - panel_h (logical bottom)
 ```
 
 The top bar style matches the firmware's standard `sudoku.app`
@@ -356,24 +374,35 @@ The "More" menu is a right-anchored 75%-width panel with the
 following items, in order: **Sync**, **Title A–Z**, **By author**,
 **By series**, **Recent**, **Grid**, **List**, **Download all**,
 **Settings**, **Applications**.  (A "System menu" entry existed while
-the firmware bar was unreliable; tapping the top status strip now opens
-the firmware control panel directly, so the entry was dropped.)
+the firmware bar was unreliable; tapping the top status strip now
+opens the firmware control panel directly, so the entry was dropped.)
 
 ### How the firmware system status bar works
 
-The stock desktop shows one system status bar at the **top** of the
-screen ("Fr 23:05 + down-arrow + sync/wifi + frontlight + battery",
-rows `[0, PanelHeight())`), with the app content offset beneath it.
-The mechanism (from `libinkview` disassembly + device screenshots,
-U633 6.8.2817):
+The firmware draws the system status bar at the TOP of the screen
+("Fr 23:05 + down-arrow + sync/wifi + lightbulb + battery", rows
+`[0, PanelHeight())` of the physical screen), with all app content
+below it.  The mechanism (from `libinkview` disassembly + device
+screenshots, U633 6.8.2817):
 
-* `fb_y_offset` stays 0 and `ScreenHeight()` reports the full physical
-  height (1448); apps offset their own surfaces by `PanelHeight()`.
-* `iv_update_panel()`'s y placement is controlled by bit 3 of two
-  internal panel-state bytes (image offsets 0x135240 / 0x135244): set
-  → blit at y=0 (top), clear → blit at
-  `ScreenHeight()-PanelHeight()` (bottom).  The device runs with the
-  bit set.
+* The guest's logical drawing space stays the full `ScreenHeight()`
+  (1448 rows on the U633) and drawing is NOT shifted: app content
+  occupies SHM rows `[0, ScreenHeight()-PanelHeight())` and
+  `iv_update_panel()` blits the bar at
+  `y = ScreenHeight()-PanelHeight()` — the BOTTOM rows of the task
+  framebuffer.
+* `OpenScreen()` stores `GetThemeInt("panel_position", 0)` in the
+  library state (offset `0x160`).  When it is 1, `SetPanelType(type)`
+  (bit 3 of `type` clear) sets the per-task
+  `iv_fbinfo::fb_y_offset = PanelHeight()` (offset `0x8c` in the task
+  SHM header) — the **wrapped scanout origin**.  The display pipeline
+  starts scanout `fb_y_offset` rows into the framebuffer and wraps:
+  the bottom rows (the bar) appear at the top of the screen and app
+  row 0 lands at physical row `PanelHeight()`.  (The wrap is also why
+  drawing "too far down" makes content appear at the top, e.g. while
+  scrolling the launcher.)
+* Pointer input arrives in physical screen coordinates and the guest
+  subtracts `fb_y_offset`, so the app sees logical coordinates.
 
 Registration happens in `main()` BEFORE `InkViewMain()`, in the stock
 order (doing it inside `EVT_INIT` corrupts the per-task fbinfo on the
@@ -397,16 +426,17 @@ stamp_panel();   /* iv_update_panel(0) or our self-drawn fallback */
 Repaint();
 ```
 
-On the emulator the guest never sets the placement bit, so
-`iv_update_panel()` would blit the bar at the BOTTOM — the divergence
-the user flagged.  The pbemu shim therefore interposes `SetPanelType()`
-and, after forwarding to the real implementation, sets bit 3 of those
-two bytes (resolved via `dladdr` on the real symbol), which restores
-device parity.
+The pbemu emulator replicates the display side of this contract in the
+PC viewer (and `frame_dump`): both read `fb_y_offset` from the task SHM
+header (via the informer snapshot) and present SHM row `r` at screen
+row `(r + fb_y_offset) % height`, exactly like the device's scanout.
+The shim only supplies the theme answer the device resolves natively
+(`GetThemeString("panel_position") = "1"`); `SetPanelType()` itself is
+NOT interposed.
 
-On a live device where the panel painter never activates for this
-task (`PanelHeight()` returns 0 at `EVT_INIT`), the app falls back to
-a **self-drawn** strip of the same height (`SELF_PANEL_H`) in the same
+On a live device where the panel painter never activates for this task
+(`PanelHeight()` returns 0 at `EVT_INIT`), the app falls back to a
+**self-drawn** strip of the same height (`SELF_PANEL_H`) in the same
 top band: day + 24h time on the left, frontlight bulb + battery
 outline on the right, drawn by `draw_system_strip()`.  `stamp_panel()`
 picks the right painter; `g_state.panel_h` is forced to `SELF_PANEL_H`

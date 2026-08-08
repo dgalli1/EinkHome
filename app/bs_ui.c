@@ -33,7 +33,7 @@ void
 draw_top_bar(void)
 {
     int w = ScreenWidth();
-    int y0 = g_state.panel_h;
+    int y0 = 0; /* top bar sits at the very top; the system panel is at the bottom */
     int col = BLACK;
 
     FillArea(0, y0, w, TOP_BAR_H, WHITE);
@@ -160,7 +160,7 @@ sync_spin_tick(void *ctx)
      * is redrawn whole when the state that feeds it changes. */
     if (!sync_modal_open() && g_state.tab != TAB_SEARCH) {
         draw_sync_icon();
-        PartialUpdate(ScreenWidth() - 96 - 8 - 96, g_state.panel_h, 96, TOP_BAR_H);
+        PartialUpdate(ScreenWidth() - 96 - 8 - 96, 0, 96, TOP_BAR_H);
     }
     SetWeakTimerEx("bspin", sync_spin_tick, NULL, 1000);
 }
@@ -176,7 +176,7 @@ sync_set_active(int on)
     }
     if (!sync_modal_open() && g_state.tab != TAB_SEARCH) {
         draw_sync_icon();
-        PartialUpdate(ScreenWidth() - 96 - 8 - 96, g_state.panel_h, 96, TOP_BAR_H);
+        PartialUpdate(ScreenWidth() - 96 - 8 - 96, 0, 96, TOP_BAR_H);
     }
 }
 
@@ -184,7 +184,7 @@ void
 draw_sync_icon(void)
 {
     int w = ScreenWidth();
-    int y0 = g_state.panel_h;
+    int y0 = 0;
     int ic_w = 96;
     int ic_x = w - ic_w - 8 - ic_w; /* left of the menu button */
     int ic_y = y0 + (TOP_BAR_H - ic_w) / 2;
@@ -229,7 +229,7 @@ void
 draw_search_icon(void)
 {
     int w = ScreenWidth();
-    int y0 = g_state.panel_h;
+    int y0 = 0;
     int col = BLACK;
     int ic_w = 96;
     int menu_x = w - 96 - 8;
@@ -368,7 +368,8 @@ downloads_pending(void)
 }
 
 /* 1 = the firmware's panel painter never activated (PanelHeight()==0 at
- * init, the live-device case); we draw the status strip ourselves. */
+ * init); we draw the status strip ourselves — at the BOTTOM, where the
+ * firmware's type-1 panel lives. */
 int g_self_panel = 0;
 
 static void
@@ -396,9 +397,10 @@ draw_system_strip(void)
 {
     int w = ScreenWidth();
     int h = g_state.panel_h;
+    int y0 = ScreenHeight() - h;
 
-    FillArea(0, 0, w, h, WHITE);
-    DrawLine(0, h - 1, w, h - 1, BLACK);
+    FillArea(0, y0, w, h, WHITE);
+    DrawLine(0, y0, w, y0, BLACK);
 
     time_t    now = time(NULL);
     struct tm tmv;
@@ -408,13 +410,13 @@ draw_system_strip(void)
     ifont *tf = OpenFont(DEFAULTFONT, 40, 0);
     if (tf != NULL) {
         SetFont(tf, BLACK);
-        DrawString(24, (h - 40) / 2, buf);
+        DrawString(24, y0 + (h - 40) / 2, buf);
         CloseFont(tf);
     }
 
     /* Frontlight bulb: circle with short rays. */
     int lx = w - 176;
-    int ly = h / 2;
+    int ly = y0 + h / 2;
     draw_circle_outline(lx, ly, 12);
     for (int a = 0; a < 8; a++) {
         double ang = a * M_PI / 4.0 + M_PI / 8.0;
@@ -428,7 +430,7 @@ draw_system_strip(void)
     /* Battery: outline + nub + fill proportional to charge. */
     int bw = 84, bh = 40;
     int bx = w - 116;
-    int by = (h - bh) / 2;
+    int by = y0 + (h - bh) / 2;
     DrawRect(bx, by, bw, bh, BLACK);
     FillArea(bx + bw + 1, by + bh / 2 - 7, 6, 14, BLACK);
     int lvl = GetBatteryPower();
@@ -441,7 +443,7 @@ draw_system_strip(void)
         FillArea(bx + 4, by + 4, fw, bh - 8, BLACK);
 }
 
-/* Paint the top status strip: firmware-painted when the panel painter
+/* Paint the bottom status strip: firmware-painted when the panel painter
  * is active (emulator), self-drawn when it never activates (device). */
 void
 stamp_panel(void)
@@ -450,6 +452,17 @@ stamp_panel(void)
         draw_system_strip();
     else
         iv_update_panel(0);
+}
+
+/* Bottom edge of the app-owned content area: the firmware's type-1
+ * system panel occupies [content_bottom(), ScreenHeight()), so every
+ * app surface (top bar, grid, pager, overlays) lives above it.  The
+ * stock desktop does the same (its MainFrame is created with height
+ * ScreenHeight() - PanelHeight()). */
+int
+content_bottom(void)
+{
+    return ScreenHeight() - g_state.panel_h;
 }
 
 /* -- cover helpers ------------------------------------------------------ */
@@ -506,10 +519,10 @@ view_rows(void)
 {
     if (g_state.view_mode != VIEW_LIST)
         return ROWS;
-    int t = g_state.panel_h + TOP_BAR_H;
-    int b = ScreenHeight() - PAGER_H;
+    int t = TOP_BAR_H;
+    int b = content_bottom() - PAGER_H;
     if (g_state.menu_open || g_state.more_open)
-        b = ScreenHeight();
+        b = content_bottom();
     int rows = (b - t - 8) / LIST_ROW_H;
     if (rows < 1)
         rows = 1;
@@ -528,10 +541,10 @@ void
 grid_geom(int *top, int *bot, int *cell_w, int *cell_h)
 {
     int w = ScreenWidth();
-    int t = g_state.panel_h + TOP_BAR_H;
-    int b = ScreenHeight() - PAGER_H;
+    int t = TOP_BAR_H;
+    int b = content_bottom() - PAGER_H;
     if (g_state.menu_open || g_state.more_open)
-        b = ScreenHeight();
+        b = content_bottom();
     int avail_h = b - t - 8;
     int avail_w = w - 16;
     int cw, ch;
@@ -949,10 +962,10 @@ draw_dl_popup(void)
 {
     int w = ScreenWidth();
     int h = ScreenHeight();
-    /* Dim the shelf body below the top bar, so the top-bar icons (the
-     * spinning sync glyph among them) stay fully visible while the
-     * download runs. */
-    for (int yy = g_state.panel_h + TOP_BAR_H; yy < h; yy += 2)
+    /* Dim the shelf body below the top bar and above the panel band,
+     * so the top-bar icons (the spinning sync glyph among them) stay
+     * fully visible while the download runs. */
+    for (int yy = TOP_BAR_H; yy < content_bottom(); yy += 2)
         DrawLine(0, yy, w, yy, LGRAY);
 
     int pw = w * 3 / 4;
@@ -1027,7 +1040,7 @@ redraw_shelf(void)
         FullUpdate();
         return;
     }
-    FillArea(0, g_state.panel_h, ScreenWidth(), ScreenHeight() - g_state.panel_h, WHITE);
+    FillArea(0, 0, ScreenWidth(), content_bottom(), WHITE);
     draw_top_bar();
     if (g_state.tab == TAB_SEARCH)
         draw_search_tab();
@@ -1042,11 +1055,9 @@ redraw_shelf(void)
 void
 draw_grid(void)
 {
-    /* Layout: [system panel] [our top bar] [grid] [pager].
-     * The system panel renders at the TOP of the screen (PANEL_NO_FB_OFFSET
-     * flag), occupying rows [0, panel_h).  Everything we draw is offset
-     * below it; the pager sits at the very bottom with no reservation.
-     */
+    /* Layout: [top bar] [grid] [pager] [system panel].  The firmware's
+     * type-1 panel owns the bottom band [content_bottom(),
+     * ScreenHeight()); the pager sits directly above it. */
     int top, bot, cell_w, cell_h;
     grid_geom(&top, &bot, &cell_w, &cell_h);
     /* Clear the grid area first so cells from a previous page don't
@@ -1200,9 +1211,8 @@ void
 draw_pager(void)
 {
     int w = ScreenWidth();
-    int h = ScreenHeight();
-    /* Pager sits at the very bottom; the system panel is at the top. */
-    int y = h - PAGER_H;
+    /* Pager sits directly above the bottom system panel band. */
+    int y = content_bottom() - PAGER_H;
     FillArea(0, y, w, PAGER_H, WHITE);
     DrawLine(0, y, w, y, BLACK);
 
@@ -1243,16 +1253,15 @@ void
 draw_overlay_menu(void)
 {
     int w = ScreenWidth();
-    int h = ScreenHeight();
-    FillArea(0, g_state.panel_h, w, h - g_state.panel_h, BLACK);
+    FillArea(0, 0, w, content_bottom(), BLACK);
     int pw = w * 3 / 4;
-    FillArea(0, g_state.panel_h, pw, h - g_state.panel_h, WHITE);
-    DrawLine(pw, g_state.panel_h, pw, h, BLACK);
+    FillArea(0, 0, pw, content_bottom(), WHITE);
+    DrawLine(pw, 0, pw, content_bottom(), BLACK);
 
     ifont *f = OpenFont(DEFAULTFONTB, 32, 0);
     if (f != NULL) {
         SetFont(f, BLACK);
-        DrawString(24, g_state.panel_h + 32, i18n("action.menu"));
+        DrawString(24, 32, i18n("action.menu"));
         CloseFont(f);
     }
 
@@ -1263,7 +1272,7 @@ draw_overlay_menu(void)
         "group.recent",
     };
     int n = (int)(sizeof labels / sizeof labels[0]);
-    int y0 = g_state.panel_h + 96;
+    int y0 = 96;
     int item_h = 88;
     for (int i = 0; i < n; i++) {
         int sel = (i == (int)g_state.group);
@@ -1281,17 +1290,16 @@ void
 draw_overlay_more(void)
 {
     int w = ScreenWidth();
-    int h = ScreenHeight();
-    FillArea(0, g_state.panel_h, w, h - g_state.panel_h, BLACK);
+    FillArea(0, 0, w, content_bottom(), BLACK);
     int pw = w * 3 / 4;
     int px = w - pw;
-    FillArea(px, g_state.panel_h, pw, h - g_state.panel_h, WHITE);
-    DrawLine(px, g_state.panel_h, px, h, BLACK);
+    FillArea(px, 0, pw, content_bottom(), WHITE);
+    DrawLine(px, 0, px, content_bottom(), BLACK);
 
     ifont *f = OpenFont(DEFAULTFONTB, 32, 0);
     if (f != NULL) {
         SetFont(f, BLACK);
-        DrawString(px + 24, g_state.panel_h + 32, i18n("action.more"));
+        DrawString(px + 24, 32, i18n("action.more"));
         CloseFont(f);
     }
     const char *labels[] = {
@@ -1307,7 +1315,7 @@ draw_overlay_more(void)
         "action.apps",
     };
     int n = (int)(sizeof labels / sizeof labels[0]);
-    int y0 = g_state.panel_h + MORE_Y0;
+    int y0 = MORE_Y0;
     for (int i = 0; i < n; i++) {
         int sel = 0;
         if (i == 0 && g_state.sync_state == 1)
@@ -1364,10 +1372,9 @@ settings_keyboard_handler(char *buffer)
     }
     g_settings_edit = 0;
     draw_overlay_settings();
-    /* The on-screen keyboard draws full-screen and wipes the top status
-     * strip; re-stamp it before the flush so the panel survives the commit
-     * redraw (draw_overlay_settings clears only from panel_h). */
-    stamp_panel();
+    /* The on-screen keyboard draws full-screen and wipes the bottom
+     * status strip; re-stamp it before the flush so the panel survives
+     * the commit redraw. */
     FullUpdate();
 }
 
@@ -1429,18 +1436,17 @@ void
 draw_overlay_settings(void)
 {
     int w = ScreenWidth();
-    int h = ScreenHeight();
-    FillArea(0, g_state.panel_h, w, h - g_state.panel_h, WHITE);
+    FillArea(0, 0, w, content_bottom(), WHITE);
 
     ifont *tf = OpenFont(DEFAULTFONTB, 40, 0);
     if (tf != NULL) {
         SetFont(tf, BLACK);
-        DrawString(32, g_state.panel_h + 28, i18n("settings.title"));
+        DrawString(32, 28, i18n("settings.title"));
         CloseFont(tf);
     }
-    DrawLine(0, g_state.panel_h + 92, w, g_state.panel_h + 92, BLACK);
+    DrawLine(0, 92, w, 92, BLACK);
 
-    int y = g_state.panel_h + 112;
+    int y = 112;
     settings_draw_row(y, i18n("settings.api_host"), g_state.api_base, g_settings_edit == 1);
     y += SETTINGS_ROW_H;
     settings_draw_row(y, i18n("settings.api_key"), g_state.api_token, g_settings_edit == 2);
