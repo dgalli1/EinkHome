@@ -206,6 +206,11 @@ on_event(int type, int par1, int par2)
             FullUpdate();
             return 1;
         }
+        if (g_folder_open) {
+            draw_overlay_folder();
+            FullUpdate();
+            return 1;
+        }
         if (g_state.settings_open) {
             draw_overlay_settings();
             FullUpdate();
@@ -229,6 +234,15 @@ on_event(int type, int par1, int par2)
 
     if (type == EVT_POINTERDOWN) {
         int x = par1, y = par2;
+        /* The download-folder picker body is drag-scrolled like the
+         * launcher: remember the press point so POINTERMOVE can
+         * translate the finger travel into scroll. */
+        if (g_folder_open) {
+            g_folder_drag = 1;
+            g_folder_drag_y = y;
+            g_folder_moved = 0;
+            return 1;
+        }
         /* The launcher body is drag-scrolled: remember the press point so
          * POINTERMOVE can translate the finger travel into scroll. */
         if (g_state.launcher_open) {
@@ -257,6 +271,21 @@ on_event(int type, int par1, int par2)
     }
 
     if (type == EVT_POINTERMOVE) {
+        if (g_folder_open) {
+            if (g_folder_drag) {
+                int dy = par2 - g_folder_drag_y;
+                if (g_folder_moved || dy > LAUNCHER_DRAG_SLOP || dy < -LAUNCHER_DRAG_SLOP) {
+                    g_folder_moved = 1;
+                    g_folder_scroll -= dy;
+                    g_folder_drag_y = par2;
+                    /* Draw the new scroll position into the framebuffer
+                     * but do NOT flush; the refresh happens once on
+                     * finger lift (see the POINTERUP path). */
+                    draw_overlay_folder();
+                }
+            }
+            return 1;
+        }
         if (g_state.launcher_open) {
             if (g_state.launcher_drag) {
                 int dy = par2 - g_state.launcher_drag_y;
@@ -302,6 +331,27 @@ on_event(int type, int par1, int par2)
             return 1;
         }
 
+        /* The download-folder picker owns the screen while open (it
+         * sits on top of the settings page).  A lift that ended a
+         * scroll drag is not a tap. */
+        if (g_folder_open) {
+            int was_drag = g_folder_moved;
+            g_folder_drag = 0;
+            g_folder_moved = 0;
+            if (was_drag) {
+                /* The full clamp (list height, ".." row) lives in
+                 * draw_overlay_folder; only keep the offset
+                 * non-negative here. */
+                if (g_folder_scroll < 0)
+                    g_folder_scroll = 0;
+                draw_overlay_folder();
+                flush_content();
+            } else {
+                on_tap_folder(x, y);
+            }
+            return 1;
+        }
+
         /* Settings overlay owns the whole screen and repaints itself. */
         if (g_state.settings_open) {
             on_tap_overlay_settings(x, y);
@@ -341,11 +391,19 @@ on_event(int type, int par1, int par2)
             return 1;
         }
 
-        /* The download popup owns all taps while open.  While any
-         * download is active it is modal — downloads never run in the
-         * background — so a tap is swallowed; once the queue drains
-         * (finished or failed) a tap closes it. */
+        /* The download popup owns all taps while open.  The X button
+         * aborts the whole queue (batch, series, or single download);
+         * the rest of the popup is modal while any download is active
+         * — downloads never run in the background — so a tap is
+         * swallowed; once the queue drains (finished or failed) a tap
+         * closes it. */
         if (g_state.dl_popup) {
+            int cx, cy;
+            dl_cancel_rect(&cx, &cy);
+            if (x >= cx && x < cx + DL_CANCEL_SIZE && y >= cy && y < cy + DL_CANCEL_SIZE) {
+                cancel_downloads();
+                return 1;
+            }
             if (downloads_pending() == 0 && !g_dl_batch_active) {
                 g_state.dl_popup = 0;
                 g_state.dl_popup_auto_open = 0;
@@ -365,10 +423,14 @@ on_event(int type, int par1, int par2)
             return 1;
         }
         if (g_state.more_open) {
-            on_tap_overlay_more(x, y);
+            /* on_tap_overlay_more reports 1 when its action already
+             * repainted (settings / launcher / download-all); without
+             * that, this follow-up redraw would flush the whole content
+             * area a second time in the same tap. */
+            int repainted = on_tap_overlay_more(x, y);
             /* If Settings was opened, it already drew itself; don't
              * repaint the shelf over it. */
-            if (!g_state.settings_open) {
+            if (!g_state.settings_open && !repainted) {
                 redraw_shelf();
             }
             return 1;
@@ -420,7 +482,7 @@ on_event(int type, int par1, int par2)
         if (which == 3) {
             g_state.more_open = 1;
             draw_overlay_more();
-            FullUpdate();
+            flush_content();
             return 1;
         }
         if (which == 2) {
@@ -509,11 +571,11 @@ on_event(int type, int par1, int par2)
          * is up so it can never fight the active surface. */
         if (par1 == IV_KEY_MENU) {
             if (!g_state.settings_open && !g_state.ctx_open && !g_state.dl_popup &&
-                !g_state.launcher_open) {
+                !g_state.launcher_open && !g_folder_open) {
                 g_state.menu_open = !g_state.menu_open;
                 if (g_state.menu_open) {
                     draw_overlay_menu();
-                    FullUpdate();
+                    flush_content();
                 } else {
                     redraw_shelf();
                 }
@@ -533,7 +595,8 @@ on_event(int type, int par1, int par2)
          * fall through to the Back logic below (close the topmost
          * sheet), matching how the stock bookshelf treats them. */
         if (is_page_key && !g_state.ctx_open && !g_state.dl_popup && !g_state.settings_open &&
-            !g_state.launcher_open && !g_state.menu_open && !g_state.more_open) {
+            !g_state.launcher_open && !g_state.menu_open && !g_state.more_open &&
+            !g_folder_open) {
             int pages = current_pages();
             if ((par1 == IV_KEY_NEXT || par1 == IV_KEY_NEXT2) && g_state.page + 1 < pages) {
                 g_state.page++;
@@ -558,6 +621,10 @@ on_event(int type, int par1, int par2)
                     g_state.dl_popup_auto_open = 0;
                     redraw_shelf();
                 }
+                return 1;
+            }
+            if (g_folder_open) {
+                folder_close();
                 return 1;
             }
             if (g_state.settings_open) {
@@ -626,9 +693,12 @@ keyboard_handler(char *buffer)
     view_rebuild();
     /* The on-screen keyboard draws full-screen and wipes the bottom
      * status strip; re-stamp it before redraw_shelf() flushes so the
-     * panel survives the commit redraw. */
+     * panel survives the commit redraw.  redraw_shelf() only flushes
+     * the content area, so follow with a full-screen flush to repaint
+     * the panel band the keyboard wiped. */
     stamp_panel();
     redraw_shelf();
+    FullUpdate();
 }
 
 int

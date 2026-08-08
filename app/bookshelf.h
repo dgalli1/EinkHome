@@ -57,12 +57,13 @@ extern void unlockCanvasDrawing(void);
 #define API_BASE_DEFAULT "http://169.254.1.2:8765"
 #endif
 
-#define TOKEN_DEFAULT   "pbemu-dev-token"
-#define LOCAL_DOWNLOADS "/mnt/ext1/system/bin"
-/* Guest-writable fallback for downloads.  The emulator's non-root qemu-arm
- * guest cannot write LOCAL_DOWNLOADS (/mnt/ext1/system/bin), so downloads
- * fall back to /tmp there (see resolve_downloads_dir).  On a real device
- * LOCAL_DOWNLOADS is writable and used directly. */
+#define TOKEN_DEFAULT "pbemu-dev-token"
+/* Download folder for books, chosen in Settings → Download folder.
+ * The picker only browses inside /mnt/ext1 (on-device storage); the
+ * default is the stock PocketBook downloads folder.  In the emulator
+ * the non-root qemu-arm guest cannot write /mnt/ext1 at all, so
+ * downloads fall back to /tmp there (see resolve_downloads_dir). */
+#define DEFAULT_DOWNLOADS_DIR    "/mnt/ext1/Downloads"
 #define LOCAL_DOWNLOADS_FALLBACK "/tmp"
 #define CONFIG_FILENAME          "bookshelf.cfg"
 /* Guest-writable fallback config path (used when the app's own directory
@@ -184,6 +185,12 @@ extern void unlockCanvasDrawing(void);
 /* Height reserved inside the download popup for the batch progress bar
  * (one bar covering every open download). */
 #define DL_BAR_H 56
+/* Cancel button inside the download popup: a 64x64 square directly
+ * right of the batch progress bar (comfortable touch target on 300
+ * DPI), so it reads as "abort the downloads" rather than a popup
+ * close button. */
+#define DL_CANCEL_SIZE 64
+#define DL_CANCEL_GAP  16
 
 typedef struct {
     const char *key;
@@ -316,6 +323,15 @@ typedef struct {
 } ReaderCandidate;
 #define SETTINGS_ROW_H 120
 #define SETTINGS_BTN_H 96
+/* Download-folder picker overlay (bs_folder.c): header with the current
+ * path, a scrollable list of subdirectories, and Select/Back buttons.
+ * Browsing is confined to /mnt/ext1 — the list has no ".." above the
+ * root, so on-device storage is the only thing choosable. */
+#define FOLDER_ROW_H    96
+#define FOLDER_LIST_TOP 120
+#define FOLDER_BTN_H    96
+#define FOLDER_BTN_PAD  24
+#define FOLDER_MAX_DIRS 128
 typedef struct {
     const char *device;
     const char *partner;
@@ -347,31 +363,36 @@ typedef struct {
 
 /* ── global variables ── */
 
-extern char              g_lang[8];
-extern const I18n        g_i18n[];
-extern FILE             *g_log;
-extern char              g_cfg_reader[220];
-extern char              g_config_path[600];
-extern char              g_drilled_series[MAX_ID_LEN];
-extern char              g_drilled_series_name[48];
-extern State             g_state;
-extern char              g_search_kb_buf[MAX_QUERY_LEN];
-extern CoverSlot         g_covers[NCOVER_SLOTS];
-extern TileRow           g_rows[MAX_ROWS * COLS]; /* current page rows */
-extern int               g_row_count;             /* rows on the page */
-extern int               g_view_total;            /* tiles in the view */
-extern int               g_dl_batch_active;       /* download-all batch mode */
-extern int               g_dl_batch_total;
-extern int               g_dl_batch_done;
-extern int               g_dl_batch_failed;
-extern char              g_dl_batch_failed_ids[MAX_DOWNLOADS * 4][MAX_ID_LEN];
-extern int               g_dl_batch_failed_count;
-void                     download_all_start(void);
-extern int               g_cover_armed;
-extern DownloadItem      g_downloads[MAX_DOWNLOADS];
-extern int               g_download_count;
-extern int               g_download_armed;
-extern char              g_downloads_dir[128];
+extern char         g_lang[8];
+extern const I18n   g_i18n[];
+extern FILE        *g_log;
+extern char         g_cfg_reader[220];
+extern char         g_config_path[600];
+extern char         g_drilled_series[MAX_ID_LEN];
+extern char         g_drilled_series_name[48];
+extern State        g_state;
+extern char         g_search_kb_buf[MAX_QUERY_LEN];
+extern CoverSlot    g_covers[NCOVER_SLOTS];
+extern TileRow      g_rows[MAX_ROWS * COLS]; /* current page rows */
+extern int          g_row_count;             /* rows on the page */
+extern int          g_view_total;            /* tiles in the view */
+extern int          g_dl_batch_active;       /* download-all batch mode */
+extern int          g_dl_batch_total;
+extern int          g_dl_batch_done;
+extern int          g_dl_batch_failed;
+extern char         g_dl_batch_failed_ids[MAX_DOWNLOADS * 4][MAX_ID_LEN];
+extern int          g_dl_batch_failed_count;
+void                download_all_start(void);
+extern int          g_cover_armed;
+extern DownloadItem g_downloads[MAX_DOWNLOADS];
+extern int          g_download_count;
+extern int          g_download_armed;
+extern char         g_downloads_dir[128];
+/* Raw `downloads_dir=` from the config file (validated against /mnt/ext1
+ * by resolve_downloads_dir). */
+extern char g_cfg_downloads_dir[256];
+/* Folder picked in Settings → Download folder, pending the Save tap. */
+extern char              g_settings_dl_dir[256];
 extern char              g_covers_dir[COVERS_DIR_CAP];
 extern int               g_lp_armed;
 extern int               g_lp_vi;
@@ -481,8 +502,13 @@ int        current_pages(void);
 /* draw_downloads_tab removed — the Downloads page is gone; the progress
  * bar lives in the download popup (draw_dl_popup). */
 void          draw_dl_popup(void);
+void          dl_popup_geom(int *px, int *py, int *pw, int *ph);
+void          refresh_dl_popup(void);
+void          dl_cancel_rect(int *x, int *y);
+void          cancel_downloads(void);
 void          dl_progress_metrics(int *total, int *done, int *failed, int *active);
 void          redraw_shelf(void);
+void          flush_content(void);
 void          draw_grid(void);
 void          cover_tick(void *ctx);
 void          draw_pager(void);
@@ -494,6 +520,16 @@ const char   *settings_reader_label(void);
 void          settings_draw_row(int y, const char *label, const char *value, int editing);
 void          settings_draw_button(int y, const char *label, int filled);
 void          draw_overlay_settings(void);
+void          folder_open(void);
+void          folder_close(void);
+void          draw_overlay_folder(void);
+int           on_tap_folder(int x, int y);
+extern int    g_folder_open;
+extern char   g_folder_path[256];
+extern int    g_folder_scroll;
+extern int    g_folder_drag;
+extern int    g_folder_drag_y;
+extern int    g_folder_moved;
 int           hit_top_bar(int x, int y);
 void          draw_sync_icon(void);
 void          sync_set_active(int on);
@@ -503,7 +539,7 @@ int           hit_history(int x, int y);
 int           hit_thumbnail(int x, int y);
 int           hit_pager(int x, int y);
 void          on_tap_overlay_menu(int x, int y);
-void          on_tap_overlay_more(int x, int y);
+int           on_tap_overlay_more(int x, int y);
 void          settings_close(void);
 void          settings_apply(void);
 void          on_tap_overlay_settings(int x, int y);

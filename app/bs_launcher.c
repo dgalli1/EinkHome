@@ -952,7 +952,8 @@ launch_app(const LauncherItem *it)
             PartialUpdate(x - 12, y - 12, hg->width + 24, hg->height + 24);
         }
     }
-    if (NewTaskEx(it->path, ai ? args : NULL, base, it->text, NULL, 0x25 | TASK_MAKEACTIVE, 0) < 0) {
+    if (NewTaskEx(it->path, ai ? args : NULL, base, it->text, NULL, 0x25 | TASK_MAKEACTIVE, 0) <
+        0) {
         /* Launch failed: drop the hourglass and bring the launcher back so
          * the user is not stuck staring at an indefinite spinner. */
         HideHourglass();
@@ -1001,7 +1002,7 @@ launcher_open_set(void)
     g_state.launcher_drag = 0;
     g_state.launcher_moved = 0;
     draw_overlay_launcher();
-    FullUpdate();
+    flush_content();
 }
 
 void
@@ -1025,7 +1026,7 @@ drill_back(void)
     draw_top_bar();
     draw_grid();
     draw_pager();
-    FullUpdate();
+    flush_content();
 }
 
 void
@@ -1049,7 +1050,7 @@ on_tap_thumbnail(int vi)
         draw_top_bar();
         draw_grid();
         draw_pager();
-        FullUpdate();
+        flush_content();
         return;
     }
 

@@ -91,7 +91,7 @@ if [ "${DO_BUILD}" = "1" ] || [ ! -f "${SRC_APP}" ]; then
 	echo "==> building ${SRC_APP}"
 	BS_SRCS=""
 	for _f in bs_i18n.c bs_config.c bs_model.c bs_net.c bs_ui.c \
-	          bs_input.c bs_launcher.c bs_downloads.c bs_store.c bs_main.c; do
+		bs_input.c bs_launcher.c bs_downloads.c bs_folder.c bs_store.c bs_main.c; do
 		BS_SRCS="${BS_SRCS:+${BS_SRCS} }${HERE}/${_f}"
 	done
 	# shellcheck disable=SC2086
@@ -132,8 +132,10 @@ fi
 
 # Sanity-check that we can ssh to the device non-interactively.  Refuse
 # to continue if password auth would be required, so the user notices
-# before the script scp's half the files and then hangs on ssh.
-if ! ssh ${SSH_COMMON} -o ConnectTimeout=5 "root@${DEVICE}" true 2>/dev/null; then
+# before the script scp's half the files and then hangs on ssh.  The
+# ssh stderr is shown — it distinguishes "No route to host" (device
+# asleep / off Wi-Fi) from a host-key or auth problem.
+if ! ssh ${SSH_COMMON} -o ConnectTimeout=5 "root@${DEVICE}" true; then
 	echo "ERROR: cannot ssh to root@${DEVICE} non-interactively." >&2
 	echo "       run 'ssh-copy-id root@${DEVICE}' once before invoking this script." >&2
 	exit 1
@@ -149,6 +151,14 @@ EOF
 
 echo "==> staging to ${DEVICE}:/mnt/ext1/system/bin/"
 echo "    api_url = ${API_URL}"
+
+# A previously installed copy is often owned by a different user (the
+# pbjb installer writes as root) or read-only, so scp cannot overwrite
+# it in place — it fails with `dest open ...: Failure`.  Remove the
+# stale files first: rm only needs write permission on the directory,
+# which the ssh user has.
+ssh ${SSH_COMMON} "root@${DEVICE}" rm -f \
+	/mnt/ext1/system/bin/bookshelf.app /mnt/ext1/system/bin/bookshelf.cfg
 
 # Push the binary and config.  The destination IS
 # /mnt/ext1/system/bin/bookshelf.app: monitor.app resolves the home app

@@ -155,19 +155,23 @@ on_tap_overlay_menu(int x, int y)
     g_state.menu_open = 0;
 }
 
-void
+/* Handle a tap while the More overlay is open.  Returns 1 when the
+ * action already repainted the screen itself (settings, launcher,
+ * download-all) — the caller must then skip its follow-up redraw or
+ * the whole content area flushes twice per tap. */
+int
 on_tap_overlay_more(int x, int y)
 {
     int pw = ScreenWidth() * 3 / 4;
     int px = ScreenWidth() - pw;
     if (x < px || x >= ScreenWidth()) {
         g_state.more_open = 0;
-        return;
+        return 0;
     }
     if (y >= MORE_Y0 && y < MORE_Y0 + MORE_ITEM_H) {
         g_state.more_open = 0;
         do_sync();
-        return;
+        return 0;
     }
     /* Settings row opens the full-screen settings page. */
     if (y >= MORE_Y0 + MORE_SETTINGS_IDX * MORE_ITEM_H &&
@@ -177,14 +181,14 @@ on_tap_overlay_more(int x, int y)
         g_settings_edit = 0;
         draw_overlay_settings();
         FullUpdate();
-        return;
+        return 1;
     }
     /* Applications row opens the in-app launcher overlay. */
     if (y >= MORE_Y0 + MORE_APPS_IDX * MORE_ITEM_H &&
         y < MORE_Y0 + (MORE_APPS_IDX + 1) * MORE_ITEM_H) {
         g_state.more_open = 0;
         launcher_open_set();
-        return;
+        return 1;
     }
     /* Download-all row queues every book in the library and opens the
      * download-progress popup so the user watches the queue drain. */
@@ -192,7 +196,7 @@ on_tap_overlay_more(int x, int y)
         y < MORE_Y0 + (MORE_DLALL_IDX + 1) * MORE_ITEM_H) {
         g_state.more_open = 0;
         download_all_start();
-        return;
+        return 1;
     }
     for (int i = 1; i < MORE_DLALL_IDX; i++) {
         if (y >= MORE_Y0 + i * MORE_ITEM_H && y < MORE_Y0 + i * MORE_ITEM_H + MORE_ITEM_H) {
@@ -209,29 +213,34 @@ on_tap_overlay_more(int x, int y)
                 g_state.sort = (SortMode)(i - 1);
                 view_rebuild();
             }
-            return;
+            return 0;
         }
     }
     g_state.more_open = 0;
+    return 0;
 }
 
-/* Close the settings overlay and repaint the shelf beneath it. */
+/* Close the settings overlay and repaint the shelf beneath it.  A
+ * picked-but-unsaved download folder is discarded. */
 void
 settings_close(void)
 {
     g_state.settings_open = 0;
     g_settings_edit = 0;
+    g_settings_dl_dir[0] = '\0';
     redraw_shelf();
 }
 
 /* Persist settings, rebuild the endpoint URLs from the (possibly edited)
- * api_base / api_token, then re-sync so the shelf reflects the new
- * server immediately. */
+ * api_base / api_token, re-apply the download folder, then re-sync so
+ * the shelf reflects the new server immediately. */
 void
 settings_apply(void)
 {
     save_config_file();
     build_endpoint_urls();
+    resolve_downloads_dir();
+    g_settings_dl_dir[0] = '\0';
     g_state.settings_open = 0;
     g_settings_edit = 0;
     do_sync();
@@ -246,7 +255,8 @@ on_tap_overlay_settings(int x, int y)
     int y_row1 = 112;
     int y_row2 = y_row1 + SETTINGS_ROW_H;
     int y_row3 = y_row2 + SETTINGS_ROW_H;
-    int y_save = y_row3 + SETTINGS_ROW_H + 24;
+    int y_row4 = y_row3 + SETTINGS_ROW_H;
+    int y_save = y_row4 + SETTINGS_ROW_H + 24;
     int y_back = y_save + SETTINGS_BTN_H;
 
     if (y >= y_row1 && y < y_row1 + SETTINGS_ROW_H - 12) {
@@ -278,6 +288,11 @@ on_tap_overlay_settings(int x, int y)
         g_state.reader_pref = (g_state.reader_pref + 1) % (g_reader_count + 1);
         draw_overlay_settings();
         FullUpdate();
+        return;
+    }
+    if (y >= y_row4 && y < y_row4 + SETTINGS_ROW_H - 12) {
+        /* Download-folder picker (confined to /mnt/ext1). */
+        folder_open();
         return;
     }
     if (y >= y_save && y < y_save + SETTINGS_BTN_H - 12) {

@@ -949,35 +949,92 @@ draw_dl_progress(int x, int y, int w)
     }
 }
 
+/* Cancel-button rect inside the download popup: directly right of the
+ * batch progress bar (shared by the draw path and the tap hit-test).
+ * The bar row runs at py + CTX_TITLE_H + 64 and spans the sheet width
+ * minus the button column, so the button shares the bar's row instead
+ * of sitting in the popup's title corner. */
+void
+dl_cancel_rect(int *x, int *y)
+{
+    int px, py, pw, ph;
+    dl_popup_geom(&px, &py, &pw, &ph);
+    int bar_y = py + CTX_TITLE_H + 64;
+    *x = px + pw - CTX_PAD - DL_CANCEL_SIZE;
+    *y = bar_y + (DL_BAR_H - DL_CANCEL_SIZE) / 2;
+}
+
+/* Repaint just the download-popup sheet (progress bar, current item,
+ * status line).  download_tick() calls this on every queue change:
+ * the shelf around the popup is untouched during a download, so a
+ * sheet-sized partial keeps the e-ink flicker local instead of
+ * re-flashing the whole content area once per item (which is what
+ * redraw_shelf() did — three times per finished download). */
+void
+refresh_dl_popup(void)
+{
+    int px, py, pw, ph;
+
+    if (!g_state.dl_popup)
+        return;
+    draw_dl_popup();
+    dl_popup_geom(&px, &py, &pw, &ph);
+    PartialUpdate(px, py, pw, ph);
+}
+
+/* Download-popup sheet geometry: a centred 3/4-width sheet.  Shared by
+ * the draw path, the cancel-button rect, and the popup-only refresh. */
+void
+dl_popup_geom(int *px, int *py, int *pw, int *ph)
+{
+    int w = ScreenWidth();
+    int h = ScreenHeight();
+    *pw = w * 3 / 4;
+    *ph = 320;
+    *px = (w - *pw) / 2;
+    *py = (h - *ph) / 2;
+}
+
 /* Download-progress popup: a centred modal sheet over a dimmed shelf.
  * Title, the current item, the batch progress bar, and a status line.
- * Shown whenever downloads run (book press, context-menu Download,
- * Download all).  While any download is active the popup is
- * non-dismissable — downloads never run in the background; once the
- * queue drains a tap or Back closes it.  When the popup was opened by
- * a single-book press (dl_popup_auto_open), download_tick() launches
- * the reader as soon as the queue drains. */
+ * A cancel (X) button right of the progress bar aborts the whole
+ * queue — the single in-flight fetch cannot be interrupted
+ * (QuickDownload blocks), so it is left to finish while every queued
+ * item is dropped (see cancel_downloads).  Shown whenever downloads
+ * run (book press, context-menu Download, Download all).  While any
+ * download is active the popup is non-dismissable — downloads never
+ * run in the background; once the queue drains a tap or Back closes
+ * it.  When the popup was opened by a single-book press
+ * (dl_popup_auto_open), download_tick() launches the reader as soon
+ * as the queue drains. */
 void
 draw_dl_popup(void)
 {
     int w = ScreenWidth();
-    int h = ScreenHeight();
     /* Dim the shelf body below the top bar and above the panel band,
      * so the top-bar icons (the spinning sync glyph among them) stay
      * fully visible while the download runs. */
     for (int yy = TOP_BAR_H; yy < content_bottom(); yy += 2)
         DrawLine(0, yy, w, yy, LGRAY);
 
-    int pw = w * 3 / 4;
-    int ph = 320;
-    int px = (w - pw) / 2;
+    int pw, ph, px, py;
+    dl_popup_geom(&px, &py, &pw, &ph);
     LOG("[bookshelf] draw_dl_popup open auto_open=%d count=%d\n",
         g_state.dl_popup_auto_open,
         g_download_count);
-    int py = (h - ph) / 2;
     FillArea(px, py, pw, ph, WHITE);
     DrawRect(px, py, pw, ph, BLACK);
     DrawRect(px + 1, py + 1, pw - 2, ph - 2, BLACK);
+
+    /* Cancel (X) button right of the progress bar.  Always drawn:
+     * while a download is active it aborts the queue; once the queue
+     * has drained it just closes the popup, like a tap anywhere else. */
+    int cx, cy;
+    dl_cancel_rect(&cx, &cy);
+    FillArea(cx, cy, DL_CANCEL_SIZE, DL_CANCEL_SIZE, WHITE);
+    DrawRect(cx, cy, DL_CANCEL_SIZE, DL_CANCEL_SIZE, BLACK);
+    DrawLine(cx + 16, cy + 16, cx + DL_CANCEL_SIZE - 16, cy + DL_CANCEL_SIZE - 16, BLACK);
+    DrawLine(cx + DL_CANCEL_SIZE - 16, cy + 16, cx + 16, cy + DL_CANCEL_SIZE - 16, BLACK);
 
     ifont *tf = OpenFont(DEFAULTFONTB, 30, 0);
     if (tf != NULL) {
@@ -1010,7 +1067,8 @@ draw_dl_popup(void)
         }
     }
 
-    draw_dl_progress(px + CTX_PAD, py + CTX_TITLE_H + 64, pw - 2 * CTX_PAD);
+    draw_dl_progress(
+        px + CTX_PAD, py + CTX_TITLE_H + 64, pw - 2 * CTX_PAD - DL_CANCEL_SIZE - DL_CANCEL_GAP);
 
     int total = 0, done = 0, failed = 0, active = 0;
     dl_progress_metrics(&total, &done, &failed, &active);
@@ -1027,6 +1085,23 @@ draw_dl_popup(void)
         DrawString(px + CTX_PAD, py + CTX_TITLE_H + 64 + DL_BAR_H + 12, hint);
         CloseFont(sf);
     }
+}
+
+/* Flush the app-owned content area [0, content_bottom()) as a partial
+ * update.  Every app surface (top bar, grid, pager, overlays, settings)
+ * is drawn strictly inside this region — the firmware's system panel
+ * band [content_bottom(), ScreenHeight()) is never touched — so a
+ * content-area partial is visually equivalent to FullUpdate() without
+ * the full-screen flash, at a fraction of the cost.  FullUpdate() stays
+ * reserved for the cases where it genuinely earns its price: first
+ * paint (EVT_INIT), task foreground / external repaint (EVT_SHOW etc.,
+ * where the framebuffer may hold another app's content), the
+ * on-screen-keyboard commits (the keyboard wipes the panel band too),
+ * and the launcher drag-end (ghost clear after an unflushed drag). */
+void
+flush_content(void)
+{
+    PartialUpdate(0, 0, ScreenWidth(), content_bottom());
 }
 
 /* Repaint the whole shelf (top bar, body, pager) in the current tab,
@@ -1049,7 +1124,7 @@ redraw_shelf(void)
     draw_pager();
     if (g_state.dl_popup)
         draw_dl_popup();
-    FullUpdate();
+    flush_content();
 }
 
 void
@@ -1446,12 +1521,22 @@ draw_overlay_settings(void)
     }
     DrawLine(0, 92, w, 92, BLACK);
 
+    /* Downloads folder: the pending picker choice, else the resolved
+     * effective directory. */
+    char        dl_shown[256];
+    const char *dl = g_settings_dl_dir[0] ? g_settings_dl_dir : g_downloads_dir;
+    snprintf(dl_shown, sizeof dl_shown, "%s", dl);
+    while (StringWidth(dl_shown) > w - 2 * 32 - 16 && strlen(dl_shown) > 4)
+        dl_shown[strlen(dl_shown) - 1] = '\0';
+
     int y = 112;
     settings_draw_row(y, i18n("settings.api_host"), g_state.api_base, g_settings_edit == 1);
     y += SETTINGS_ROW_H;
     settings_draw_row(y, i18n("settings.api_key"), g_state.api_token, g_settings_edit == 2);
     y += SETTINGS_ROW_H;
     settings_draw_row(y, i18n("settings.reader"), settings_reader_label(), 0);
+    y += SETTINGS_ROW_H;
+    settings_draw_row(y, i18n("settings.dl_dir"), dl_shown, 0);
     y += SETTINGS_ROW_H + 24;
     settings_draw_button(y, i18n("settings.save"), 1);
     y += SETTINGS_BTN_H;

@@ -397,10 +397,12 @@ download_tick(void *ctx)
             }
         }
         g_dl_thread_id[0] = '\0';
-        if (g_state.dl_popup)
-            redraw_shelf();
-        else
-            draw_top_bar(); /* refresh the pending-count badge */
+        /* The popup refresh is deferred to the spawn path below, which
+         * runs in the same tick and repaints the sheet once with the
+         * settled tally AND the next item's title.  Without a popup,
+         * just refresh the top-bar badge. */
+        if (!g_state.dl_popup)
+            draw_top_bar();
         sync_set_active(downloads_pending() > 0 || g_dl_batch_active);
     }
 
@@ -461,8 +463,6 @@ download_tick(void *ctx)
         return;
     }
     target->state = 1;
-    if (g_state.dl_popup)
-        redraw_shelf();
 
     /* Spawn the worker for this item. */
     Book b;
@@ -498,8 +498,13 @@ download_tick(void *ctx)
         target->state = 3;
     }
 
+    /* One popup refresh per item: the sheet now shows the settled
+     * tally and the new current-item title.  The dimmed shelf behind
+     * it never changed, so a sheet-sized partial suffices — a
+     * content-area refresh per finished download is what made
+     * download-all flicker. */
     if (g_state.dl_popup)
-        redraw_shelf();
+        refresh_dl_popup();
     else
         draw_top_bar(); /* refresh the pending-count badge in top bar */
 
@@ -511,6 +516,35 @@ download_tick(void *ctx)
         g_download_armed = 1;
         SetWeakTimerEx("bdl", download_tick, NULL, 120);
     }
+}
+
+/* Abort every open download: drop the whole queue and end the batch
+ * (download-all, series, or single-book).  The one in-flight file fetch
+ * cannot be interrupted — QuickDownload blocks until the transfer or
+ * its timeout ends — so the worker is left to finish in the
+ * background.  Its completion is absorbed harmlessly: download_tick()
+ * only settles items still present in the queue, and g_dl_thread_id is
+ * cleared here so the settle path skips it entirely (no store update,
+ * no batch tally, no popup redraw).  Any file that lands anyway stays
+ * on disk and is reconciled by refresh_downloaded_flags() on the next
+ * launch. */
+void
+cancel_downloads(void)
+{
+    LOG("[bookshelf] cancel_downloads batch=%d in_flight=%s\n",
+        g_dl_batch_active,
+        g_dl_thread_id[0] != '\0' ? g_dl_thread_id : "(none)");
+    g_dl_batch_active = 0;
+    g_dl_batch_total = 0;
+    g_dl_batch_done = 0;
+    g_dl_batch_failed = 0;
+    g_dl_batch_failed_count = 0;
+    g_download_count = 0;
+    g_dl_thread_id[0] = '\0';
+    g_state.dl_popup = 0;
+    g_state.dl_popup_auto_open = 0;
+    sync_set_active(0);
+    redraw_shelf();
 }
 
 /* Queue every member of a series (by series_id), in bounded slices, and
@@ -664,7 +698,7 @@ open_context_for_tile(int vi)
         g_state.ctx_series_id[0] = '\0';
     }
     draw_context_menu();
-    FullUpdate();
+    flush_content();
     LOG("[bookshelf] context menu open series=%d vi=%d\n", tr.is_series, vi);
 }
 

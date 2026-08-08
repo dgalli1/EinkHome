@@ -67,19 +67,62 @@ int  g_dl_batch_failed = 0;
 char g_dl_batch_failed_ids[MAX_DOWNLOADS * 4][MAX_ID_LEN];
 int  g_dl_batch_failed_count = 0;
 
-/* Directory downloads are written to.  Resolved once at startup by
- * resolve_downloads_dir(): LOCAL_DOWNLOADS when the guest can write it
- * (real device), else the /tmp fallback (emulator). */
+/* Directory downloads are written to.  Resolved at startup (and again
+ * after a settings save) by resolve_downloads_dir(): the configured
+ * `downloads_dir=` (Settings → Download folder) when it is a valid
+ * /mnt/ext1 path, else the default /mnt/ext1/Downloads, else — when
+ * the guest cannot write /mnt/ext1 at all, e.g. the emulator's
+ * non-root qemu-arm — the /tmp fallback. */
 char g_downloads_dir[128];
+
+/* Raw `downloads_dir=` from the config file.  Not trusted: the picker
+ * confines choices to /mnt/ext1, but the config file is re-validated
+ * against that prefix here. */
+char g_cfg_downloads_dir[256];
+
+/* Folder picked in Settings → Download folder, pending the Save tap. */
+char g_settings_dl_dir[256];
+
+static int
+is_mnt_ext1_path(const char *p)
+{
+    return strncmp(p, "/mnt/ext1", 9) == 0 && (p[9] == '/' || p[9] == '\0');
+}
 
 void
 resolve_downloads_dir(void)
 {
-    if (access(LOCAL_DOWNLOADS, W_OK) == 0)
-        snprintf(g_downloads_dir, sizeof g_downloads_dir, "%s", LOCAL_DOWNLOADS);
-    else
+    /* The pending picker choice (before the settings Save has been
+     * re-read from the config) wins over the stored config value. */
+    const char *wanted = DEFAULT_DOWNLOADS_DIR;
+    if (g_settings_dl_dir[0] != '\0' && is_mnt_ext1_path(g_settings_dl_dir))
+        wanted = g_settings_dl_dir;
+    else if (g_cfg_downloads_dir[0] != '\0' && is_mnt_ext1_path(g_cfg_downloads_dir))
+        wanted = g_cfg_downloads_dir;
+    /* First run on a real device: the default folder does not exist
+     * yet.  Creating it here makes the picker default usable; a
+     * non-root guest (emulator) cannot create it and falls through to
+     * the /tmp fallback. */
+    if (access(wanted, W_OK) != 0)
+        mkdir(wanted, 0777);
+    if (access(wanted, W_OK) == 0) {
+        /* Bounded: book paths are <dir>/<id>.<ext> and must fit
+         * MAX_PATH_LEN, so the folder is capped well under it.  A
+         * deeper configured path is truncated (and logged). */
+        size_t wlen = strlen(wanted);
+        if (wlen >= sizeof g_downloads_dir)
+            wlen = sizeof g_downloads_dir - 1;
+        memcpy(g_downloads_dir, wanted, wlen);
+        g_downloads_dir[wlen] = '\0';
+        if (wlen != strlen(wanted))
+            LOG("[bookshelf] downloads dir truncated to %s\n", g_downloads_dir);
+    } else {
         snprintf(g_downloads_dir, sizeof g_downloads_dir, "%s", LOCAL_DOWNLOADS_FALLBACK);
-    LOG("[bookshelf] downloads dir = %s\n", g_downloads_dir);
+    }
+    LOG("[bookshelf] downloads dir = %s (cfg=%s%s)\n",
+        g_downloads_dir,
+        g_cfg_downloads_dir[0] != '\0' ? g_cfg_downloads_dir : "(none)",
+        g_settings_dl_dir[0] != '\0' ? ", pending" : "");
 }
 
 /* Directory for cached cover PNGs.  Same parent as the config file
@@ -163,9 +206,10 @@ reader_pref_from_path(const char *value)
     return 0;
 }
 
-/* Persist the current api_base / api_token / reader_pref to the config
- * file.  Written as a plain key=value list so the existing reader picks
- * it straight back up on the next launch.  Returns 0 on success. */
+/* Persist the current api_base / api_token / downloads_dir /
+ * reader_pref to the config file.  Written as a plain key=value list
+ * so the existing reader picks it straight back up on the next
+ * launch.  Returns 0 on success. */
 int
 save_config_file(void)
 {
@@ -176,6 +220,9 @@ save_config_file(void)
     }
     fprintf(f, "api_url=%s\n", g_state.api_base);
     fprintf(f, "api_token=%s\n", g_state.api_token);
+    const char *dl_dir = g_settings_dl_dir[0] ? g_settings_dl_dir : g_cfg_downloads_dir;
+    if (dl_dir[0] != '\0')
+        fprintf(f, "downloads_dir=%s\n", dl_dir);
     if (g_state.reader_pref > 0 && g_state.reader_pref <= g_reader_count)
         fprintf(f, "reader=%s\n", g_readers[g_state.reader_pref - 1].path);
     else

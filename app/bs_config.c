@@ -116,6 +116,8 @@ cfg_set_kv(const char *key, const char *value, void *user)
             *p = (char)tolower((unsigned char)*p);
     } else if (strcmp(key, "reader") == 0) {
         snprintf(g_cfg_reader, sizeof g_cfg_reader, "%s", value);
+    } else if (strcmp(key, "downloads_dir") == 0 || strcmp(key, "download_dir") == 0) {
+        snprintf(g_cfg_downloads_dir, sizeof g_cfg_downloads_dir, "%s", value);
     } else {
         LOG("[bookshelf] config: unknown key `%s`\n", key);
     }
