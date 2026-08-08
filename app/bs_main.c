@@ -53,10 +53,9 @@ on_event(int type, int par1, int par2)
          * Calling SetPanelType(PANEL_DISABLED) or iv_fullscreen()
          * would hide it, which is what we explicitly do NOT want —
          * the user wants the original PB-app behaviour of leaving
-         * the system panel drawn by the firmware.  The type-1 panel
-         * owns the BOTTOM band [ScreenHeight()-panel_h,
-         * ScreenHeight()); we query PanelHeight() once so all
-         * subsequent draws can stop above it without per-frame work.
+         * the system panel drawn over by the firmware.  We also
+         * query PanelHeight() once so all subsequent draws can
+         * start below it without per-frame work.
          *
          * Note: the stock bookshelf does NOT set the
          * APPLICATION_READER attribute (that is the eink-reader's
@@ -75,9 +74,9 @@ on_event(int type, int par1, int par2)
         if (g_state.panel_h <= 0) {
             /* Live device: the firmware's panel painter never activates
              * for this task (PanelHeight()==0), so the stock strip is
-             * never drawn and our content would run into the bottom
-             * edge.  Reserve the stock bar height and paint the strip
-             * ourselves (draw_system_strip, bottom band). */
+             * never drawn and our content would sit flush against the
+             * top edge.  Reserve the stock bar height and paint the
+             * strip ourselves (draw_system_strip). */
             g_state.panel_h = SELF_PANEL_H;
             g_self_panel = 1;
         }
@@ -104,10 +103,11 @@ on_event(int type, int par1, int par2)
         /* Force the firmware to actually draw the system panel now.
          * Repaint() enqueues EVT_SHOW (=23) on the event loop, which
          * the firmware handles by calling iv_actualize_panel(), which
-         * in turn calls iv_update_panel() (the function that blits the
-         * day-of-week + 24h-time + down-arrow + lightbulb + battery
-         * strip into the bottom band).  Without this call the panel is
-         * only redrawn on subsequent state changes (clock minute tick,
+         * in turn calls iv_update_panel() (the function that draws the
+         * day-of-week + 24h-time strip at the top and the matching
+         * strip at the bottom with the down-arrow + lightbulb +
+         * battery icons).  Without this call the panel is only
+         * redrawn on subsequent state changes (clock minute tick,
          * battery percent change, net state change) — on a freshly
          * launched task with no state change yet, the panel rect is
          * blank.  Repaint() forces an immediate one-shot redraw.
@@ -314,8 +314,8 @@ on_event(int type, int par1, int par2)
                 /* Clamp the scroll to the laid-out body height, then
                  * flush the framebuffer drawn during the drag — the
                  * single refresh the stock firmware performs on lift. */
-                int body_top = LAUNCHER_HEADER_H;
-                int body_h = content_bottom() - body_top;
+                int body_top = g_state.panel_h + LAUNCHER_HEADER_H;
+                int body_h = ScreenHeight() - body_top;
                 int max_scroll = g_launcher_body_h - body_h;
                 if (max_scroll < 0)
                     max_scroll = 0;
@@ -370,10 +370,10 @@ on_event(int type, int par1, int par2)
             }
             return 1;
         }
-        /* Bottom system strip (the status bar with clock, battery,
-         * etc.).  Tapping anywhere on it opens the firmware control
-         * panel — the same gesture as the real device. */
-        if (y >= content_bottom()) {
+        /* Top system strip (the status bar with clock, battery, etc.).
+         * Tapping anywhere on it opens the firmware control panel — the
+         * same gesture as the real device. */
+        if (y < g_state.panel_h) {
             LOG("[bookshelf] system bar tapped -> control panel\n");
             OpenControlPanel(NULL);
             return 1;
@@ -490,7 +490,10 @@ on_event(int type, int par1, int par2)
              * wipe it. */
             if (!g_state.dl_popup) {
                 draw_grid();
-                PartialUpdate(0, TOP_BAR_H, ScreenWidth(), content_bottom() - TOP_BAR_H);
+                PartialUpdate(0,
+                              g_state.panel_h + TOP_BAR_H,
+                              ScreenWidth(),
+                              ScreenHeight() - g_state.panel_h - TOP_BAR_H);
             }
             return 1;
         }
@@ -621,9 +624,9 @@ keyboard_handler(char *buffer)
     g_state.tab = TAB_LIBRARY;
     g_state.page = 0;
     view_rebuild();
-    /* The on-screen keyboard draws full-screen and wipes the bottom
-     * status strip; re-stamp it before redraw_shelf() flushes so the
-     * panel survives the commit redraw. */
+    /* The on-screen keyboard draws full-screen and wipes the top status
+     * strip; re-stamp it before redraw_shelf() flushes so the panel
+     * survives the commit redraw (redraw_shelf clears only from panel_h). */
     stamp_panel();
     redraw_shelf();
 }

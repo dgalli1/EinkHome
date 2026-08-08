@@ -476,7 +476,7 @@ def test_header_tap_opens_control_panel(fresh_bookshelf):
     if "self_panel=1" not in log:
         pytest.skip("firmware panel active: the tap is handled by the firmware")
     before = bs.current_log()
-    bs.tap_at(bs.geom.screen_w // 2, bs.geom.screen_h - bs.geom.panel_h // 2)
+    bs.tap_at(bs.geom.screen_w // 2, bs.geom.panel_h // 2)
     _wait_log_slice(bs, before, "system bar tapped -> control panel")
 
 

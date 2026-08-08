@@ -261,19 +261,6 @@ book-open handshake (the built-in reader shows an hourglass and
 closes).  If the binary is ever missing, the launcher falls back to the
 stock `/ebrmain/bin/bookshelf.app` on its own.
 
-**Auxiliary firmware services.**  The stock boot starts the resident
-background services (`taskmgr`, `reader_controller`, `control_panel_mgr`,
-`explorer`, `update_desktop_data`) as part of the home task's init
-handshake; a fresh boot with our binary as the home task does not
-trigger that startup, which leaves the control-panel Task Manager
-button without a target and makes OpenBook's `reader_controller` poll
-time out.  Our bookshelf therefore launches those services itself from
-its deferred init (`launch_aux_services()`), using `NewTaskEx` with
-`TASK_BACKGROUND` flags — the same approach the emulator's shim uses for
-`reader_controller` (`ensure_reader_controller_task()`).  Once the
-services are resident (they relaunch on every bookshelf start), the
-Task Manager button and the book-open chain behave like stock.
-
 To remove everything and restore the stock boot path:
 
 ```bash
@@ -314,35 +301,33 @@ ssh root@<device-ip> 'tail -f /mnt/ext1/applications/bookshelf.log'
 
 ### Initial sync is automatic
 
-The binary syncs metadata on startup — deferred to a one-shot timer so
-`EVT_INIT` returns immediately (a blocking network sync inside init
-delays the firmware's main-menu task binding on the real device, which
-breaks the control-panel Task Manager button and the
-`reader_controller`-based book-open chain).  The local store is opened
-and the grid built from it *before* the network sync, so an unreachable
-API still shows the cached library, and the shelf refreshes once the
-deferred sync settles.  Subsequent syncs are triggered via **⋯** →
-**Sync**.
+The binary syncs metadata on startup (the EVT_INIT handler calls
+`do_sync()` before the first draw), so the shelf populates without a
+manual tap.  The local store is opened and the grid built from it
+*before* the network sync, so an unreachable API still shows the
+cached library.  Subsequent syncs are triggered via **⋯** → **Sync**.
 
 ## UI
 
-The on-screen layout has four regions stacked vertically, all drawn
-above the system status bar (drawn by the firmware with day-of-week +
-24h time + down-arrow + lightbulb + battery; the stock type-1 panel
-lives at the BOTTOM of the screen):
+The on-screen layout has four regions stacked vertically below the
+system status bar.  The firmware's `libinkview` draws that bar at the
+**top** of the screen (day + 24h time, sync/wifi/frontlight/battery
+icons) into rows `[0, panel_h)`; the guest keeps the full physical
+height (`ScreenHeight()` = 1448) and every app surface is offset below
+the bar by `panel_h` (the pager sits at `ScreenHeight() - PAGER_H`):
 
 ```
 +--------------------------------------------------+ <- 0
-|  [⌂]                    [Q] [⬇] []            |   TOP_BAR_H (128 px)
+|  Fr 23:05      ⌄      (sync) wifi 💡 63% 🔋     |   system status bar (firmware, TOP)
++--------------------------------------------------+ <- panel_h (~106)
+|  [⌂]                    [Q] [⬇] [☰]            |   TOP_BAR_H (128 px)
 +--------------------------------------------------+
 |                                                  |
 |   [book]    [book]    [book]                     |
 |   [book]    [book]    [book]                     |   3×2 grid of thumbnails
 |                                                  |
 +--------------------------------------------------+
-|              <  1 / 2  >                          |   PAGER_H
-+--------------------------------------------------+   <- ScreenHeight - panel_h
-|  Wed 13:01       ⌄      💡     🔋 100%   ←  bottom status bar
+|              <  1 / 9  >                          |   PAGER_H (96) at the bottom
 +--------------------------------------------------+ <- ScreenHeight
 ```
 
@@ -371,24 +356,29 @@ The "More" menu is a right-anchored 75%-width panel with the
 following items, in order: **Sync**, **Title A–Z**, **By author**,
 **By series**, **Recent**, **Grid**, **List**, **Download all**,
 **Settings**, **Applications**.  (A "System menu" entry existed while
-the firmware bar was unreliable; tapping the bottom status strip now
-opens the firmware control panel directly, so the entry was dropped.)
+the firmware bar was unreliable; tapping the top status strip now opens
+the firmware control panel directly, so the entry was dropped.)
 
-### How the firmware system status bar is enabled
+### How the firmware system status bar works
 
-The stock desktop (`bookshelf.app`) shows the standard system status
-bar at the **bottom** of the screen ("Wed 13:01 + down-arrow +
-lightbulb + battery").  The bar is drawn by the firmware's
-`libinkview` (`iv_update_panel()` blits it into the bottom band
-`[ScreenHeight()-PanelHeight(), ScreenHeight())`); the app content —
-including our pager — lives above that band, exactly like the stock
-`MainFrame`, which is created with height `ScreenHeight() -
-PanelHeight()`.
+The stock desktop shows one system status bar at the **top** of the
+screen ("Fr 23:05 + down-arrow + sync/wifi + frontlight + battery",
+rows `[0, PanelHeight())`), with the app content offset beneath it.
+The mechanism (from `libinkview` disassembly + device screenshots,
+U633 6.8.2817):
+
+* `fb_y_offset` stays 0 and `ScreenHeight()` reports the full physical
+  height (1448); apps offset their own surfaces by `PanelHeight()`.
+* `iv_update_panel()`'s y placement is controlled by bit 3 of two
+  internal panel-state bytes (image offsets 0x135240 / 0x135244): set
+  → blit at y=0 (top), clear → blit at
+  `ScreenHeight()-PanelHeight()` (bottom).  The device runs with the
+  bit set.
 
 Registration happens in `main()` BEFORE `InkViewMain()`, in the stock
-order (moving it into `EVT_INIT` corrupts the per-task fbinfo on the
+order (doing it inside `EVT_INIT` corrupts the per-task fbinfo on the
 live device — `ScreenHeight()` collapses to the panel height and the
-pager ends up drawn over the system bar):
+layout fights the bar for the same rows):
 
 ```c
 InitInkview(0x4110);
@@ -401,33 +391,38 @@ SetPanelType(1);            /* the stock bookshelf's literal value */
 In `EVT_INIT` we then reserve the band and force a first paint:
 
 ```c
-g_state.panel_h = PanelHeight();  /* height reserved at the BOTTOM */
+g_state.panel_h = PanelHeight();  /* height reserved at the TOP */
 DrawPanel(NULL, "Bookshelf", NULL, -1);
 stamp_panel();   /* iv_update_panel(0) or our self-drawn fallback */
 Repaint();
 ```
 
-On the emulator `libinkview` paints the strip once the panel is enabled
-as above.  On a live device the panel painter may not activate for this
-task (`PanelHeight()` returns 0 at `EVT_INIT`), so the app falls back
-to a **self-drawn** strip of the same height (`SELF_PANEL_H`) in the
-same bottom band: day + 24h time on the left, frontlight bulb + battery
+On the emulator the guest never sets the placement bit, so
+`iv_update_panel()` would blit the bar at the BOTTOM — the divergence
+the user flagged.  The pbemu shim therefore interposes `SetPanelType()`
+and, after forwarding to the real implementation, sets bit 3 of those
+two bytes (resolved via `dladdr` on the real symbol), which restores
+device parity.
+
+On a live device where the panel painter never activates for this
+task (`PanelHeight()` returns 0 at `EVT_INIT`), the app falls back to
+a **self-drawn** strip of the same height (`SELF_PANEL_H`) in the same
+top band: day + 24h time on the left, frontlight bulb + battery
 outline on the right, drawn by `draw_system_strip()`.  `stamp_panel()`
 picks the right painter; `g_state.panel_h` is forced to `SELF_PANEL_H`
-so the pager never sits in the bottom edge.  Tapping the strip (either
-painter) opens the firmware control panel, the same gesture as the
-stock UI.
+so the top bar never sits flush against the top edge.  Tapping the
+strip (either painter) opens the firmware control panel, the same
+gesture as the stock UI.
 
 We deliberately **do not** call `SetPanelType(PANEL_DISABLED)` or
 `iv_fullscreen()`.  Without those the system panel stays visible —
-swipe down from the top to access Wi-Fi / Bluetooth / Sync, swipe up
-from the bottom to see the time/battery bar plus the system settings.
+swipe down from the top to access Wi-Fi / Bluetooth / Sync.
 
 `IvSetAppCapability` and `SetDefaultOrientation` are exported by the
-firmware's `libinkview` but absent from this SDK vintage's bundled lib,
-so both are declared `__attribute__((weak))` and guarded with a NULL
-check; the firmware's `SetOrientation()`/`SetDefaultOrientation()` are
-NULL-fb-safe before registration (they log and return while
+firmware's `libinkview` but absent from this SDK vintage's bundled
+lib, so both are declared `__attribute__((weak))` and guarded with a
+NULL check; the firmware's `SetOrientation()`/`SetDefaultOrientation()`
+are NULL-fb-safe before registration (they log and return while
 `hw_getframebuffer()` is still NULL), which is exactly why the stock
 app can call them in `main()`.
 

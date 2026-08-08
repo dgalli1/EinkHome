@@ -114,20 +114,16 @@ class BookshelfGeometry:
     screen_h: int
     panel_h: int
 
-    def content_bottom(self) -> int:
-        """Bottom edge of the app content area (top of the system panel)."""
-        return self.screen_h - self.panel_h
-
     # ── top bar ────────────────────────────────────────────────────────
 
     def home_button_center(self) -> tuple[int, int]:
         """Centre of the 96×96 home (house) button, left side of top bar."""
-        return (8 + 48, TOP_BAR_H // 2)
+        return (8 + 48, self.panel_h + TOP_BAR_H // 2)
 
     def menu_button_center(self) -> tuple[int, int]:
         """Centre of the 96×96 More (hamburger) button, right side of top
         bar."""
-        return (self.screen_w - 8 - 48, TOP_BAR_H // 2)
+        return (self.screen_w - 8 - 48, self.panel_h + TOP_BAR_H // 2)
 
     # ── search (top-bar icon + Search sub-page) ───────────────────────
 
@@ -137,17 +133,17 @@ class BookshelfGeometry:
         if self.screen_w == 0:
             return (0, 0)
         x = self.screen_w - 8 - 96 - 2 * 96 + 48
-        return (x, TOP_BAR_H // 2)
+        return (x, self.panel_h + TOP_BAR_H // 2)
     def search_input_center(self) -> tuple[int, int]:
         """Centre of the search text box on the Search sub-page input
         row (the row sits directly below the top bar)."""
-        row_top = TOP_BAR_H
+        row_top = self.panel_h + TOP_BAR_H
         return (self.screen_w // 2, row_top + SEARCH_ROW_H // 2)
 
     def search_history_center(self, index: int) -> tuple[int, int]:
         """Centre of history-term row *index* (0-based within the
         current page) on the Search sub-page."""
-        row_top = TOP_BAR_H + SEARCH_ROW_H
+        row_top = self.panel_h + TOP_BAR_H + SEARCH_ROW_H
         return (
             self.screen_w // 2,
             row_top + index * SEARCH_HISTORY_ROW_H + SEARCH_HISTORY_ROW_H // 2,
@@ -157,8 +153,8 @@ class BookshelfGeometry:
 
     def _grid_params(self) -> tuple[int, int, int]:
         """Return ``(grid_top, cell_w, cell_h)`` matching ``grid_geom()``."""
-        top = TOP_BAR_H + TAB_ROW_H
-        bot = self.content_bottom() - PAGER_H
+        top = self.panel_h + TOP_BAR_H + TAB_ROW_H
+        bot = self.screen_h - PAGER_H
         avail_w = self.screen_w - 16
         avail_h = bot - top - 8
         cell_w = max(CELL_MIN_W, min(avail_w // COLS, CELL_MAX_W))
@@ -179,8 +175,8 @@ class BookshelfGeometry:
     # ── pager ──────────────────────────────────────────────────────────
 
     def pager_y(self) -> int:
-        """Top edge of the pager row (directly above the bottom panel)."""
-        return self.content_bottom() - PAGER_H
+        """Top edge of the pager row."""
+        return self.screen_h - PAGER_H
 
     def pager_prev_center(self) -> tuple[int, int]:
         """Centre of the 96×64 prev-page button."""
@@ -208,7 +204,7 @@ class BookshelfGeometry:
         """Centre of More-overlay item *index* (y0=96, item_h=88)."""
         pw = self.screen_w * 3 // 4
         px = self.screen_w - pw
-        return (px + pw // 2, 96 + index * 88 + 44)
+        return (px + pw // 2, self.panel_h + 96 + index * 88 + 44)
 
     def outside_more_overlay(self) -> tuple[int, int]:
         """A point guaranteed to be left of the right-anchored More panel."""
@@ -223,23 +219,23 @@ class BookshelfGeometry:
     def menu_item_center(self, index: int) -> tuple[int, int]:
         """Centre of Menu-overlay item *index* (y0=96, item_h=88)."""
         pw = self.screen_w * 3 // 4
-        return (pw // 2, 96 + index * 88 + 44)
+        return (pw // 2, self.panel_h + 96 + index * 88 + 44)
 
     # ── Settings overlay (full-screen page) ───────────────────────────
 
     def settings_row_center(self, row: int) -> tuple[int, int]:
         """Centre of settings row *row* (0=API host, 1=API key, 2=reader)."""
-        y = SETTINGS_ROW1_Y + row * SETTINGS_ROW_H
+        y = self.panel_h + SETTINGS_ROW1_Y + row * SETTINGS_ROW_H
         return (self.screen_w // 2, y + (SETTINGS_ROW_H - 12) // 2)
 
     def settings_save_center(self) -> tuple[int, int]:
         """Centre of the Save & apply button."""
-        y = SETTINGS_ROW1_Y + 3 * SETTINGS_ROW_H + 24
+        y = self.panel_h + SETTINGS_ROW1_Y + 3 * SETTINGS_ROW_H + 24
         return (self.screen_w // 2, y + (SETTINGS_BTN_H - 12) // 2)
 
     def settings_back_center(self) -> tuple[int, int]:
         """Centre of the Back button."""
-        y = SETTINGS_ROW1_Y + 3 * SETTINGS_ROW_H + 24 + SETTINGS_BTN_H
+        y = self.panel_h + SETTINGS_ROW1_Y + 3 * SETTINGS_ROW_H + 24 + SETTINGS_BTN_H
         return (self.screen_w // 2, y + (SETTINGS_BTN_H - 12) // 2)
 
     def outside_menu_overlay(self) -> tuple[int, int]:
@@ -251,7 +247,7 @@ class BookshelfGeometry:
     def sync_button_center(self) -> tuple[int, int]:
         """Centre of the 96×96 sync button, left of the More button.
         Runs a library sync."""
-        return (self.screen_w - 152, TOP_BAR_H // 2)
+        return (self.screen_w - 152, self.panel_h + TOP_BAR_H // 2)
 
     # ── context (long-press) menu ─────────────────────────────────────
 
@@ -266,28 +262,30 @@ class BookshelfGeometry:
         return (px + pw // 2, iy + CTX_ITEM_H // 2)
 
     # ── firmware on-screen keyboard ───────────────────────────────────
-    # The keyboard is drawn by the firmware (not by bookshelf.c), full
-    # screen above the bottom system panel; the return key centre was
-    # measured at (963, 1269) with the stock bottom-panel layout.
+    # The keyboard is drawn by the firmware (not by bookshelf.c), so its
+    # geometry is fixed relative to the bottom of the visible area.  With
+    # the top-panel layout (PANEL_NO_FB_OFFSET, fb_y_offset=0) the visible
+    # area spans the full screen height; the return key centre shifts down
+    # by panel_h compared to the old bottom-panel measurement (1269).
 
     def keyboard_return_center(self) -> tuple[int, int]:
         """Centre of the on-screen keyboard's return/accept key."""
-        return (963, 1269)
+        return (963, 1269 + self.panel_h)
 
     # ── launcher overlay ──────────────────────────────────────────────
 
     def launcher_back_center(self) -> tuple[int, int]:
         """Centre of the launcher Back button."""
-        by = (LAUNCHER_HEADER_H - 56) // 2
+        by = self.panel_h + (LAUNCHER_HEADER_H - 56) // 2
         return (16 + 80, by + 28)
 
     def launcher_first_app_center(self) -> tuple[int, int]:
         """Centre of the first app cell (after the first header) at scroll 0."""
         cell_w = (self.screen_w - 2 * LAUNCHER_MARGIN) // LAUNCHER_COLS
-        y = LAUNCHER_HEADER_H + LAUNCHER_GROUP_H
+        y = self.panel_h + LAUNCHER_HEADER_H + LAUNCHER_GROUP_H
         return (LAUNCHER_MARGIN + cell_w // 2, y + LAUNCHER_CELL_H // 2)
 
     def launcher_body_center(self) -> tuple[int, int]:
         """A point in the middle of the launcher's scrollable body."""
-        body_top = LAUNCHER_HEADER_H
-        return (self.screen_w // 2, (body_top + self.content_bottom()) // 2)
+        body_top = self.panel_h + LAUNCHER_HEADER_H
+        return (self.screen_w // 2, (body_top + self.screen_h) // 2)

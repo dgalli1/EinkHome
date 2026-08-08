@@ -792,9 +792,9 @@ void
 draw_overlay_launcher(void)
 {
     int w = ScreenWidth();
-    int h = content_bottom();
-    int body_top = LAUNCHER_HEADER_H;
-    int body_h = content_bottom() - body_top;
+    int h = ScreenHeight();
+    int body_top = g_state.panel_h + LAUNCHER_HEADER_H;
+    int body_h = h - body_top;
 
     /* Clamp the scroll offset: the column's last row stops at the bottom
      * edge; a column shorter than the window never scrolls. */
@@ -807,21 +807,25 @@ draw_overlay_launcher(void)
         g_state.launcher_scroll = max_scroll;
     int scroll = g_state.launcher_scroll;
 
-    FillArea(0, 0, w, content_bottom(), WHITE);
+    FillArea(0, g_state.panel_h, w, h - g_state.panel_h, WHITE);
 
     /* Fixed header: title + Back button. */
-    FillArea(0, 0, w, LAUNCHER_HEADER_H, WHITE);
-    DrawLine(0, LAUNCHER_HEADER_H - 1, w, LAUNCHER_HEADER_H - 1, BLACK);
+    FillArea(0, g_state.panel_h, w, LAUNCHER_HEADER_H, WHITE);
+    DrawLine(0,
+             g_state.panel_h + LAUNCHER_HEADER_H - 1,
+             w,
+             g_state.panel_h + LAUNCHER_HEADER_H - 1,
+             BLACK);
     ifont *tf = OpenFont(DEFAULTFONTB, 36, 0);
     if (tf) {
         SetFont(tf, BLACK);
         const char *title = i18n("launcher.title");
         int         tw = StringWidth(title);
-        DrawString((w - tw) / 2, (LAUNCHER_HEADER_H - 36) / 2, title);
+        DrawString((w - tw) / 2, g_state.panel_h + (LAUNCHER_HEADER_H - 36) / 2, title);
         CloseFont(tf);
     }
     {
-        int bx = 16, by = (LAUNCHER_HEADER_H - 56) / 2, bw = 160, bh = 56;
+        int bx = 16, by = g_state.panel_h + (LAUNCHER_HEADER_H - 56) / 2, bw = 160, bh = 56;
         DrawRect(bx, by, bw, bh, BLACK);
         ifont *bf = OpenFont(DEFAULTFONTB, 28, 0);
         if (bf) {
@@ -926,13 +930,14 @@ launch_app(const LauncherItem *it)
 void
 on_tap_overlay_launcher(int x, int y)
 {
-    int body_top = LAUNCHER_HEADER_H;
-    if (x >= 16 && x < 176 && y >= (LAUNCHER_HEADER_H - 56) / 2 &&
-        y < (LAUNCHER_HEADER_H - 56) / 2 + 56) {
+    int h = ScreenHeight();
+    int body_top = g_state.panel_h + LAUNCHER_HEADER_H;
+    if (x >= 16 && x < 176 && y >= g_state.panel_h + (LAUNCHER_HEADER_H - 56) / 2 &&
+        y < g_state.panel_h + (LAUNCHER_HEADER_H - 56) / 2 + 56) {
         launcher_close();
         return;
     }
-    if (y < body_top || y >= content_bottom())
+    if (y < body_top || y >= h)
         return;
     int by = y - body_top + g_state.launcher_scroll;
     for (int i = 0; i < g_launcher_count; i++) {
@@ -977,7 +982,7 @@ drill_back(void)
     g_state.page = g_state.saved_page;
     view_rebuild();
     LOG("[bookshelf] drilled back to top level (view=%d)\n", g_view_total);
-    FillArea(0, 0, ScreenWidth(), content_bottom(), WHITE);
+    FillArea(0, g_state.panel_h, ScreenWidth(), ScreenHeight() - g_state.panel_h, WHITE);
     draw_top_bar();
     draw_grid();
     draw_pager();
@@ -1001,7 +1006,7 @@ on_tap_thumbnail(int vi)
         LOG("[bookshelf] drilled into series '%s' (%d books)\n",
             g_drilled_series_name,
             g_view_total);
-        FillArea(0, 0, ScreenWidth(), content_bottom(), WHITE);
+        FillArea(0, g_state.panel_h, ScreenWidth(), ScreenHeight() - g_state.panel_h, WHITE);
         draw_top_bar();
         draw_grid();
         draw_pager();
