@@ -257,7 +257,9 @@ class BookshelfGeometry:
 
     def context_item_center(self, item: int, n_items: int = 2) -> tuple[int, int]:
         """Centre of context-menu item *item* (0-based) in a sheet of
-        *n_items* rows."""
+        *n_items* rows.  The app centres the sheet on the full logical
+        screen (``context_geom``: ``py = (ScreenHeight() - ph) / 2``),
+        not on the content area above the system strip."""
         pw = self.screen_w * 3 // 4
         ph = CTX_TITLE_H + n_items * CTX_ITEM_H + CTX_PAD
         px = (self.screen_w - pw) // 2
@@ -266,9 +268,11 @@ class BookshelfGeometry:
         return (px + pw // 2, iy + CTX_ITEM_H // 2)
 
     # ── firmware on-screen keyboard ───────────────────────────────────
-    # The keyboard is drawn by the firmware (not by bookshelf.c), full
-    # screen above the bottom system panel; the return key centre was
-    # measured at (963, 1269) with the stock bottom-panel layout.
+    # The keyboard is drawn by the firmware in the guest's logical space.
+    # The return key centre was measured at logical (963, 1269) and does
+    # not move when the panel reserves fb_y_offset rows: the keyboard
+    # keeps its bottom edge at ScreenHeight()-PanelHeight(), which the
+    # scanout wrap presents at the physical window bottom either way.
 
     def keyboard_return_center(self) -> tuple[int, int]:
         """Centre of the on-screen keyboard's return/accept key."""
