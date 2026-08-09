@@ -26,7 +26,8 @@ from tests.support.reader.session import Session
 from tests.support.runtime import container_running, container_sh
 from tests.support.runtime_common import REPO_ROOT
 
-PBEMU_ROOT = REPO_ROOT / "pbemu"
+EINKHOME_ROOT = Path(__file__).resolve().parents[1]
+PBEMU_ROOT = REPO_ROOT
 from tests.test_bookshelf import (
     API_TOKEN,
     CONTAINER,

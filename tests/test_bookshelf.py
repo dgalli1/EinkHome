@@ -44,9 +44,11 @@ from tests.support.runtime import Emulator, container_running, container_sh
 from tests.support.runtime_common import REPO_ROOT
 
 # The pbemu submodule provides the firmware tree, the emulator tooling
-# (tools/ + api/) and the container; everything else (app, Makefile,
-# test support) lives in this repository.
-PBEMU_ROOT = REPO_ROOT / "pbemu"
+# (tools/ + api/), the container and the test support framework
+# (tests/support).  This repository provides the app, the Makefile and
+# the test files; EINKHOME_ROOT points back here from the submodule.
+EINKHOME_ROOT = Path(__file__).resolve().parents[1]
+PBEMU_ROOT = REPO_ROOT
 
 FIRMWARE = "U633_6.8.2817"
 API_PORT = 18765
@@ -139,12 +141,12 @@ def _stop_api_server(proc: subprocess.Popen) -> None:  # type: ignore[type-arg]
 
 def _build_bookshelf() -> Path:
     """Build the bookshelf binary. Returns path to the built ELF."""
-    out = REPO_ROOT / "build" / "bookshelf.app"
+    out = EINKHOME_ROOT / "build" / "bookshelf.app"
     # The source list lives in bookshelf/Makefile; build_armel.sh does
     # the cross-compile.
     subprocess.run(
-        ["make", "-C", str(REPO_ROOT)],
-        cwd=REPO_ROOT,
+        ["make", "-C", str(EINKHOME_ROOT)],
+        cwd=EINKHOME_ROOT,
         check=True,
         capture_output=True,
         text=True,
