@@ -149,6 +149,19 @@ def _build_bookshelf() -> Path:
     return out
 
 
+def _snapshot_cfg(path: Path) -> str | None:
+    """Return a cfg file's current text, or None when absent."""
+    return path.read_text(encoding="utf-8") if path.is_file() else None
+
+
+def _restore_cfg_file(path: Path, saved: str | None, mode: int = 0o644) -> None:
+    """Restore a cfg file to its pre-test state (remove if absent)."""
+    path.unlink(missing_ok=True)
+    if saved is not None:
+        path.write_text(saved, encoding="utf-8")
+        path.chmod(mode)
+
+
 def _stage_binary(binary: Path) -> None:
     """Stage the bookshelf binary + config into .live and container.
 
@@ -345,7 +358,15 @@ def bookshelf_env():
     # 2. Start API server (mock provider)
     api_proc = _start_api_server()
 
-    # 3. Stage binary + config
+    # 3. Stage binary + config.  Snapshot the dev cfgs first so the
+    #    run's test-pointing api_url can be restored afterwards — a
+    #    leftover override otherwise poisons the next manual emulator
+    #    session (the app keeps syncing to the dead test port).
+    live = REPO_ROOT / FIRMWARE / ".live"
+    bin_cfg = live / "mnt/ext1/system/bin/bookshelf.cfg"
+    tmp_cfg = live / "tmp/bookshelf.cfg"
+    saved_bin_cfg = _snapshot_cfg(bin_cfg)
+    saved_tmp_cfg = _snapshot_cfg(tmp_cfg)
     _stage_binary(binary)
 
     # 4. Stop any existing emulator
@@ -405,7 +426,14 @@ def bookshelf_env():
 
     yield bs, emulator
 
-    # Cleanup
+    # Cleanup: restore the dev cfgs (the run wrote its own api_url),
+    # then stop the emulator so no in-memory stale URL can re-poison
+    # the restored files.  The bin cfg stays owner-write-only (a
+    # world-writable one makes the guest pick the unwritable app dir
+    # as its settings home); the tmp cfg is world-writable because the
+    # guest (container UID) rewrites settings there.
+    _restore_cfg_file(bin_cfg, saved_bin_cfg)
+    _restore_cfg_file(tmp_cfg, saved_tmp_cfg, mode=0o666)
     _stop_api_server(api_proc)
     emulator.stop(force=True)
 

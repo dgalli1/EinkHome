@@ -196,13 +196,12 @@ resolve_config_path(const char *argv0)
     if (primary[0] == '\0')
         snprintf(primary, sizeof primary, "/etc/pbemu/%s", CONFIG_FILENAME);
 
-    /* Prefer the primary when it's writable (either the file exists and
-     * is writable, or its directory is writable so we can create it);
-     * otherwise use the guest-writable /tmp fallback. */
-    if (access(primary, W_OK) == 0) {
-        snprintf(g_config_path, sizeof g_config_path, "%s", primary);
-        return;
-    }
+    /* Prefer the primary when its DIRECTORY is writable — settings and
+     * the library store are created next to the config file, so a
+     * writable config file alone is not enough (e.g. a world-writable
+     * cfg in an app dir the guest cannot write would point the store
+     * at a directory where no new file can be created).  Otherwise use
+     * the guest-writable /tmp fallback. */
     char dir_copy[600];
     snprintf(dir_copy, sizeof dir_copy, "%s", primary);
     char *slash = strrchr(dir_copy, '/');

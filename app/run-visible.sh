@@ -116,7 +116,24 @@ cat >"${REPO_ROOT}/${FIRMWARE}/.live/mnt/ext1/system/bin/bookshelf.cfg" <<CFGEOF
 api_url=http://127.0.0.1:${API_PORT}
 api_token=pbemu-dev-token
 CFGEOF
+# Owner-write only: `cat >` keeps a pre-existing file's mode, and a
+# world-writable cfg would make the guest think the (unwritable) app
+# dir is its settings home, breaking the store fallback to /tmp.
+chmod 0644 "${REPO_ROOT}/${FIRMWARE}/.live/mnt/ext1/system/bin/bookshelf.cfg"
 echo "  wrote bookshelf.cfg (api_url=http://127.0.0.1:${API_PORT})"
+
+# The guest may have a settings override in /tmp/bookshelf.cfg (its app
+# dir is not writable in the emulator, so settings saves land there).
+# Refresh the api_url in it too, preserving any other settings — a stale
+# override (e.g. from a test run pointing at a dead port) would otherwise
+# win over the freshly written cfg above on the next launch.
+TMP_CFG="${REPO_ROOT}/${FIRMWARE}/.live/tmp/bookshelf.cfg"
+if [ -f "${TMP_CFG}" ]; then
+	sed -i "s|^api_url=.*|api_url=http://127.0.0.1:${API_PORT}|" "${TMP_CFG}"
+	# The guest (container UID) rewrites this file on settings changes.
+	chmod 666 "${TMP_CFG}"
+	echo "  refreshed ${TMP_CFG} (api_url=http://127.0.0.1:${API_PORT})"
+fi
 
 echo "==> 5/5  starting emulator WITH viewer"
 # --network=host so the guest reaches the API server at 127.0.0.1.
