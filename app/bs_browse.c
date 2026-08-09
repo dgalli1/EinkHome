@@ -250,10 +250,9 @@ draw_browse(void)
         g_browse_scroll = max_scroll;
 
     /* Body only — the top bar (with the path as its title) is drawn by
-     * the caller.  The fill would wipe the top bar's bottom border, so
-     * redraw the separator like draw_grid does. */
+     * the caller.  The fill starts below the top bar's bottom border
+     * (TOP_BAR_PAD gap), so it leaves the border intact. */
     FillArea(0, top, w, bottom - top, WHITE);
-    DrawLine(0, top, w, top, BLACK);
 
     for (int i = 0; i < rows; i++) {
         int idx = g_browse_scroll + i;

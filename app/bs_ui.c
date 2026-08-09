@@ -417,7 +417,6 @@ draw_search_tab(void)
     grid_geom(&top, &bot, &cell_w, &cell_h);
     int w = ScreenWidth();
     FillArea(0, top, w, bot - top, WHITE);
-    DrawLine(0, top, w, top, BLACK);
     LOG("[bookshelf] draw_search_tab page=%d\n", g_state.page);
 
     /* ── input row: magnifier icon + text box ── */
@@ -1313,7 +1312,6 @@ draw_grid(void)
      * so partial updates stay simple.
      */
     FillArea(0, top, ScreenWidth(), bot - top, WHITE);
-    DrawLine(0, top, ScreenWidth(), top, BLACK);
     LOG("[bookshelf] draw_grid view=%d page=%d cell=%dx%d top=%d bot=%d\n",
         g_view_total,
         g_state.page,
