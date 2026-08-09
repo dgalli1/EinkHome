@@ -156,7 +156,10 @@ case "${OUT_REL}" in
 esac
 
 # All paths the compiler sees inside the container are /work/...
-CONTAINER_OUT="/work/${OUT_REL}"
+case "${OUT_REL}" in
+/*) CONTAINER_OUT="${OUT_REL}" ;;
+*) CONTAINER_OUT="/work/${OUT_REL}" ;;
+esac
 CONTAINER_SDK_INC="/work/sdk/pocketbook-sdk-b288/include"
 CONTAINER_SDK_LIB="/work/sdk/pocketbook-sdk-b288/lib"
 CONTAINER_FW_LIBZ="/work/U633_6.8.2817/ebrmain/cramfs/lib/libz.so.1.2.11"
@@ -215,6 +218,9 @@ podman run --rm \
 	"${CRTN}"
 
 echo
-echo "Built: ${REPO_ROOT}/${OUT_REL}"
+case "${OUT_REL}" in
+/work/*) echo "Built: ${REPO_ROOT}/${OUT_REL#/work/}" ;;
+*) echo "Built: ${REPO_ROOT}/${OUT_REL}" ;;
+esac
 echo "Size:  $(stat -c%s "${REPO_ROOT}/${OUT_REL}") bytes"
 echo "GLIBC: $(strings "${REPO_ROOT}/${OUT_REL}" | grep '^GLIBC_' | sort -u | tr '\n' ' ')"
