@@ -220,7 +220,20 @@ podman run --rm \
 echo
 case "${OUT_REL}" in
 /work/*)
-	_HOST_OUT="${REPO_ROOT}/${OUT_REL#/work/}"
+	# Reverse the repo-root mount, then any extra mounts
+	# (PBEMU_EXTRA_MOUNTS) whose container prefix matches.
+	_rel="${OUT_REL#/work/}"
+	_HOST_OUT="${REPO_ROOT}/${_rel}"
+	for _m in ${PBEMU_EXTRA_MOUNTS:-}; do
+		_host="${_m%%:*}"
+		_cont="${_m#*:}"
+		case "${_rel}" in
+		"${_cont#/}"/*)
+			_HOST_OUT="${_host}/${_rel#${_cont#/}/}"
+			break
+			;;
+		esac
+	done
 	echo "Built: ${_HOST_OUT}"
 	;;
 *)
