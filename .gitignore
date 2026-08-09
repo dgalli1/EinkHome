@@ -7,3 +7,5 @@ api/config/
 api/.cover-cache/
 # PocketBook SDK blob (re-fetched via sdk/install-sdk.sh)
 sdk/pocketbook-sdk-b288/
+# Screenshots from scripts/click_first_book.py
+screenshots/
