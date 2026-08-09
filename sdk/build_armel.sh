@@ -221,15 +221,18 @@ echo
 case "${OUT_REL}" in
 /work/*)
 	# Reverse the repo-root mount, then any extra mounts
-	# (PBEMU_EXTRA_MOUNTS) whose container prefix matches.
+	# (PBEMU_EXTRA_MOUNTS) whose container prefix matches.  The
+	# extra-mount container prefix is relative to the /work repo
+	# mount (e.g. /work/einkhome → einkhome).
 	_rel="${OUT_REL#/work/}"
 	_HOST_OUT="${REPO_ROOT}/${_rel}"
 	for _m in ${PBEMU_EXTRA_MOUNTS:-}; do
 		_host="${_m%%:*}"
 		_cont="${_m#*:}"
+		_cont_rel="${_cont#/work/}"
 		case "${_rel}" in
-		"${_cont#/}"/*)
-			_HOST_OUT="${_host}/${_rel#${_cont#/}/}"
+		"${_cont_rel}"/*)
+			_HOST_OUT="${_host}/${_rel#${_cont_rel}/}"
 			break
 			;;
 		esac
