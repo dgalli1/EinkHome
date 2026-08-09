@@ -1,19 +1,21 @@
 #!/bin/sh
 #
-# run.sh — end-to-end driver for the pbemu bookshelf replacement (step 2).
+# run.sh — end-to-end driver for EinkHome (the bookshelf replacement).
 #
 # Steps:
-#   1. Build the guest ELF against the PocketBook SDK (sdk/build_armel.sh).
-#   2. (Re)start the pbemu API server (api/api/server.py) on 127.0.0.1:8765
-#      so the in-emulator app has a target to talk to.  The container
-#      reaches it via 169.254.1.2 (host.containers.internal).
+#   1. Build the guest ELF via the pbemu submodule's sdk/build_armel.sh.
+#   2. (Re)start the pbemu API server (pbemu/api/api/server.py) on
+#      127.0.0.1:8765 so the in-emulator app has a target to talk to.
 #   3. Stop the running emulator.
 #   4. Stage the ELF as /mnt/ext1/system/bin/bookshelf.app inside the
 #      container so monitor.app picks our binary on next respawn.
 #   5. Restart the emulator.
-#   6. Wait for the foreground task to be our bookshelf, take a screenshot,
+#   6. Wait for the foreground task to be our app, take a screenshot,
 #      dump recent bookserver state reports, and confirm the API server
 #      has seen the device's /sync/delta / /sync/state / /open-with calls.
+#
+# The pbemu submodule must be checked out (git submodule update --init)
+# and its firmware staged (pbemu/pbemu install) before running.
 
 set -eu
 
@@ -25,16 +27,17 @@ REPO_ROOT=$(
 	unset CDPATH
 	cd "${HERE}/.." && pwd
 )
+PBEMU_DIR="${REPO_ROOT}/pbemu"
 CONTAINER="${PBEMU_CONTAINER:-pb-pocketbook-ui}"
-BS_DIR="${HERE}"
 API_PORT="${PBEMU_API_PORT:-8765}"
+FIRMWARE="U633_6.8.2817"
 
 cd "${REPO_ROOT}"
 
 echo "==> 1/6  building bookshelf.app"
-# The source list lives in bookshelf/Makefile; build_armel.sh does the
-# actual cross-compile.
-make -C "${BS_DIR}" all
+# The source list lives in the root Makefile; build_armel.sh in the
+# pbemu submodule does the actual cross-compile.
+make all
 
 if ! podman container exists "${CONTAINER}" 2>/dev/null; then
 	echo "INFO: container ${CONTAINER} not running; will be started in step 5"
@@ -46,7 +49,7 @@ fi
 case "${CONTAINER_STATE}" in
 present)
 	echo "==> 2/6  stopping container ${CONTAINER}"
-	./pbemu stop
+	"${PBEMU_DIR}/pbemu" stop
 	;;
 *)
 	echo "==> 2/6  skipping container stop (not running)"
@@ -57,15 +60,23 @@ echo "==> 3/6  (re)starting pbemu-api on 127.0.0.1:${API_PORT}"
 # Kill any stale server first.
 pkill -f "api.api.server" 2>/dev/null || true
 sleep 0.5
-# Run from the repo root so the mock provider's relative
+# Run from the pbemu submodule so the mock provider's relative
 # `U633_6.8.2817/.live/mnt/ext1/books` resolves correctly.
-cd "${REPO_ROOT}"
+cd "${PBEMU_DIR}"
+PYTHON="${PBEMU_DIR}/.venv/bin/python"
+if [ ! -x "${PYTHON}" ]; then
+	PYTHON=$(command -v python3 || true)
+fi
+if [ -z "${PYTHON}" ]; then
+	echo "ERROR: no python interpreter found (tried ${PBEMU_DIR}/.venv/bin/python and python3)" >&2
+	exit 1
+fi
 # Run the server module via `python -m` with PYTHONPATH pointing
-# at the repo root.  Note that `tools/` shadows `api/providers/`
+# at the pbemu root.  Note that `tools/` shadows `api/providers/`
 # when we put the repo root in sys.path, so we explicitly add the
 # api dir to PYTHONPATH as well.
-PYTHONPATH="${REPO_ROOT}:${REPO_ROOT}/api" \
-	/home/damian/git/pbemu/.venv/bin/python -m api.api.server \
+PYTHONPATH="${PBEMU_DIR}:${PBEMU_DIR}/api" \
+	"${PYTHON}" -m api.api.server \
 	--host 0.0.0.0 --port "${API_PORT}" \
 	>/tmp/pbemu-api.log 2>&1 &
 echo $! >/tmp/pbemu-api.pid
@@ -107,13 +118,13 @@ EOF
 fi
 
 echo "==> 4/6  staging into ${CONTAINER:-new container}"
-if [ ! -d "${REPO_ROOT}/U633_6.8.2817/.live" ]; then
-	PBEMU_NO_KEEPID=1 ./pbemu start U633_6.8.2817 --no-viewer --no-audio --reset --no-build
-	./pbemu stop
+if [ ! -d "${PBEMU_DIR}/${FIRMWARE}/.live" ]; then
+	PBEMU_NO_KEEPID=1 "${PBEMU_DIR}/pbemu" start "${FIRMWARE}" --no-viewer --no-audio --reset --no-build
+	"${PBEMU_DIR}/pbemu" stop
 fi
-mkdir -p "${REPO_ROOT}/U633_6.8.2817/.live/mnt/ext1/system/bin"
+mkdir -p "${PBEMU_DIR}/${FIRMWARE}/.live/mnt/ext1/system/bin"
 install -m 0755 "build/bookshelf.app" \
-	"${REPO_ROOT}/U633_6.8.2817/.live/mnt/ext1/system/bin/bookshelf.app"
+	"${PBEMU_DIR}/${FIRMWARE}/.live/mnt/ext1/system/bin/bookshelf.app"
 echo "  staged $(wc -c <build/bookshelf.app) bytes to .live/mnt/ext1/system/bin/bookshelf.app"
 # Also push the binary into the running container so monitor.app launches
 # it on next respawn (it looks under both /ebrmain/bin and
@@ -133,15 +144,15 @@ podman exec "${CONTAINER}" /usr/bin/chmod +x \
 
 # Write a bookshelf.cfg that points at 127.0.0.1 (works with --network=host
 # and with the old shared-netns mode; 169.254.1.2 is unreachable under pasta).
-mkdir -p "${REPO_ROOT}/U633_6.8.2817/.live/mnt/ext1/system/bin"
-cat >"${REPO_ROOT}/U633_6.8.2817/.live/mnt/ext1/system/bin/bookshelf.cfg" <<CFGEOF
+mkdir -p "${PBEMU_DIR}/${FIRMWARE}/.live/mnt/ext1/system/bin"
+cat >"${PBEMU_DIR}/${FIRMWARE}/.live/mnt/ext1/system/bin/bookshelf.cfg" <<CFGEOF
 api_url=http://127.0.0.1:${API_PORT}
 api_token=pbemu-dev-token
 CFGEOF
 # Owner-write only: `cat >` keeps a pre-existing file's mode, and a
 # world-writable cfg would make the guest think the (unwritable) app
 # dir is its settings home, breaking the store fallback to /tmp.
-chmod 0644 "${REPO_ROOT}/U633_6.8.2817/.live/mnt/ext1/system/bin/bookshelf.cfg"
+chmod 0644 "${PBEMU_DIR}/${FIRMWARE}/.live/mnt/ext1/system/bin/bookshelf.cfg"
 echo "  wrote bookshelf.cfg (api_url=http://127.0.0.1:${API_PORT})"
 
 # The guest may have a settings override in /tmp/bookshelf.cfg (its app
@@ -149,7 +160,7 @@ echo "  wrote bookshelf.cfg (api_url=http://127.0.0.1:${API_PORT})"
 # Refresh the api_url in it too, preserving any other settings — a stale
 # override (e.g. from a test run pointing at a dead port) would otherwise
 # win over the freshly written cfg above on the next launch.
-TMP_CFG="${REPO_ROOT}/U633_6.8.2817/.live/tmp/bookshelf.cfg"
+TMP_CFG="${PBEMU_DIR}/${FIRMWARE}/.live/tmp/bookshelf.cfg"
 if [ -f "${TMP_CFG}" ]; then
 	sed -i "s|^api_url=.*|api_url=http://127.0.0.1:${API_PORT}|" "${TMP_CFG}"
 	# The guest (container UID) rewrites this file on settings changes.
@@ -158,21 +169,16 @@ if [ -f "${TMP_CFG}" ]; then
 fi
 
 echo "==> 5/6  starting container"
-PBEMU_NO_KEEPID=1 PBEMU_PODMAN_ARGS="--network=host" ./pbemu start U633_6.8.2817 --no-viewer --no-audio --no-build
+PBEMU_NO_KEEPID=1 PBEMU_PODMAN_ARGS="--network=host" "${PBEMU_DIR}/pbemu" start "${FIRMWARE}" --no-viewer --no-audio --no-build
 sleep 3
 # kill the previous run if any
 podman exec "${CONTAINER}" /usr/bin/killall bookshelf.app 2>/dev/null || true
 sleep 5
 
 echo "==> 6/6  screenshot + state"
-./pbemu screenshot /tmp/pbemu_bookshelf.png --force
+"${PBEMU_DIR}/pbemu" screenshot /tmp/pbemu_bookshelf.png --force
 echo "screenshot -> /tmp/pbemu_bookshelf.png ($(wc -c </tmp/pbemu_bookshelf.png) bytes)"
-./pbemu state || true
+"${PBEMU_DIR}/pbemu" state || true
 
 echo
 echo "API server recent state:"
-if [ -f /tmp/pbemu-api.log ]; then
-	tail -30 /tmp/pbemu-api.log
-fi
-echo
-echo "Done.  Press Ctrl-C to stop the API server (PID $(cat /tmp/pbemu-api.pid))."

@@ -101,7 +101,7 @@ on_event(int type, int par1, int par2)
          * framework only calls it via iv_actualize_panel() when
          * is_state_changed() is true, which it isn't on a fresh launch, so
          * we force it here.  Arg 0 = reading-mode disabled (normal bar). */
-        DrawPanel(NULL, "Bookshelf", NULL, -1);
+        DrawPanel(NULL, "EinkHome", NULL, -1);
         stamp_panel();
 
         /* Force the firmware to actually draw the system panel now.

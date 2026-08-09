@@ -11,7 +11,7 @@ char g_lang[8] = "en";
  */
 
 const I18n g_i18n[] = {
-    {"app.title", "Bookshelf", "B\u00fccherregal", "\u00c9tag\u00e8re", "pbemu libreria"},
+    {"app.title", "EinkHome", "EinkHome", "EinkHome", "EinkHome"},
     {"action.sync", "Sync", "Sync", "Sync", "Sync"},
     {"action.more", "More", "Mehr", "Plus", "Altro"},
     {"action.menu", "Menu", "Men\u00fc", "Menu", "Menu"},

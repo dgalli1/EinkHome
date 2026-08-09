@@ -3,7 +3,7 @@
 Requires:
   - podman available
   - firmware U633_6.8.2817 staged (./pbemu install)
-  - books in U633_6.8.2817/.live/mnt/ext1/books/
+  - books in pbemu/U633_6.8.2817/.live/mnt/ext1/books/
 
 Run with: pytest tests/test_bookshelf.py -v
 """
@@ -43,6 +43,11 @@ from tests.support.reader.session import Session
 from tests.support.runtime import Emulator, container_running, container_sh
 from tests.support.runtime_common import REPO_ROOT
 
+# The pbemu submodule provides the firmware tree, the emulator tooling
+# (tools/ + api/) and the container; everything else (app, Makefile,
+# test support) lives in this repository.
+PBEMU_ROOT = REPO_ROOT / "pbemu"
+
 FIRMWARE = "U633_6.8.2817"
 API_PORT = 18765
 API_TOKEN = "pbemu-dev-token"
@@ -58,7 +63,7 @@ pytestmark = pytest.mark.bookshelf
 def _pbemu_env() -> dict[str, str]:
     """Return env dict with tools/ prepended to PYTHONPATH."""
     env = os.environ.copy()
-    tools = str(REPO_ROOT / "tools")
+    tools = str(PBEMU_ROOT / "tools")
     env["PYTHONPATH"] = (
         tools if not env.get("PYTHONPATH") else f"{tools}{os.pathsep}{env['PYTHONPATH']}"
     )
@@ -68,8 +73,8 @@ def _pbemu_env() -> dict[str, str]:
 def _api_env() -> dict[str, str]:
     """Return env dict for the API server subprocess."""
     env = os.environ.copy()
-    api_dir = str(REPO_ROOT / "api")
-    root = str(REPO_ROOT)
+    api_dir = str(PBEMU_ROOT / "api")
+    root = str(PBEMU_ROOT)
     extra = f"{root}{os.pathsep}{api_dir}"
     env["PYTHONPATH"] = (
         extra if not env.get("PYTHONPATH") else f"{extra}{os.pathsep}{env['PYTHONPATH']}"
@@ -96,7 +101,7 @@ def _start_api_server() -> subprocess.Popen:  # type: ignore[type-arg]
             "--config",
             str(REPO_ROOT / "tests" / "support" / "server-test.json"),
         ],
-        cwd=REPO_ROOT,
+        cwd=PBEMU_ROOT,
         env=_api_env(),
         stdout=log_fh,
         stderr=subprocess.STDOUT,
@@ -138,7 +143,7 @@ def _build_bookshelf() -> Path:
     # The source list lives in bookshelf/Makefile; build_armel.sh does
     # the cross-compile.
     subprocess.run(
-        ["make", "-C", str(REPO_ROOT / "bookshelf")],
+        ["make", "-C", str(REPO_ROOT)],
         cwd=REPO_ROOT,
         check=True,
         capture_output=True,
@@ -170,7 +175,7 @@ def _stage_binary(binary: Path) -> None:
     monitor.app will find it (ebrmain/bin takes priority over
     /mnt/ext1/system/bin).
     """
-    live = REPO_ROOT / FIRMWARE / ".live"
+    live = PBEMU_ROOT / FIRMWARE / ".live"
     bin_dir = live / "mnt/ext1/system/bin"
     bin_dir.mkdir(parents=True, exist_ok=True)
 
@@ -362,7 +367,7 @@ def bookshelf_env():
     #    run's test-pointing api_url can be restored afterwards — a
     #    leftover override otherwise poisons the next manual emulator
     #    session (the app keeps syncing to the dead test port).
-    live = REPO_ROOT / FIRMWARE / ".live"
+    live = PBEMU_ROOT / FIRMWARE / ".live"
     bin_cfg = live / "mnt/ext1/system/bin/bookshelf.cfg"
     tmp_cfg = live / "tmp/bookshelf.cfg"
     saved_bin_cfg = _snapshot_cfg(bin_cfg)
@@ -911,7 +916,7 @@ def test_no_crash_after_all_interactions(fresh_bookshelf):
 _SERIES_STEM = "Drill_Test"
 _SERIES_FILES = [f"{_SERIES_STEM} - 01.epub", f"{_SERIES_STEM} - 02.epub"]
 _ALLOWED_EXT = (".epub", ".pdf", ".fb2", ".djvu", ".txt", ".cbz", ".cbr")
-_BOOKS_DIR = REPO_ROOT / FIRMWARE / ".live" / "mnt" / "ext1" / "books"
+_BOOKS_DIR = PBEMU_ROOT / FIRMWARE / ".live" / "mnt" / "ext1" / "books"
 _PAGESIZE = 6  # COLS * ROWS, must match geometry.PAGESIZE
 
 
@@ -1038,7 +1043,7 @@ def test_series_card_drill_in_and_back(fresh_bookshelf):
 # so bookshelf.c falls back to /tmp (resolve_downloads_dir); guest /tmp maps to
 # .live/tmp on the host.  The helpers below inspect/clean that dir.
 
-_DOWNLOADS_DIR = REPO_ROOT / FIRMWARE / ".live" / "tmp"
+_DOWNLOADS_DIR = PBEMU_ROOT / FIRMWARE / ".live" / "tmp"
 
 
 def _downloaded_files() -> list[Path]:
@@ -1103,7 +1108,7 @@ def _final_dl_progress(bs: BookshelfSession, before: str, total: int, *, timeout
 
 
 _DL_DELAY_PORT = 18767
-_DL_DELAY_CFG = REPO_ROOT / FIRMWARE / ".live" / "tmp" / "bookshelf.cfg"
+_DL_DELAY_CFG = PBEMU_ROOT / FIRMWARE / ".live" / "tmp" / "bookshelf.cfg"
 
 
 def _start_delayed_api_server() -> subprocess.Popen:  # type: ignore[type-arg]
@@ -1453,7 +1458,7 @@ def test_series_longpress_delete(fresh_bookshelf):
 # the module's real server.  Guest /tmp maps to .live/tmp on the host,
 # which is also where the library store + cover cache live.
 
-_OFFLINE_TMP = REPO_ROOT / FIRMWARE / ".live" / "tmp"
+_OFFLINE_TMP = PBEMU_ROOT / FIRMWARE / ".live" / "tmp"
 _OFFLINE_STORE = _OFFLINE_TMP / "bookshelf_lib.db"
 _OFFLINE_LEGACY = _OFFLINE_TMP / "bookshelf_lib.json"
 _OFFLINE_COVERS = _OFFLINE_TMP / "covers"

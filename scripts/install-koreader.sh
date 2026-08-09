@@ -1,6 +1,7 @@
 #!/bin/sh
 #
-# install-koreader.sh — install KOReader (PocketBook build) into the pbemu
+# install-koreader.sh — install KOReader (PocketBook build) into the
+# pbemu submodule's emulator tree.
 # emulator, straight from the GitHub release.
 #
 # Usage:
@@ -59,11 +60,11 @@ v*) ;;
 esac
 
 ZIP="/tmp/koreader-pocketbook-${TAG}.zip"
-TARGET="${REPO_ROOT}/U633_6.8.2817/.live/mnt/ext1"
+TARGET="${REPO_ROOT}/pbemu/U633_6.8.2817/.live/mnt/ext1"
 
 if [ ! -d "${TARGET}/applications" ]; then
 	echo "ERROR: emulator tree not staged at ${TARGET}" >&2
-	echo "       run './pbemu install U633_6.8.2817' first" >&2
+	echo "       run 'pbemu/pbemu install U633_6.8.2817' first" >&2
 	exit 1
 fi
 

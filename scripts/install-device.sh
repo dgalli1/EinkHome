@@ -89,11 +89,11 @@ SRC_CFG="${REPO_ROOT}/build/bookshelf.cfg"
 
 if [ "${DO_BUILD}" = "1" ] || [ ! -f "${SRC_APP}" ]; then
 	echo "==> building ${SRC_APP}"
-	make -C "${HERE}" all
+	make -C "${REPO_ROOT}" all
 fi
 
 if [ ! -f "${SRC_APP}" ]; then
-	echo "ERROR: ${SRC_APP} not found; pass --build or run ./bookshelf/run.sh first" >&2
+	echo "ERROR: ${SRC_APP} not found; pass --build or run ./scripts/run.sh first" >&2
 	exit 1
 fi
 

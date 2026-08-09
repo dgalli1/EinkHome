@@ -25,6 +25,8 @@ from tests.support.bookshelf import BookshelfGeometry, BookshelfSession
 from tests.support.reader.session import Session
 from tests.support.runtime import container_running, container_sh
 from tests.support.runtime_common import REPO_ROOT
+
+PBEMU_ROOT = REPO_ROOT / "pbemu"
 from tests.test_bookshelf import (
     API_TOKEN,
     CONTAINER,
@@ -104,7 +106,7 @@ def _stage_scale() -> None:
     the guest store + any /tmp config override so the 100k sync starts
     from cursor 0 against the scale port."""
     _stage_binary(_build_bookshelf())
-    bin_dir = REPO_ROOT / FIRMWARE / ".live" / "mnt/ext1/system/bin"
+    bin_dir = PBEMU_ROOT / FIRMWARE / ".live" / "mnt/ext1/system/bin"
     (bin_dir / "bookshelf.cfg").write_text(
         f"api_url=http://127.0.0.1:{SCALE_PORT}\napi_token={API_TOKEN}\n",
         encoding="utf-8",

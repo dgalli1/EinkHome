@@ -1,18 +1,24 @@
-# bookshelf/Makefile — build the bookshelf guest app.
+# EinkHome Makefile — build the EinkHome guest app.
 #
-# The source list lives HERE and only here: run.sh, run-visible.sh,
-# install-device.sh and tests/test_bookshelf.py all delegate to `make`.
-# The actual cross-compile (arm-linux-gnueabi-gcc inside the pbdev
-# container, linked against the firmware rootfs) is done by
-# sdk/build_armel.sh, which owns the toolchain flags.
+# The source list lives HERE and only here; scripts/run.sh,
+# scripts/run-visible.sh, scripts/install-device.sh and tests/ all
+# delegate to `make`.  Compilation is done by the pbemu submodule's
+# sdk/build_armel.sh (arm-linux-gnueabi-gcc inside the pbdev
+# container, linked against the firmware rootfs staged in the
+# submodule).  Our app dir is exposed to the container through
+# PBEMU_EXTRA_MOUNTS and the include dir through
+# PBEMU_APP_INCLUDE_DIR; the ELF lands in build/.
 #
 # Usage:
-#     make -C bookshelf           # build build/bookshelf.app
-#     make -C bookshelf clean     # remove the built ELF
+#     make            # build build/bookshelf.app
+#     make clean      # remove the built ELF
+#
+# Note: the binary keeps the name bookshelf.app — the firmware's home
+# task is selected by that exact name (see README.md).
 
-REPO_ROOT := $(abspath $(CURDIR)/..)
-BUILD_ARMEL := $(REPO_ROOT)/sdk/build_armel.sh
-OUT := $(REPO_ROOT)/build/bookshelf.app
+PBEMU_DIR := $(abspath $(CURDIR)/pbemu)
+BUILD_ARMEL := $(PBEMU_DIR)/sdk/build_armel.sh
+OUT := $(CURDIR)/build/bookshelf.app
 
 SOURCES := \
 	bs_i18n.c \
@@ -31,14 +37,17 @@ SOURCES := \
 	bs_store.c \
 	bs_main.c
 
-SRC_PATHS := $(addprefix $(CURDIR)/,$(SOURCES))
+SRC_PATHS := $(addprefix $(CURDIR)/app/,$(SOURCES))
 
 .PHONY: all clean
 
 all: $(OUT)
 
 $(OUT): $(SRC_PATHS) $(BUILD_ARMEL)
-	$(BUILD_ARMEL) $(SRC_PATHS) --output build/bookshelf.app
+	mkdir -p $(CURDIR)/build
+	PBEMU_EXTRA_MOUNTS="$(CURDIR):/work/einkhome" \
+	PBEMU_APP_INCLUDE_DIR=/work/einkhome/app \
+	$(BUILD_ARMEL) $(SRC_PATHS) --output /work/einkhome/build/bookshelf.app
 
 clean:
 	rm -f $(OUT)

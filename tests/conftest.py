@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(_REPO_ROOT / "tools"))
+sys.path.insert(0, str(_REPO_ROOT / "pbemu" / "tools"))
 
 # Imports are placed after the sys.path mutation because pbemu lives under
 # ``tools/`` rather than as an installed package during interactive runs.

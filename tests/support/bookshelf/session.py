@@ -13,6 +13,8 @@ from typing import TYPE_CHECKING
 
 from tests.support.reader.session import Session
 from tests.support.runtime_common import REPO_ROOT
+
+PBEMU_ROOT = REPO_ROOT / "pbemu"
 from tests.support.ui_input import (
     IV_KEY_BACK,
     pointer_down,
@@ -39,7 +41,7 @@ _LOG_OPEN_MARKER = "--- bookshelf.app log opened"
 
 
 def _bookshelf_log_candidates(firmware: str) -> list[Path]:
-    base = REPO_ROOT / firmware / ".live"
+    base = PBEMU_ROOT / firmware / ".live"
     return [
         base / "tmp" / "bookshelf.log",
         base / "mnt" / "ext1" / "system" / "bin" / "bookshelf.log",

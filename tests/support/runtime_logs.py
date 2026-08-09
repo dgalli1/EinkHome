@@ -37,7 +37,7 @@ def _is_ignorable_monitor_line(line: str) -> bool:
 
 def monitor_log_path(firmware: str) -> Path:
     """Return the host path for the staged guest ``monitor.log``."""
-    return REPO_ROOT / firmware / ".live/var/log/monitor.log"
+    return PBEMU_ROOT / firmware / ".live/var/log/monitor.log"
 
 
 def monitor_log_size(firmware: str) -> int:
