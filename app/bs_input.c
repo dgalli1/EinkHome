@@ -368,9 +368,9 @@ on_tap_overlay_settings(int x, int y)
     }
 }
 
-/* Taps on the full-screen log viewer: Back (top-left) or the two
- * bottom scroll buttons (older = up the file, newer = toward the
- * tail).  Taps anywhere else are ignored. */
+/* Taps on the full-screen log viewer: Back (top-left) or the corner
+ * scroll buttons (up = older, down = newer).  Taps elsewhere are
+ * ignored. */
 void
 on_tap_log_view(int x, int y)
 {
@@ -381,29 +381,18 @@ on_tap_log_view(int x, int y)
         redraw_shelf();
         return;
     }
-    int w = ScreenWidth();
-    int h = content_bottom();
-    int btn_y = h - 8 - LOG_BTN_H;
-    int bw = LOG_BTN_W;
-    int gap = LOG_BTN_GAP;
-    int x1 = (w - 2 * bw - gap) / 2;
-    int x2 = x1 + bw + gap;
-    int page = (btn_y - (LOG_BACK_Y + LOG_BACK_H + 16)) / LOG_ROW_H;
-    if (page < 1)
-        page = 1;
-    if (y >= btn_y && y < btn_y + LOG_BTN_H) {
-        if (x >= x1 && x < x1 + bw) {
-            /* Older: scroll toward the file start (row 0). */
-            g_state.log_scroll -= page;
-            if (g_state.log_scroll < 0)
-                g_state.log_scroll = 0;
-            draw_log_view();
-            FullUpdate();
-        } else if (x >= x2 && x < x2 + bw) {
-            /* Newer: toward the tail; draw_log_view clamps at the end. */
-            g_state.log_scroll += page;
-            draw_log_view();
-            FullUpdate();
-        }
+    int dir = hit_scroll_button(x, y);
+    if (dir != 0) {
+        int h = content_bottom();
+        int btn_y = h - 8 - SCROLL_BTN_H;
+        int page = (btn_y - (LOG_BACK_Y + LOG_BACK_H + 16)) / LOG_ROW_H;
+        if (page < 1)
+            page = 1;
+        /* Rows are ordered oldest → newest; up (dir -1) goes older. */
+        g_state.log_scroll += dir * page;
+        if (g_state.log_scroll < 0)
+            g_state.log_scroll = 0;
+        draw_log_view();
+        FullUpdate();
     }
 }

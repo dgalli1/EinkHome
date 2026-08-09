@@ -96,8 +96,6 @@ const I18n g_i18n[] = {
     {"settings.logs", "Show logs", "Logs anzeigen", "Afficher les logs", "Mostra log"},
     {"log.title", "Log", "Log", "Journal", "Log"},
     {"log.back", "Back", "Zur\u00fcck", "Retour", "Indietro"},
-    {"log.older", "Older", "\u00c4lter", "Plus ancien", "Pi\u00f9 vecchi"},
-    {"log.newer", "Newer", "Neuer", "Plus r\u00e9cent", "Pi\u00f9 recenti"},
     {"log.empty", "No log file yet", "Noch keine Logdatei", "Aucun journal", "Nessun log"},
     {"tab.search", "Search", "Suche", "Recherche", "Cerca"},
     {"settings.back", "Back", "Zur\u00fcck", "Retour", "Indietro"},

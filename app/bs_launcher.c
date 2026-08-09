@@ -771,7 +771,25 @@ draw_launcher_icon(int cx, int cy, const char *icon_name, const char *title)
     if (!bm && icon_name && icon_name[0] == '/')
         bm = LoadPNG(icon_name, 0);
     if (bm) {
-        DrawBitmap(x0, y0, bm);
+        /* Center the bitmap inside the icon box.  The firmware icon
+         * resources come in various native sizes; anchoring them at the
+         * box's top-left made small glyphs drift toward the corner
+         * (and off the label's centre line).  Oversized icons are
+         * scaled down, aspect-preserving, to fit the box. */
+        int bw = bm->width;
+        int bh = bm->height;
+        if (bw > sz || bh > sz) {
+            if (bw > bh) {
+                bh = bh * sz / bw;
+                bw = sz;
+            } else {
+                bw = bw * sz / bh;
+                bh = sz;
+            }
+            StretchBitmap(x0 + (sz - bw) / 2, y0 + (sz - bh) / 2, bw, bh, bm, STRETCH);
+        } else {
+            DrawBitmap(x0 + (sz - bw) / 2, y0 + (sz - bh) / 2, bm);
+        }
         return;
     }
     FillArea(x0, y0, sz, sz, WHITE);
@@ -892,6 +910,8 @@ draw_overlay_launcher(void)
             }
         }
     }
+    /* Stock corner scroll buttons while the column overflows. */
+    draw_scroll_buttons(scroll > 0, scroll < max_scroll);
     if (hf)
         CloseFont(hf);
     if (af)
@@ -968,6 +988,22 @@ on_tap_overlay_launcher(int x, int y)
     if (x >= 16 && x < 176 && y >= (LAUNCHER_HEADER_H - 56) / 2 &&
         y < (LAUNCHER_HEADER_H - 56) / 2 + 56) {
         launcher_close();
+        return;
+    }
+    /* Corner scroll buttons: page up/down the column. */
+    int dir = hit_scroll_button(x, y);
+    if (dir != 0) {
+        int body_h = content_bottom() - body_top;
+        int max_scroll = g_launcher_body_h - body_h;
+        if (max_scroll < 0)
+            max_scroll = 0;
+        g_state.launcher_scroll += dir * body_h;
+        if (g_state.launcher_scroll < 0)
+            g_state.launcher_scroll = 0;
+        if (g_state.launcher_scroll > max_scroll)
+            g_state.launcher_scroll = max_scroll;
+        draw_overlay_launcher();
+        flush_content();
         return;
     }
     if (y < body_top || y >= content_bottom())

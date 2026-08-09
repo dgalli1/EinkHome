@@ -192,6 +192,10 @@ draw_overlay_folder(void)
         DrawString(bx + (sw - tw) / 2, sy + (sh - 12 - 32) / 2, i18n("settings.back"));
         CloseFont(f);
     }
+
+    /* Corner scroll buttons, raised above the Select/Back band. */
+    int sy0 = content_bottom() - FOLDER_BTN_H - FOLDER_BTN_PAD - SCROLL_BTN_H;
+    draw_scroll_buttons_at(g_folder_scroll > 0, g_folder_scroll < max_scroll, sy0);
 }
 
 /* Commit the browsed folder as the pending downloads-folder setting. */
@@ -262,6 +266,18 @@ folder_navigate(const char *name)
 int
 on_tap_folder(int x, int y)
 {
+    /* Corner scroll buttons (raised above the Select/Back band). */
+    int sy0 = content_bottom() - FOLDER_BTN_H - FOLDER_BTN_PAD - SCROLL_BTN_H;
+    int dir = hit_scroll_button_at(x, y, sy0);
+    if (dir != 0) {
+        int rows = folder_rows_visible();
+        g_folder_scroll += dir * rows;
+        if (g_folder_scroll < 0)
+            g_folder_scroll = 0;
+        draw_overlay_folder();
+        flush_content();
+        return 1;
+    }
     int sx, sy, sw, sh;
     folder_buttons(&sx, &sy, &sw, &sh);
     if (y >= sy && y < sy + sh - 12) {

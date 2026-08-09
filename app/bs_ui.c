@@ -1967,6 +1967,66 @@ draw_overlay_settings(void)
     settings_draw_button(y, i18n("settings.logs"), 0);
 }
 
+/* ── stock up/down scroll buttons ────────────────────────────────────── */
+
+/* Draw the corner scroll buttons every scrollable surface uses (the
+ * same pattern the stock firmware apps show, e.g. the coloring app):
+ * up chevron bottom-left, down chevron bottom-right, overlaid on the
+ * content.  A direction that cannot scroll renders in light grey.
+ * Surfaces that cannot scroll at all draw nothing.  `y0` is the top
+ * of the button band; surfaces with a fixed bottom bar (the folder
+ * picker) raise it above that bar. */
+void
+draw_scroll_buttons_at(int up_ok, int down_ok, int y0)
+{
+    if (!up_ok && !down_ok)
+        return;
+    int w = ScreenWidth();
+
+    FillArea(0, y0, SCROLL_BTN_W, SCROLL_BTN_H, WHITE);
+    DrawRect(0, y0, SCROLL_BTN_W, SCROLL_BTN_H, up_ok ? BLACK : LGRAY);
+    int col = up_ok ? BLACK : LGRAY;
+    int cx = SCROLL_BTN_W / 2;
+    int cy = y0 + SCROLL_BTN_H / 2;
+    DrawLine(cx - 24, cy + 14, cx, cy - 14, col);
+    DrawLine(cx + 24, cy + 14, cx, cy - 14, col);
+
+    int x2 = w - SCROLL_BTN_W;
+    FillArea(x2, y0, SCROLL_BTN_W, SCROLL_BTN_H, WHITE);
+    DrawRect(x2, y0, SCROLL_BTN_W, SCROLL_BTN_H, down_ok ? BLACK : LGRAY);
+    col = down_ok ? BLACK : LGRAY;
+    cx = x2 + SCROLL_BTN_W / 2;
+    DrawLine(cx - 24, cy - 14, cx, cy + 14, col);
+    DrawLine(cx + 24, cy - 14, cx, cy + 14, col);
+}
+
+void
+draw_scroll_buttons(int up_ok, int down_ok)
+{
+    draw_scroll_buttons_at(up_ok, down_ok, content_bottom() - SCROLL_BTN_H);
+}
+
+/* Hit test for the corner scroll buttons: -1 = up (bottom-left),
+ * +1 = down (bottom-right), 0 = neither. */
+int
+hit_scroll_button_at(int x, int y, int y0)
+{
+    int w = ScreenWidth();
+    if (y < y0 || y >= y0 + SCROLL_BTN_H)
+        return 0;
+    if (x >= 0 && x < SCROLL_BTN_W)
+        return -1;
+    if (x >= w - SCROLL_BTN_W && x < w)
+        return +1;
+    return 0;
+}
+
+int
+hit_scroll_button(int x, int y)
+{
+    return hit_scroll_button_at(x, y, content_bottom() - SCROLL_BTN_H);
+}
+
 /* ── log viewer (Settings → Show logs) ──────────────────────────────── */
 
 /* Read the log tail: at most `cap` bytes, aligned to a line boundary.
@@ -2121,12 +2181,14 @@ draw_log_view(void)
     DrawLine(0, LOG_BACK_Y + LOG_BACK_H + 8, w, LOG_BACK_Y + LOG_BACK_H + 8, BLACK);
 
     int body_top = LOG_BACK_Y + LOG_BACK_H + 16;
-    int btn_y = h - 8 - LOG_BTN_H;
+    int btn_y = h - 8 - SCROLL_BTN_H;
     int body_h = btn_y - body_top - 8;
     if (body_h < LOG_ROW_H)
         body_h = LOG_ROW_H;
     int rows_vis = body_h / LOG_ROW_H;
 
+    int   first = 0;
+    int   max_first = 0;
     char *text = log_tail_read(160 * 1024);
     if (text == NULL) {
         ifont *ef = OpenFont(DEFAULTFONT, 26, 0);
@@ -2141,10 +2203,11 @@ draw_log_view(void)
         if (rows != NULL) {
             nrows = log_wrap_rows(text, w - 48, rows, rows_vis * 8);
         }
-        int max_first = nrows - rows_vis;
-        if (max_first < 0)
-            max_first = 0;
-        int first = g_state.log_scroll < 0 ? max_first : g_state.log_scroll;
+        int maxf = nrows - rows_vis;
+        if (maxf < 0)
+            maxf = 0;
+        max_first = maxf;
+        first = g_state.log_scroll < 0 ? max_first : g_state.log_scroll;
         if (first > max_first)
             first = max_first;
         if (first < 0)
@@ -2172,22 +2235,6 @@ draw_log_view(void)
     }
     free(text);
 
-    /* Bottom scroll buttons: older (up the file) / newer (tail). */
-    int bw = LOG_BTN_W;
-    int gap = LOG_BTN_GAP;
-    int x1 = (w - 2 * bw - gap) / 2;
-    int x2 = x1 + bw + gap;
-    FillArea(x1, btn_y, bw, LOG_BTN_H, WHITE);
-    DrawRect(x1, btn_y, bw, LOG_BTN_H, BLACK);
-    FillArea(x2, btn_y, bw, LOG_BTN_H, WHITE);
-    DrawRect(x2, btn_y, bw, LOG_BTN_H, BLACK);
-    ifont *sf = OpenFont(DEFAULTFONTB, 26, 0);
-    if (sf != NULL) {
-        SetFont(sf, BLACK);
-        int tw = StringWidth(i18n("log.older"));
-        DrawString(x1 + (bw - tw) / 2, btn_y + (LOG_BTN_H - 26) / 2, i18n("log.older"));
-        tw = StringWidth(i18n("log.newer"));
-        DrawString(x2 + (bw - tw) / 2, btn_y + (LOG_BTN_H - 26) / 2, i18n("log.newer"));
-        CloseFont(sf);
-    }
+    /* Stock corner scroll buttons: older = up, newer = down. */
+    draw_scroll_buttons(first > 0, first < max_first);
 }

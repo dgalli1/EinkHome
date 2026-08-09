@@ -282,11 +282,18 @@ draw_browse(void)
             CloseFont(f);
         }
     }
+    draw_scroll_buttons(g_browse_scroll > 0, g_browse_scroll < max_scroll);
 }
 
 int
 on_tap_browse(int x, int y)
 {
+    /* Corner scroll buttons page the listing. */
+    int dir = hit_scroll_button(x, y);
+    if (dir != 0) {
+        browse_page(dir);
+        return 1;
+    }
     (void)x; /* rows span the full width; only y matters */
     if (y < TOP_BAR_H + TOP_BAR_PAD)
         return 1;

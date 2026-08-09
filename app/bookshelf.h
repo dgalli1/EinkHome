@@ -196,11 +196,14 @@ extern void unlockCanvasDrawing(void);
 #define LOG_BACK_Y  10
 #define LOG_BACK_W  128
 #define LOG_BACK_H  72
-#define LOG_BTN_H   64
-#define LOG_BTN_W   220
-#define LOG_BTN_GAP 24
 #define LOG_ROW_H   26
 #define LOG_FONT_PX 20
+
+/* Stock up/down scroll buttons (the pattern firmware apps use, e.g.
+ * the coloring app): an up chevron at the bottom-left corner, a down
+ * chevron at the bottom-right, overlaid on the scrollable surface. */
+#define SCROLL_BTN_W 150
+#define SCROLL_BTN_H 96
 
 typedef struct {
     const char *key;
@@ -596,6 +599,10 @@ void          sync_popup_fail(void);   /* sync failed: show the error, then clos
 void          draw_log_view(void);
 void          on_tap_log_view(int x, int y);
 const char   *log_path(void);
+void          draw_scroll_buttons(int up_ok, int down_ok);
+void          draw_scroll_buttons_at(int up_ok, int down_ok, int y0);
+int           hit_scroll_button(int x, int y);
+int           hit_scroll_button_at(int x, int y, int y0);
 void          redraw_shelf(void);
 void          flush_content(void);
 void          draw_grid(void);
