@@ -229,6 +229,14 @@ store_open(void)
                 store_migrate_columns();
             store_set_meta("schema_version", "2");
         }
+        /* Column-driven backstop: builds that stamped the v2 marker
+         * before filename/source joined the migration list would
+         * otherwise skip them forever (the marker check above is
+         * satisfied).  The migration only alters genuinely missing
+         * columns, so this is a no-op on a healthy store. */
+        if (store_has_column("books", "id") == 1 && (store_has_column("books", "filename") != 1 ||
+                                                     store_has_column("books", "source") != 1))
+            store_migrate_columns();
     }
     if (sqlite3_exec(g_db, SCHEMA_SQL, NULL, NULL, NULL) != SQLITE_OK) {
         /* Introspection can miss a pre-existing table (e.g. a locked or
