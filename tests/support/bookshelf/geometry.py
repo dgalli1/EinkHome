@@ -234,12 +234,12 @@ class BookshelfGeometry:
 
     def settings_save_center(self) -> tuple[int, int]:
         """Centre of the Save & apply button."""
-        y = SETTINGS_ROW1_Y + 3 * SETTINGS_ROW_H + 24
+        y = SETTINGS_ROW1_Y + 4 * SETTINGS_ROW_H + 24
         return (self.screen_w // 2, y + (SETTINGS_BTN_H - 12) // 2)
 
     def settings_back_center(self) -> tuple[int, int]:
         """Centre of the Back button."""
-        y = SETTINGS_ROW1_Y + 3 * SETTINGS_ROW_H + 24 + SETTINGS_BTN_H
+        y = SETTINGS_ROW1_Y + 4 * SETTINGS_ROW_H + 24 + SETTINGS_BTN_H
         return (self.screen_w // 2, y + (SETTINGS_BTN_H - 12) // 2)
 
     def outside_menu_overlay(self) -> tuple[int, int]:

@@ -143,7 +143,9 @@ def _build_bookshelf() -> Path:
         for f in [
             "bs_i18n.c", "bs_config.c", "bs_model.c", "bs_net.c",
             "bs_ui.c", "bs_input.c", "bs_launcher.c",
-            "bs_downloads.c", "bs_store.c", "bs_main.c",
+            "bs_downloads.c", "bs_folder.c", "bs_local.c",
+            "bs_browse.c", "bs_extract.c", "bs_progress.c",
+            "bs_store.c", "bs_main.c",
         ]
     ]
     for s in srcs:
@@ -290,14 +292,18 @@ for d in /var/run/task/[0-9]*; do
     name=""
     [ -r "$d/appname" ] && name=$(cat "$d/appname" 2>/dev/null)
     case "$name" in
-        *bookshelf*|*reader*|*control_panel*)
-            pid=""
-            [ -r "$d/mainpid" ] && pid=$(cat "$d/mainpid" 2>/dev/null)
-            if [ -n "$pid" ]; then
-                kill -TERM "$pid" 2>/dev/null && pids="$pids $pid"
-            fi
-            ;;
+        monitor.app|informer|scanner.app|usage_stat.app|taskmgr.app|digital_frame.app|\
+        calendar.app|settings.app|eink-cache-reader.app)
+            continue ;;
     esac
+    # Bookshelf, the reader, control panel, or a stray app the previous
+    # test launched (launcher tests leave their app foregrounded, which
+    # would otherwise keep the informer's active task off bookshelf).
+    pid=""
+    [ -r "$d/mainpid" ] && pid=$(cat "$d/mainpid" 2>/dev/null)
+    if [ -n "$pid" ]; then
+        kill -TERM "$pid" 2>/dev/null && pids="$pids $pid"
+    fi
 done
 sleep 1
 for p in $pids; do
