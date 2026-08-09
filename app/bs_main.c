@@ -237,6 +237,11 @@ on_event(int type, int par1, int par2)
             FullUpdate();
             return 1;
         }
+        if (g_state.log_open) {
+            draw_log_view();
+            FullUpdate();
+            return 1;
+        }
         draw_top_bar();
         if (g_state.tab == TAB_SEARCH)
             draw_search_tab();
@@ -248,6 +253,8 @@ on_event(int type, int par1, int par2)
             draw_pager();
         if (g_state.dl_popup)
             draw_dl_popup();
+        if (g_state.sync_popup)
+            draw_sync_popup();
         if (g_state.menu_open)
             draw_overlay_menu();
         else if (g_state.more_open)
@@ -297,7 +304,8 @@ on_event(int type, int par1, int par2)
         g_lp_armed = 0;
         g_lp_vi = -1;
         if (g_state.tab == TAB_LIBRARY && !g_state.settings_open && !g_state.menu_open &&
-            !g_state.more_open && !g_state.ctx_open && !g_state.dl_popup) {
+            !g_state.more_open && !g_state.ctx_open && !g_state.dl_popup && !g_state.log_open &&
+            !g_state.sync_popup) {
             int vi = hit_thumbnail(x, y);
             if (vi >= 0) {
                 g_lp_armed = 1;
@@ -427,6 +435,19 @@ on_event(int type, int par1, int par2)
         /* Settings overlay owns the whole screen and repaints itself. */
         if (g_state.settings_open) {
             on_tap_overlay_settings(x, y);
+            return 1;
+        }
+        /* The log viewer owns all taps while open. */
+        if (g_state.log_open) {
+            on_tap_log_view(x, y);
+            return 1;
+        }
+        /* The sync-progress sheet is modal during the sync (which is
+         * synchronous anyway); once the sync is done or failed a tap
+         * dismisses it. */
+        if (g_state.sync_popup) {
+            g_state.sync_popup = 0;
+            redraw_shelf();
             return 1;
         }
         /* Launcher overlay owns the whole screen while open.  A lift that
@@ -566,6 +587,11 @@ on_event(int type, int par1, int par2)
             return 1;
         }
         if (which == 2) {
+            /* Manual sync: show what the sync is doing (metadata
+             * batches / local scan / covers).  The Folder source has
+             * nothing to sync, so no popup there. */
+            if (g_state.source != SOURCE_FOLDER)
+                sync_popup_open();
             do_sync();
             redraw_shelf();
             return 1;

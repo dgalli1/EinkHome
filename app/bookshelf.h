@@ -184,6 +184,24 @@ extern void unlockCanvasDrawing(void);
 #define DL_CANCEL_SIZE 64
 #define DL_CANCEL_GAP  16
 
+/* Sync-progress popup stages (g_state.sync_stage). */
+#define SYNC_STAGE_META   1 /* fetching metadata batches */
+#define SYNC_STAGE_SCAN   2 /* local library scan */
+#define SYNC_STAGE_COVERS 3 /* cover thumbnails after the sync */
+#define SYNC_STAGE_DONE   4 /* finished */
+#define SYNC_STAGE_FAIL   5 /* the sync failed */
+
+/* Log viewer (Settings → Show logs) geometry. */
+#define LOG_BACK_X  8
+#define LOG_BACK_Y  10
+#define LOG_BACK_W  128
+#define LOG_BACK_H  72
+#define LOG_BTN_H   64
+#define LOG_BTN_W   220
+#define LOG_BTN_GAP 24
+#define LOG_ROW_H   26
+#define LOG_FONT_PX 20
+
 typedef struct {
     const char *key;
     const char *en;
@@ -299,6 +317,22 @@ typedef struct {
     int  dl_popup;
     int  dl_popup_auto_open;
     char dl_popup_book_id[MAX_ID_LEN];
+
+    /* Sync-progress popup (sync button tap).  sync_popup shows a small
+     * centred sheet describing what the in-flight sync is doing;
+     * sync_stage picks the status line (metadata batch / local scan /
+     * covers / done / failed).  Only manual syncs (button, settings
+     * apply) open it; boot and timer syncs stay silent. */
+    int sync_popup;
+    int sync_stage; /* SYNC_STAGE_* */
+    int sync_round; /* metadata batch counter */
+    int sync_scan;  /* local scan file counter */
+
+    /* Full-screen log viewer (settings → Show logs).  log_open shows
+     * the app log tail; log_scroll < 0 means "tail", otherwise the
+     * index of the first visible line (0 = oldest). */
+    int log_open;
+    int log_scroll;
 
     /* Reader selection.  reader_pref == 0 means "Auto" (honour the
      * server's open-with resolution); otherwise it is a 1-based index
@@ -552,6 +586,16 @@ void          refresh_dl_popup(void);
 void          dl_cancel_rect(int *x, int *y);
 void          cancel_downloads(void);
 void          dl_progress_metrics(int *total, int *done, int *failed, int *active);
+void          draw_sync_popup(void);
+void          sync_popup_geom(int *px, int *py, int *pw, int *ph);
+void          sync_popup_open(void);
+void          sync_popup_close(void);
+void          sync_popup_refresh(void);
+void          sync_popup_finish(void); /* sync ended: covers/done stage + auto-close */
+void          sync_popup_fail(void);   /* sync failed: show the error, then close */
+void          draw_log_view(void);
+void          on_tap_log_view(int x, int y);
+const char   *log_path(void);
 void          redraw_shelf(void);
 void          flush_content(void);
 void          draw_grid(void);

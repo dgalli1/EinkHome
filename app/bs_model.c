@@ -360,6 +360,10 @@ do_sync(void)
      * library (all of /mnt/ext1), or nothing for the live Folder file
      * browser. */
     if (g_state.source == SOURCE_LOCAL) {
+        if (g_state.sync_popup) {
+            g_state.sync_stage = SYNC_STAGE_SCAN;
+            sync_popup_refresh();
+        }
         local_import_scanner();
         goto synced;
     }
@@ -373,6 +377,11 @@ do_sync(void)
     int more = 1;
     int rounds = 0;
     while (more && rounds < 400) { /* 400 * SYNC_BATCH = 200k ceiling */
+        g_state.sync_round = rounds + 1;
+        /* Repaint the progress sheet every few batches; the round trip
+         * itself is the slow part, so the sheet tracks it live. */
+        if (g_state.sync_popup && (rounds % 5 == 0))
+            sync_popup_refresh();
         char body[128];
         snprintf(body, sizeof body, "{\"cursor\":%lld,\"limit\":%d}", cursor, SYNC_BATCH);
         char *resp = NULL;
@@ -384,6 +393,7 @@ do_sync(void)
             sync_set_active(0);
             if (resp)
                 free(resp);
+            sync_popup_fail();
             return;
         }
         LOG("[bookshelf] do_sync: body=%p retsize=%d cursor=%lld\n", (void *)resp, rlen, cursor);
@@ -418,6 +428,7 @@ do_sync(void)
     LOG("[bookshelf] do_sync: rounds=%d cursor=%lld\n", rounds, cursor);
 
 synced:
+    sync_popup_finish();
     view_rebuild();
     if (g_state.page * view_pagesize() >= view_total())
         g_state.page = 0;

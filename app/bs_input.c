@@ -291,6 +291,10 @@ settings_apply(void)
     g_settings_dl_dir[0] = '\0';
     g_state.settings_open = 0;
     g_settings_edit = 0;
+    /* Re-sync with the new settings; show the progress sheet (unless
+     * the Folder source, which has nothing to sync). */
+    if (g_state.source != SOURCE_FOLDER)
+        sync_popup_open();
     do_sync();
     redraw_shelf();
 }
@@ -306,6 +310,7 @@ on_tap_overlay_settings(int x, int y)
     int y_row4 = y_row3 + SETTINGS_ROW_H;
     int y_save = y_row4 + SETTINGS_ROW_H + 24;
     int y_back = y_save + SETTINGS_BTN_H;
+    int y_logs = y_back + SETTINGS_BTN_H;
 
     if (y >= y_row1 && y < y_row1 + SETTINGS_ROW_H - 12) {
         g_settings_edit = 1;
@@ -350,5 +355,55 @@ on_tap_overlay_settings(int x, int y)
     if (y >= y_back && y < y_back + SETTINGS_BTN_H - 12) {
         settings_close();
         return;
+    }
+    if (y >= y_logs && y < y_logs + SETTINGS_BTN_H - 12) {
+        /* Show the app log directly (Settings → Show logs). */
+        g_state.settings_open = 0;
+        g_settings_edit = 0;
+        g_state.log_open = 1;
+        g_state.log_scroll = -1; /* start at the tail */
+        draw_log_view();
+        FullUpdate();
+        return;
+    }
+}
+
+/* Taps on the full-screen log viewer: Back (top-left) or the two
+ * bottom scroll buttons (older = up the file, newer = toward the
+ * tail).  Taps anywhere else are ignored. */
+void
+on_tap_log_view(int x, int y)
+{
+    if (x >= LOG_BACK_X && x < LOG_BACK_X + LOG_BACK_W && y >= LOG_BACK_Y &&
+        y < LOG_BACK_Y + LOG_BACK_H) {
+        g_state.log_open = 0;
+        g_state.log_scroll = -1;
+        redraw_shelf();
+        return;
+    }
+    int w = ScreenWidth();
+    int h = content_bottom();
+    int btn_y = h - 8 - LOG_BTN_H;
+    int bw = LOG_BTN_W;
+    int gap = LOG_BTN_GAP;
+    int x1 = (w - 2 * bw - gap) / 2;
+    int x2 = x1 + bw + gap;
+    int page = (btn_y - (LOG_BACK_Y + LOG_BACK_H + 16)) / LOG_ROW_H;
+    if (page < 1)
+        page = 1;
+    if (y >= btn_y && y < btn_y + LOG_BTN_H) {
+        if (x >= x1 && x < x1 + bw) {
+            /* Older: scroll toward the file start (row 0). */
+            g_state.log_scroll -= page;
+            if (g_state.log_scroll < 0)
+                g_state.log_scroll = 0;
+            draw_log_view();
+            FullUpdate();
+        } else if (x >= x2 && x < x2 + bw) {
+            /* Newer: toward the tail; draw_log_view clamps at the end. */
+            g_state.log_scroll += page;
+            draw_log_view();
+            FullUpdate();
+        }
     }
 }

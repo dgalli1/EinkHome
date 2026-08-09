@@ -4,7 +4,14 @@
 
 /* ── log file ────────────────────────────────────────────────────────── */
 
-FILE *g_log = NULL;
+FILE       *g_log = NULL;
+static char g_log_path[300];
+
+const char *
+log_path(void)
+{
+    return g_log_path;
+}
 
 void
 log_open(const char *argv0)
@@ -23,9 +30,16 @@ log_open(const char *argv0)
     } else {
         snprintf(path, sizeof path, "/tmp/bookshelf.log");
     }
+    snprintf(g_log_path, sizeof g_log_path, "%s", path);
     g_log = fopen(path, "a");
-    if (g_log == NULL)
-        g_log = fopen("/tmp/bookshelf.log", "a");
+    if (g_log == NULL) {
+        /* The app dir may not be writable (emulator guest); the log
+         * then lives in /tmp.  Record the path that actually took so
+         * the log viewer shows the real file. */
+        snprintf(path, sizeof path, "/tmp/bookshelf.log");
+        g_log = fopen(path, "a");
+    }
+    snprintf(g_log_path, sizeof g_log_path, "%s", path);
     if (g_log != NULL) {
         setvbuf(g_log, NULL, _IOLBF, 0);
         fprintf(g_log, "--- bookshelf.app log opened (argv0=%s) ---\n", argv0 ? argv0 : "(null)");

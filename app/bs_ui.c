@@ -1256,6 +1256,173 @@ draw_dl_popup(void)
     }
 }
 
+/* ── sync progress popup ─────────────────────────────────────────────── */
+
+void
+sync_popup_geom(int *px, int *py, int *pw, int *ph)
+{
+    int w = ScreenWidth();
+    int h = ScreenHeight();
+    *pw = w * 3 / 4;
+    *ph = 190;
+    *px = (w - *pw) / 2;
+    *py = (h - *ph) / 2;
+}
+
+/* Title / status line for the current sync stage.  The sub-line carries
+ * the counter (batch number / scanned books / result count). */
+static const char *
+sync_popup_line(int *sub)
+{
+    *sub = 0;
+    switch (g_state.sync_stage) {
+    case SYNC_STAGE_META:
+        *sub = 1;
+        return i18n("sync.meta");
+    case SYNC_STAGE_SCAN:
+        *sub = 2;
+        return i18n("sync.scan");
+    case SYNC_STAGE_COVERS:
+        return i18n("sync.covers");
+    case SYNC_STAGE_FAIL:
+        return i18n("status.fail");
+    default:
+        return i18n("sync.done");
+    }
+}
+
+/* Sync-progress sheet: a centred modal card over the dimmed shelf,
+ * telling the user what the in-flight sync is doing (metadata batch,
+ * local scan, covers, done/failed).  Only manual syncs open it; boot
+ * and timer syncs run silently behind the spinning top-bar icon. */
+void
+draw_sync_popup(void)
+{
+    int w = ScreenWidth();
+    for (int yy = TOP_BAR_H; yy < content_bottom(); yy += 2)
+        DrawLine(0, yy, w, yy, LGRAY);
+
+    int px, py, pw, ph;
+    sync_popup_geom(&px, &py, &pw, &ph);
+    FillArea(px, py, pw, ph, WHITE);
+    DrawRect(px, py, pw, ph, BLACK);
+    DrawRect(px + 1, py + 1, pw - 2, ph - 2, BLACK);
+
+    ifont *tf = OpenFont(DEFAULTFONTB, 30, 0);
+    if (tf != NULL) {
+        SetFont(tf, BLACK);
+        DrawString(px + CTX_PAD, py + 18, i18n("action.sync"));
+        CloseFont(tf);
+    }
+    DrawLine(px + CTX_PAD, py + CTX_TITLE_H - 1, px + pw - CTX_PAD, py + CTX_TITLE_H - 1, LGRAY);
+
+    int         sub;
+    const char *line = sync_popup_line(&sub);
+    ifont      *lf = OpenFont(DEFAULTFONTB, 28, 0);
+    if (lf != NULL) {
+        SetFont(lf, BLACK);
+        DrawString(px + CTX_PAD, py + CTX_TITLE_H + 24, line);
+        CloseFont(lf);
+    }
+    ifont *sf = OpenFont(DEFAULTFONT, 24, 0);
+    if (sf != NULL) {
+        SetFont(sf, DGRAY);
+        char subline[96];
+        switch (sub) {
+        case 1:
+            snprintf(subline, sizeof subline, i18n("sync.batch"), g_state.sync_round);
+            break;
+        case 2:
+            snprintf(subline, sizeof subline, i18n("sync.books"), g_state.sync_scan);
+            break;
+        default:
+            snprintf(subline, sizeof subline, i18n("sync.books"), view_total());
+            break;
+        }
+        DrawString(px + CTX_PAD, py + CTX_TITLE_H + 68, subline);
+        CloseFont(sf);
+    }
+}
+
+void
+sync_popup_refresh(void)
+{
+    if (!g_state.sync_popup)
+        return;
+    int px, py, pw, ph;
+    sync_popup_geom(&px, &py, &pw, &ph);
+    draw_sync_popup();
+    PartialUpdate(px, py, pw, ph);
+}
+
+void
+sync_popup_open(void)
+{
+    if (g_state.sync_popup)
+        return;
+    g_state.sync_popup = 1;
+    g_state.sync_stage = SYNC_STAGE_META;
+    g_state.sync_round = 0;
+    g_state.sync_scan = 0;
+    sync_popup_refresh();
+}
+
+void
+sync_popup_close(void)
+{
+    if (!g_state.sync_popup)
+        return;
+    g_state.sync_popup = 0;
+    redraw_shelf();
+}
+
+/* Close the popup shortly after the sync finished (or failed).  While
+ * covers are still loading the popup stays on the COVERS line and the
+ * timer re-arms; the 15s cap guarantees it closes even on a slow link
+ * (covers then finish in the background). */
+static void
+sync_popup_close_tick(void *ctx)
+{
+    (void)ctx;
+    if (!g_state.sync_popup)
+        return;
+    if (g_state.sync_stage == SYNC_STAGE_COVERS && g_cover_armed) {
+        SetWeakTimerEx("bsyncp", sync_popup_close_tick, NULL, 1000);
+        return;
+    }
+    sync_popup_close();
+}
+
+static void
+sync_popup_auto_close(int delay_ms)
+{
+    SetWeakTimerEx("bsyncp", sync_popup_close_tick, NULL, delay_ms);
+}
+
+void
+sync_popup_finish(void)
+{
+    if (!g_state.sync_popup)
+        return;
+    g_state.sync_stage = SYNC_STAGE_COVERS;
+    sync_popup_refresh();
+    cover_schedule_next();
+    if (g_cover_armed)
+        sync_popup_auto_close(15000); /* safety cap; covers closing sooner is the norm */
+    else
+        sync_popup_auto_close(900);
+}
+
+void
+sync_popup_fail(void)
+{
+    if (!g_state.sync_popup)
+        return;
+    g_state.sync_stage = SYNC_STAGE_FAIL;
+    sync_popup_refresh();
+    sync_popup_auto_close(1500);
+}
+
 /* Flush the app-owned content area [0, content_bottom()) as a partial
  * update.  Every app surface (top bar, grid, pager, overlays, settings)
  * is drawn strictly inside this region — the firmware's system panel
@@ -1296,6 +1463,8 @@ redraw_shelf(void)
         draw_pager();
     if (g_state.dl_popup)
         draw_dl_popup();
+    if (g_state.sync_popup)
+        draw_sync_popup();
     flush_content();
 }
 
@@ -1374,8 +1543,17 @@ cover_tick(void *ctx)
             break;
         }
     }
-    if (target < 0)
+    if (target < 0) {
+        /* Nothing pending on this page.  A manual sync that opened the
+         * progress popup ends here: the covers have drained, so move
+         * the popup to its "done" state (it auto-closes shortly). */
+        if (g_state.sync_popup && g_state.sync_stage == SYNC_STAGE_COVERS) {
+            g_state.sync_stage = SYNC_STAGE_DONE;
+            sync_popup_refresh();
+            sync_popup_auto_close(900);
+        }
         return; /* nothing pending on this page */
+    }
 
     const char *bid = page_row_id(target - page_start);
     if (bid == NULL)
@@ -1455,7 +1633,7 @@ cover_tick(void *ctx)
      * single-tile PartialUpdate can't punch a hole through the overlay's
      * dim mask (the full redraw on close then shows the now-cached cover). */
     int modal = g_state.ctx_open || g_state.menu_open || g_state.more_open ||
-                g_state.settings_open || g_state.dl_popup;
+                g_state.settings_open || g_state.dl_popup || g_state.sync_popup;
     LOG("[bookshelf] cover_tick blit begin modal=%d\n", modal);
 
     int tx, ty, tw, th;
@@ -1785,4 +1963,231 @@ draw_overlay_settings(void)
     settings_draw_button(y, i18n("settings.save"), 1);
     y += SETTINGS_BTN_H;
     settings_draw_button(y, i18n("settings.back"), 0);
+    y += SETTINGS_BTN_H;
+    settings_draw_button(y, i18n("settings.logs"), 0);
+}
+
+/* ── log viewer (Settings → Show logs) ──────────────────────────────── */
+
+/* Read the log tail: at most `cap` bytes, aligned to a line boundary.
+ * Returns a malloc'd NUL-terminated buffer, or NULL when the log does
+ * not exist yet. */
+static char *
+log_tail_read(size_t cap)
+{
+    const char *path = log_path();
+    FILE       *f = fopen(path, "r");
+    if (f == NULL)
+        return NULL;
+    if (fseek(f, 0, SEEK_END) != 0) {
+        fclose(f);
+        return NULL;
+    }
+    long size = ftell(f);
+    long start = 0;
+    if (size > (long)cap) {
+        start = size - (long)cap;
+        if (fseek(f, start, SEEK_SET) != 0) {
+            fclose(f);
+            return NULL;
+        }
+        int c;
+        while ((c = fgetc(f)) != EOF && c != '\n')
+            ;
+    } else {
+        /* Back to the beginning: the SEEK_END above left the position
+         * at EOF. */
+        if (fseek(f, 0, SEEK_SET) != 0) {
+            fclose(f);
+            return NULL;
+        }
+    }
+    size_t n = (size_t)(size - start);
+    char  *buf = malloc(n + 1);
+    if (buf == NULL) {
+        fclose(f);
+        return NULL;
+    }
+    size_t got = fread(buf, 1, n, f);
+    fclose(f);
+    buf[got] = '\0';
+    return buf;
+}
+
+/* A wrapped display row: a span of the log buffer. */
+typedef struct {
+    const char *p;
+    int         len;
+} LogRow;
+
+/* Width of a non-NUL-terminated span (the SDK only measures C
+ * strings). */
+static int
+span_width(const char *p, int len)
+{
+    char tmp[1024];
+    if (len > (int)sizeof tmp - 1)
+        len = (int)sizeof tmp - 1;
+    memcpy(tmp, p, (size_t)len);
+    tmp[len] = '\0';
+    return StringWidth(tmp);
+}
+
+/* Greedy word wrap of the log text into display rows no wider than
+ * `maxw` px.  Rows point into `text` (never modified).  Returns the
+ * row count. */
+static int
+log_wrap_rows(const char *text, int maxw, LogRow *rows, int cap)
+{
+    int         count = 0;
+    const char *line = text;
+    while (*line != '\0' && count < cap) {
+        const char *nl = strchr(line, '\n');
+        size_t      llen = nl ? (size_t)(nl - line) : strlen(line);
+        const char *end = line + llen;
+        const char *ws = line;
+        while (ws < end) {
+            const char *we = ws;
+            while (we < end && *we != ' ')
+                we++;
+            if (we == ws) { /* collapse space runs */
+                ws++;
+                continue;
+            }
+            int wordw = span_width(ws, (int)(we - ws));
+            int curw = rows[count].len > 0 ? span_width(rows[count].p, rows[count].len) : 0;
+            if (rows[count].len > 0 && curw + wordw + 6 > maxw) {
+                count++;
+                if (count >= cap)
+                    goto done;
+            }
+            if (rows[count].len == 0)
+                rows[count].p = ws;
+            rows[count].len += (int)(we - ws);
+            if (we < end)
+                rows[count].len++; /* the separating space */
+            ws = we;
+        }
+        if (rows[count].len > 0) {
+            count++;
+            if (count >= cap)
+                goto done;
+        }
+        if (nl == NULL)
+            break;
+        line = nl + 1;
+    }
+done:
+    return count;
+}
+
+/* Full-screen log viewer: the app log tail, line-wrapped, page-scrolled
+ * with the two bottom buttons; Back returns to the shelf. */
+void
+draw_log_view(void)
+{
+    int w = ScreenWidth();
+    int h = content_bottom();
+    FillArea(0, 0, w, h, WHITE);
+
+    /* Header: back button + title + file path. */
+    FillArea(LOG_BACK_X, LOG_BACK_Y, LOG_BACK_W, LOG_BACK_H, WHITE);
+    DrawRect(LOG_BACK_X, LOG_BACK_Y, LOG_BACK_W, LOG_BACK_H, BLACK);
+    ifont *bf = OpenFont(DEFAULTFONTB, 26, 0);
+    if (bf != NULL) {
+        SetFont(bf, BLACK);
+        int tw = StringWidth(i18n("log.back"));
+        DrawString(LOG_BACK_X + (LOG_BACK_W - tw) / 2,
+                   LOG_BACK_Y + (LOG_BACK_H - 26) / 2,
+                   i18n("log.back"));
+        CloseFont(bf);
+    }
+    ifont *tf = OpenFont(DEFAULTFONTB, 34, 0);
+    if (tf != NULL) {
+        SetFont(tf, BLACK);
+        DrawString(LOG_BACK_X + LOG_BACK_W + 16, LOG_BACK_Y + 8, i18n("log.title"));
+        CloseFont(tf);
+    }
+    ifont *pf = OpenFont(DEFAULTFONT, 20, 0);
+    if (pf != NULL) {
+        SetFont(pf, DGRAY);
+        char shown[200];
+        snprintf(shown, sizeof shown, "%s", log_path());
+        while (StringWidth(shown) > w - LOG_BACK_X - LOG_BACK_W - 32 && strlen(shown) > 8)
+            shown[strlen(shown) - 1] = '\0';
+        DrawString(LOG_BACK_X + LOG_BACK_W + 16, LOG_BACK_Y + 46, shown);
+        CloseFont(pf);
+    }
+    DrawLine(0, LOG_BACK_Y + LOG_BACK_H + 8, w, LOG_BACK_Y + LOG_BACK_H + 8, BLACK);
+
+    int body_top = LOG_BACK_Y + LOG_BACK_H + 16;
+    int btn_y = h - 8 - LOG_BTN_H;
+    int body_h = btn_y - body_top - 8;
+    if (body_h < LOG_ROW_H)
+        body_h = LOG_ROW_H;
+    int rows_vis = body_h / LOG_ROW_H;
+
+    char *text = log_tail_read(160 * 1024);
+    if (text == NULL) {
+        ifont *ef = OpenFont(DEFAULTFONT, 26, 0);
+        if (ef != NULL) {
+            SetFont(ef, DGRAY);
+            DrawString(32, body_top + 40, i18n("log.empty"));
+            CloseFont(ef);
+        }
+    } else {
+        LogRow *rows = calloc((size_t)rows_vis * 8, sizeof(LogRow));
+        int     nrows = 0;
+        if (rows != NULL) {
+            nrows = log_wrap_rows(text, w - 48, rows, rows_vis * 8);
+        }
+        int max_first = nrows - rows_vis;
+        if (max_first < 0)
+            max_first = 0;
+        int first = g_state.log_scroll < 0 ? max_first : g_state.log_scroll;
+        if (first > max_first)
+            first = max_first;
+        if (first < 0)
+            first = 0;
+        g_state.log_scroll = first;
+
+        ifont *lf = OpenFont(DEFAULTFONT, LOG_FONT_PX, 0);
+        if (lf != NULL) {
+            SetFont(lf, BLACK);
+            for (int i = 0; i < rows_vis && first + i < nrows; i++) {
+                int         len = rows[first + i].len;
+                const char *p = rows[first + i].p;
+                if (len > 480)
+                    len = 480;
+                char tmp[512];
+                memcpy(tmp, p, (size_t)len);
+                tmp[len] = '\0';
+                while (StringWidth(tmp) > w - 48 && strlen(tmp) > 4)
+                    tmp[strlen(tmp) - 1] = '\0';
+                DrawString(24, body_top + i * LOG_ROW_H, tmp);
+            }
+            CloseFont(lf);
+        }
+        free(rows);
+    }
+    free(text);
+
+    /* Bottom scroll buttons: older (up the file) / newer (tail). */
+    int bw = LOG_BTN_W;
+    int gap = LOG_BTN_GAP;
+    int x1 = (w - 2 * bw - gap) / 2;
+    int x2 = x1 + bw + gap;
+    FillArea(x1, btn_y, bw, LOG_BTN_H, WHITE);
+    DrawRect(x1, btn_y, bw, LOG_BTN_H, BLACK);
+    FillArea(x2, btn_y, bw, LOG_BTN_H, WHITE);
+    DrawRect(x2, btn_y, bw, LOG_BTN_H, BLACK);
+    ifont *sf = OpenFont(DEFAULTFONTB, 26, 0);
+    if (sf != NULL) {
+        SetFont(sf, BLACK);
+        int tw = StringWidth(i18n("log.older"));
+        DrawString(x1 + (bw - tw) / 2, btn_y + (LOG_BTN_H - 26) / 2, i18n("log.older"));
+        tw = StringWidth(i18n("log.newer"));
+        DrawString(x2 + (bw - tw) / 2, btn_y + (LOG_BTN_H - 26) / 2, i18n("log.newer"));
+        CloseFont(sf);
+    }
 }

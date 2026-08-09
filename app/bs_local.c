@@ -129,6 +129,14 @@ folder_scan_dir(const char *dir, int depth, const char *src_label)
         snprintf(b.source, sizeof b.source, "%s", src_label);
         store_upsert_book(&b);
         g_folder_scan_count++;
+        /* Live progress for the sync popup: repaint the counter every
+         * 32 files — a full repaint per book would dominate the scan
+         * on a large library. */
+        if (g_state.sync_popup && g_state.sync_stage == SYNC_STAGE_SCAN &&
+            (g_folder_scan_count & 31) == 0) {
+            g_state.sync_scan = g_folder_scan_count;
+            sync_popup_refresh();
+        }
     }
     closedir(d);
 }
