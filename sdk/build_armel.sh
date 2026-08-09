@@ -114,14 +114,28 @@ for _src in ${SRCS}; do
 done
 
 # Build the container-side source list and determine output name.
+# Sources outside the repo root (e.g. an app living in its own
+# repository) are mapped through PBEMU_EXTRA_MOUNTS, e.g.
+# "PBEMU_EXTRA_MOUNTS=/home/me/EinkHome:/work/einkhome".
 CONTAINER_SRCS=""
 _FIRST_SRC=""
 for _src in ${SRCS}; do
 	_rel=$(echo "${_src}" | sed "s|^${REPO_ROOT}/||")
+	_cpath="/work/${_rel}"
+	for _m in ${PBEMU_EXTRA_MOUNTS:-}; do
+		_host="${_m%%:*}"
+		_cont="${_m#*:}"
+		case "${_src}" in
+		"${_host}"/*)
+			_cpath="${_cont}/$(echo "${_src}" | sed "s|^${_host}/||")"
+			break
+			;;
+		esac
+	done
 	if [ -z "${CONTAINER_SRCS}" ]; then
-		CONTAINER_SRCS="/work/${_rel}"
+		CONTAINER_SRCS="${_cpath}"
 	else
-		CONTAINER_SRCS="${CONTAINER_SRCS} /work/${_rel}"
+		CONTAINER_SRCS="${CONTAINER_SRCS} ${_cpath}"
 	fi
 	if [ -z "${_FIRST_SRC}" ]; then
 		_FIRST_SRC="${_src}"
@@ -129,8 +143,17 @@ for _src in ${SRCS}; do
 done
 
 NAME=$(basename "${_FIRST_SRC}" .c)
-OUT_REL="${OUTPUT:-build/${NAME}}"
-mkdir -p "$(dirname "${REPO_ROOT}/${OUT_REL}")"
+if [ -z "${OUTPUT}" ]; then
+	OUT_REL="build/${NAME}"
+else
+	OUT_REL="${OUTPUT}"
+fi
+# An absolute output path (a container path on an extra mount) is
+# created by the caller; relative paths live under the repo root.
+case "${OUT_REL}" in
+/*) ;;
+*) mkdir -p "$(dirname "${REPO_ROOT}/${OUT_REL}")" ;;
+esac
 
 # All paths the compiler sees inside the container are /work/...
 CONTAINER_OUT="/work/${OUT_REL}"
@@ -152,13 +175,20 @@ CRTE="${CRT_CROSS_DIR}/crtendS.o"
 CRTN="${CRT_FW_DIR}/crtn.o"
 
 # shellcheck disable=SC2086
+_EXTRA_MOUNTS=""
+for _m in ${PBEMU_EXTRA_MOUNTS:-}; do
+	_EXTRA_MOUNTS="${_EXTRA_MOUNTS} -v ${_m}:z"
+done
+
+# shellcheck disable=SC2086
 podman run --rm \
 	-v "${REPO_ROOT}:/work:z" \
+	${_EXTRA_MOUNTS} \
 	-w /work \
 	localhost/pbdev:latest \
 	/usr/bin/arm-linux-gnueabi-gcc \
 	"-I${CONTAINER_SDK_INC}" \
-	"-I/work/bookshelf" \
+	"-I${PBEMU_APP_INCLUDE_DIR:-/work/bookshelf}" \
 	"-I/usr/include" \
 	"-L${CONTAINER_SYSROOT}/lib" \
 	"-Wl,-rpath,${CONTAINER_SDK_LIB}" \
