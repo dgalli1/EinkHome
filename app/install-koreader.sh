@@ -84,6 +84,10 @@ unzip -o -q "${ZIP}" -d "${TARGET}"
 # The archive carries the exec bits; re-assert them in case umask
 # interfered (unzip honours the stored modes, so this is belt+braces).
 chmod 755 "${TARGET}/applications/koreader.app" "${TARGET}/system/bin/koreader.app"
+# The emulator guest runs as a non-root uid: the launcher script writes
+# crash.log and settings into the koreader dir, so it must be writable
+# by anyone (on a real device koreader runs as root).
+chmod 777 "${TARGET}/applications/koreader"
 
 echo "==> installed ${TAG}:"
 ls -la "${TARGET}/applications/koreader.app" "${TARGET}/applications/koreader" | head -8
