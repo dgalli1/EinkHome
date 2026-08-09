@@ -6,9 +6,10 @@ A clean, provider-agnostic REST API for the in-emulator
 metadata and book files without going to PocketBook's cloud.
 
 The design replaces the messy `pbcloud-override` proxy with a
-small, single-purpose server.  See `../bookshelf/RESEARCH.md` for
-the full rationale; the short version is "we are not required to
-mimic the legacy pbcloud API 1:1, so we made a better one".
+small, single-purpose server.  See the EinkHome repository's
+`RESEARCH.md` for the full rationale; the short version is "we are
+not required to mimic the legacy pbcloud API 1:1, so we made a
+better one".
 
 ## What it does
 
@@ -53,7 +54,7 @@ proxy uses).
 ## Run
 
 ```
-./bookshelf/run.sh       # builds the in-emulator app AND the API server, restarts everything
+../scripts/run.sh        # (EinkHome repo) builds the in-emulator app AND the API server, restarts everything
 # or, just the server:
 PYTHONPATH=. python -m api.api.server --host 0.0.0.0 --port 8765
 ```
