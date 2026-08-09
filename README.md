@@ -77,9 +77,15 @@ pbemu/pbemu stop           # stop the emulator
 ## Tests
 
 ```sh
-cd pbemu && ./setup-venv.sh && cd ..
-pbemu/pbemu test U633_6.8.2817 -- tests/test_bookshelf.py -k offline
+./scripts/test.sh            # api unit tests + full emulator e2e suite
+./scripts/test.sh --pbemu    # ... plus the pbemu submodule's own suite
+./scripts/test.sh -- -k offline   # pass pytest args through to the e2e suite
+# or: make test
 ```
+
+The emulator e2e suite needs podman, the staged firmware
+(`pbemu/pbemu install`) and staged books in
+`pbemu/U633_6.8.2817/.live/mnt/ext1/books/`.
 
 ## Why the binary is still called bookshelf.app
 

@@ -1,0 +1,90 @@
+#!/bin/sh
+#
+# test.sh — run the EinkHome test suites.
+#
+#   scripts/test.sh                # api unit tests + the emulator e2e suite
+#   scripts/test.sh --pbemu        # ... plus the pbemu submodule's own suite
+#   scripts/test.sh -- -k offline  # pass pytest args through to the e2e suite
+#
+# Requirements: the pbemu submodule venv (cd pbemu && ./setup-venv.sh),
+# podman, the staged firmware (pbemu/pbemu install) and staged books in
+# pbemu/U633_6.8.2817/.live/mnt/ext1/books/.
+#
+# Exit status: 0 when every selected suite passed, 1 otherwise.
+
+set -eu
+
+HERE=$(
+	unset CDPATH
+	cd "$(dirname "$0")" && pwd
+)
+REPO_ROOT=$(
+	unset CDPATH
+	cd "${HERE}/.." && pwd
+)
+PBEMU_DIR="${REPO_ROOT}/pbemu"
+PY="${PBEMU_DIR}/.venv/bin/python"
+FIRMWARE_DIR="${PBEMU_DIR}/U633_6.8.2817"
+BOOKS_DIR="${FIRMWARE_DIR}/.live/mnt/ext1/books"
+
+RUN_API=1
+RUN_E2E=1
+RUN_PBEMU=0
+PYTEST_ARGS=""
+
+for arg in "$@"; do
+	case "${arg}" in
+	--pbemu) RUN_PBEMU=1 ;;
+	--) shift; PYTEST_ARGS="$*"; break ;;
+	--help|-h)
+		sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'
+		exit 0
+		;;
+	*) echo "unknown argument: ${arg} (try --help)" >&2; exit 2 ;;
+	esac
+done
+
+die() {
+	echo "ERROR: $*" >&2
+	exit 1
+}
+
+if [ ! -x "${PY}" ]; then
+	die "venv missing at ${PY} — run: (cd pbemu && ./setup-venv.sh)"
+fi
+if ! "${PY}" -m pytest --version >/dev/null 2>&1; then
+	die "pytest not installed in the venv — run: (cd pbemu && ./setup-venv.sh)"
+fi
+
+if [ "${RUN_E2E}" = 1 ] || [ "${RUN_PBEMU}" = 1 ]; then
+	command -v podman >/dev/null 2>&1 || die "podman not found"
+fi
+if [ "${RUN_E2E}" = 1 ]; then
+	[ -d "${FIRMWARE_DIR}" ] || die "firmware not staged — run: pbemu/pbemu install"
+	[ -d "${BOOKS_DIR}" ] && [ -n "$(ls -A "${BOOKS_DIR}" 2>/dev/null)" ] \
+		|| die "no books staged in ${BOOKS_DIR} — the e2e suite needs a populated library"
+fi
+
+rc=0
+
+if [ "${RUN_API}" = 1 ]; then
+	echo "==> api unit tests (api/tests)"
+	(cd "${REPO_ROOT}" && "${PY}" -m pytest api/tests -q) || rc=1
+fi
+
+if [ "${RUN_E2E}" = 1 ]; then
+	echo "==> EinkHome e2e suite (tests/)"
+	(cd "${REPO_ROOT}" && "${PY}" -m pytest tests/ -q ${PYTEST_ARGS}) || rc=1
+fi
+
+if [ "${RUN_PBEMU}" = 1 ]; then
+	echo "==> pbemu submodule suite (pbemu/tests)"
+	(cd "${PBEMU_DIR}" && ./.venv/bin/python -m pytest tests/ -q) || rc=1
+fi
+
+if [ "${rc}" -eq 0 ]; then
+	echo "All selected suites passed."
+else
+	echo "One or more suites failed." >&2
+fi
+exit "${rc}"

@@ -38,9 +38,12 @@ SOURCES := \
 
 SRC_PATHS := $(addprefix $(CURDIR)/app/,$(SOURCES))
 
-.PHONY: all clean
+.PHONY: all clean test
 
 all: $(OUT)
+
+test:
+	scripts/test.sh
 
 $(OUT): $(SRC_PATHS) $(BUILD_ARMEL)
 	mkdir -p $(CURDIR)/build
