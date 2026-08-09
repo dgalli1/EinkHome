@@ -34,7 +34,10 @@ REPO_ROOT=$(
 )
 
 SDK="${REPO_ROOT}/sdk/pocketbook-sdk-b288"
-FIRMWARE="${REPO_ROOT}/U633_6.8.2817"
+# The firmware rootfs may live outside this repo (e.g. in the pbemu
+# submodule when the wrapper is used from an app repo); PBEMU_FIRMWARE_DIR
+# overrides it and the container mount below exposes it at /work/U633_6.8.2817.
+FIRMWARE="${PBEMU_FIRMWARE_DIR:-${REPO_ROOT}/U633_6.8.2817}"
 SYSROOT="${FIRMWARE}/rootfs"
 
 # Sanity checks up front so the failure mode is clear instead of buried in
@@ -182,6 +185,12 @@ _EXTRA_MOUNTS=""
 for _m in ${PBEMU_EXTRA_MOUNTS:-}; do
 	_EXTRA_MOUNTS="${_EXTRA_MOUNTS} -v ${_m}:z"
 done
+# Firmware outside the repo root must be mounted at the container path
+# the linker flags below reference (/work/U633_6.8.2817).
+case "${FIRMWARE}" in
+"${REPO_ROOT}"/*) ;;
+*) _EXTRA_MOUNTS="${_EXTRA_MOUNTS} -v ${FIRMWARE}:/work/U633_6.8.2817:z" ;;
+esac
 
 # shellcheck disable=SC2086
 podman run --rm \

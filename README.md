@@ -50,10 +50,9 @@ cd ..
 git add pbemu && git commit -m "submodule: bump pbemu (…)"
 ```
 
-The cross-compile glue (`sdk/build_armel.sh` in the submodule) is the
-only pbemu file EinkHome reaches into; it supports building apps from
-outside the pbemu tree via `PBEMU_EXTRA_MOUNTS` and
-`PBEMU_APP_INCLUDE_DIR` (see the Makefile).
+The cross-compile glue (`sdk/build_armel.sh`, in this repo) builds the
+app against the firmware rootfs staged in the pbemu submodule via
+`PBEMU_FIRMWARE_DIR` (see the Makefile).
 
 ## Build
 

@@ -65,8 +65,8 @@ else
 fi
 
 echo "==> 5/6  PocketBook SDK"
-if [ ! -f "${PBEMU_DIR}/sdk/pocketbook-sdk-b288/include/inkview.h" ]; then
-	(cd "${PBEMU_DIR}" && sh sdk/install-sdk.sh)
+if [ ! -f "${REPO_ROOT}/sdk/pocketbook-sdk-b288/include/inkview.h" ]; then
+	(cd "${REPO_ROOT}" && sh sdk/install-sdk.sh)
 else
 	echo "    already installed"
 fi

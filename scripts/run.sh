@@ -3,7 +3,7 @@
 # run.sh — end-to-end driver for EinkHome (the bookshelf replacement).
 #
 # Steps:
-#   1. Build the guest ELF via the pbemu submodule's sdk/build_armel.sh.
+#   1. Build the guest ELF via sdk/build_armel.sh (this repo).
 #   2. (Re)start the API server (api/api/server.py) on
 #      127.0.0.1:8765 so the in-emulator app has a target to talk to.
 #   3. Stop the running emulator.
