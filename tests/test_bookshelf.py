@@ -103,7 +103,10 @@ def _start_api_server() -> subprocess.Popen:  # type: ignore[type-arg]
             "--config",
             str(REPO_ROOT / "tests" / "support" / "server-test.json"),
         ],
-        cwd=EINKHOME_ROOT,
+        # The server code lives in this repo (api/ on PYTHONPATH), but it
+        # runs with the submodule as cwd so the config's firmware-relative
+        # paths (books_dir: U633_6.8.2817/.live/...) resolve correctly.
+        cwd=PBEMU_ROOT,
         env=_api_env(),
         stdout=log_fh,
         stderr=subprocess.STDOUT,

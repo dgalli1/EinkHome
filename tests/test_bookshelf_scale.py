@@ -79,7 +79,9 @@ def _start_scale_api() -> subprocess.Popen:  # type: ignore[type-arg]
             "--provider",
             "mock",
         ],
-        cwd=EINKHOME_ROOT,
+        # Server code lives in this repo (api/ on PYTHONPATH); cwd stays
+        # the submodule so firmware-relative config paths resolve.
+        cwd=PBEMU_ROOT,
         env=_scale_api_env(),
         stdout=log_fh,
         stderr=subprocess.STDOUT,

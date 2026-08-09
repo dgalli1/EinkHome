@@ -2,3 +2,6 @@ build/
 __pycache__/
 *.pyc
 .pytest_cache/
+# Local API config (may hold provider credentials) + caches
+api/config/
+api/.cover-cache/

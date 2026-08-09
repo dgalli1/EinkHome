@@ -60,9 +60,10 @@ echo "==> 3/6  (re)starting pbemu-api on 127.0.0.1:${API_PORT}"
 # Kill any stale server first.
 pkill -f "api.api.server" 2>/dev/null || true
 sleep 0.5
-# Run from the repo root: the API server lives here (api/), the venv
-# comes from the pbemu submodule.
-cd "${REPO_ROOT}"
+# Run from the pbemu submodule so the config's firmware-relative
+# paths (books_dir: U633_6.8.2817/.live/...) resolve correctly; the
+# server code itself lives in this repo (api/ on PYTHONPATH).
+cd "${PBEMU_DIR}"
 PYTHON="${PBEMU_DIR}/.venv/bin/python"
 if [ ! -x "${PYTHON}" ]; then
 	PYTHON=$(command -v python3 || true)

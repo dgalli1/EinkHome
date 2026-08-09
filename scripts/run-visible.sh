@@ -80,8 +80,9 @@ echo "==> 2/5  (re)starting pbemu-api on 127.0.0.1:${API_PORT}"
 # Kill any stale server first.
 pkill -f "api.api.server" 2>/dev/null || true
 sleep 0.5
-# Run from the repo root: the API server lives here (api/).
-cd "${REPO_ROOT}"
+# Run from the pbemu submodule so the config's firmware-relative
+# paths resolve correctly; the server code lives in this repo (api/).
+cd "${PBEMU_DIR}"
 PYTHONPATH="${REPO_ROOT}:${REPO_ROOT}/api" \
 	"${PYTHON}" -m api.api.server \
 	--host 0.0.0.0 --port "${API_PORT}" \
