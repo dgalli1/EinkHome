@@ -103,6 +103,7 @@ else
 	echo "  not running"
 fi
 
+cd "${REPO_ROOT}"
 echo "==> 4/5  staging bookshelf.app + cfg into ${FIRMWARE}/.live"
 if [ ! -d "${PBEMU_DIR}/${FIRMWARE}/.live" ]; then
 	echo "ERROR: ${PBEMU_DIR}/${FIRMWARE}/.live missing; run "${PBEMU_DIR}/pbemu" start once first" >&2
