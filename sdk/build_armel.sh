@@ -219,8 +219,14 @@ podman run --rm \
 
 echo
 case "${OUT_REL}" in
-/work/*) echo "Built: ${REPO_ROOT}/${OUT_REL#/work/}" ;;
-*) echo "Built: ${REPO_ROOT}/${OUT_REL}" ;;
+/work/*)
+	_HOST_OUT="${REPO_ROOT}/${OUT_REL#/work/}"
+	echo "Built: ${_HOST_OUT}"
+	;;
+*)
+	_HOST_OUT="${REPO_ROOT}/${OUT_REL}"
+	echo "Built: ${_HOST_OUT}"
+	;;
 esac
-echo "Size:  $(stat -c%s "${REPO_ROOT}/${OUT_REL}") bytes"
-echo "GLIBC: $(strings "${REPO_ROOT}/${OUT_REL}" | grep '^GLIBC_' | sort -u | tr '\n' ' ')"
+echo "Size:  $(stat -c%s "${_HOST_OUT}") bytes"
+echo "GLIBC: $(strings "${_HOST_OUT}" | grep '^GLIBC_' | sort -u | tr '\n' ' ')"
