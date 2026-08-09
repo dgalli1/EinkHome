@@ -520,7 +520,6 @@ const char *json_next_object(const char *p, const char **end_out);
 int parse_book_obj(const char *obj, Book *b);
 void do_sync(void);
 void store_open(void);
-void ensure_explorer_db(void);
 void store_close(void);
 int store_count(void);
 long long store_get_cursor(void);

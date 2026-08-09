@@ -128,7 +128,6 @@ int on_event(int type, int par1, int par2) {
     resolve_downloads_dir();
     resolve_covers_dir();
     store_open();
-    ensure_explorer_db();       /* the reader aborts without the explorer db */
     refresh_downloaded_flags(); /* files may have changed while we were away */
     progress_reload();          /* reader progress from the explorer DB */
     /* A local source renders from the on-device library directly;
