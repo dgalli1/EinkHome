@@ -18,6 +18,7 @@ import shutil
 import subprocess
 import sys
 import time
+from pathlib import Path
 
 import pytest
 
@@ -28,7 +29,7 @@ from tests.support.runtime_common import REPO_ROOT
 
 EINKHOME_ROOT = Path(__file__).resolve().parents[1]
 PBEMU_ROOT = REPO_ROOT
-from tests.test_bookshelf import (
+from test_bookshelf import (
     API_TOKEN,
     CONTAINER,
     FIRMWARE,
@@ -54,8 +55,8 @@ pytestmark = pytest.mark.bookshelf
 def _scale_api_env() -> dict[str, str]:
     """API server env with the mock provider scaled to 100k books."""
     env = os.environ.copy()
-    api_dir = str(REPO_ROOT / "api")
-    root = str(REPO_ROOT)
+    api_dir = str(EINKHOME_ROOT / "api")
+    root = str(EINKHOME_ROOT)
     env["PYTHONPATH"] = f"{root}{os.pathsep}{api_dir}"
     env["PBEMU_MOCK_COUNT"] = str(SCALE_COUNT)
     env["PBEMU_MOCK_SERIES_SIZE"] = str(SERIES_SIZE)
@@ -63,7 +64,7 @@ def _scale_api_env() -> dict[str, str]:
 
 
 def _start_scale_api() -> subprocess.Popen:  # type: ignore[type-arg]
-    log_path = REPO_ROOT / "build" / "pbemu-api-scale.log"
+    log_path = EINKHOME_ROOT / "build" / "pbemu-api-scale.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log_fh = open(log_path, "w", encoding="utf-8")  # noqa: SIM115
     proc = subprocess.Popen(
@@ -78,7 +79,7 @@ def _start_scale_api() -> subprocess.Popen:  # type: ignore[type-arg]
             "--provider",
             "mock",
         ],
-        cwd=REPO_ROOT,
+        cwd=EINKHOME_ROOT,
         env=_scale_api_env(),
         stdout=log_fh,
         stderr=subprocess.STDOUT,
@@ -126,7 +127,9 @@ def _stage_scale() -> None:
         )
         container_sh(
             "rm -f /tmp/bookshelf.cfg /tmp/bookshelf_lib.db "
-            "/tmp/bookshelf_lib.db-journal",
+            "/tmp/bookshelf_lib.db-journal "
+            "/mnt/ext1/system/bin/bookshelf_lib.db "
+            "/mnt/ext1/system/bin/bookshelf_lib.db-journal",
             check=False,
             timeout=5,
         )

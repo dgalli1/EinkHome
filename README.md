@@ -25,12 +25,12 @@ pbemu/              # git submodule: the emulator project this app runs in
 
 ## The pbemu submodule
 
-Everything around the app — the emulator (qemu-arm + shim), the
-staged firmware (`pbemu/U633_6.8.2817`), the mock Kavita API server
-(`pbemu/api`), the developer CLI (`pbemu/pbemu`) — lives in the
-[`pbemu`](https://github.com/dgalli1/pbemu) submodule.  EinkHome only
-contains the app itself plus the glue that builds, stages, and tests
-it against the submodule.
+The pbemu submodule provides everything around the app — the
+emulator (qemu-arm + shim), the staged firmware
+(`pbemu/U633_6.8.2817`), and the developer CLI (`pbemu/pbemu`).
+EinkHome contains the app itself, its mock Kavita REST API server
+(`api/`), and the glue that builds, stages, and tests them against
+the submodule.
 
 ```sh
 git submodule update --init --recursive   # first checkout

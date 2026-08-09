@@ -75,8 +75,8 @@ def _pbemu_env() -> dict[str, str]:
 def _api_env() -> dict[str, str]:
     """Return env dict for the API server subprocess."""
     env = os.environ.copy()
-    api_dir = str(PBEMU_ROOT / "api")
-    root = str(PBEMU_ROOT)
+    api_dir = str(EINKHOME_ROOT / "api")
+    root = str(EINKHOME_ROOT)
     extra = f"{root}{os.pathsep}{api_dir}"
     env["PYTHONPATH"] = (
         extra if not env.get("PYTHONPATH") else f"{extra}{os.pathsep}{env['PYTHONPATH']}"
@@ -86,7 +86,7 @@ def _api_env() -> dict[str, str]:
 
 def _start_api_server() -> subprocess.Popen:  # type: ignore[type-arg]
     """Start the mock API server on the test port. Returns the Popen."""
-    log_path = REPO_ROOT / "build" / "pbemu-api-test.log"
+    log_path = EINKHOME_ROOT / "build" / "pbemu-api-test.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log_fh = open(log_path, "w", encoding="utf-8")  # noqa: SIM115
     proc = subprocess.Popen(
@@ -103,7 +103,7 @@ def _start_api_server() -> subprocess.Popen:  # type: ignore[type-arg]
             "--config",
             str(REPO_ROOT / "tests" / "support" / "server-test.json"),
         ],
-        cwd=PBEMU_ROOT,
+        cwd=EINKHOME_ROOT,
         env=_api_env(),
         stdout=log_fh,
         stderr=subprocess.STDOUT,
@@ -359,6 +359,15 @@ def bookshelf_env():
     if shutil.which("podman") is None:
         pytest.skip("podman not available")
 
+    # Start from a clean guest store + cover cache.  The scale suite
+    # leaves a ~100k-book synthetic store behind, which puts the app's
+    # sync cursor past the live library and poisons download/offline
+    # tests on the next run.
+    _OFFLINE_STORE.unlink(missing_ok=True)
+    (_OFFLINE_DIR / "bookshelf_lib.db-journal").unlink(missing_ok=True)
+    (_OFFLINE_DIR / "bookshelf_lib.json.migrated").unlink(missing_ok=True)
+    shutil.rmtree(_OFFLINE_DIR / "covers", ignore_errors=True)
+
     # 1. Build the binary
     binary = _build_bookshelf()
 
@@ -598,18 +607,31 @@ def test_more_overlay_dismiss_back_key(fresh_bookshelf):
 
 # ── settings overlay ───────────────────────────────────────────────────
 
-_GUEST_CFG = "/tmp/bookshelf.cfg"
+# The app resolves its config to /mnt/ext1/system/bin/bookshelf.cfg (the
+# dir is guest-writable since the staging change) and saves settings
+# there; /tmp/bookshelf.cfg is only a kv-override.
+_GUEST_CFG_HOST = (
+    PBEMU_ROOT / FIRMWARE / ".live" / "mnt" / "ext1" / "system" / "bin" / "bookshelf.cfg"
+)
 
 
 def _read_guest_cfg() -> str:
     """Read the guest's bookshelf.cfg (host-side .live mount)."""
-    out = container_sh(f"cat {_GUEST_CFG}", check=False, timeout=5)
-    return out.stdout or ""
+    return _GUEST_CFG_HOST.read_text(encoding="utf-8") if _GUEST_CFG_HOST.is_file() else ""
 
 
 def _clear_guest_cfg() -> None:
-    """Remove the guest's settings-override config so a test starts on Auto."""
-    container_sh(f"rm -f {_GUEST_CFG}", check=False, timeout=5)
+    """Drop the saved reader preference so a test starts on Auto, keeping
+    the staged api_url/api_token (save_config_file rewrites the whole
+    config next to its resolved config file)."""
+    if not _GUEST_CFG_HOST.is_file():
+        return
+    lines = [
+        ln
+        for ln in _GUEST_CFG_HOST.read_text(encoding="utf-8").splitlines()
+        if not ln.startswith("reader=")
+    ]
+    _GUEST_CFG_HOST.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def test_more_overlay_settings_opens_page(fresh_bookshelf):
@@ -1045,7 +1067,7 @@ def test_series_card_drill_in_and_back(fresh_bookshelf):
 # so bookshelf.c falls back to /tmp (resolve_downloads_dir); guest /tmp maps to
 # .live/tmp on the host.  The helpers below inspect/clean that dir.
 
-_DOWNLOADS_DIR = PBEMU_ROOT / FIRMWARE / ".live" / "tmp"
+_DOWNLOADS_DIR = PBEMU_ROOT / FIRMWARE / ".live" / "mnt" / "ext1" / "Downloads"
 
 
 def _downloaded_files() -> list[Path]:
@@ -1460,10 +1482,15 @@ def test_series_longpress_delete(fresh_bookshelf):
 # the module's real server.  Guest /tmp maps to .live/tmp on the host,
 # which is also where the library store + cover cache live.
 
+# The guest resolves its config to /mnt/ext1/system/bin (writable since
+# the staging commits made /mnt guest-writable), so the store, cover
+# cache and legacy JSON live next to that config; /tmp/bookshelf.cfg is
+# only a kv-override the loader re-applies on top.
 _OFFLINE_TMP = PBEMU_ROOT / FIRMWARE / ".live" / "tmp"
-_OFFLINE_STORE = _OFFLINE_TMP / "bookshelf_lib.db"
-_OFFLINE_LEGACY = _OFFLINE_TMP / "bookshelf_lib.json"
-_OFFLINE_COVERS = _OFFLINE_TMP / "covers"
+_OFFLINE_DIR = PBEMU_ROOT / FIRMWARE / ".live" / "mnt" / "ext1" / "system" / "bin"
+_OFFLINE_STORE = _OFFLINE_DIR / "bookshelf_lib.db"
+_OFFLINE_LEGACY = _OFFLINE_DIR / "bookshelf_lib.json"
+_OFFLINE_COVERS = _OFFLINE_DIR / "covers"
 _OFFLINE_CFG = _OFFLINE_TMP / "bookshelf.cfg"
 
 
@@ -1741,7 +1768,7 @@ def test_legacy_json_store_migrates_to_sqlite(bookshelf_env):
 
     # Wipe any current store; drop a legacy JSON store with two books.
     _OFFLINE_STORE.unlink(missing_ok=True)
-    (_OFFLINE_TMP / "bookshelf_lib.db.migrated").unlink(missing_ok=True)
+    (_OFFLINE_DIR / "bookshelf_lib.db.migrated").unlink(missing_ok=True)
     _OFFLINE_LEGACY.write_text(
         json.dumps(
             [
@@ -1776,8 +1803,9 @@ def test_legacy_json_store_migrates_to_sqlite(bookshelf_env):
     # sticky, so it may only rename files it owns; hand the fixture over
     # (on a real device the app creates and owns the legacy file itself).
     container_sh(
-        "chown \"$(stat -c %u:%g /tmp/covers 2>/dev/null || "
-        "stat -c %u:%g /tmp/bookshelf.log)\" /tmp/bookshelf_lib.json",
+        "chown \"$(stat -c %u:%g /mnt/ext1/system/bin/covers 2>/dev/null || "
+        "stat -c %u:%g /mnt/ext1/system/bin/bookshelf.log)\" "
+        "/mnt/ext1/system/bin/bookshelf_lib.json",
         check=False,
     )
 
@@ -1799,6 +1827,6 @@ def test_legacy_json_store_migrates_to_sqlite(bookshelf_env):
         ids = {b["id"] for b in _store_books()}
         assert {"legacy_a", "legacy_b"} <= ids
         assert not _OFFLINE_LEGACY.exists(), "legacy json not renamed"
-        assert (_OFFLINE_TMP / "bookshelf_lib.json.migrated").exists()
+        assert (_OFFLINE_DIR / "bookshelf_lib.json.migrated").exists()
     finally:
         _restore_cfg(saved_cfg)

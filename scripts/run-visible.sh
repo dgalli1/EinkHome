@@ -8,7 +8,7 @@
 # --no-viewer for automated screenshots). Steps:
 #
 #   1. Build the guest ELF via the pbemu submodule (skip with --no-build).
-#   2. (Re)start the pbemu API server on 127.0.0.1:8765 so the in-emulator
+#   2. (Re)start the API server on 127.0.0.1:8765 so the in-emulator
 #      app has a target to talk to.
 #   3. Stop any running emulator container.
 #   4. Stage the ELF + bookshelf.cfg into .live so monitor.app launches it.
@@ -80,10 +80,9 @@ echo "==> 2/5  (re)starting pbemu-api on 127.0.0.1:${API_PORT}"
 # Kill any stale server first.
 pkill -f "api.api.server" 2>/dev/null || true
 sleep 0.5
-# Run from the pbemu submodule so the mock provider's relative
-# `U633_6.8.2817/.live/mnt/ext1/books` resolves correctly.
-cd "${PBEMU_DIR}"
-PYTHONPATH="${PBEMU_DIR}:${PBEMU_DIR}/api" \
+# Run from the repo root: the API server lives here (api/).
+cd "${REPO_ROOT}"
+PYTHONPATH="${REPO_ROOT}:${REPO_ROOT}/api" \
 	"${PYTHON}" -m api.api.server \
 	--host 0.0.0.0 --port "${API_PORT}" \
 	>/tmp/pbemu-api.log 2>&1 &
