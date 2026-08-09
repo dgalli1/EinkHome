@@ -186,9 +186,10 @@ for _m in ${PBEMU_EXTRA_MOUNTS:-}; do
 	_EXTRA_MOUNTS="${_EXTRA_MOUNTS} -v ${_m}:z"
 done
 # Firmware outside the repo root must be mounted at the container path
-# the linker flags below reference (/work/U633_6.8.2817).
+# the linker flags below reference (/work/U633_6.8.2817).  Only the
+# in-repo default location needs no extra mount.
 case "${FIRMWARE}" in
-"${REPO_ROOT}"/*) ;;
+"${REPO_ROOT}/U633_6.8.2817") ;;
 *) _EXTRA_MOUNTS="${_EXTRA_MOUNTS} -v ${FIRMWARE}:/work/U633_6.8.2817:z" ;;
 esac
 
