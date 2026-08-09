@@ -4,17 +4,7 @@
 /*
  * bookshelf.h — shared header for the split bookshelf app.
  *
- * Source files:
- *   bs_i18n.c
- *   bs_config.c
- *   bs_model.c
- *   bs_net.c
- *   bs_ui.c
- *   bs_input.c
- *   bs_launcher.c
- *   bs_downloads.c
- *   bs_store.c
- *   bs_main.c
+ * Translation units: see the SOURCES list in bookshelf/Makefile.
  */
 
 #include <inkview.h>

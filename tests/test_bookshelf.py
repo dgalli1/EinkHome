@@ -134,24 +134,11 @@ def _stop_api_server(proc: subprocess.Popen) -> None:  # type: ignore[type-arg]
 
 def _build_bookshelf() -> Path:
     """Build the bookshelf binary. Returns path to the built ELF."""
-    bs_dir = REPO_ROOT / "bookshelf"
     out = REPO_ROOT / "build" / "bookshelf.app"
-    build_script = REPO_ROOT / "sdk" / "build_armel.sh"
-    assert build_script.is_file(), f"build script missing: {build_script}"
-    srcs = [
-        str(bs_dir / f)
-        for f in [
-            "bs_i18n.c", "bs_config.c", "bs_model.c", "bs_net.c",
-            "bs_ui.c", "bs_input.c", "bs_launcher.c",
-            "bs_downloads.c", "bs_folder.c", "bs_local.c",
-            "bs_browse.c", "bs_extract.c", "bs_progress.c",
-            "bs_store.c", "bs_main.c",
-        ]
-    ]
-    for s in srcs:
-        assert Path(s).is_file(), f"source missing: {s}"
+    # The source list lives in bookshelf/Makefile; build_armel.sh does
+    # the cross-compile.
     subprocess.run(
-        [str(build_script), *srcs, "--output", str(out.relative_to(REPO_ROOT))],
+        ["make", "-C", str(REPO_ROOT / "bookshelf")],
         cwd=REPO_ROOT,
         check=True,
         capture_output=True,

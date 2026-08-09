@@ -91,8 +91,8 @@ state back through the loopback container-to-host network.
 ## Build
 
 ```
-sdk/install-sdk.sh                         # one-off: fetch SDK headers + libs
-sdk/build_armel.sh bookshelf/bookshelf.c --output build/bookshelf.app
+sdk/install-sdk.sh                       # one-off: fetch SDK headers + libs
+make -C bookshelf                        # builds build/bookshelf.app
 ```
 
 ## Run
