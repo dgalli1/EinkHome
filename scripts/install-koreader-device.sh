@@ -5,7 +5,7 @@
 # install-device.sh.
 #
 # Usage:
-#   bookshelf/install-koreader-device.sh <device-ip> [version]
+#   scripts/install-koreader-device.sh <device-ip> [version]
 #
 # Arguments:
 #   <device-ip>  SSH target for the PocketBook (root@<ip>).  Passwordless
@@ -16,7 +16,7 @@
 # What it does:
 #   1. Resolves the release tag (latest by default).
 #   2. Downloads koreader-pocketbook-<tag>.zip from GitHub releases
-#      (cached in /tmp; delete the file to force a re-download).
+#      into a per-invocation temp dir (removed on exit via trap).
 #   3. Removes any previous KOReader on the device, then streams the
 #      archive over ssh via tar — scp cannot overwrite root-owned files
 #      and does NOT preserve exec bits, which KOReader's binaries need.
@@ -75,8 +75,12 @@ v*) ;;
 *) TAG="v${TAG}" ;;
 esac
 
-ZIP="/tmp/koreader-pocketbook-${TAG}.zip"
-UNPACK="/tmp/koreader-pocketbook-${TAG}"
+ZIP_TMPDIR=$(mktemp -d)
+# Per-invocation temp dir: concurrent installs of the same tag used to
+# collide on the shared /tmp paths.  Removed on exit (success or error).
+trap 'rm -rf "${ZIP_TMPDIR}"' EXIT
+ZIP="${ZIP_TMPDIR}/koreader-pocketbook-${TAG}.zip"
+UNPACK="${ZIP_TMPDIR}/unpack"
 
 # Sanity-check that we can ssh to the device non-interactively.  Refuse
 # to continue if password auth would be required, so the user notices
@@ -89,13 +93,9 @@ if ! ssh ${SSH_COMMON} -o ConnectTimeout=5 "root@${DEVICE}" true; then
 	exit 1
 fi
 
-if [ ! -f "${ZIP}" ]; then
-	echo "==> downloading ${GITHUB_DL}/${TAG}/koreader-pocketbook-${TAG}.zip"
-	curl -fL --max-time 300 -o "${ZIP}" \
-		"${GITHUB_DL}/${TAG}/koreader-pocketbook-${TAG}.zip"
-else
-	echo "==> using cached ${ZIP}"
-fi
+echo "==> downloading ${GITHUB_DL}/${TAG}/koreader-pocketbook-${TAG}.zip"
+curl -fL --max-time 300 -o "${ZIP}" \
+	"${GITHUB_DL}/${TAG}/koreader-pocketbook-${TAG}.zip"
 
 rm -rf "${UNPACK}"
 mkdir -p "${UNPACK}"
@@ -118,10 +118,11 @@ ssh ${SSH_COMMON} "root@${DEVICE}" rm -rf \
 # ssh's exit status (POSIX sh has no pipefail), silently leaving a
 # half-installed KOReader; with the file staged first, set -e catches a
 # tar failure directly and ssh's status still reflects the remote tar.
-TARBALL="/tmp/koreader-pocketbook-${TAG}.tar"
+# Both the tarball and the unpacked tree live under ${ZIP_TMPDIR} and
+# are removed by the EXIT trap.
+TARBALL="${ZIP_TMPDIR}/koreader-pocketbook-${TAG}.tar"
 tar -C "${UNPACK}" -cf "${TARBALL}" applications system
 ssh ${SSH_COMMON} "root@${DEVICE}" 'cd /mnt/ext1 && tar -xf -' < "${TARBALL}"
-rm -f "${TARBALL}"
 
 echo "==> installed.  verify with:"
 echo "    ssh root@${DEVICE} 'ls -l /mnt/ext1/applications/koreader.app'"

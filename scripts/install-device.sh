@@ -3,15 +3,17 @@
 # install-device.sh — push the pbemu bookshelf.app to a real PocketBook.
 #
 # Usage:
-#   bookshelf/install-device.sh <device-ip> [api-url]
+#   scripts/install-device.sh <device-ip> [api-url]
 #
 # Arguments:
 #   <device-ip>  SSH target for the PocketBook (root@<ip>).  Passwordless
 #                ssh must already be configured (ssh-copy-id once).
 #   [api-url]    Full URL the on-device binary should talk to.  When
 #                omitted, the script picks the host's primary LAN IPv4
-#                and uses http://<lan-ip>:8765.  Override if the device
-#                is on a different subnet than the host running the API.
+#                (lan_ip() in lib.sh) and uses http://<lan-ip>:${PBEMU_API_PORT:-8765}.
+#                Override the port with PBEMU_API_PORT, or pass an
+#                explicit api-url if the device is on a different subnet
+#                than the host running the API.
 #
 # What it does:
 #   1. Builds the ARM binary if `build/bookshelf.app` is missing.
@@ -46,17 +48,20 @@ HERE=$(
 	unset CDPATH
 	cd "$(dirname "$0")" && pwd
 )
+# Shared helpers (lan_ip) — must stay POSIX sh.
+. "${HERE}/lib.sh"
 REPO_ROOT=$(
 	unset CDPATH
 	cd "${HERE}/.." && pwd
 )
+API_PORT="${PBEMU_API_PORT:-8765}"
 
 usage() {
 	cat >&2 <<EOF
 usage: $(basename "$0") <device-ip> [api-url]
        $(basename "$0") --build <device-ip> [api-url]
 
-Pushes build/bookshelf.app + a fresh config to <device-ip>:/mnt/ext1/applications/.
+Pushes build/bookshelf.app + a fresh config to <device-ip>:/mnt/ext1/system/bin/.
 
 EOF
 	exit 64
@@ -98,30 +103,14 @@ if [ ! -f "${SRC_APP}" ]; then
 fi
 
 # Resolve the api_url the device should hit.  When the user doesn't
-# override, pick the host's primary LAN IPv4 (the first non-loopback
-# IPv4 with a default route) and assume the API server is on :8765.
-# If that fails, fall back to the build default (which is wrong for a
-# real device but lets the user notice the problem).
+# override, pick the host's primary LAN IPv4 (lan_ip() in lib.sh: the
+# first non-loopback IPv4 with a default route, with a magic fallback
+# overridable via PBEMU_LAN_FALLBACK) and assume the API server is on
+# ${API_PORT}.  If that fails, the fallback IP is wrong for a real
+# device but lets the user notice the problem.
 if [ -z "${API_URL}" ]; then
-	LAN_IP=$(
-		ip -4 -o addr show scope global 2>/dev/null |
-			awk '{print $4}' |
-			cut -d/ -f1 |
-			head -n1
-	)
-	if [ -z "${LAN_IP}" ]; then
-		LAN_IP=$(
-			hostname -I 2>/dev/null |
-				tr ' ' '\n' |
-				grep -v '^127\.' |
-				head -n1
-		)
-	fi
-	if [ -z "${LAN_IP}" ]; then
-		echo "WARN: could not detect LAN ip; falling back to 192.168.1.42:8765" >&2
-		LAN_IP="192.168.1.42"
-	fi
-	API_URL="http://${LAN_IP}:8765"
+	LAN_IP=$(lan_ip)
+	API_URL="http://${LAN_IP}:${API_PORT}"
 fi
 
 # Sanity-check that we can ssh to the device non-interactively.  Refuse

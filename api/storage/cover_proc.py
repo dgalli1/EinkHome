@@ -37,8 +37,16 @@ def process(raw: bytes) -> Optional[bytes]:
     except ImportError:
         return None
 
+    # Backstop against decompression bombs: raising the ceiling to our
+    # explicit limit makes PIL warn instead of aborting below it.  The
+    # explicit check below rejects oversized images before any pixel
+    # work (no full decode of a 100MP source).
+    Image.MAX_IMAGE_PIXELS = 30_000_000
+
     try:
         img = Image.open(io.BytesIO(raw))
+        if img.width * img.height > 30_000_000:
+            return None
         img.load()
     except Exception:
         return None

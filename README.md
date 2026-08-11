@@ -16,8 +16,11 @@ are not touched by this repository.
 ```
 Makefile            # the only source list; builds build/bookshelf.app
 app/                # the app sources (bs_*.c, bookshelf.h, sqlite3.h)
-scripts/            # run.sh / run-visible.sh (emulator),
-                    # install-device.sh (real device), install-koreader.sh
+scripts/            # run.sh / run-visible.sh (emulator), setup.sh (bootstrap),
+                    # install-device.sh / install-koreader-device.sh (real device),
+                    # install-koreader.sh (emulator KOReader), uninstall-device.sh,
+                    # test.sh, build_ol_corpus.py + click_first_book.py (dev tools),
+                    # legacy/ (superseded on-device helper scripts, kept for reference)
 sdk/                # cross-compile wrapper + SDK bootstrap
 tests/              # emulator integration test suite + support framework
 pbemu/              # git submodule: the emulator project this app runs in
@@ -72,7 +75,26 @@ pbemu/pbemu stop           # stop the emulator
 
 ```sh
 ./scripts/install-device.sh <device-ip> [api-url]
+./scripts/install-koreader-device.sh <device-ip> [version]   # push KOReader
+./scripts/uninstall-device.sh <device-ip>                    # remove the custom bookshelf
 ```
+
+## Development tools
+
+```sh
+./scripts/setup.sh                    # one-time bootstrap: submodule, venv, pbdev
+                                      # image, firmware, SDK, emulator artifacts
+python3 scripts/build_ol_corpus.py    # build a mock-book corpus (JSONL) from Open
+                                      # Library dumps → .cover-cache/mock_books.jsonl
+                                      # (served by the mock provider via PBEMU_MOCK_CORPUS)
+python3 scripts/click_first_book.py   # open the first staged book in the emulator and
+                                      # capture page-1/page-10 screenshots into screenshots/
+```
+
+`scripts/legacy/` holds superseded on-device helper scripts (e.g. the
+`bookshelf-wrapper.sh` startup hook that older installs deployed to
+`/mnt/ext1/system/bin/bookshelf.app`); they are kept for reference and
+for uninstalling from devices that still carry them.
 
 ## Tests
 

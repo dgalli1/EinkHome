@@ -46,7 +46,7 @@ all: $(OUT)
 test:
 	scripts/test.sh
 
-$(OUT): $(SRC_PATHS) $(BUILD_ARMEL)
+$(OUT): $(SRC_PATHS) $(wildcard $(CURDIR)/app/*.h) $(BUILD_ARMEL)
 	mkdir -p $(CURDIR)/build
 	PBEMU_FIRMWARE_DIR="$(PBEMU_DIR)/U633_6.8.2817" \
 	PBEMU_APP_INCLUDE_DIR=/work/app \

@@ -50,19 +50,24 @@ if _API_DIR not in sys.path:
     sys.path.insert(0, _API_DIR)
 
 import argparse  # noqa: E402
+import hmac  # noqa: E402
 import http.server  # noqa: E402
 import json  # noqa: E402
 import re  # noqa: E402
 import socketserver  # noqa: E402
 import sqlite3  # noqa: E402
+import tempfile  # noqa: E402
 import time  # noqa: E402
 import threading  # noqa: E402
 import traceback  # noqa: E402
+from dataclasses import dataclass, field  # noqa: E402
 from typing import Any  # noqa: E402
+from urllib.parse import parse_qs, unquote  # noqa: E402
 
 from providers.base import BookMeta  # noqa: E402
 from storage.cover_cache import CoverCache  # noqa: E402
 from storage.ledger import SyncLedger  # noqa: E402
+from storage.placeholder import PLACEHOLDER_PNG  # noqa: E402
 from storage.suggest import search_text, suggest_terms  # noqa: E402
 
 DEFAULT_CONFIG_PATH = os.path.join(
@@ -85,22 +90,27 @@ def _default_config() -> dict[str, Any]:
         "port": 8765,
         "providers": {
             "mock": {
+                "kind": "mock",
                 "books_dir": "U633_6.8.2817/.live/mnt/ext1/books",
+                "library_name": "pbemu demo library",
             },
             "kavita": {
+                "kind": "kavita",
                 "base_url": "",
                 "api_key": "",
                 "username": "",
                 "password": "",
                 "verify_tls": True,
-                "timeout": 30,
+                "timeout": 60,
+                "library_ids": [],
             },
         },
         "open_with": {
             "epub": ["eink-reader", "bookshelf"],
             "pdf": ["eink-reader", "pdfviewer"],
-            "fb2": ["eink-reader", "bookshelf"],
-            "djvu": ["eink-reader"],
+            "fb2": ["eink-reader"],
+            "txt": ["eink-reader"],
+            "djvu": ["djvureader"],
             "default": ["eink-reader"],
         },
         "cover_cache_dir": ".cover-cache",
@@ -244,14 +254,18 @@ class PbemuAPIServer(http.server.BaseHTTPRequestHandler):
     open_with: Any
 
     server_version = "pbemu-api/0.1"
+    protocol_version = "HTTP/1.1"
 
     # The `app` instance attribute is set per-request from
     # `main()`'s RequestHandler subclass.  We don't set it here
     # because BaseHTTPRequestHandler.__init__ doesn't take it.
 
     def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
+        # `self.client_address[0]` instead of `address_string()`:
+        # the latter does a reverse-DNS lookup per request, which is
+        # pure latency on a LAN-bound device API.
         sys.stderr.write(
-            f"[{time.strftime('%H:%M:%S')}] {self.address_string()} - {format % args}\n"
+            f"[{time.strftime('%H:%M:%S')}] {self.client_address[0]} - {format % args}\n"
         )
 
     def log_request(self, code: int = -1, size: int = -1) -> None:
@@ -264,10 +278,21 @@ class PbemuAPIServer(http.server.BaseHTTPRequestHandler):
 
     def _send(self, status: int, hdrs: dict[str, str], body: bytes) -> None:
         try:
+            # HEAD: same status/headers as GET, no body bytes on the wire.
+            if getattr(self, "_head_only", False):
+                body = b""
             self.send_response(status)
             self.send_header("Server", self.server_version)
             for k, v in hdrs.items():
                 self.send_header(k, v)
+            # HTTP/1.1 correctness: every plain response carries an
+            # explicit Content-Length (except bodyless 204/304) and
+            # closes the connection so no keep-alive state machine has
+            # to guess at framing.
+            if "Content-Length" not in hdrs and status not in (204, 304):
+                self.send_header("Content-Length", str(len(body)))
+            if "Connection" not in hdrs:
+                self.send_header("Connection", "close")
             self.end_headers()
             self._headers_sent = True
             if body:
@@ -281,6 +306,8 @@ class PbemuAPIServer(http.server.BaseHTTPRequestHandler):
             self.send_header("Server", self.server_version)
             for k, v in hdrs.items():
                 self.send_header(k, v)
+            if "Connection" not in hdrs:
+                self.send_header("Connection", "close")
             self.end_headers()
             self._headers_sent = True
             for chunk in body_iter:
@@ -294,27 +321,29 @@ class PbemuAPIServer(http.server.BaseHTTPRequestHandler):
             pass
 
     def _split_path(self) -> tuple[str, dict[str, list[str]]]:
-        """Return (cleaned_path, query_dict)."""
+        """Return (cleaned_path, query_dict).
+
+        The path is percent-unquoted and the query is parsed with
+        ``parse_qs`` (which unquotes keys and values) so percent-encoded
+        ids route correctly and ``?access_token=`` values containing
+        reserved characters still authenticate.
+        """
         full = self.path
         if "?" in full:
             path, qs = full.split("?", 1)
         else:
             path, qs = full, ""
-        path = path.lstrip("/")
-        q: dict[str, list[str]] = {}
-        for pair in qs.split("&"):
-            if not pair or "=" not in pair:
-                continue
-            k, v = pair.split("=", 1)
-            q.setdefault(k, []).append(v)
+        path = unquote(path.lstrip("/"))
+        q = parse_qs(qs, keep_blank_values=True)
         return path, q
 
     def _auth_ok(self) -> bool:
         cfg = self.app.config
         if not cfg.get("api_token"):
             return True  # dev mode
+        expected = str(cfg["api_token"])
         token = _auth_token(dict(self.headers))
-        if token == cfg["api_token"]:
+        if token and hmac.compare_digest(token, expected):
             return True
         # For cover and file GETs, the device may pass the token in
         # `?access_token=...` because the cover loader does not
@@ -322,16 +351,16 @@ class PbemuAPIServer(http.server.BaseHTTPRequestHandler):
         # This is the same workaround the legacy PB cloud used.
         _, q = self._split_path()
         at = (q.get("access_token") or [""])[0]
-        return bool(at) and at == cfg["api_token"]
+        return bool(at) and hmac.compare_digest(at, expected)
 
-    def _read_body_json(self) -> dict[str, Any] | None:
+    def _read_body_json(self, max_bytes: int = 1024 * 1024) -> dict[str, Any] | None:
         try:
             length = int(self.headers.get("Content-Length", "0"))
         except (TypeError, ValueError):
             return None
         if length <= 0:
             return {}
-        if length > 1024 * 1024:
+        if length > max_bytes:
             return None
         try:
             raw = self.rfile.read(length)
@@ -366,13 +395,21 @@ class PbemuAPIServer(http.server.BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802
         self._safe_handle(self._dispatch_get)
 
+    def do_HEAD(self) -> None:  # noqa: N802
+        # Route like GET but never send a body: `_send` suppresses it.
+        self._head_only = True
+        self._safe_handle(self._dispatch_get)
+
     def _dispatch_get(self) -> None:
         path, q = self._split_path()
         endpoint, full = self._route(path)
         if endpoint is None:
             self._send(*_json(404, {"error": "not found", "path": full}))
             return
-        if not self._auth_ok():
+        # `healthz` is public (mirrors the `_route` comment: health
+        # probes don't need to know the API version or carry a token);
+        # every other endpoint requires auth.
+        if endpoint != "healthz" and not self._auth_ok():
             self._send(*_json(401, {"error": "unauthorized"}))
             return
         self._handle_get(endpoint, full)
@@ -392,7 +429,8 @@ class PbemuAPIServer(http.server.BaseHTTPRequestHandler):
         self._handle_post(endpoint, full)
 
     def do_PUT(self) -> None:  # noqa: N802
-        self.do_GET()
+        # PUT was previously an alias for GET; nothing writes via PUT.
+        self._send(*_json(405, {"error": "method not allowed"}))
 
     def _route(self, path: str) -> tuple[str | None, str]:
         """Map a URL path onto an `endpoint` string.
@@ -424,6 +462,7 @@ class PbemuAPIServer(http.server.BaseHTTPRequestHandler):
                         "status": "ok",
                         "provider": provider.name,
                         "detail": "pbemu-api ready",
+                        "pid": os.getpid(),
                     },
                 )
             )
@@ -456,7 +495,8 @@ class PbemuAPIServer(http.server.BaseHTTPRequestHandler):
             return
 
         if endpoint == "authors":
-            self._send(*_json(200, {"items": provider.list_authors(), "count": 0}))
+            authors = provider.list_authors()
+            self._send(*_json(200, {"items": authors, "count": len(authors)}))
             return
 
         if endpoint == "books":
@@ -480,6 +520,13 @@ class PbemuAPIServer(http.server.BaseHTTPRequestHandler):
                 self._handle_cover(book_id)
                 return
             if sub == "file":
+                if getattr(self, "_head_only", False):
+                    # HEAD cannot stream without executing the handler
+                    # twice; refuse it rather than fake a body.
+                    self._send(
+                        *_json(405, {"error": "method not allowed", "path": full_path})
+                    )
+                    return
                 self._handle_file(book_id)
                 return
         self._send(*_json(404, {"error": "not found", "path": full_path}))
@@ -503,16 +550,20 @@ class PbemuAPIServer(http.server.BaseHTTPRequestHandler):
         offset = max(0, offset)
         since = (q.get("since") or [None])[0]
         provider = self.app.provider
-        books = provider.list_books(
+        # Fetch one extra row to distinguish an exactly-full page from a
+        # truncated one (same trick the delta sync uses).
+        fetched = provider.list_books(
             mode=mode,
             library_id=library_id,
             series_id=series_id,
             author_id=author_id,
             search=search,
-            limit=limit,
+            limit=limit + 1,
             offset=offset,
             since=since,
         )
+        has_more = len(fetched) > limit
+        books = fetched[:limit]
         items = [_book_to_api(b) for b in books]
         self._send(
             *_json(
@@ -522,26 +573,47 @@ class PbemuAPIServer(http.server.BaseHTTPRequestHandler):
                     "limit": limit,
                     "offset": offset,
                     "count": len(items),
-                    "hasMore": len(items) == limit,
+                    "hasMore": has_more,
                 },
             )
         )
 
     def _handle_cover(self, book_id: str) -> None:
         cache = self.app.cover_cache
+        etag = cache.etag_for(book_id)
+        inm = self.headers.get("If-None-Match")
+        if inm and inm.strip('"') == etag:
+            # ETag is derived from the book id, so a matching client
+            # already holds the identical bytes; 304, no body.
+            self._send(304, {"ETag": etag}, b"")
+            return
         png = cache.read_png(book_id)
         if png is None:
             # Not pre-heated yet: process synchronously now so the device
             # still gets a real (small) cover instead of the raw multi-MB
-            # upstream bytes.  The result is cached for next time.
-            raw = self.app.provider.get_cover(book_id)
-            if raw:
-                cache.process_and_store(book_id, raw)
+            # upstream bytes.  Concurrent cold fetches for the same book
+            # share one download/decode: the first thread registers an
+            # event, the rest wait (bounded) and then serve from cache.
+            inflight = self.app.inflight
+            ev = inflight.get(book_id)
+            if ev is not None:
+                ev.wait(timeout=20.0)
                 png = cache.read_png(book_id)
+            if png is None:
+                # Owner of the slot, or the waiter timed out — process
+                # anyway (never deadlock on a slow owner).
+                ev = inflight.setdefault(book_id, threading.Event())
+                try:
+                    raw = self.app.provider.get_cover(book_id)
+                    if raw:
+                        png = cache.process_and_store(book_id, raw)
+                finally:
+                    inflight.pop(book_id, None)
+                    ev.set()
         if not png:
-            png = b"\x89PNG\r\n\x1a\n" + _TINY_PNG
+            png = PLACEHOLDER_PNG
         self._send(
-            *_bytes(200, png, "image/png", {"ETag": cache.etag_for(book_id)})
+            *_bytes(200, png, "image/png", {"ETag": etag})
         )
 
     def _handle_file(self, book_id: str) -> None:
@@ -682,15 +754,21 @@ class PbemuAPIServer(http.server.BaseHTTPRequestHandler):
     def _handle_sync_state(self) -> None:
         """POST /api/v1/sync/state - device posts its sync state.
 
-        Logged for debugging; persistence is future-work.
+        Logged for debugging; the device's last consumed rev (``cursor``)
+        is persisted to the ledger, where it bounds tombstone compaction.
         """
-        body = self._read_body_json() or {}
+        body = self._read_body_json(max_bytes=32 * 1024 * 1024) or {}
         device_id = body.get("deviceId", "unknown")
         known = body.get("known") or []
         downloaded = body.get("downloaded") or []
         sys.stderr.write(
             f"sync/state: device={device_id} known={len(known)} downloaded={len(downloaded)}\n"
         )
+        cursor = body.get("cursor")
+        if isinstance(cursor, int) and cursor >= 0:
+            ledger = getattr(self.app, "ledger", None)
+            if ledger is not None:
+                ledger.record_device(body.get("device") or "default", cursor)
         self._send(*_json(202, {"ok": True, "deviceId": device_id}))
 
     def _handle_open_with(self) -> None:
@@ -708,6 +786,8 @@ class PbemuAPIServer(http.server.BaseHTTPRequestHandler):
         if not ext:
             meta = self.app.provider.get_book(book_id)
             ext = meta.file_format if meta else None
+        if ext:
+            ext = ext.lower()  # table keys are lowercase; accept any case
         table = self.app.open_with
         if ext and ext in table:
             primary = table[ext][0]
@@ -726,18 +806,6 @@ class PbemuAPIServer(http.server.BaseHTTPRequestHandler):
                 },
             )
         )
-
-
-# -- 1x1 grey RGB PNG (placeholder for missing covers).  The bytes must
-# form a *valid* PNG (correct zlib LEN/NLEN): Pillow and the firmware's
-# LoadPNGStretch both reject a corrupt stream. ---------------------------
-
-
-_TINY_PNG = bytes.fromhex(
-    "0000000d4948445200000001000000010802000000907753"
-    "de0000000c49444154789c636868680000030401814bd3d2"
-    "100000000049454e44ae426082"
-)
 
 
 # -- provider factory ----------------------------------------------------
@@ -764,7 +832,24 @@ def build_provider(cfg: dict[str, Any]):
 # -- HTTP server glue ----------------------------------------------------
 
 
-def build_default_app(cfg: dict[str, Any] | None = None) -> Any:
+@dataclass
+class _AppState:
+    """Per-process shared state handed to each request handler."""
+
+    config: dict[str, Any]
+    provider: Any
+    cover_cache: CoverCache
+    open_with: dict[str, Any]
+    ledger: SyncLedger | None
+    ledger_max_age: float
+    inflight: dict[str, threading.Event] = field(default_factory=dict)
+    """Per-book-id cover-processing events: serialises concurrent cold
+    cover fetches so only one thread downloads/decodes per book."""
+
+
+def build_default_app(
+    cfg: dict[str, Any] | None = None, *, config_path: str | None = None
+) -> Any:
     """Resolve config + provider + cover cache + sync ledger into a
     single ``_AppState`` instance that the HTTP handler picks up.
     """
@@ -776,24 +861,56 @@ def build_default_app(cfg: dict[str, Any] | None = None) -> Any:
     cover_cache = CoverCache(cache_root, cache_age)
     ledger_cfg = cfg.get("ledger") or {}
     ledger_path = ledger_cfg.get("path") or os.path.join(cache_root, "sync-ledger.db")
+    # A ledger inside volatile storage (e.g. /tmp) loses its rev history
+    # on reboot, which would corrupt every device cursor.  When the
+    # *default* path lands there, relocate next to the config file so
+    # the ledger survives; an explicitly configured path is respected
+    # but warned about.
+    tmpdir = tempfile.gettempdir()
+    if os.path.realpath(os.path.dirname(ledger_path)).startswith(tmpdir):
+        if ledger_cfg.get("path"):
+            sys.stderr.write(
+                f"ledger: configured path {ledger_path} is volatile "
+                f"({tmpdir}); sync history will not survive a reboot\n"
+            )
+        else:
+            relocated = (
+                os.path.join(
+                    os.path.dirname(config_path),
+                    f"{os.path.basename(config_path)}-ledger.db",
+                )
+                if config_path
+                else os.path.join(os.getcwd(), "sync-ledger.db")
+            )
+            sys.stderr.write(
+                f"ledger: default path {ledger_path} is volatile "
+                f"({tmpdir}); relocating to {relocated}\n"
+            )
+            ledger_path = relocated
+            if os.path.realpath(os.path.dirname(ledger_path)).startswith(tmpdir):
+                # The config itself lives in volatile storage; there is
+                # nowhere durable to go.  Warn and proceed anyway.
+                sys.stderr.write(
+                    f"ledger: final path {ledger_path} is volatile "
+                    f"({tmpdir}); sync history will not survive a reboot\n"
+                )
     try:
         os.makedirs(os.path.dirname(ledger_path) or ".", exist_ok=True)
-        ledger: SyncLedger | None = SyncLedger(ledger_path)
+        ledger: SyncLedger | None = SyncLedger(
+            ledger_path,
+            ack_empty_catalogue=bool(ledger_cfg.get("ack_empty_catalogue", False)),
+        )
     except sqlite3.Error as exc:
         sys.stderr.write(f"ledger: cannot open {ledger_path}: {exc}\n")
         ledger = None
-    state: Any = type(
-        "_AppState",
-        (),
-        {
-            "config": cfg,
-            "provider": provider,
-            "cover_cache": cover_cache,
-            "open_with": cfg.get("open_with") or {},
-            "ledger": ledger,
-            "ledger_max_age": float(ledger_cfg.get("refresh_max_age_s", 30.0)),
-        },
-    )()
+    state = _AppState(
+        config=cfg,
+        provider=provider,
+        cover_cache=cover_cache,
+        open_with=cfg.get("open_with") or {},
+        ledger=ledger,
+        ledger_max_age=float(ledger_cfg.get("refresh_max_age_s", 30.0)),
+    )
     return state
 
 
@@ -871,32 +988,31 @@ def _warm_covers(app: Any) -> None:
     """Background pre-heat: process every cover once so the very first
     sync's cover fetches already hit the cache.
 
-    Runs in a daemon thread, never on the request path.  Each book is
+    Runs in a daemon thread, never on the request path.  Walks the
+    provider's full catalogue (no cap) chunk by chunk; each book is
     handled independently so one undecodable cover can't stall the rest,
     and already-processed books are skipped (idempotent re-runs).
     """
     cache = app.cover_cache
     provider = app.provider
-    try:
-        books = provider.list_books(mode="all", limit=4000)
-    except Exception as exc:  # noqa: BLE001
-        sys.stderr.write(f"cover warm-up: list_books failed: {exc}\n")
-        return
-    total = len(books)
-    sys.stderr.write(f"cover warm-up: {total} books to process\n")
     done = 0
-    for meta in books:
-        try:
-            if not cache.is_ready(meta.id):
-                raw = provider.get_cover(meta.id)
-                if raw:
-                    cache.process_and_store(meta.id, raw)
-        except Exception as exc:  # noqa: BLE001
-            sys.stderr.write(f"cover warm-up: {meta.id} failed: {exc}\n")
-        done += 1
-        if done % 25 == 0:
-            sys.stderr.write(f"cover warm-up: {done}/{total}\n")
-    sys.stderr.write(f"cover warm-up: done {done}/{total}\n")
+    try:
+        chunks = provider.walk_books(mode="all", chunk_size=500)
+        for chunk in chunks:
+            for meta in chunk:
+                try:
+                    if not cache.has_png(meta.id):
+                        raw = provider.get_cover(meta.id)
+                        if raw:
+                            cache.process_and_store(meta.id, raw)
+                except Exception as exc:  # noqa: BLE001
+                    sys.stderr.write(f"cover warm-up: {meta.id} failed: {exc}\n")
+                done += 1
+            sys.stderr.write(f"cover warm-up: {done} processed\n")
+    except Exception as exc:  # noqa: BLE001
+        sys.stderr.write(f"cover warm-up: walk_books failed: {exc}\n")
+        return
+    sys.stderr.write(f"cover warm-up: done {done}\n")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -924,7 +1040,10 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     cfg = load_config(args.config) if args.config else load_config()
     cfg = _apply_runtime_overrides(cfg, args)
-    app = build_default_app(cfg)
+    config_path = args.config or (
+        DEFAULT_CONFIG_PATH if os.path.isfile(DEFAULT_CONFIG_PATH) else None
+    )
+    app = build_default_app(cfg, config_path=config_path)
     RequestHandler = type(
         "RequestHandler",
         (PbemuAPIServer,),

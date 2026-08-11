@@ -32,6 +32,7 @@ from .base import (
     Provider,
     SeriesInfo,
 )
+from storage.placeholder import PLACEHOLDER_PNG
 
 # Deterministic vocabulary for synthetic titles/authors.  Indexing by
 # (i mod len) keeps every synthetic book reproducible across runs.
@@ -404,6 +405,29 @@ class MockProvider(Provider):
                 break
         return out
 
+    def walk_books(
+        self, *, mode: str = "all", chunk_size: int = 500
+    ) -> Iterator[list[BookMeta]]:
+        """Single-pass catalogue walk.
+
+        The default ``list_books`` offset paging re-scans the catalogue
+        from index 0 for every page, which is quadratic at 100k synthetic
+        books; walking ``_all`` once keeps the cover warm-up and the
+        ledger refresh linear.  Filtered modes are rare and cheap, so
+        those fall back to the base implementation.
+        """
+        if mode != "all":
+            yield from super().walk_books(mode=mode, chunk_size=chunk_size)
+            return
+        chunk: list[BookMeta] = []
+        for meta in self._all(None, None, None):
+            chunk.append(meta)
+            if len(chunk) >= chunk_size:
+                yield chunk
+                chunk = []
+        if chunk:
+            yield chunk
+
     def get_book(self, book_id: str) -> BookMeta | None:
         idx = self._syn_index(book_id)
         if idx is not None:
@@ -418,8 +442,8 @@ class MockProvider(Provider):
         return None
 
     def get_cover(self, book_id: str) -> bytes | None:
-        # No real covers in mock mode — return a 1x1 placeholder.
-        return b"\x89PNG\r\n\x1a\n" + _TINY_PNG
+        # No real covers in mock mode — return the 1x1 placeholder.
+        return PLACEHOLDER_PNG
 
     def open_file(self, book_id: str) -> tuple[str, Iterator[bytes]] | None:
         idx = self._syn_index(book_id)
@@ -435,13 +459,6 @@ class MockProvider(Provider):
             if self._book_id(entry["abs"]) == book_id:
                 return entry["name"], _file_iter(entry["abs"])
         return None
-
-
-_TINY_PNG = bytes.fromhex(
-    "0000000d4948445200000001000000010802000000907753"
-    "de0000000c49444154789c636868680000030401814bd3d2"
-    "100000000049454e44ae426082"
-)
 
 
 def _iso(t: float) -> str:

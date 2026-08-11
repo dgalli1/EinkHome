@@ -5,7 +5,7 @@
 # emulator, straight from the GitHub release.
 #
 # Usage:
-#   bookshelf/install-koreader.sh [version]
+#   scripts/install-koreader.sh [version]
 #
 # Arguments:
 #   [version]  Release tag to install, e.g. `v2026.07.1`.  Omitted → the
@@ -14,7 +14,7 @@
 # What it does:
 #   1. Resolves the release tag (latest by default).
 #   2. Downloads koreader-pocketbook-<tag>.zip from GitHub releases
-#      (cached in /tmp; delete the file to force a re-download).
+#      into a per-invocation temp dir (removed on exit via trap).
 #   3. Extracts the archive into the emulator's .live tree at
 #      U633_6.8.2817/.live/mnt/ext1 — the container's /mnt is a bind
 #      mount of that tree, so a running emulator sees the files
@@ -59,7 +59,11 @@ v*) ;;
 *) TAG="v${TAG}" ;;
 esac
 
-ZIP="/tmp/koreader-pocketbook-${TAG}.zip"
+ZIP_TMPDIR=$(mktemp -d)
+# Per-invocation temp dir: concurrent installs of the same tag used to
+# collide on the shared /tmp path.  Removed on exit (success or error).
+trap 'rm -rf "${ZIP_TMPDIR}"' EXIT
+ZIP="${ZIP_TMPDIR}/koreader-pocketbook-${TAG}.zip"
 TARGET="${REPO_ROOT}/pbemu/U633_6.8.2817/.live/mnt/ext1"
 
 if [ ! -d "${TARGET}/applications" ]; then
@@ -68,13 +72,9 @@ if [ ! -d "${TARGET}/applications" ]; then
 	exit 1
 fi
 
-if [ ! -f "${ZIP}" ]; then
-	echo "==> downloading ${GITHUB_DL}/${TAG}/koreader-pocketbook-${TAG}.zip"
-	curl -fL --max-time 300 -o "${ZIP}" \
-		"${GITHUB_DL}/${TAG}/koreader-pocketbook-${TAG}.zip"
-else
-	echo "==> using cached ${ZIP}"
-fi
+echo "==> downloading ${GITHUB_DL}/${TAG}/koreader-pocketbook-${TAG}.zip"
+curl -fL --max-time 300 -o "${ZIP}" \
+	"${GITHUB_DL}/${TAG}/koreader-pocketbook-${TAG}.zip"
 
 echo "==> extracting into ${TARGET}"
 rm -rf \

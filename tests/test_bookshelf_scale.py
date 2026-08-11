@@ -18,28 +18,29 @@ import shutil
 import subprocess
 import sys
 import time
-from pathlib import Path
 
 import pytest
 
 from tests.support.bookshelf import BookshelfGeometry, BookshelfSession
-from tests.support.reader.session import Session
-from tests.support.runtime import container_running, container_sh
-from tests.support.runtime_common import REPO_ROOT
-
-EINKHOME_ROOT = Path(__file__).resolve().parents[1]
-PBEMU_ROOT = REPO_ROOT
-from test_bookshelf import (
+from tests.support.bookshelf.env import (
     API_TOKEN,
     CONTAINER,
+    EINKHOME_ROOT,
     FIRMWARE,
+    PBEMU_ROOT,
+    _OFFLINE_DIR,
+    _OFFLINE_STORE,
     _build_bookshelf,
     _parse_panel_h,
+    _restore_cfg_file,
+    _snapshot_cfg,
     _stage_binary,
     _start_emulator,
     _stop_api_server,
     _wait_bookshelf_active,
 )
+from tests.support.reader.session import Session
+from tests.support.runtime import container_running, container_sh
 
 SCALE_PORT = 18766
 SCALE_COUNT = 100_000
@@ -177,6 +178,16 @@ def scale_env():
     if shutil.which("podman") is None:
         pytest.skip("podman not available")
 
+    # Snapshot the dev cfgs before staging rewrites them to the scale
+    # port, so teardown can restore the state the main e2e fixture
+    # expects — a leftover scale-pointing cfg or the 100k store on disk
+    # would poison a later manual `pbemu start` / e2e run.
+    live = PBEMU_ROOT / FIRMWARE / ".live"
+    bin_cfg = live / "mnt/ext1/system/bin/bookshelf.cfg"
+    tmp_cfg = live / "tmp/bookshelf.cfg"
+    saved_bin_cfg = _snapshot_cfg(bin_cfg)
+    saved_tmp_cfg = _snapshot_cfg(tmp_cfg)
+
     api = _start_scale_api()
     _stage_scale()
     emulator = _start_emulator()
@@ -195,8 +206,17 @@ def scale_env():
 
     yield bs, emulator
 
+    # Restore the dev cfgs first (the running guest holds the stale
+    # scale-port URL in memory; stopping the emulator before restoring
+    # could let a shutdown settings-save re-poison the files), then stop
+    # the servers and drop the staged 100k store so the next boot is
+    # clean.
+    _restore_cfg_file(bin_cfg, saved_bin_cfg)
+    _restore_cfg_file(tmp_cfg, saved_tmp_cfg, mode=0o666)
     _stop_api_server(api)
     emulator.stop(force=True)
+    _OFFLINE_STORE.unlink(missing_ok=True)
+    (_OFFLINE_DIR / "bookshelf_lib.db-journal").unlink(missing_ok=True)
 
 
 def _last_view(log: str) -> int:

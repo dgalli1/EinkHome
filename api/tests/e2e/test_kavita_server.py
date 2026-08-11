@@ -143,18 +143,14 @@ def _auth_headers():
 @SKIP_NO_URL
 @SKIP_UNREACHABLE
 def test_server_health_endpoint(live_server):
-    """Healthz endpoint returns the active provider name.  Note: this
-    endpoint is currently behind the bearer-token check (the
-    healthz handler runs *after* auth), so we send the token."""
-    status, body = _http_get(
-        f"{live_server}/api/v1/healthz",
-        headers=_auth_headers(),
-        timeout=15,
-    )
+    """Healthz endpoint is public (liveness probes carry no token) and
+    reports the active provider name plus the server pid."""
+    status, body = _http_get(f"{live_server}/api/v1/healthz", timeout=15)
     assert status == 200, body
     data = _json_or(body, {})
     assert data["status"] == "ok"
     assert data["provider"] == "kavita"
+    assert isinstance(data.get("pid"), int)
 
 
 @SKIP_NO_AUTH
@@ -220,28 +216,64 @@ def test_sync_delta_returns_books(live_server):
 
 @SKIP_NO_AUTH
 @SKIP_UNREACHABLE
-def test_sync_delta_respects_known_list(live_server):
-    """Passing all known ids must produce an empty added list."""
-    status, body = _http_get(
-        f"{live_server}/api/v1/books?limit=200",
-        headers=_auth_headers(),
-        timeout=60,
-    )
-    books = _json_or(body, {}).get("items", [])
-    if not books:
-        pytest.skip("no books")
-    known_ids = [b["id"] for b in books]
+def test_sync_delta_cursor_protocol(live_server):
+    """The cursor protocol ignores `known` in sync/delta bodies.
 
+    A first delta with no cursor returns the full library (bounded by
+    `limit`); a second delta with cursor=nextCursor returns only newer
+    changes; and the `known` list is ignored — the server answers
+    identically with or without it.
+    """
+    limit = 100
+
+    # First delta: no cursor → the whole library, bounded by limit.
     status, body = _http_post(
         f"{live_server}/api/v1/sync/delta",
-        {"known": known_ids},
+        {"known": [], "limit": limit},
         headers=_auth_headers(),
         timeout=60,
     )
-    data = _json_or(body, {})
-    assert data["added"] == [], (
-        f"expected empty added list when all known sent, got {len(data['added'])}"
+    assert status == 200, body
+    first = _json_or(body, {})
+    assert len(first["added"]) <= limit
+    assert first["nextCursor"] >= 0
+    assert isinstance(first["more"], bool)
+
+    # Second delta from nextCursor: only revs the device hasn't seen.
+    # Nothing changed between the two calls, so in a quiet library this
+    # is empty — but whatever comes back must not overlap the first
+    # batch (revs strictly increase, so a replay is impossible).
+    status, body = _http_post(
+        f"{live_server}/api/v1/sync/delta",
+        {"cursor": first["nextCursor"], "limit": limit},
+        headers=_auth_headers(),
+        timeout=60,
     )
+    assert status == 200, body
+    second = _json_or(body, {})
+    seen_ids = {b["id"] for b in first["added"]}
+    for b in second["added"]:
+        assert b["id"] not in seen_ids
+    assert all(bid not in seen_ids for bid in second["removed"])
+    assert second["nextCursor"] >= first["nextCursor"]
+
+    # `known` is ignored: same cursor, identical response.
+    status, body = _http_post(
+        f"{live_server}/api/v1/sync/delta",
+        {
+            "cursor": first["nextCursor"],
+            "limit": limit,
+            "known": list(seen_ids),
+        },
+        headers=_auth_headers(),
+        timeout=60,
+    )
+    assert status == 200, body
+    third = _json_or(body, {})
+    assert third["added"] == second["added"]
+    assert third["removed"] == second["removed"]
+    assert third["nextCursor"] == second["nextCursor"]
+    assert third["more"] == second["more"]
 
 
 @SKIP_NO_AUTH

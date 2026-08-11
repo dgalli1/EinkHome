@@ -11,7 +11,6 @@ Run with: pytest tests/test_bookshelf.py -v
 from __future__ import annotations
 
 import json
-import os
 import re
 import shutil
 import subprocess
@@ -34,329 +33,36 @@ from tests.support.bookshelf import (
     BookshelfGeometry,
     BookshelfSession,
 )
-from tests.support.bookshelf.session import (
-    count_log_openings,
-    latest_invocation_log,
-    read_bookshelf_log,
+from tests.support.bookshelf.env import (
+    API_PORT,
+    API_TOKEN,
+    EINKHOME_ROOT,
+    FIRMWARE,
+    PBEMU_ROOT,
+    _OFFLINE_CFG,
+    _OFFLINE_COVERS,
+    _OFFLINE_DIR,
+    _OFFLINE_LEGACY,
+    _OFFLINE_STORE,
+    _api_env,
+    _build_bookshelf,
+    _kill_guest_tasks,
+    _parse_panel_h,
+    _pbemu_env,
+    _restart_bookshelf,
+    _restore_cfg_file,
+    _snapshot_cfg,
+    _stage_binary,
+    _start_api_server,
+    _start_emulator,
+    _stop_api_server,
+    _wait_bookshelf_active,
 )
 from tests.support.reader.session import Session
-from tests.support.runtime import Emulator, container_running, container_sh
+from tests.support.runtime import Emulator, container_sh
 from tests.support.runtime_common import REPO_ROOT
 
-# The pbemu submodule provides the firmware tree, the emulator tooling
-# (tools/ + api/), the container and the test support framework
-# (tests/support).  This repository provides the app, the Makefile and
-# the test files; EINKHOME_ROOT points back here from the submodule.
-EINKHOME_ROOT = Path(__file__).resolve().parents[1]
-PBEMU_ROOT = REPO_ROOT
-
-FIRMWARE = "U633_6.8.2817"
-API_PORT = 18765
-API_TOKEN = "pbemu-dev-token"
-CONTAINER = "pb-pocketbook-ui"
-BOOKSHELF_APP = "bookshelf.app"
-
 pytestmark = pytest.mark.bookshelf
-
-
-# ── helpers ────────────────────────────────────────────────────────────
-
-
-def _pbemu_env() -> dict[str, str]:
-    """Return env dict with tools/ prepended to PYTHONPATH."""
-    env = os.environ.copy()
-    tools = str(PBEMU_ROOT / "tools")
-    env["PYTHONPATH"] = (
-        tools if not env.get("PYTHONPATH") else f"{tools}{os.pathsep}{env['PYTHONPATH']}"
-    )
-    return env
-
-
-def _api_env() -> dict[str, str]:
-    """Return env dict for the API server subprocess."""
-    env = os.environ.copy()
-    api_dir = str(EINKHOME_ROOT / "api")
-    root = str(EINKHOME_ROOT)
-    extra = f"{root}{os.pathsep}{api_dir}"
-    env["PYTHONPATH"] = (
-        extra if not env.get("PYTHONPATH") else f"{extra}{os.pathsep}{env['PYTHONPATH']}"
-    )
-    return env
-
-
-def _start_api_server() -> subprocess.Popen:  # type: ignore[type-arg]
-    """Start the mock API server on the test port. Returns the Popen."""
-    log_path = EINKHOME_ROOT / "build" / "pbemu-api-test.log"
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-    log_fh = open(log_path, "w", encoding="utf-8")  # noqa: SIM115
-    proc = subprocess.Popen(
-        [
-            sys.executable,
-            "-m",
-            "api.api.server",
-            "--host",
-            "0.0.0.0",
-            "--port",
-            str(API_PORT),
-            "--provider",
-            "mock",
-            "--config",
-            str(EINKHOME_ROOT / "tests" / "support" / "server-test.json"),
-        ],
-        # The server code lives in this repo (api/ on PYTHONPATH), but it
-        # runs with the submodule as cwd so the config's firmware-relative
-        # paths (books_dir: U633_6.8.2817/.live/...) resolve correctly.
-        cwd=PBEMU_ROOT,
-        env=_api_env(),
-        stdout=log_fh,
-        stderr=subprocess.STDOUT,
-    )
-    # Wait for server to be ready
-    deadline = time.monotonic() + 10.0
-    while time.monotonic() < deadline:
-        try:
-            import urllib.request
-
-            req = urllib.request.Request(
-                f"http://127.0.0.1:{API_PORT}/api/v1/healthz",
-                headers={"Authorization": f"Bearer {API_TOKEN}"},
-            )
-            urllib.request.urlopen(req, timeout=2)
-            return proc
-        except Exception:
-            time.sleep(0.3)
-    proc.kill()
-    raise RuntimeError(
-        f"API server did not start within 10s. Log:\n{log_path.read_text()}"
-    )
-
-
-def _stop_api_server(proc: subprocess.Popen) -> None:  # type: ignore[type-arg]
-    """Terminate the API server process."""
-    if proc.poll() is None:
-        proc.terminate()
-        try:
-            proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait(timeout=3)
-
-
-def _build_bookshelf() -> Path:
-    """Build the bookshelf binary. Returns path to the built ELF."""
-    out = EINKHOME_ROOT / "build" / "bookshelf.app"
-    # The source list lives in bookshelf/Makefile; build_armel.sh does
-    # the cross-compile.
-    subprocess.run(
-        ["make", "-C", str(EINKHOME_ROOT)],
-        cwd=EINKHOME_ROOT,
-        check=True,
-        capture_output=True,
-        text=True,
-        timeout=120,
-    )
-    assert out.is_file(), f"build output missing: {out}"
-    return out
-
-
-def _snapshot_cfg(path: Path) -> str | None:
-    """Return a cfg file's current text, or None when absent."""
-    return path.read_text(encoding="utf-8") if path.is_file() else None
-
-
-def _restore_cfg_file(path: Path, saved: str | None, mode: int = 0o644) -> None:
-    """Restore a cfg file to its pre-test state (remove if absent)."""
-    path.unlink(missing_ok=True)
-    if saved is not None:
-        path.write_text(saved, encoding="utf-8")
-        path.chmod(mode)
-
-
-def _stage_binary(binary: Path) -> None:
-    """Stage the bookshelf binary + config into .live and container.
-
-    Uses ``podman cp`` to copy the binary from host into the container,
-    then ``podman exec`` with container-side paths to place it where
-    monitor.app will find it (ebrmain/bin takes priority over
-    /mnt/ext1/system/bin).
-
-    The host-side .live staging is always lenient (it is the fallback
-    when no container exists), but once the container IS running any
-    failed container-side copy raises: a silently failed ``podman cp``
-    would otherwise leave the previous binary in place and the guest
-    would keep running stale code.
-    """
-    live = PBEMU_ROOT / FIRMWARE / ".live"
-    bin_dir = live / "mnt/ext1/system/bin"
-    bin_dir.mkdir(parents=True, exist_ok=True)
-
-    # Copy binary to host-side .live (volume-mounted into container)
-    shutil.copy2(binary, bin_dir / "bookshelf.app")
-    (bin_dir / "bookshelf.app").chmod(0o755)
-
-    # Write config to host-side .live
-    (bin_dir / "bookshelf.cfg").write_text(
-        f"api_url=http://127.0.0.1:{API_PORT}\napi_token={API_TOKEN}\n",
-        encoding="utf-8",
-    )
-
-    # Push binary + config into running container via podman cp + exec.
-    # container_sh runs INSIDE the container, so host paths don't work;
-    # we must use podman cp for host→container transfer, then podman exec
-    # with container-side paths for the rest.
-    if container_running():
-        # 1. Copy binary from host into container /tmp
-        subprocess.run(
-            ["podman", "cp", str(binary), f"{CONTAINER}:/tmp/bookshelf.app.new"],
-            check=True,
-            capture_output=True,
-            timeout=10,
-        )
-        # 2. Remove symlink at ebrmain/bin, place our binary there
-        container_sh(
-            "rm -f /workspace/firmware/.live/ebrmain/bin/bookshelf.app && "
-            "mv /tmp/bookshelf.app.new "
-            "/workspace/firmware/.live/ebrmain/bin/bookshelf.app && "
-            "chmod +x /workspace/firmware/.live/ebrmain/bin/bookshelf.app && "
-            "cp /workspace/firmware/.live/ebrmain/bin/bookshelf.app "
-            "/mnt/ext1/system/bin/bookshelf.app && "
-            "chmod +x /mnt/ext1/system/bin/bookshelf.app",
-            check=True,
-            timeout=10,
-        )
-        # 3. Copy config into container
-        subprocess.run(
-            [
-                "podman",
-                "cp",
-                str(bin_dir / "bookshelf.cfg"),
-                f"{CONTAINER}:/mnt/ext1/system/bin/bookshelf.cfg",
-            ],
-            check=True,
-            capture_output=True,
-            timeout=5,
-        )
-
-def _start_emulator() -> Emulator:
-    """Stop any existing emulator and start a fresh one with --network=host."""
-    # Stop existing
-    subprocess.run(
-        [sys.executable, "-m", "pbemu", "stop"],
-        cwd=REPO_ROOT,
-        env=_pbemu_env(),
-        check=False,
-    )
-    time.sleep(1)
-
-    # Start with --network=host.  The U633 is a colour device: advertise
-    # the 24-bit framebuffer so the guest's RGB24 cover decodes render
-    # (and the app's device_display_colormask() path is exercised).
-    env = _pbemu_env()
-    env["PBEMU_NO_KEEPID"] = "1"
-    env["PBEMU_PODMAN_ARGS"] = "--network=host"
-    env["SHIM_PBEMU_COLOR_FB"] = "1"
-    subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "pbemu",
-            "start",
-            FIRMWARE,
-            "--no-viewer",
-            "--no-audio",
-            "--no-build",
-        ],
-        cwd=REPO_ROOT,
-        env=env,
-        check=True,
-        timeout=120,
-    )
-
-    emulator = Emulator(firmware=FIRMWARE)
-    emulator.wait_for_monitor(timeout=30)
-    emulator.wait_for_hwevent(timeout=30)
-    return emulator
-
-
-def _wait_bookshelf_active(emulator: Emulator, timeout: float = 30.0) -> None:
-    """Poll until bookshelf.app is the active task."""
-    session = Session(emulator)
-    session.wait_for_active_app("bookshelf.app", "bookshelf", timeout=timeout)
-
-
-def _parse_panel_h(firmware: str) -> int:
-    """Parse panel_h from the bookshelf log."""
-    log = read_bookshelf_log(firmware)
-    m = re.search(r"EVT_INIT panel_h=(\d+)", log)
-    if m:
-        return int(m.group(1))
-    # Default for 6-inch panel
-    return 0
-
-
-# ``killall bookshelf.app`` cannot work: the guest runs under qemu-arm, so its
-# comm is "qemu-arm", not "bookshelf.app".  The reliable handle is the
-# qemu-arm host pid that monitor.app records in /var/run/task/<id>/mainpid
-# (the same value ``arm_probe kill-task`` signals).  We TERM every bookshelf /
-# reader task, then KILL any that did not exit, so monitor.app respawns a
-# clean launcher.  Without this the previous test's on-screen keyboard or
-# overlay stays open and steals the next test's taps at the firmware level.
-_KILL_GUEST_TASKS_SCRIPT = r"""
-pids=""
-for d in /var/run/task/[0-9]*; do
-    [ -d "$d" ] || continue
-    name=""
-    [ -r "$d/appname" ] && name=$(cat "$d/appname" 2>/dev/null)
-    case "$name" in
-        monitor.app|informer|scanner.app|usage_stat.app|taskmgr.app|digital_frame.app|\
-        calendar.app|settings.app|eink-cache-reader.app)
-            continue ;;
-    esac
-    # Bookshelf, the reader, control panel, or a stray app the previous
-    # test launched (launcher tests leave their app foregrounded, which
-    # would otherwise keep the informer's active task off bookshelf).
-    pid=""
-    [ -r "$d/mainpid" ] && pid=$(cat "$d/mainpid" 2>/dev/null)
-    if [ -n "$pid" ]; then
-        kill -TERM "$pid" 2>/dev/null && pids="$pids $pid"
-    fi
-done
-sleep 1
-for p in $pids; do
-    kill -0 "$p" 2>/dev/null && kill -KILL "$p" 2>/dev/null
-done
-echo "term_pids=$pids"
-"""
-
-
-def _kill_guest_tasks() -> None:
-    """Signal the bookshelf/reader qemu-arm processes via /var/run/task."""
-    container_sh(_KILL_GUEST_TASKS_SCRIPT, check=False, timeout=10)
-
-
-def _wait_fresh_bookshelf(before: int, timeout: float = 30.0) -> None:
-    """Block until a launch newer than *before* has synced and drawn."""
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if count_log_openings(FIRMWARE) > before:
-            slice_ = latest_invocation_log(FIRMWARE)
-            if "do_sync" in slice_ and "draw_grid" in slice_:
-                return
-        time.sleep(0.3)
-    raise RuntimeError(
-        f"bookshelf did not respawn+sync within {timeout}s "
-        f"(log openings={count_log_openings(FIRMWARE)}, expected > {before})"
-    )
-
-
-def _restart_bookshelf(emulator: Emulator, timeout: float = 30.0) -> None:
-    """Kill the guest bookshelf (+ any reader) and wait for a clean respawn."""
-    before = count_log_openings(FIRMWARE)
-    _kill_guest_tasks()
-    _wait_fresh_bookshelf(before, timeout=timeout)
-    # Ensure the informer routes taps to the respawned foreground task.
-    _wait_bookshelf_active(emulator, timeout=10.0)
-    time.sleep(1.0)
 
 
 # ── fixtures ───────────────────────────────────────────────────────────
@@ -1660,18 +1366,8 @@ def test_series_longpress_delete(fresh_bookshelf):
 # The guest re-reads /tmp/bookshelf.cfg (CONFIG_TMP_PATH) last, so writing
 # a dead-port override there makes the next boot offline without touching
 # the module's real server.  Guest /tmp maps to .live/tmp on the host,
-# which is also where the library store + cover cache live.
-
-# The guest resolves its config to /mnt/ext1/system/bin (writable since
-# the staging commits made /mnt guest-writable), so the store, cover
-# cache and legacy JSON live next to that config; /tmp/bookshelf.cfg is
-# only a kv-override the loader re-applies on top.
-_OFFLINE_TMP = PBEMU_ROOT / FIRMWARE / ".live" / "tmp"
-_OFFLINE_DIR = PBEMU_ROOT / FIRMWARE / ".live" / "mnt" / "ext1" / "system" / "bin"
-_OFFLINE_STORE = _OFFLINE_DIR / "bookshelf_lib.db"
-_OFFLINE_LEGACY = _OFFLINE_DIR / "bookshelf_lib.json"
-_OFFLINE_COVERS = _OFFLINE_DIR / "covers"
-_OFFLINE_CFG = _OFFLINE_TMP / "bookshelf.cfg"
+# which is also where the library store + cover cache live (the _OFFLINE_*
+# paths are defined in tests/support/bookshelf/env.py).
 
 
 def _ensure_offline_assets(emulator: Emulator) -> None:

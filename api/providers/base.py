@@ -199,3 +199,25 @@ class Provider(ABC):
         the API server streams straight through to the device.
         """
         raise NotImplementedError
+
+    def walk_books(
+        self, *, mode: str = "all", chunk_size: int = 500
+    ) -> Iterator[list[BookMeta]]:
+        """Stream the full catalogue in bounded chunks, in stable order.
+
+        Default implementation pages through :meth:`list_books` with an
+        offset cursor.  Providers whose native API can walk the catalogue
+        once (rather than re-scanning from offset 0 for every page) MUST
+        override this — with an offset-0 re-scan a 100k catch-up is
+        quadratic.  The ledger refresh and the cover warm-up both
+        consume this stream.
+        """
+        offset = 0
+        while True:
+            chunk = self.list_books(mode=mode, limit=chunk_size, offset=offset)
+            if not chunk:
+                return
+            yield chunk
+            if len(chunk) < chunk_size:
+                return
+            offset += len(chunk)

@@ -1,0 +1,30 @@
+{
+    "host": "0.0.0.0",
+    "port": 8765,
+    "api_token": "pbemu-dev-token",
+    "provider": "mock",
+    "providers": {
+        "mock": {
+            "kind": "mock",
+            "books_dir": "U633_6.8.2817/.live/mnt/ext1/books",
+            "library_name": "pbemu demo library (100k OL corpus)",
+            "count": 100000,
+            "corpus": ".cover-cache/mock_books.jsonl"
+        }
+    },
+    "open_with": {
+        "epub":  ["eink-reader", "bookshelf"],
+        "pdf":   ["eink-reader", "pdfviewer"],
+        "fb2":   ["eink-reader"],
+        "txt":   ["eink-reader"],
+        "djvu":  ["djvureader"],
+        "default": ["eink-reader"]
+    },
+    "cover_cache": {
+        "dir": "/tmp/pbemu-covers-100k",
+        "max_age_seconds": 604800
+    },
+    "ledger": {
+        "refresh_max_age_s": 30.0
+    }
+}

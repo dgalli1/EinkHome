@@ -3,7 +3,7 @@
 # uninstall-device.sh — remove the pbemu custom bookshelf + startup wrapper.
 #
 # Usage:
-#   bookshelf/uninstall-device.sh <device-ip>
+#   scripts/uninstall-device.sh <device-ip>
 #
 # Removes:
 #   /mnt/ext1/system/bin/bookshelf.app   (home-task binary → restores stock boot)
@@ -11,7 +11,8 @@
 #   /mnt/ext1/applications/books.app     (legacy custom bookshelf binary)
 #   /mnt/ext1/applications/bookshelf.cfg (legacy config)
 #   /mnt/ext1/applications/bookshelf.log (log)
-#   /mnt/ext1/applications/bookshelf-wrapper.log (legacy wrapper log)
+#   /mnt/ext1/applications/bookshelf-wrapper.log (log of the legacy wrapper
+#                                                script — scripts/legacy/bookshelf-wrapper.sh)
 #   /tmp/pbemu_bookshelf.pid             (legacy pid file, if present)
 #
 # After removal, reboot the device to restore the stock bookshelf as
@@ -51,7 +52,8 @@ ssh ${SSH_COMMON} "root@${DEVICE}" sh -c '
 	rm -f /mnt/ext1/system/bin/bookshelf.app
 	rm -f /mnt/ext1/system/bin/bookshelf.cfg
 
-	# Remove legacy app files.
+	# Remove legacy app files (incl. the wrapper-script log — the
+	# wrapper itself now lives at scripts/legacy/bookshelf-wrapper.sh).
 	rm -f /mnt/ext1/applications/books.app
 	rm -f /mnt/ext1/applications/bookshelf.cfg
 	rm -f /mnt/ext1/applications/bookshelf.log

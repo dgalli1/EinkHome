@@ -21,6 +21,8 @@ import threading
 import time
 from typing import Optional
 
+from storage.placeholder import PLACEHOLDER_PNG
+
 
 class CoverCache:
     """Disk-backed cache for processed cover PNGs."""
@@ -35,6 +37,28 @@ class CoverCache:
         self.max_age = max_age_seconds
         if create_dir:
             os.makedirs(self.directory, exist_ok=True)
+        self._sweep_stale_tmp()
+
+    def _sweep_stale_tmp(self) -> None:
+        """Remove orphaned ``.tmp`` write leftovers older than an hour.
+
+        ``_atomic`` cleans up after itself, but a crash between writing
+        the tmp file and ``os.replace`` leaks one; sweep them at startup
+        so they never accumulate."""
+        cutoff = time.time() - 3600.0
+        try:
+            names = os.listdir(self.directory)
+        except OSError:
+            return
+        for name in names:
+            if not name.endswith(".tmp"):
+                continue
+            path = os.path.join(self.directory, name)
+            try:
+                if os.path.getmtime(path) < cutoff:
+                    os.unlink(path)
+            except OSError:
+                continue
 
     # --- key handling ----------------------------------------------------
 
@@ -57,14 +81,15 @@ class CoverCache:
             mtime = os.path.getmtime(path)
         except OSError:
             return False
-        return (time.time() - mtime) < self.max_age
+        now = time.time()
+        if mtime > now + 60.0:
+            # Clock skew / restored filesystem: a future mtime must not
+            # count as "too fresh to be stale" forever — clamp to now.
+            mtime = now
+        return (now - mtime) < self.max_age
 
     def has_png(self, book_id: str) -> bool:
         return self._fresh(self.png_path(book_id))
-
-    def is_ready(self, book_id: str) -> bool:
-        """True when the cover PNG is cached & fresh."""
-        return self.has_png(book_id)
 
     # --- reads -----------------------------------------------------------
 
@@ -93,6 +118,15 @@ class CoverCache:
                 fh.flush()
                 os.fsync(fh.fileno())
             os.replace(tmp, path)
+            # Durability: fsync the parent directory so the rename
+            # survives a crash.  Not every platform allows fsync on a
+            # directory fd, so failures here are ignored.
+            with contextlib.suppress(OSError):
+                dir_fd = os.open(os.path.dirname(path) or ".", os.O_RDONLY)
+                try:
+                    os.fsync(dir_fd)
+                finally:
+                    os.close(dir_fd)
         except OSError as exc:
             sys.stderr.write(f"cover_cache: write failed {path}: {exc}\n")
             with contextlib.suppress(OSError):
@@ -106,17 +140,20 @@ class CoverCache:
         """Decode `raw`, cache the resized PNG, return the PNG bytes.
 
         Returns None (and caches nothing) if the bytes are not a decodable
-        image; the caller then serves a 1x1 placeholder.
+        image; the caller then serves a 1x1 placeholder.  Placeholder
+        sources are returned as-is without touching the disk — a provider
+        without real covers (e.g. mock) must not fill the cache with
+        thousands of identical 1x1 PNGs.
         """
+        if raw == PLACEHOLDER_PNG:
+            return PLACEHOLDER_PNG
         # Imported lazily so a missing Pillow never breaks cache reads.
         from storage import cover_proc
 
         png = cover_proc.process(raw)
         if png is None:
             return None
+        if png == PLACEHOLDER_PNG:
+            return png  # decoded to the placeholder: serve, don't store
         self.store_png(book_id, png)
         return png
-
-    def purge(self, book_id: str) -> None:
-        with contextlib.suppress(OSError):
-            os.unlink(self.png_path(book_id))

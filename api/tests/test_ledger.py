@@ -9,6 +9,8 @@ across reopen.
 # pylint: disable=missing-function-docstring,redefined-outer-name
 import os
 import sys
+import threading
+import time
 
 import pytest
 
@@ -47,6 +49,19 @@ class FakeProvider:
     def list_books(self, *, mode="all", limit=500, offset=0, **_kw):
         self.calls += 1
         return self.metas[offset : offset + limit]
+
+    def walk_books(self, *, mode="all", chunk_size=500):
+        """Mirror providers.base.Provider.walk_books (offset paging,
+        stop on an empty or short chunk, never yield empty chunks)."""
+        offset = 0
+        while True:
+            chunk = self.list_books(mode=mode, limit=chunk_size, offset=offset)
+            if not chunk:
+                return
+            yield chunk
+            if len(chunk) < chunk_size:
+                return
+            offset += len(chunk)
 
 
 @pytest.fixture
@@ -182,6 +197,111 @@ def test_large_walk_pages_the_provider(tmp_path):
         assert len(entries) == 1 and more is False
     finally:
         led.close()
+
+
+def test_record_device_and_min_device_rev(ledger):
+    """record_device persists per-device cursors; the minimum bounds
+    tombstone compaction."""
+    assert ledger.min_device_rev() is None  # no device has reported yet
+    ledger.record_device("dev-a", 42)
+    assert ledger.min_device_rev() == 42
+    ledger.record_device("dev-b", 10)
+    assert ledger.min_device_rev() == 10
+    # Updating a cursor can only lower (or keep) the minimum.
+    ledger.record_device("dev-a", 7)
+    assert ledger.min_device_rev() == 7
+    ledger.record_device("dev-b", 100)
+    assert ledger.min_device_rev() == 7
+
+
+def test_compact_tombstones_deletes_only_consumed_tombstones(ledger):
+    prov = FakeProvider([_meta("a"), _meta("b"), _meta("c")])
+    ledger.refresh(prov, max_age_s=0)
+    ledger.delta(0, 100)  # a device consumes revs 1..3
+
+    # Drop "a" and "b" -> tombstones at revs 4 and 5; "c" stays live.
+    prov.metas = [_meta("c")]
+    ledger.refresh(prov, max_age_s=0)
+    assert ledger.count() == 1
+
+    # No device has reported a cursor: compaction must delete nothing —
+    # every tombstone may still need to be replayed.
+    assert ledger.compact_tombstones() == 0
+    entries, _ = ledger.delta(0, 100)
+    assert [e.book_id for e in entries if e.added_at is None] == ["a", "b"]
+
+    # A device that consumed rev 5 has seen "a" (rev 4); the "b"
+    # tombstone (rev 5) is still replayable.  Compaction drops only the
+    # consumed tombstone and never touches live rows.
+    ledger.record_device("dev1", 5)
+    assert ledger.min_device_rev() == 5
+    assert ledger.compact_tombstones() == 1
+    assert ledger.count() == 1
+    entries, _ = ledger.delta(3, 10)
+    assert [(e.book_id, e.added_at) for e in entries] == [("b", None)]
+
+    # Explicit min_rev: tombstones strictly below it go; at-or-above
+    # survives; live rows are never touched.
+    assert ledger.compact_tombstones(min_rev=5) == 0
+    assert ledger.compact_tombstones(min_rev=6) == 1  # "b"@5
+    assert ledger.count() == 1
+    entries, _ = ledger.delta(0, 100)
+    assert [e.book_id for e in entries] == ["c"]
+    assert entries[0].added_at is not None
+
+
+def test_empty_catalogue_refusal_unless_acknowledged(tmp_path):
+    """An empty provider walk must never tombstone a populated ledger —
+    unless the operator opted into the wipe via ack_empty_catalogue."""
+    led = SyncLedger(str(tmp_path / "guard.db"))
+    try:
+        led.refresh(FakeProvider([_meta("a"), _meta("b")]), max_age_s=0)
+        with pytest.raises(RuntimeError):
+            led.refresh(FakeProvider([]), max_age_s=0)
+        assert led.count() == 2  # nothing was tombstoned
+    finally:
+        led.close()
+
+    led2 = SyncLedger(str(tmp_path / "ack.db"), ack_empty_catalogue=True)
+    try:
+        led2.refresh(FakeProvider([_meta("a"), _meta("b")]), max_age_s=0)
+        assert led2.refresh(FakeProvider([]), max_age_s=0) is True
+        assert led2.count() == 0
+        entries, _ = led2.delta(0, 10)
+        assert [e.book_id for e in entries] == ["a", "b"]
+        assert all(e.added_at is None for e in entries)  # tombstones
+    finally:
+        led2.close()
+
+
+def test_delta_during_refresh_smoke(ledger):
+    """A delta read racing an in-flight refresh must never raise."""
+    walked = threading.Event()
+
+    class SlowProvider(FakeProvider):
+        def list_books(self, *, mode="all", limit=500, offset=0, **_kw):
+            if offset == 0:
+                walked.set()
+                time.sleep(0.05)
+            return super().list_books(mode=mode, limit=limit, offset=offset)
+
+    metas = [_meta(f"b{i:03d}") for i in range(5000)]
+    prov = SlowProvider(metas)
+    ledger.refresh(prov, max_age_s=0)  # initial fill (warms the walk)
+    walked.clear()
+
+    t = threading.Thread(
+        target=ledger.refresh, args=(prov,), kwargs={"max_age_s": 0}
+    )
+    t.start()
+    assert walked.wait(2.0), "refresh thread never entered the provider walk"
+    # The refresh holds the write lock; delta serialises behind it.
+    entries, more = ledger.delta(0, 100)
+    assert len(entries) == 100
+    assert isinstance(more, bool)
+    t.join(timeout=10)
+    assert not t.is_alive(), "refresh thread hung"
+    assert ledger.count() == 5000  # post-walk state fully visible
 
 
 if __name__ == "__main__":

@@ -24,7 +24,9 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from collections import OrderedDict
 from collections.abc import Iterator
+from datetime import datetime, timezone
 from typing import Any
 
 from .base import (
@@ -62,6 +64,20 @@ def _safe_float(v: Any) -> float | None:
         return None
 
 
+def _iso_utc(s: str) -> str:
+    """Normalize an ISO-8601 timestamp to UTC ``YYYY-MM-DDTHH:MM:SSZ``.
+
+    Used to compare ``updated_at`` / ``since`` values that may carry
+    different offsets (or none at all — naive timestamps are treated
+    as UTC, which is what Kavita emits for wall-clock fields), so
+    mixed-offset strings compare correctly.
+    """
+    dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 def _filename_from_content_disposition(cd: str) -> str | None:
     """Extract filename*= / filename= from a Content-Disposition header."""
     if not cd:
@@ -90,6 +106,17 @@ def _filename_from_content_disposition(cd: str) -> str | None:
 # page loop in _series_in_library terminates against a server that never
 # returns a short page.
 _MAX_SERIES_PER_LIBRARY = 10000
+
+# Backoff sleeps (seconds) between transient-failure retries (HTTP 5xx,
+# URLError/TimeoutError/OSError) in _KavitaClient._request.
+_RETRY_DELAYS = (0.5, 1.0, 2.0)
+
+# LRU caps for the provider's per-chapter caches.  The chapter-files
+# cache is the hot one: a 30s-interval catalogue refresh must not
+# re-fetch every chapter's files over HTTP.
+_CHAPTER_FILES_CACHE_MAX = 8192
+_ID_CACHE_MAX = 16384
+_BOOK_CACHE_MAX = 16384
 
 
 class _KavitaClient:
@@ -142,28 +169,52 @@ class _KavitaClient:
         with_auth: bool = True,
     ) -> tuple[int, bytes, dict[str, str]]:
         url = self._url(path)
-        data: bytes | None = None
-        headers = self._headers(with_auth)
-        if body is not None:
-            data = json.dumps(body).encode("utf-8")
-            headers["Content-Type"] = "application/json"
-        req = urllib.request.Request(url, data=data, method=method, headers=headers)
-        try:
-            resp_ctx = urllib.request.urlopen(
-                req, timeout=self.timeout, context=self._ssl
+        retries = 0
+        while True:
+            data: bytes | None = None
+            headers = self._headers(with_auth)
+            if body is not None:
+                data = json.dumps(body).encode("utf-8")
+                headers["Content-Type"] = "application/json"
+            req = urllib.request.Request(
+                url, data=data, method=method, headers=headers
             )
-            status = resp_ctx.status
-            body_bytes = resp_ctx.read()
-            hdrs = dict(resp_ctx.getheaders())
-            return status, body_bytes, hdrs
-        except urllib.error.HTTPError as exc:
-            return (
-                exc.code,
-                exc.read() if exc.fp else b"",
-                dict(exc.headers.items()),
-            )
-        except (urllib.error.URLError, TimeoutError, OSError) as exc:
-            raise RuntimeError(f"Kavita request {method} {path} failed: {exc}") from exc
+            try:
+                resp_ctx = urllib.request.urlopen(
+                    req, timeout=self.timeout, context=self._ssl
+                )
+                status = resp_ctx.status
+                body_bytes = resp_ctx.read()
+                hdrs = dict(resp_ctx.getheaders())
+                return status, body_bytes, hdrs
+            except urllib.error.HTTPError as exc:
+                status = exc.code
+                body_bytes = exc.read() if exc.fp else b""
+                hdrs = dict(exc.headers.items())
+                # The login call itself is never retried (with_auth=False):
+                # a failed login must surface immediately rather than
+                # re-entering ensure_auth.
+                if not with_auth:
+                    return status, body_bytes, hdrs
+                if status == 401 and self._jwt and retries == 0:
+                    # Server rejected the token — force one fresh login,
+                    # then retry exactly once with the new JWT.
+                    self._jwt_expiry = 0.0
+                    self.ensure_auth()
+                    retries += 1
+                    continue
+                if 500 <= status < 600 and retries < len(_RETRY_DELAYS):
+                    time.sleep(_RETRY_DELAYS[retries])
+                    retries += 1
+                    continue
+                return status, body_bytes, hdrs
+            except (urllib.error.URLError, TimeoutError, OSError) as exc:
+                if not with_auth or retries >= len(_RETRY_DELAYS):
+                    raise RuntimeError(
+                        f"Kavita request {method} {path} failed: {exc}"
+                    ) from exc
+                time.sleep(_RETRY_DELAYS[retries])
+                retries += 1
 
     def _request_json(
         self,
@@ -434,14 +485,24 @@ class _KavitaClient:
         Tries ``chapter-cover`` first (chapter-specific artwork when
         present, server falls back to series cover automatically),
         then ``series-cover`` as a backstop.  Kavita 0.8.x image
-        routes refuse JWT auth (``401``) and require ``apiKey=`` as a
-        query parameter.
+        routes prefer ``apiKey=`` as a query parameter; when no
+        api_key is configured we fall back to the JWT Authorization
+        header so username/password-only setups still get covers.
         """
-        for path in (
-            f"/api/Image/chapter-cover?chapterId={chapter_id}&apiKey={self.api_key}",
-            f"/api/Image/series-cover?seriesId={series_id}&apiKey={self.api_key}",
+        if not self.api_key:
+            self.ensure_auth()
+        for base in (
+            f"/api/Image/chapter-cover?chapterId={chapter_id}",
+            f"/api/Image/series-cover?seriesId={series_id}",
         ):
-            req = urllib.request.Request(self._url(path))
+            if self.api_key:
+                req = urllib.request.Request(
+                    self._url(f"{base}&apiKey={self.api_key}")
+                )
+            else:
+                req = urllib.request.Request(
+                    self._url(base), headers=self._headers(with_jwt=True)
+                )
             try:
                 resp = urllib.request.urlopen(
                     req, timeout=self.timeout, context=self._ssl
@@ -473,9 +534,17 @@ class KavitaProvider(Provider):
             timeout=cfg.get("timeout", 60.0),
             verify_tls=cfg.get("verify_tls", True),
         )
-        # chapter_id -> book-id (our string id) for stable URLs
-        self._id_cache: dict[int, str] = {}
-        self._book_cache: dict[str, BookMeta] = {}
+        # chapter_id -> book-id (our string id) for stable URLs.
+        # LRU-capped: one entry per chapter at 100k books would
+        # otherwise grow without bound.
+        self._id_cache: OrderedDict[int, str] = OrderedDict()
+        # book-id -> BookMeta for single-book lookups (LRU-capped).
+        self._book_cache: OrderedDict[str, BookMeta] = OrderedDict()
+        # chapter_id -> (files, volume DTO) so catalogue-walk refreshes
+        # don't re-fetch every chapter's files over HTTP (LRU-capped).
+        self._chapter_files_cache: OrderedDict[
+            int, tuple[list[dict[str, Any]], dict[str, Any] | None]
+        ] = OrderedDict()
         self._library_filter: set[int] = set()
         for x in cfg.get("library_ids") or ():
             v = _safe_int(x)
@@ -487,9 +556,12 @@ class KavitaProvider(Provider):
     def _book_id(self, chapter_id: int) -> str:
         cached = self._id_cache.get(chapter_id)
         if cached:
+            self._id_cache.move_to_end(chapter_id)
             return cached
         s = f"kavita_ch_{chapter_id:08x}"
         self._id_cache[chapter_id] = s
+        if len(self._id_cache) > _ID_CACHE_MAX:
+            self._id_cache.popitem(last=False)
         return s
 
     def _format_to_ext(self, kavita_file: dict[str, Any]) -> str:
@@ -516,6 +588,33 @@ class KavitaProvider(Provider):
                 return mapping[fmt]
         return "epub"
 
+    def _chapter_files_and_volume(
+        self,
+        chapter_id: int,
+        volume: dict[str, Any] | None = None,
+    ) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
+        """Return ``(files, volume DTO)`` for a chapter, LRU-cached.
+
+        ``volume`` may be passed by callers that already hold it (the
+        catalogue walk) so a cold miss doesn't need an extra
+        ``/api/Volume`` round-trip; ``get_book``/``get_cover`` omit it
+        and the volume is resolved here.  Entries are evicted
+        LRU-style past ``_CHAPTER_FILES_CACHE_MAX`` so a 30s-interval
+        refresh doesn't re-fetch every chapter's files.
+        """
+        cached = self._chapter_files_cache.get(chapter_id)
+        if cached is not None:
+            self._chapter_files_cache.move_to_end(chapter_id)
+            return cached
+        files = self.client.get_chapter_files(chapter_id)
+        if volume is None:
+            volume = self.client.get_chapter_volume(chapter_id)
+        entry = (files, volume)
+        self._chapter_files_cache[chapter_id] = entry
+        if len(self._chapter_files_cache) > _CHAPTER_FILES_CACHE_MAX:
+            self._chapter_files_cache.popitem(last=False)
+        return entry
+
     def _chapter_to_meta(
         self,
         chapter: dict[str, Any],
@@ -525,7 +624,7 @@ class KavitaProvider(Provider):
         chapter_id = chapter.get("id")
         if not chapter_id:
             return None
-        files = self.client.get_chapter_files(chapter_id)
+        files, _ = self._chapter_files_and_volume(chapter_id, volume)
         if not files:
             return None
         chosen: dict[str, Any] | None = None
@@ -647,6 +746,26 @@ class KavitaProvider(Provider):
             page += 1
         return out
 
+    def _iter_chapter_metas(
+        self,
+        lids: list[int],
+        series_id_filter: str | None = None,
+    ) -> Iterator[tuple[dict[str, Any], dict[str, Any], dict[str, Any]]]:
+        """Yield ``(chapter, series, volume)`` for every chapter in ``lids``.
+
+        Walks libraries → series → volumes → chapters exactly once, in
+        stable order.  Shared by list_books and walk_books so both stay
+        in the same order without duplicating the walk.
+        """
+        for lid in lids:
+            for s in self._series_in_library(lid, series_id_filter):
+                sid = s.get("id")
+                if not sid:
+                    continue
+                for vol in self.client.get_volumes(sid):
+                    for ch in vol.get("chapters") or []:
+                        yield ch, s, vol
+
     # --- Provider interface -----------------------------------------------
 
     def health(self) -> dict[str, Any]:
@@ -705,6 +824,33 @@ class KavitaProvider(Provider):
         # "by author" as a future improvement.
         return []
 
+    def walk_books(
+        self, *, mode: str = "all", chunk_size: int = 500
+    ) -> Iterator[list[BookMeta]]:
+        """Stream the full catalogue in stable order, in bounded chunks.
+
+        Single-pass override: each library → series → volume → chapter
+        is visited exactly once (no offset-0 re-scan, no accumulated
+        array slice), so a full-catalogue walk is linear in the number
+        of chapters.  Only the unfiltered ``mode="all"`` walk takes
+        this path; filtered walks fall back to the base offset-paged
+        implementation (which reuses list_books' filters).
+        """
+        if mode != "all":
+            yield from super().walk_books(mode=mode, chunk_size=chunk_size)
+            return
+        chunk: list[BookMeta] = []
+        for ch, s, vol in self._iter_chapter_metas(self._all_library_ids()):
+            meta = self._chapter_to_meta(ch, s, vol)
+            if meta is None:
+                continue
+            chunk.append(meta)
+            if len(chunk) >= chunk_size:
+                yield chunk
+                chunk = []
+        if chunk:
+            yield chunk
+
     def list_books(
         self,
         *,
@@ -726,35 +872,46 @@ class KavitaProvider(Provider):
         else:
             lids = self._all_library_ids()
 
+        # Normalize `since` to UTC once: `updated_at` and `since` are
+        # both ISO-8601 strings, but mixed offsets would compare wrong
+        # lexicographically.
+        since_norm: str | None = None
+        if since:
+            try:
+                since_norm = _iso_utc(since)
+            except ValueError:
+                since_norm = None  # unparseable — fall back to raw compare
+
         out: list[BookMeta] = []
-        for lid in lids:
-            if mode == "series" and series_id:
-                series_iter = self._series_in_library(lid, series_id)
-            else:
-                series_iter = self._series_in_library(lid)
-            for s in series_iter:
-                sid = s.get("id")
-                if not sid:
+        for ch, s, vol in self._iter_chapter_metas(
+            lids, series_id if mode == "series" else None
+        ):
+            meta = self._chapter_to_meta(ch, s, vol)
+            if meta is None:
+                continue
+            if search:
+                q = search.lower()
+                hay = (meta.title + " " + (meta.series or "")).lower()
+                if q not in hay:
                     continue
-                for vol in self.client.get_volumes(sid):
-                    for ch in vol.get("chapters") or []:
-                        meta = self._chapter_to_meta(ch, s, vol)
-                        if meta is None:
+            if since and meta.updated_at:
+                if since_norm is None:
+                    if meta.updated_at <= since:
+                        continue
+                else:
+                    try:
+                        if _iso_utc(meta.updated_at) <= since_norm:
                             continue
-                        if search:
-                            q = search.lower()
-                            hay = (meta.title + " " + (meta.series or "")).lower()
-                            if q not in hay:
-                                continue
-                        if since and meta.updated_at and meta.updated_at <= since:
-                            continue
-                        out.append(meta)
-                        if len(out) >= limit + offset:
-                            return out[offset : offset + limit]
+                    except ValueError:
+                        pass  # unparseable updated_at — keep the book
+            out.append(meta)
+            if len(out) >= limit + offset:
+                return out[offset : offset + limit]
         return out[offset : offset + limit]
 
     def get_book(self, book_id: str) -> BookMeta | None:
         if book_id in self._book_cache:
+            self._book_cache.move_to_end(book_id)
             return self._book_cache[book_id]
         if not book_id.startswith("kavita_ch_"):
             return None
@@ -767,7 +924,7 @@ class KavitaProvider(Provider):
             return None
         # Kavita's chapter DTO has volumeId but no seriesId; the
         # volume carries seriesId.
-        volume = self.client.get_chapter_volume(chapter_id)
+        _, volume = self._chapter_files_and_volume(chapter_id)
         series_id = volume.get("seriesId") if volume else None
         if not series_id:
             return None
@@ -778,6 +935,8 @@ class KavitaProvider(Provider):
                     meta = self._chapter_to_meta(chapter, s, volume)
                     if meta is not None:
                         self._book_cache[book_id] = meta
+                        if len(self._book_cache) > _BOOK_CACHE_MAX:
+                            self._book_cache.popitem(last=False)
                     return meta
         return None
 
@@ -788,7 +947,7 @@ class KavitaProvider(Provider):
             chapter_id = int(book_id[len("kavita_ch_") :], 16)
         except ValueError:
             return None
-        volume = self.client.get_chapter_volume(chapter_id)
+        _, volume = self._chapter_files_and_volume(chapter_id)
         series_id = volume.get("seriesId") if volume else None
         if not series_id:
             return None

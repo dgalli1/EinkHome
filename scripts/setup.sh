@@ -48,6 +48,14 @@ if [ ! -x "${PBEMU_DIR}/.venv/bin/python" ]; then
 fi
 
 echo "==> 3/6  pbdev container image"
+if ! command -v podman >/dev/null 2>&1; then
+	echo "ERROR: podman not found in PATH (install it, e.g. 'pacman -S podman')" >&2
+	exit 1
+fi
+if ! podman info >/dev/null 2>&1; then
+	echo "ERROR: 'podman info' failed — is the podman service/socket running?" >&2
+	exit 1
+fi
 if ! podman image exists localhost/pbdev:latest 2>/dev/null; then
 	PBEMU_RUN image
 fi
@@ -58,7 +66,12 @@ if [ ! -f "${FW_ZIP}" ]; then
 	curl -fL --max-time 1800 -o "${FW_ZIP}" "${FIRMWARE_URL}"
 fi
 echo "    zip: $(wc -c <"${FW_ZIP}") bytes"
-if [ ! -d "${PBEMU_DIR}/${FIRMWARE}" ]; then
+# "Already staged" must mean a usable tree: the firmware dir alone (or
+# an empty/absent .live) would pass the old [ -d ] check on a broken
+# tree, so verify .live exists and is non-empty too.
+if [ ! -d "${PBEMU_DIR}/${FIRMWARE}" ] ||
+	[ ! -d "${PBEMU_DIR}/${FIRMWARE}/.live" ] ||
+	[ -z "$(ls -A "${PBEMU_DIR}/${FIRMWARE}/.live" 2>/dev/null || true)" ]; then
 	PBEMU_RUN install "${FW_ZIP}"
 else
 	echo "    already staged at ${PBEMU_DIR}/${FIRMWARE}"

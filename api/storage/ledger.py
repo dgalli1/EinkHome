@@ -45,6 +45,12 @@ Schema:
     state(key TEXT PRIMARY KEY, value INTEGER)
         next_rev   — next revision to hand out (starts at 1)
         last_walk  — unix time the last full provider walk finished
+
+    device_cursors(device_id TEXT PRIMARY KEY, last_rev INTEGER NOT NULL,
+                   updated_at TEXT NOT NULL)
+        last_rev   — the highest rev that device has consumed.  The
+                     minimum across devices bounds tombstone compaction:
+                     no tombstone below it can ever be replayed.
 """
 
 from __future__ import annotations
@@ -65,6 +71,10 @@ if TYPE_CHECKING:
 # list_books call's result tiny, large enough that a 100k catch-up is
 # only ~50 round trips into the provider.
 SCAN_PAGE = 2000
+
+# Tombstones below every device's cursor are unreadable dead rows.
+# Compact the pile once it grows past this many (checked once per walk).
+TOMBSTONE_COMPACT_THRESHOLD = 5000
 
 
 @dataclass(frozen=True)
@@ -107,9 +117,13 @@ def fingerprint(meta: BookMeta) -> str:
 class SyncLedger:
     """SQLite-backed revision change log for one provider instance."""
 
-    def __init__(self, path: str) -> None:
+    def __init__(self, path: str, *, ack_empty_catalogue: bool = False) -> None:
         self.con = sqlite3.connect(path, check_same_thread=False)
         self.con.execute("PRAGMA journal_mode=WAL")
+        # Cross-process safety: two processes touching the same DB file
+        # (e.g. a live server and a test harness) must wait out each
+        # other's write locks instead of failing with SQLITE_BUSY.
+        self.con.execute("PRAGMA busy_timeout=3000")
         self.con.execute(
             "CREATE TABLE IF NOT EXISTS books("
             "id TEXT PRIMARY KEY, rev INTEGER UNIQUE, added_at TEXT, "
@@ -127,6 +141,11 @@ class SyncLedger:
             "CREATE TABLE IF NOT EXISTS state(key TEXT PRIMARY KEY, value INTEGER)"
         )
         self.con.execute(
+            "CREATE TABLE IF NOT EXISTS device_cursors("
+            "device_id TEXT PRIMARY KEY, last_rev INTEGER NOT NULL, "
+            "updated_at TEXT NOT NULL)"
+        )
+        self.con.execute(
             "INSERT OR IGNORE INTO state(key, value) VALUES ('next_rev', 1)"
         )
         self.con.execute(
@@ -134,6 +153,7 @@ class SyncLedger:
         )
         self.con.commit()
         self._lock = threading.Lock()
+        self._ack_empty_catalogue = ack_empty_catalogue
 
     # -- write side --------------------------------------------------------
 
@@ -158,6 +178,14 @@ class SyncLedger:
             except Exception:
                 self.con.rollback()
                 raise
+            # Bulk removals leave a pile of tombstones behind; once it
+            # grows past the threshold, drop the rows every device has
+            # already consumed (rev below the minimum device cursor).
+            row = self.con.execute(
+                "SELECT COUNT(*) FROM books WHERE added_at IS NULL"
+            ).fetchone()
+            if int(row[0]) > TOMBSTONE_COMPACT_THRESHOLD:
+                self._compact_tombstones()
             self._state_set("last_walk", int(time.time()))
             self.con.commit()
             return True
@@ -171,22 +199,20 @@ class SyncLedger:
             for r in self.con.execute("SELECT id, fp, added_at FROM books")
         }
         seen: set[str] = set()
-        offset = 0
         first_page = True
-        while True:
-            batch = provider.list_books(
-                mode="all", limit=SCAN_PAGE, offset=offset
-            )
+        for batch in provider.walk_books(mode="all", chunk_size=SCAN_PAGE):
             if first_page:
+                first_page = False
                 # An empty first page while the ledger holds rows means
                 # the provider error path collapsed the whole catalogue
                 # to nothing — tombstones would wipe the library.  Refuse.
-                if not batch and stored:
+                if not batch and stored and not self._ack_empty_catalogue:
                     raise RuntimeError(
                         "provider returned an empty catalogue with "
                         f"{len(stored)} rows in the ledger; refusing to tombstone"
                     )
-                first_page = False
+            if not batch:
+                continue  # defensive: walkers must not yield empty pages
             inserts: list[BookMeta] = []
             updates: list[BookMeta] = []
             for meta in batch:
@@ -202,9 +228,13 @@ class SyncLedger:
                     stored[meta.id] = (fp, meta.added_at)
             self._apply_inserts(inserts)
             self._apply_updates(updates)
-            if len(batch) < SCAN_PAGE:
-                break  # last (possibly partial) page
-            offset += SCAN_PAGE
+        if first_page and stored and not self._ack_empty_catalogue:
+            # walk_books yields no pages for an empty catalogue — the
+            # same collapsed-provider refusal as an empty first page.
+            raise RuntimeError(
+                "provider returned an empty catalogue with "
+                f"{len(stored)} rows in the ledger; refusing to tombstone"
+            )
 
         gone = [
             bid
@@ -302,12 +332,13 @@ class SyncLedger:
     def delta(self, cursor: int, limit: int) -> tuple[list[LedgerEntry], bool]:
         """Up to ``limit`` entries with rev > cursor, ordered by rev,
         plus whether more entries remain beyond the batch."""
-        rows = self.con.execute(
-            "SELECT rev, id, added_at, title, authors, series, series_id, "
-            "series_idx, format, size, file_name FROM books "
-            "WHERE rev > ? ORDER BY rev LIMIT ?",
-            (cursor, limit + 1),
-        ).fetchall()
+        with self._lock:
+            rows = self.con.execute(
+                "SELECT rev, id, added_at, title, authors, series, series_id, "
+                "series_idx, format, size, file_name FROM books "
+                "WHERE rev > ? ORDER BY rev LIMIT ?",
+                (cursor, limit + 1),
+            ).fetchall()
         more = len(rows) > limit
         entries = [
             LedgerEntry(
@@ -329,15 +360,63 @@ class SyncLedger:
 
     def cursor(self) -> int:
         """Highest rev assigned so far (0 for an empty ledger)."""
-        row = self.con.execute("SELECT MAX(rev) FROM books").fetchone()
+        with self._lock:
+            row = self.con.execute("SELECT MAX(rev) FROM books").fetchone()
         return int(row[0]) if row and row[0] is not None else 0
 
     def count(self) -> int:
         """Number of live (non-tombstone) books."""
-        row = self.con.execute(
-            "SELECT COUNT(*) FROM books WHERE added_at IS NOT NULL"
-        ).fetchone()
+        with self._lock:
+            row = self.con.execute(
+                "SELECT COUNT(*) FROM books WHERE added_at IS NOT NULL"
+            ).fetchone()
         return int(row[0])
+
+    def record_device(self, device_id: str, last_rev: int) -> None:
+        """Persist a device's last consumed revision.  The minimum of
+        these cursors bounds tombstone compaction: no tombstone below
+        it can ever be replayed, so it is safe to delete."""
+        with self._lock:
+            self.con.execute(
+                "INSERT OR REPLACE INTO device_cursors(device_id, last_rev, "
+                "updated_at) VALUES (?, ?, ?)",
+                (
+                    device_id,
+                    last_rev,
+                    time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                ),
+            )
+            self.con.commit()
+
+    def min_device_rev(self) -> int | None:
+        """Smallest ``last_rev`` any device has reported, or None when
+        no device has ever posted a cursor."""
+        with self._lock:
+            row = self.con.execute(
+                "SELECT MIN(last_rev) FROM device_cursors"
+            ).fetchone()
+        return int(row[0]) if row and row[0] is not None else None
+
+    def compact_tombstones(self, min_rev: int | None = None) -> int:
+        """Delete tombstoned rows whose rev is strictly below ``min_rev``
+        (when given) or below the smallest cursor any device reported
+        (when omitted).  Live rows are never touched.  Returns the
+        number of rows deleted."""
+        with self._lock:
+            deleted = self._compact_tombstones(min_rev)
+            self.con.commit()
+            return deleted
+
+    def _compact_tombstones(self, min_rev: int | None = None) -> int:
+        """Unlocked core of :meth:`compact_tombstones`; callers must
+        hold ``self._lock`` (``refresh`` runs it inside its own walk
+        transaction)."""
+        cur = self.con.execute(
+            "DELETE FROM books WHERE added_at IS NULL AND rev < COALESCE(?, "
+            "(SELECT MIN(last_rev) FROM device_cursors))",
+            (min_rev,),
+        )
+        return cur.rowcount
 
     def close(self) -> None:
         self.con.close()

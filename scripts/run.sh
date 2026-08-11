@@ -22,6 +22,11 @@
 #
 # The pbemu submodule must be checked out (git submodule update --init)
 # and its firmware staged (pbemu/pbemu install) before running.
+#
+# NOTE: run.sh and run-visible.sh share the dev-server pidfile + log
+# (/tmp/pbemu-api.{pid,log}) — only one of them may run at a time.  On
+# success this script intentionally leaves the emulator + API server
+# running; on failure a trap stops both and drops the pidfile.
 
 set -eu
 
@@ -29,6 +34,8 @@ HERE=$(
 	unset CDPATH
 	cd "$(dirname "$0")" && pwd
 )
+# Shared helpers (lan_ip) — must stay POSIX sh.
+. "${HERE}/lib.sh"
 REPO_ROOT=$(
 	unset CDPATH
 	cd "${HERE}/.." && pwd
@@ -36,7 +43,30 @@ REPO_ROOT=$(
 PBEMU_DIR="${REPO_ROOT}/pbemu"
 CONTAINER="${PBEMU_CONTAINER:-pb-pocketbook-ui}"
 API_PORT="${PBEMU_API_PORT:-8765}"
+API_PIDFILE="/tmp/pbemu-api.pid"
+API_LOGFILE="/tmp/pbemu-api.log"
 FIRMWARE="U633_6.8.2817"
+
+# Failure trap: stop the emulator + API server and remove the pidfile,
+# but ONLY on error — the normal exit path leaves everything running.
+cleanup_on_error() {
+	_status=$?
+	if [ "${_status}" -eq 0 ]; then
+		return 0
+	fi
+	echo "ERROR: run.sh failed (exit ${_status}); stopping emulator + api server" >&2
+	"${PBEMU_DIR}/pbemu" stop 2>/dev/null || true
+	if [ -f "${API_PIDFILE}" ]; then
+		_apid=$(cat "${API_PIDFILE}" 2>/dev/null || true)
+		if [ -n "${_apid}" ] && kill -0 "${_apid}" 2>/dev/null &&
+			ps -p "${_apid}" -o args= 2>/dev/null | grep -q "api.api.server"; then
+			kill "${_apid}" 2>/dev/null || true
+		fi
+		rm -f "${API_PIDFILE}"
+	fi
+	return 0
+}
+trap cleanup_on_error EXIT
 
 cd "${REPO_ROOT}"
 
@@ -63,9 +93,31 @@ present)
 esac
 
 echo "==> 3/7  (re)starting pbemu-api on 127.0.0.1:${API_PORT}"
-# Kill any stale server first.
-pkill -f "api.api.server" 2>/dev/null || true
-sleep 0.5
+# Kill any stale server first.  run.sh and run-visible.sh share
+# ${API_PIDFILE}, so this also stops a server left by the other script.
+# The pid is sanity-checked against the process cmdline so a recycled
+# pid can never kill an innocent process.
+if [ -f "${API_PIDFILE}" ]; then
+	OLD_PID=$(cat "${API_PIDFILE}" 2>/dev/null || true)
+	if [ -n "${OLD_PID}" ] && kill -0 "${OLD_PID}" 2>/dev/null; then
+		if ps -p "${OLD_PID}" -o args= 2>/dev/null | grep -q "api.api.server"; then
+			echo "  stopping stale api server (pid ${OLD_PID})"
+			# `|| true`: the process may have exited between the
+			# checks and the kill; the wait below covers that.
+			kill "${OLD_PID}" 2>/dev/null || true
+			# Bounded wait (~5s) for it to actually exit; a lingering
+			# server would otherwise collide on the port.
+			_wait=0
+			while kill -0 "${OLD_PID}" 2>/dev/null && [ "${_wait}" -lt 50 ]; do
+				_wait=$((_wait + 1))
+				sleep 0.1
+			done
+		else
+			echo "WARN: ${API_PIDFILE} holds pid ${OLD_PID}, which is not the api server; ignoring" >&2
+		fi
+	fi
+	rm -f "${API_PIDFILE}"
+fi
 # Run from the pbemu submodule so the config's firmware-relative
 # paths (books_dir: U633_6.8.2817/.live/...) resolve correctly; the
 # server code itself lives in this repo (api/ on PYTHONPATH).
@@ -83,34 +135,22 @@ fi
 PYTHONPATH="${REPO_ROOT}:${REPO_ROOT}/api" \
 	"${PYTHON}" -m api.api.server \
 	--host 0.0.0.0 --port "${API_PORT}" \
-	>/tmp/pbemu-api.log 2>&1 &
-echo $! >/tmp/pbemu-api.pid
+	>"${API_LOGFILE}" 2>&1 &
+echo $! >"${API_PIDFILE}"
 sleep 1
 # Verify the server is up.
-if ! curl -s --max-time 2 "http://127.0.0.1:${API_PORT}/api/v1/healthz" -H "Authorization: Bearer pbemu-dev-token" >/dev/null; then
-	echo "ERROR: api server did not start; see /tmp/pbemu-api.log" >&2
-	cat /tmp/pbemu-api.log >&2
+if ! curl -sf --max-time 2 "http://127.0.0.1:${API_PORT}/api/v1/healthz" -H "Authorization: Bearer pbemu-dev-token" >/dev/null; then
+	echo "ERROR: api server did not start; see ${API_LOGFILE}" >&2
+	cat "${API_LOGFILE}" >&2
 	exit 1
 fi
 echo "  api server up: $(curl -s -H 'Authorization: Bearer pbemu-dev-token' http://127.0.0.1:${API_PORT}/api/v1/healthz)"
 
 # Surface the LAN address(es) so a real PocketBook on the same Wi-Fi
 # can reach the API.  We pick the first non-loopback IPv4 with a
-# default route.  The user can then set PBEMU_API_URL on the device.
-LAN_IP=$(
-	ip -4 -o addr show scope global 2>/dev/null |
-		awk '{print $4}' |
-		cut -d/ -f1 |
-		head -n1
-)
-if [ -z "${LAN_IP}" ]; then
-	LAN_IP=$(
-		hostname -I 2>/dev/null |
-			tr ' ' '\n' |
-			grep -v '^127\.' |
-			head -n1
-	)
-fi
+# default route (lan_ip() in lib.sh; PBEMU_LAN_FALLBACK overrides the
+# fallback).  The user can then set PBEMU_API_URL on the device.
+LAN_IP=$(lan_ip)
 if [ -n "${LAN_IP}" ]; then
 	cat <<EOF
 
@@ -231,4 +271,4 @@ OPENWITH_APP=$(printf '%s' "${OPENWITH}" | sed -n 's/.*"app":"\([^"]*\)".*/\1/p'
 echo "  /open-with -> app=${OPENWITH_APP:-?}"
 
 echo
-echo "Done. Screenshot: /tmp/pbemu_bookshelf.png  api log: /tmp/pbemu-api.log"
+echo "Done. Screenshot: /tmp/pbemu_bookshelf.png  api log: ${API_LOGFILE}"

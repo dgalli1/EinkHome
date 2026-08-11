@@ -6,14 +6,28 @@ not depend on the touch input path because that route has been observed
 to fill the /hwevent queue and force bookshelf.app into a crash loop in
 this sandbox.
 
+The staged book is the pbemu submodule's bundled test book: bgipc.epub
+("Beej's Guide to Interprocess Communication"), shipped inside the
+submodule and staged at ``U633_6.8.2817/.live/mnt/ext1/books/bgipc.epub``
+by ``pbemu install`` (see the submodule README).  Other books may share
+that books dir (tests stage stubs there); this script opens whatever
+shows up as the most recent document on the home screen via
+``ReaderSession.ensure_open_from_home`` (which taps recent-book
+candidates), so it is not tied to a single staged file.
+
 Steps:
     1. Start the emulator (clean reset)
     2. Take a screenshot of the home screen (frontpage)
-    3. Open the only staged book (bgipc.epub) via ReaderSession.open
+    3. Open the most recent staged book (the bundled bgipc.epub) via
+       ReaderSession.ensure_open_from_home
     4. Take a screenshot of page 1
     5. Turn pages until we reach page 10
     6. Take a screenshot of page 10
     7. Print the saved screenshot paths and stop the emulator
+
+Screenshots from previous runs are removed up front, so the
+``screenshots/`` dir only ever holds the newest run.  The firmware is
+overridable via the ``PBEMU_FIRMWARE`` env var (default U633_6.8.2817).
 """
 
 from __future__ import annotations
@@ -33,7 +47,7 @@ from tests.support.reader_flow import ReaderSession, Session  # noqa: E402
 from tests.support.runtime import Emulator  # noqa: E402
 
 
-FIRMWARE = "U633_6.8.2817"
+FIRMWARE = os.environ.get("PBEMU_FIRMWARE", "U633_6.8.2817")
 SHOT_DIR = _REPO_ROOT / "screenshots"
 SHOT_DIR.mkdir(exist_ok=True)
 
@@ -51,6 +65,11 @@ def save_screenshot(name: str) -> Path:
 
 
 def main() -> int:
+    # Drop screenshots from previous runs so only the newest run stays
+    # in the screenshots dir.
+    for old in SHOT_DIR.glob("*.png"):
+        old.unlink()
+
     emu = Emulator(firmware=FIRMWARE)
     emu.start()
     try:

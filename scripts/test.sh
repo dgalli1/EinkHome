@@ -1,8 +1,9 @@
-#!/bin/sh
+#!/usr/bin/env bash
 #
 # test.sh — run the EinkHome test suites.
 #
 #   scripts/test.sh                # api unit tests + the emulator e2e suite
+#   scripts/test.sh --api-only     # api unit tests only (no podman/firmware)
 #   scripts/test.sh --pbemu        # ... plus the pbemu submodule's own suite
 #   scripts/test.sh -- -k offline  # pass pytest args through to the e2e suite
 #
@@ -30,17 +31,19 @@ BOOKS_DIR="${FIRMWARE_DIR}/.live/mnt/ext1/books"
 RUN_API=1
 RUN_E2E=1
 RUN_PBEMU=0
-PYTEST_ARGS=""
+RUN_API_ONLY=0
+args=()
 
-for arg in "$@"; do
-	case "${arg}" in
-	--pbemu) RUN_PBEMU=1 ;;
-	--) shift; PYTEST_ARGS="$*"; break ;;
+while [ "$#" -gt 0 ]; do
+	case "$1" in
+	--api-only) RUN_API_ONLY=1; RUN_E2E=0; RUN_PBEMU=0; shift ;;
+	--pbemu) RUN_PBEMU=1; shift ;;
+	--) shift; args=("$@"); break ;;
 	--help|-h)
 		sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'
 		exit 0
 		;;
-	*) echo "unknown argument: ${arg} (try --help)" >&2; exit 2 ;;
+	*) echo "unknown argument: $1 (try --help)" >&2; exit 2 ;;
 	esac
 done
 
@@ -69,12 +72,16 @@ rc=0
 
 if [ "${RUN_API}" = 1 ]; then
 	echo "==> api unit tests (api/tests)"
-	(cd "${REPO_ROOT}" && "${PY}" -m pytest api/tests -q) || rc=1
+	if [ "${RUN_API_ONLY}" = 1 ]; then
+		(cd "${REPO_ROOT}" && "${PY}" -m pytest api/tests -q "${args[@]}") || rc=1
+	else
+		(cd "${REPO_ROOT}" && "${PY}" -m pytest api/tests -q) || rc=1
+	fi
 fi
 
 if [ "${RUN_E2E}" = 1 ]; then
 	echo "==> EinkHome e2e suite (tests/)"
-	(cd "${REPO_ROOT}" && "${PY}" -m pytest tests/ -q ${PYTEST_ARGS}) || rc=1
+	(cd "${REPO_ROOT}" && "${PY}" -m pytest tests/ -q "${args[@]}") || rc=1
 fi
 
 if [ "${RUN_PBEMU}" = 1 ]; then

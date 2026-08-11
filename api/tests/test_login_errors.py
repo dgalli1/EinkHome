@@ -7,13 +7,14 @@ helpful error pointing at the right knob.
 """
 
 # pylint: disable=missing-function-docstring,redefined-outer-name
+import os
+import sys
+
 import pytest
 
-REPO_ROOT = "/home/damian/git/pbemu"
-import sys  # noqa: E402
-
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 sys.path.insert(0, REPO_ROOT)
-sys.path.insert(0, f"{REPO_ROOT}/api")
+sys.path.insert(0, os.path.join(REPO_ROOT, "api"))
 
 from providers.kavita import _KavitaClient  # noqa: E402
 
