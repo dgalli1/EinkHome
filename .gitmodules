@@ -1,3 +1,3 @@
 [submodule "pbemu"]
 	path = pbemu
-	url = https://codeberg.org/datyoma/pbemu.git
+	url = git@tangled.org:dgalli.tngl.sh/pbemu
