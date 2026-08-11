@@ -33,10 +33,6 @@ extern int g_dl_batch_done;
 
 extern int g_dl_batch_failed;
 
-extern char g_dl_batch_failed_ids[MAX_DOWNLOADS * 4][MAX_ID_LEN];
-
-extern int g_dl_batch_failed_count;
-
 extern int g_cover_armed;
 
 extern DownloadItem g_downloads[MAX_DOWNLOADS];
@@ -83,6 +79,13 @@ ibitmap *load_image_scaled(const char *path);
 int parse_book_obj(const cJSON *obj, Book *b);
 
 void do_sync(void);
+
+/* Abort any in-flight sync chain (settings/source changes must call
+ * this before rebuilding endpoint URLs; see bs_model.c). */
+void sync_abort(void);
+
+/* Terminal bookkeeping for the async local scan chain (bs_local.c). */
+void sync_local_finish(void);
 
 void cover_cache_path(const char *id, char *out, size_t cap);
 

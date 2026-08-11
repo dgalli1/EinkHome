@@ -592,6 +592,18 @@ draw_launcher_icon(int cx, int cy, const char *icon_name, const char *title)
     }
 }
 
+/* Back-button rect in the launcher header: shared by the draw path
+ * and the tap hit-test so the tappable region always matches the
+ * painted button. */
+void
+launcher_back_rect(int *bx, int *by, int *bw, int *bh)
+{
+    *bx = 16;
+    *by = (LAUNCHER_HEADER_H - 56) / 2;
+    *bw = 160;
+    *bh = 56;
+}
+
 void
 draw_overlay_launcher(void)
 {
@@ -625,7 +637,8 @@ draw_overlay_launcher(void)
         CloseFont(tf);
     }
     {
-        int bx = 16, by = (LAUNCHER_HEADER_H - 56) / 2, bw = 160, bh = 56;
+        int bx, by, bw, bh;
+        launcher_back_rect(&bx, &by, &bw, &bh);
         DrawRect(bx, by, bw, bh, BLACK);
         ifont *bf = OpenFont(DEFAULTFONTB, 28, 0);
         if (bf) {
@@ -754,8 +767,9 @@ void
 on_tap_overlay_launcher(int x, int y)
 {
     int body_top = LAUNCHER_HEADER_H;
-    if (x >= 16 && x < 176 && y >= (LAUNCHER_HEADER_H - 56) / 2 &&
-        y < (LAUNCHER_HEADER_H - 56) / 2 + 56) {
+    int rx, ry, rw, rh;
+    launcher_back_rect(&rx, &ry, &rw, &rh);
+    if (x >= rx && x < rx + rw && y >= ry && y < ry + rh) {
         launcher_close();
         return;
     }

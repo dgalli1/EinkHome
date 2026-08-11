@@ -20,10 +20,11 @@ hit_top_bar(int x, int y)
     if (y < bar_top || y >= bar_bot)
         return -1;
     int w = ScreenWidth();
-    /* Left button — 96×96 region, padded 8 px on the left: a back
-     * arrow on the Search sub-view or a drilled series, a no-op
-     * otherwise (the home icon was removed). */
-    if (x >= 8 && x < 8 + 96)
+    /* Left button — TOP_BTN_SIZE×TOP_BTN_SIZE region, padded
+     * TOP_BTN_PAD px on the left: a back arrow on the Search sub-view
+     * or a drilled series, a no-op otherwise (the home icon was
+     * removed). */
+    if (x >= TOP_BTN_PAD && x < TOP_BTN_PAD + TOP_BTN_SIZE)
         return 1;
     /* The Search page has no right-side icons and no source button —
      * its top bar is just the back arrow, so taps there fall through. */
@@ -32,17 +33,17 @@ hit_top_bar(int x, int y)
     /* Source button — icon + label right of the house button. */
     if (x >= SOURCE_BTN_X && x < SOURCE_BTN_X + SOURCE_BTN_W)
         return 6;
-    /* Right 96×96 region, padded 8 px on the right: the hamburger/More
-     * button. */
-    if (x >= w - 96 - 8 && x < w - 8)
+    /* Right TOP_BTN_SIZE×TOP_BTN_SIZE region, padded TOP_BTN_PAD px on
+     * the right: the hamburger/More button. */
+    if (x >= w - TOP_BTN_SIZE - TOP_BTN_PAD && x < w - TOP_BTN_PAD)
         return 3;
-    /* Sync button — 96×96 region left of the menu button; runs a
-     * library sync. */
-    if (x >= w - 96 - 8 - 96 && x < w - 96 - 8)
+    /* Sync button — TOP_BTN_SIZE region left of the menu button; runs
+     * a library sync. */
+    if (x >= w - TOP_BTN_PAD - 2 * TOP_BTN_SIZE && x < w - TOP_BTN_SIZE - TOP_BTN_PAD)
         return 2;
-    /* Search icon — 96×96 region left of the sync button; opens the
-     * Search sub-page. */
-    if (x >= w - 96 - 8 - 2 * 96 && x < w - 96 - 8 - 96)
+    /* Search icon — TOP_BTN_SIZE region left of the sync button; opens
+     * the Search sub-page. */
+    if (x >= w - TOP_BTN_PAD - 3 * TOP_BTN_SIZE && x < w - TOP_BTN_PAD - 2 * TOP_BTN_SIZE)
         return 5;
     return -1;
 }
@@ -169,7 +170,9 @@ hit_pager(int x, int y)
 void
 on_tap_overlay_menu(int x, int y)
 {
-    int y0 = 96, item_h = 88;
+    /* Row geometry is shared with the More overlay (same 96/88 values
+     * — one name, one layout). */
+    int y0 = MORE_Y0, item_h = MORE_ITEM_H;
     int pw = ScreenWidth() * 3 / 4;
     if (x < 0 || x >= pw) {
         g_state.overlay = OV_NONE;
@@ -269,6 +272,10 @@ on_tap_source(int x, int y)
     if (row < 0 || row >= 3)
         return 1;
     g_state.overlay = OV_NONE;
+    /* Source switch: abort any in-flight sync chain BEFORE the source
+     * changes / config saves, so a stale round never fetches from the
+     * old endpoint or applies a response under the new source. */
+    sync_abort();
     if (row == 0) {
         g_state.source = SOURCE_KAVITA;
         g_browse_open = 0;
@@ -311,6 +318,10 @@ settings_close(void)
 void
 settings_apply(void)
 {
+    /* Abort any in-flight sync chain BEFORE the endpoints are rebuilt
+     * from the edited api_base/api_token, so the chain never fetches
+     * the next round from the new URL with the old cursor. */
+    sync_abort();
     save_config_file();
     build_endpoint_urls();
     resolve_downloads_dir();

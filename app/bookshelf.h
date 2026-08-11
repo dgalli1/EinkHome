@@ -118,8 +118,15 @@ extern void GetKeyboardRect(irect *rect) __attribute__((weak));
  * shelf no longer carries a search row (the magnifier icon lives in the
  * top bar). */
 #define SEARCH_ROW_H 88
-#define TAB_ROW_H 0 /* tab row removed; downloads via top-bar icon */
 #define PAGER_H 96
+/* Top-bar icon buttons: 96×96 tap boxes padded 8 px from the screen
+ * edges, each holding a line-art glyph in a centred 52×52 icon box.
+ * Shared by the draw path (bs_ui.c) and the tap hit-test (bs_input.c)
+ * so the tappable region always matches the painted button. */
+#define TOP_BTN_SIZE 96
+#define TOP_BTN_PAD 8
+#define TOP_ICON_SIZE 52
+#define TOP_ICON_HALF (TOP_ICON_SIZE / 2)
 /* History-term rows on the Search sub-page.  SEARCH_HISTORY_MAX caps
  * how many previously committed queries are persisted (and shown). */
 #define SEARCH_HISTORY_ROW_H 96
@@ -242,11 +249,6 @@ struct cfg_out {
   size_t token_cap;
 };
 typedef enum {
-  FILTER_ALL,
-  FILTER_DOWNLOADED,
-  FILTER_REMOTE,
-} Filter;
-typedef enum {
   SORT_TITLE_ASC,
   SORT_AUTHOR,
   SORT_SERIES,
@@ -320,7 +322,6 @@ typedef struct {
 typedef struct {
   int sync_state; /* 0 idle, 1 syncing, 2 error */
   int sync_angle; /* rotation (deg) of the top-bar sync arc */
-  char status[160];
 
   int panel_h; /* height of the system status panel at the BOTTOM of the screen
                 */
@@ -335,7 +336,6 @@ typedef struct {
 
   SortMode sort;
   GroupMode group;
-  Filter filter;
   ViewMode view_mode; /* GRID = cover grid, LIST = one row per book */
   /* One modal overlay at a time.  Stackable popups (dl_popup,
    * sync_popup) and the search keyboard (search_kb) are NOT part of

@@ -18,21 +18,6 @@
  * dl_job_done). */
 static unsigned int g_dl_gen = 0;
 
-/* Drop the last character of a UTF-8 string at a character boundary:
- * walk back over continuation bytes (10xxxxxx) to the sequence's lead
- * byte, so a truncated title never ends in a half multibyte char. */
-static void
-utf8_drop_last_char(char *s)
-{
-    size_t len = strlen(s);
-    if (len == 0)
-        return;
-    size_t i = len - 1;
-    while (i > 0 && ((unsigned char)s[i] & 0xC0) == 0x80)
-        i--;
-    s[i] = '\0';
-}
-
 /* Unlink stale "<file>.part" fragments left in the downloads dir by a
  * crash mid-fetch (dl_fetch writes the .part, then renames on success;
  * on any other exit the fragment would otherwise stay forever).
@@ -194,6 +179,7 @@ clear_finished_downloads(void)
 
 static void dl_start_next(void);
 static void dl_job_done(BsJob *job);
+static void dl_kick(void);
 
 /* Add a book to the download queue (no-op if already queued, in
  * flight, or done; a failed entry is dropped and retried when no
@@ -421,6 +407,17 @@ book_press_action(Book *b)
     }
     launch_reader(b);
 }
+/* Failed-id set for the download-all batch: every id the batch already
+ * attempted and failed, so the next slice never re-enqueues it (its
+ * downloaded flag stays 0, so without this guard the batch would loop
+ * over the failing books forever).  Heap-allocated and grown by
+ * doubling: the old fixed 256-entry array silently dropped ids once
+ * full, and the batch then re-enqueued the failing books forever.
+ * Freed at the start of the next batch (download_all_start). */
+static char *g_dl_batch_failed_ids; /* NULL until the first failure */
+static int   g_dl_batch_failed_count = 0;
+static int   g_dl_batch_failed_cap = 0;
+
 /* True when the current batch already attempted *id* and it failed.
  * Failed books keep their downloaded flag at 0, so without this guard
  * the next slice would re-enqueue them and the batch would loop over
@@ -429,7 +426,7 @@ static int
 batch_failed_id(const char *id)
 {
     for (int i = 0; i < g_dl_batch_failed_count; i++)
-        if (strcmp(g_dl_batch_failed_ids[i], id) == 0)
+        if (strcmp(g_dl_batch_failed_ids + (size_t)i * MAX_ID_LEN, id) == 0)
             return 1;
     return 0;
 }
@@ -437,13 +434,17 @@ batch_failed_id(const char *id)
 static void
 batch_note_failed(const char *id)
 {
-    if (g_dl_batch_failed_count >=
-        (int)(sizeof g_dl_batch_failed_ids / sizeof g_dl_batch_failed_ids[0]))
-        return; /* set full: the drain treats the slice as exhausted */
-    snprintf(g_dl_batch_failed_ids[g_dl_batch_failed_count++],
-             sizeof g_dl_batch_failed_ids[0],
-             "%s",
-             id);
+    if (g_dl_batch_failed_count >= g_dl_batch_failed_cap) {
+        int    newcap = g_dl_batch_failed_cap == 0 ? 64 : g_dl_batch_failed_cap * 2;
+        char  *nids = realloc(g_dl_batch_failed_ids, (size_t)newcap * MAX_ID_LEN);
+        if (nids == NULL)
+            return; /* keep the old set; this id just is not remembered */
+        g_dl_batch_failed_ids = nids;
+        g_dl_batch_failed_cap = newcap;
+    }
+    snprintf(g_dl_batch_failed_ids + (size_t)g_dl_batch_failed_count * MAX_ID_LEN,
+             MAX_ID_LEN, "%s", id);
+    g_dl_batch_failed_count++;
 }
 
 /* Enqueue the next bounded slice of undownloaded ids for the
@@ -483,16 +484,38 @@ batch_enqueue_slice(int *got)
  * is queued synchronously so the popup shows the whole batch right
  * away; each completed download job tops the queue up as items
  * finish.  The popup opens here (no auto-open — a batch never
- * launches a reader). */
+ * launches a reader).  With nothing undownloaded the popup is not
+ * opened at all: batch_active=1 with no job in flight would make every
+ * dismiss tap a no-op (bs_main requires downloads_pending()==0 &&
+ * !g_dl_batch_active) and wedge the popup shut. */
 void
 download_all_start(void)
 {
-    g_dl_batch_active = 1;
-    g_dl_batch_total = store_count_undownloaded();
-    g_dl_batch_done = 0;
+    int total = store_count_undownloaded();
+    if (total == 0) {
+        LOG("[bookshelf] download-all nothing to download\n");
+        return;
+    }
+    /* New batch: drop the previous batch's failed-id set (grown back
+     * as this batch's failures accrue) and reset the tally. */
+    free(g_dl_batch_failed_ids);
+    g_dl_batch_failed_ids = NULL;
+    g_dl_batch_failed_cap = 0;
     g_dl_batch_failed_count = 0;
+    g_dl_batch_active = 1;
+    g_dl_batch_total = total;
+    g_dl_batch_done = 0;
+    g_dl_batch_failed = 0;
     int got = 0;
-    batch_enqueue_slice(&got); /* starts the first fetch via enqueue */
+    int enq = batch_enqueue_slice(&got); /* starts the first fetch via enqueue */
+    if (enq == 0) {
+        /* The store reported undownloaded books but none could be
+         * queued (every id failed store_get_book): nothing is in
+         * flight, so kick the drain — dl_advance's empty-queue path
+         * finalizes the batch instead of wedging with batch_active=1,
+         * an empty queue and no job to settle. */
+        dl_kick();
+    }
     g_state.dl_popup = 1;
     g_state.dl_popup_auto_open = 0;
     redraw_shelf();
@@ -501,53 +524,63 @@ download_all_start(void)
 
 static void dl_advance(void);
 
-/* Start the job for the first queued item (main thread).  One download
+/* Start the job for the next queued item (main thread).  One download
  * is in flight at a time; each job's done_cb advances the queue, so
- * starting the first item here kicks the drain. */
+ * starting the first item here kicks the drain.  A start failure
+ * (store miss, alloc or submit failure) marks the entry failed and
+ * falls through to the next queued entry, so one bad book cannot stall
+ * the drain with no job in flight; when every entry fails, the drain
+ * is re-entered so the empty-queue path finalizes (batch tally /
+ * popup) instead of wedging with nothing ever calling dl_advance. */
 static void
 dl_start_next(void)
 {
     if (g_dl_inflight != NULL)
         return;
-    DownloadItem *target = NULL;
+    int attempted = 0;
     for (int i = 0; i < g_download_count; i++) {
-        if (g_downloads[i].state == 0) {
-            target = &g_downloads[i];
-            break;
-        }
-    }
-    if (target == NULL)
-        return;
-    target->state = 1;
+        DownloadItem *target = &g_downloads[i];
+        if (target->state != 0)
+            continue;
+        attempted = 1;
+        target->state = 1;
 
-    Book b;
-    if (!store_get_book(target->id, &b)) {
-        target->state = 3;
+        Book b;
+        if (!store_get_book(target->id, &b)) {
+            target->state = 3;
+            continue;
+        }
+        DlJob *a = calloc(1, sizeof *a);
+        if (a == NULL) {
+            target->state = 3;
+            continue;
+        }
+        char path[MAX_PATH_LEN];
+        book_local_path(&b, path, sizeof path);
+        snprintf(a->id, sizeof a->id, "%s", b.id);
+        snprintf(a->url,
+                 sizeof a->url,
+                 "%s/api/v1/books/%s/file?access_token=%s",
+                 g_state.api_base,
+                 b.id,
+                 g_state.api_token);
+        snprintf(a->path, sizeof a->path, "%s", path);
+        a->gen = target->gen; /* the settle must match this exact generation */
+        BsJob *j = bs_worker_submit(dl_fetch, dl_job_done, a);
+        if (j == NULL) {
+            target->state = 3;
+            free(a);
+            continue;
+        }
+        g_dl_inflight = j;
         return;
     }
-    DlJob *a = calloc(1, sizeof *a);
-    if (a == NULL) {
-        target->state = 3;
-        return;
-    }
-    char path[MAX_PATH_LEN];
-    book_local_path(&b, path, sizeof path);
-    snprintf(a->id, sizeof a->id, "%s", b.id);
-    snprintf(a->url,
-             sizeof a->url,
-             "%s/api/v1/books/%s/file?access_token=%s",
-             g_state.api_base,
-             b.id,
-             g_state.api_token);
-    snprintf(a->path, sizeof a->path, "%s", path);
-    a->gen = target->gen; /* the settle must match this exact generation */
-    BsJob *j = bs_worker_submit(dl_fetch, dl_job_done, a);
-    if (j == NULL) {
-        target->state = 3;
-        free(a);
-        return;
-    }
-    g_dl_inflight = j;
+    /* Every queued entry failed to start: no job is in flight and
+     * nothing else would call dl_advance again, so re-enter the drain
+     * to reach the empty-queue finalize.  The entries stay marked
+     * state=3 so the popup shows them as failed. */
+    if (attempted)
+        dl_advance();
 }
 
 /* No-op job that re-enters the drain on the main thread.  Reproduces
@@ -658,6 +691,15 @@ dl_job_done(BsJob *job)
     free(a);
 
     dl_advance();
+
+    /* One tally per completed download, AFTER dl_advance so the batch
+     * finalize (active=0) is already reflected — the tests poll this
+     * line for the finished tally; per-draw logging was removed to
+     * keep the log viewer quiet. */
+    int dtotal, ddone, dfailed, dactive;
+    dl_progress_metrics(&dtotal, &ddone, &dfailed, &dactive);
+    LOG("[bookshelf] dl_progress done=%d failed=%d total=%d active=%d\n",
+        ddone, dfailed, dtotal, dactive);
 }
 
 /* Advance the queue (main thread): start the next queued item, or top
@@ -782,19 +824,31 @@ cancel_downloads(void)
 }
 
 /* Queue every member of a series (by series_id), in bounded slices, and
- * open the download-progress popup so the drain is visible. */
+ * open the download-progress popup so the drain is visible.  When the
+ * queue is full, a finished entry is pruned first (same pattern as
+ * batch_enqueue_slice), so finished rows never crowd the series out
+ * and a series larger than MAX_DOWNLOADS keeps flowing as room is
+ * freed; if no finished entry is left to make room, the rest of the
+ * series is not queued in this pass. */
 void
 download_series(const char *series_id)
 {
     char ids[64][MAX_ID_LEN];
-    int  n = 0, off = 0, got;
-    while ((got = store_series_ids(series_id, ids, 64, off)) > 0) {
+    int  n = 0, off = 0, got, full = 0;
+    while (!full && (got = store_series_ids(series_id, ids, 64, off)) > 0) {
         for (int i = 0; i < got; i++) {
             Book b;
-            if (store_get_book(ids[i], &b)) {
-                enqueue_download(&b);
-                n++;
+            if (!store_get_book(ids[i], &b))
+                continue;
+            if (g_download_count >= MAX_DOWNLOADS) {
+                prune_finished_download();
+                if (g_download_count >= MAX_DOWNLOADS) {
+                    full = 1;
+                    break;
+                }
             }
+            enqueue_download(&b);
+            n++;
         }
         off += got;
         if (got < 64)
@@ -878,8 +932,7 @@ draw_context_menu(void)
         SetFont(tf, BLACK);
         char trunc[MAX_TITLE_LEN];
         snprintf(trunc, sizeof trunc, "%s", title);
-        while (StringWidth(trunc) > pw - 2 * CTX_PAD && strlen(trunc) > 4)
-            utf8_drop_last_char(trunc); /* never split a multibyte char */
+        utf8_fit_width(trunc, sizeof trunc, pw - 2 * CTX_PAD);
         DrawString(px + CTX_PAD, py + (CTX_TITLE_H - 28) / 2 - 2, trunc);
         CloseFont(tf);
     }

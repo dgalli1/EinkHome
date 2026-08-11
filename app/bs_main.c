@@ -103,8 +103,14 @@ static void suggest_debounce_tick(void *ctx) {
   if (!changed)
     return;
   g_nsuggest = n;
-  for (int i = 0; i < n; i++)
-    snprintf(g_suggestions[i], SUGGEST_TERM_MAX, "%s", rows[i]);
+  for (int i = 0; i < n; i++) {
+    /* Bounded copy: never feed a "%s" snprintf from a source that may
+     * exceed the destination (triggers -Wformat-truncation).  memcpy
+     * of the term budget + explicit NUL, same as the sibling copy in
+     * bs_ui.c. */
+    memcpy(g_suggestions[i], rows[i], SUGGEST_TERM_MAX - 1);
+    g_suggestions[i][SUGGEST_TERM_MAX - 1] = '\0';
+  }
 
   int y_top, y_bot;
   suggest_band(&y_top, &y_bot);
@@ -179,7 +185,6 @@ int on_event(int type, int par1, int par2) {
     sync_set_hooks(&g_sync_ui_hooks);
     g_state.sort = SORT_TITLE_ASC;
     g_state.group = GROUP_ALL;
-    g_state.filter = FILTER_ALL;
 
     /* Keep the system panel visible (battery / wifi / clock).
      * Calling SetPanelType(PANEL_DISABLED) or iv_fullscreen()
@@ -661,6 +666,13 @@ int on_event(int type, int par1, int par2) {
       return 1;
     }
     if (which == 2) {
+      /* The download popup's cancel X is the topmost control while it
+       * is open; a sync popup drawn on top would cover it and trap
+       * the user, so ignore the tap until the downloads drain. */
+      if (g_state.dl_popup) {
+        LOG("[bookshelf] sync tap ignored: download popup open\n");
+        return 1;
+      }
       /* Manual sync: show what the sync is doing (metadata
        * batches / local scan / covers).  The Folder source has
        * nothing to sync, so no popup there. */
@@ -683,22 +695,22 @@ int on_event(int type, int par1, int par2) {
     int pg = hit_pager(x, y);
     if (pg == -1) {
       g_state.page--;
-      redraw_shelf();
+      flip_page();
       return 1;
     }
     if (pg == -2) {
       g_state.page++;
-      redraw_shelf();
+      flip_page();
       return 1;
     }
     if (pg == -3) {
       g_state.page = 0;
-      redraw_shelf();
+      flip_page();
       return 1;
     }
     if (pg == -4) {
       g_state.page = current_pages() - 1;
-      redraw_shelf();
+      flip_page();
       return 1;
     }
 
@@ -847,11 +859,11 @@ int on_event(int type, int par1, int par2) {
       if ((par1 == IV_KEY_NEXT || par1 == IV_KEY_NEXT2) &&
           g_state.page + 1 < pages) {
         g_state.page++;
-        redraw_shelf();
+        flip_page();
       } else if ((par1 == IV_KEY_PREV || par1 == IV_KEY_PREV2) &&
                  g_state.page > 0) {
         g_state.page--;
-        redraw_shelf();
+        flip_page();
       }
       return 1;
     }

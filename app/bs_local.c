@@ -4,8 +4,10 @@
 #include "bs_browser.h"
 #include "bs_extract.h"
 #include "bs_local.h"
+#include "bs_model.h"
 #include "bs_store.h"
 #include "bs_ui.h"
+#include "bs_worker.h"
 
 #include <dirent.h>
 
@@ -27,18 +29,82 @@
  * cross headers hide it; ARM glibc uses kernel stat version 0. */
 extern int __xstat(int ver, const char *path, struct stat *buf);
 
-static int g_folder_scan_count;
+/* Scan caps (unchanged from the old synchronous walk): directory
+ * depth and total books per import. */
+#define LOCAL_SCAN_DEPTH 8
+#define LOCAL_SCAN_CAP 20000
 
-static void
-folder_scan_dir(const char *dir, int depth, const char *src_label)
+/* The directory walk now runs on the shared background worker
+ * (bs_worker.c) so a big /mnt/ext1 tree never blocks the event loop;
+ * the collected records are applied to the store on the main thread in
+ * bounded slices (one SQLite transaction per slice of SYNC_BATCH),
+ * mirroring the remote sync's round/apply structure.  The worker
+ * touches no SQLite, no UI and no g_state. */
+
+/* One collected file record — the lean subset of Book the walk can
+ * fill without the SQLite metadata cache (author/title come from
+ * store_local_meta_get / extract_book_meta during the apply). */
+typedef struct {
+    char id[MAX_ID_LEN];
+    char title[MAX_TITLE_LEN];
+    char filename[MAX_PATH_LEN];
+    char local_path[MAX_PATH_LEN];
+    char ext[8];
+    char source[16];
+    int  size;
+} LocalFile;
+
+/* The whole collected walk result (worker-allocated; the last
+ * main-thread slice frees it). */
+typedef struct {
+    LocalFile *books;
+    int        count;
+    int        cap;
+    int        truncated; /* LOCAL_SCAN_CAP hit (or grow failure) */
+    char       src[16];
+} LocalScanResult;
+
+/* Chain generation: bumped on every local_import_scanner() kick and
+ * by local_scan_abort() (called from sync_abort on settings/source
+ * changes), so a stale in-flight chain — walk or apply — drops its
+ * results and never calls the model's finish hook under a newer
+ * chain.  Main thread only. */
+static int g_local_scan_gen;
+
+/* Append one record slot; NULL when the cap is hit (or the grow
+ * failed), which stops the walk. */
+static LocalFile *
+local_result_append(LocalScanResult *res)
 {
-    if (depth > 8 || g_folder_scan_count >= 20000)
+    if (res->count >= LOCAL_SCAN_CAP) {
+        res->truncated = 1;
+        return NULL;
+    }
+    if (res->count >= res->cap) {
+        int        newcap = res->cap == 0 ? 256 : res->cap * 2;
+        LocalFile *nb = realloc(res->books, (size_t)newcap * sizeof *nb);
+        if (nb == NULL) {
+            res->truncated = 1;
+            return NULL;
+        }
+        res->books = nb;
+        res->cap = newcap;
+    }
+    return &res->books[res->count++];
+}
+
+/* Worker: walk the tree and collect book records (blocking I/O only —
+ * no SQLite, no UI, no g_state). */
+static void
+folder_scan_collect(const char *dir, int depth, LocalScanResult *res)
+{
+    if (depth > LOCAL_SCAN_DEPTH || res->count >= LOCAL_SCAN_CAP)
         return;
     DIR *d = opendir(dir);
     if (d == NULL)
         return;
     struct dirent *e;
-    while ((e = readdir(d)) != NULL && g_folder_scan_count < 20000) {
+    while ((e = readdir(d)) != NULL && res->count < LOCAL_SCAN_CAP) {
         if (e->d_name[0] == '.')
             continue;
         char   path[MAX_PATH_LEN];
@@ -65,7 +131,7 @@ folder_scan_dir(const char *dir, int depth, const char *src_label)
             }
         }
         if (is_dir) {
-            folder_scan_dir(path, depth + 1, src_label);
+            folder_scan_collect(path, depth + 1, res);
             continue;
         }
         if (!is_reg)
@@ -84,78 +150,229 @@ folder_scan_dir(const char *dir, int depth, const char *src_label)
         if (!is_book_ext(ext))
             continue;
 
-        Book b;
-        memset(&b, 0, sizeof b);
+        LocalFile *f = local_result_append(res);
+        if (f == NULL)
+            break; /* cap reached (or grow failed): stop scanning */
         char h[9];
         hash_hex(path, h);
-        snprintf(b.id, sizeof b.id, "fld_%s", h);
+        snprintf(f->id, sizeof f->id, "fld_%s", h);
         /* Title = filename without extension, truncated to the field. */
         size_t stem_len = nlen > xlen + 1 ? nlen - (xlen + 1) : 0;
         if (stem_len > MAX_TITLE_LEN - 1)
             stem_len = MAX_TITLE_LEN - 1;
-        memcpy(b.title, e->d_name, stem_len);
-        b.title[stem_len] = '\0';
-        snprintf(b.ext, sizeof b.ext, "%s", ext);
+        memcpy(f->title, e->d_name, stem_len);
+        f->title[stem_len] = '\0';
+        snprintf(f->ext, sizeof f->ext, "%s", ext);
         /* The firmware libc exports __xstat, not stat. */
         struct stat stbuf;
         if (__xstat(0, path, &stbuf) == 0)
-            b.size = (int)stbuf.st_size;
-        b.downloaded = 1;
+            f->size = (int)stbuf.st_size;
         /* Copy only the path bytes actually written (plus NUL). */
-        memcpy(b.local_path, path, dlen + 1 + nlen + 1);
+        memcpy(f->local_path, path, dlen + 1 + nlen + 1);
         size_t fname_len = nlen;
-        if (fname_len >= sizeof b.filename)
-            fname_len = sizeof b.filename - 1;
-        memcpy(b.filename, e->d_name, fname_len);
-        b.filename[fname_len] = '\0';
-        /* Metadata: the extraction cache spares the file parse on
-         * re-imports — only unknown books get parsed. */
-        char mtitle[MAX_TITLE_LEN], mauthor[80];
-        if (store_local_meta_get(b.id, mtitle, sizeof mtitle, mauthor, sizeof mauthor)) {
-            if (mtitle[0] != '\0')
-                snprintf(b.title, sizeof b.title, "%s", mtitle);
-            if (mauthor[0] != '\0')
-                snprintf(b.author, sizeof b.author, "%s", mauthor);
-        } else if (extract_book_meta(path, ext, mtitle, sizeof mtitle, mauthor, sizeof mauthor) ==
-                   0) {
-            if (mtitle[0] != '\0')
-                snprintf(b.title, sizeof b.title, "%s", mtitle);
-            if (mauthor[0] != '\0')
-                snprintf(b.author, sizeof b.author, "%s", mauthor);
-            store_local_meta_put(b.id, mtitle, mauthor);
-        }
-        snprintf(b.source, sizeof b.source, "%s", src_label);
-        store_upsert_book(&b);
-        g_folder_scan_count++;
-        /* Live progress for the sync popup: repaint the counter every
-         * 32 files — a full repaint per book would dominate the scan
-         * on a large library. */
-        if (g_state.sync_popup && g_state.sync_stage == SYNC_STAGE_SCAN &&
-            (g_folder_scan_count & 31) == 0) {
-            g_state.sync_scan = g_folder_scan_count;
-            sync_popup_refresh();
-        }
+        if (fname_len >= sizeof f->filename)
+            fname_len = sizeof f->filename - 1;
+        memcpy(f->filename, e->d_name, fname_len);
+        f->filename[fname_len] = '\0';
+        snprintf(f->source, sizeof f->source, "%s", res->src);
     }
     closedir(d);
 }
 
-/* Mirror every book file under `dir` (recursive) into the store with
- * ids "fld_<hash>"; the previous import of the same source is replaced
- * wholesale. */
+/* Worker entry: collect every book file under /mnt/ext1 into the job
+ * result. */
 static void
-local_import_dir(const char *dir, const char *src_label)
+local_scan_walk(BsJob *job)
 {
-    store_begin();
-    store_delete_source(src_label);
-    g_folder_scan_count = 0;
-    folder_scan_dir(dir, 0, src_label);
-    store_commit();
-    LOG("[bookshelf] local: imported %d books (%s) from %s\n", g_folder_scan_count, src_label, dir);
+    LocalScanResult *res = calloc(1, sizeof *res);
+    if (res == NULL) {
+        job->rc = -1;
+        __atomic_store_n(&job->done, 1, __ATOMIC_RELEASE);
+        return;
+    }
+    snprintf(res->src, sizeof res->src, "local");
+    folder_scan_collect(BROWSE_ROOT, 0, res);
+    if (res->truncated)
+        LOG("[bookshelf] local: scan cap %d reached, import truncated\n",
+            LOCAL_SCAN_CAP);
+    job->result = res;
+    job->rc = 0;
+    __atomic_store_n(&job->done, 1, __ATOMIC_RELEASE);
 }
 
-/* The Local source: every folder under /mnt/ext1. */
+/* Apply-chain argument: the shared result plus the next index to
+ * apply.  Caller-allocated, freed by the last slice's done_cb. */
+typedef struct {
+    LocalScanResult *res;
+    int              offset; /* next book index to apply */
+    int              gen;
+} LocalApplyArg;
+
+/* Build the full Book record on the main thread (SQLite metadata
+ * cache + file extraction) — the worker only collected the file
+ * facts. */
+static void
+local_file_to_book(const LocalFile *f, Book *b)
+{
+    memset(b, 0, sizeof *b);
+    snprintf(b->id, sizeof b->id, "%s", f->id);
+    snprintf(b->title, sizeof b->title, "%s", f->title);
+    snprintf(b->ext, sizeof b->ext, "%s", f->ext);
+    b->size = f->size;
+    b->downloaded = 1;
+    snprintf(b->local_path, sizeof b->local_path, "%s", f->local_path);
+    snprintf(b->filename, sizeof b->filename, "%s", f->filename);
+    snprintf(b->source, sizeof b->source, "%s", f->source);
+    /* Metadata: the extraction cache spares the file parse on
+     * re-imports — only unknown books get parsed. */
+    char mtitle[MAX_TITLE_LEN], mauthor[80];
+    if (store_local_meta_get(f->id, mtitle, sizeof mtitle, mauthor,
+                             sizeof mauthor)) {
+        if (mtitle[0] != '\0')
+            snprintf(b->title, sizeof b->title, "%s", mtitle);
+        if (mauthor[0] != '\0')
+            snprintf(b->author, sizeof b->author, "%s", mauthor);
+    } else if (extract_book_meta(f->local_path, f->ext, mtitle,
+                                 sizeof mtitle, mauthor,
+                                 sizeof mauthor) == 0) {
+        if (mtitle[0] != '\0')
+            snprintf(b->title, sizeof b->title, "%s", mtitle);
+        if (mauthor[0] != '\0')
+            snprintf(b->author, sizeof b->author, "%s", mauthor);
+        store_local_meta_put(f->id, mtitle, mauthor);
+    }
+}
+
+/* No-op worker hop: the slice's real work (SQLite) runs in the done_cb
+ * on the main thread; the hop just re-enters it through the worker
+ * queue, mirroring dl_kick in bs_downloads.c. */
+static void
+local_apply_nop(BsJob *job)
+{
+    (void)job;
+    __atomic_store_n(&job->done, 1, __ATOMIC_RELEASE);
+}
+
+static void local_apply_slice(BsJob *job);
+
+/* done_cb of the walk: hand the collected result to the apply chain. */
+static void
+local_scan_start_apply(BsJob *job)
+{
+    LocalApplyArg  *a = job->arg;
+    LocalScanResult *res = job->result;
+    if (a->gen != g_local_scan_gen) {
+        /* Stale chain (aborted / re-kicked while walking): drop. */
+        if (res != NULL) {
+            free(res->books);
+            free(res);
+        }
+        free(a);
+        return;
+    }
+    if (res == NULL || res->count == 0) {
+        /* Walk failure or empty library: nothing to import; still end
+         * the sync (popup close, view rebuild, spinner off). */
+        if (res != NULL) {
+            free(res->books);
+            free(res);
+        }
+        free(a);
+        sync_local_finish();
+        return;
+    }
+    a->res = res;
+    a->offset = 0;
+    if (bs_worker_submit(local_apply_nop, local_apply_slice, a) == NULL) {
+        free(res->books);
+        free(res);
+        free(a);
+        sync_local_finish();
+    }
+}
+
+/* done_cb for one apply hop: write one bounded slice (SQLite, main
+ * thread) and chain the next, or finish. */
+static void
+local_apply_slice(BsJob *job)
+{
+    (void)job;
+    LocalApplyArg   *a = job->arg;
+    LocalScanResult *res = a->res;
+    if (a->gen != g_local_scan_gen) {
+        /* Aborted mid-apply (source switch / settings save): drop. */
+        free(res->books);
+        free(res);
+        free(a);
+        return;
+    }
+    int end = a->offset + SYNC_BATCH;
+    if (end > res->count)
+        end = res->count;
+    store_begin();
+    if (a->offset == 0)
+        store_delete_source(res->src);
+    for (int i = a->offset; i < end; i++) {
+        Book b;
+        local_file_to_book(&res->books[i], &b);
+        store_upsert_book(&b);
+    }
+    store_commit();
+    a->offset = end;
+    /* Live progress for the sync popup: repaint the counter once per
+     * applied slice — a full repaint per book would dominate the
+     * apply on a large library. */
+    if (g_state.sync_popup && g_state.sync_stage == SYNC_STAGE_SCAN) {
+        g_state.sync_scan = a->offset;
+        sync_popup_refresh();
+    }
+    if (a->offset < res->count) {
+        if (bs_worker_submit(local_apply_nop, local_apply_slice, a) == NULL) {
+            free(res->books);
+            free(res);
+            free(a);
+            sync_local_finish();
+        }
+        return;
+    }
+    LOG("[bookshelf] local: imported %d books (%s) from %s\n", res->count,
+        res->src, BROWSE_ROOT);
+    free(res->books);
+    free(res);
+    free(a);
+    sync_local_finish();
+}
+
+/* The Local source: kick the async walk+apply chain for /mnt/ext1.
+ * Safe to call from the boot path (bs_main.c EVT_INIT) and from
+ * do_sync; a new kick invalidates any in-flight chain. */
 void
 local_import_scanner(void)
 {
-    local_import_dir(BROWSE_ROOT, "local");
+    g_local_scan_gen++;
+    LocalApplyArg *a = malloc(sizeof *a);
+    if (a == NULL) {
+        LOG("[bookshelf] local: import start alloc failed\n");
+        sync_local_finish();
+        return;
+    }
+    a->res = NULL;
+    a->offset = 0;
+    a->gen = g_local_scan_gen;
+    if (bs_worker_submit(local_scan_walk, local_scan_start_apply, a) == NULL) {
+        free(a);
+        LOG("[bookshelf] local: worker submit failed\n");
+        sync_local_finish();
+        return;
+    }
+    LOG("[bookshelf] local: import scan started\n");
+}
+
+/* Abort any in-flight local scan chain (called from sync_abort on
+ * settings/source changes): the generation bump makes every queued
+ * apply drop its slice. */
+void
+local_scan_abort(void)
+{
+    g_local_scan_gen++;
 }

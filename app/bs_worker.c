@@ -126,8 +126,11 @@ bs_worker_cancel_all(void)
 }
 
 /* Main thread: run the done_cb of every finished job and free the job
- * struct (done_cb frees result/arg).  Re-arms 'wkr' while any job is
- * still in flight; otherwise the timer stays disarmed. */
+ * struct (done_cb frees result/arg).  Re-arms 'wkr' while any job
+ * remains in g_jobs, done or not: a done flag that flips between the
+ * drain check and a busy() re-check would otherwise leave a finished
+ * job unprocessed with the timer disarmed forever.  The next tick
+ * settles it (and re-arms again while jobs are still running). */
 void
 bs_worker_tick(void)
 {
@@ -142,16 +145,6 @@ bs_worker_tick(void)
             pp = &job->next;
         }
     }
-    if (bs_worker_busy())
+    if (g_jobs != NULL)
         SetWeakTimerEx("wkr", bs_worker_timer_cb, NULL, 100);
-}
-
-int
-bs_worker_busy(void)
-{
-    int n = 0;
-    for (BsJob *j = g_jobs; j != NULL; j = j->next)
-        if (!__atomic_load_n(&j->done, __ATOMIC_ACQUIRE))
-            n++;
-    return n;
 }

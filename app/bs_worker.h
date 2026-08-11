@@ -37,6 +37,5 @@ BsJob *bs_worker_submit(bs_job_fn fn, bs_job_done done_cb, void *arg);
 void bs_worker_cancel(BsJob *job); /* sets the cancel flag */
 void bs_worker_cancel_all(void);   /* EVT_EXIT: cancel every job */
 void bs_worker_tick(void);         /* main thread: poll + run done_cbs */
-int  bs_worker_busy(void);         /* in-flight jobs > 0 */
 
 #endif /* BS_WORKER_H */

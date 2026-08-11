@@ -16,7 +16,7 @@
  *    list; view_rebuild() fills it in SQL, view_fetch_page() reads one
  *    screenful;
  *  - downloads and the context menu look rows up by id
- *    (store_get_book / store_series_members).
+ *    (store_get_book).
  *
  * RAM cost is O(page rows) + O(cover slots), independent of library
  * size.  Why SQLite over the old hand-rolled JSON file: atomic
@@ -38,6 +38,26 @@
 #include "sqlite3.h"
 
 static sqlite3 *g_db;
+
+/* Prepared statements reused across sync rounds — a 200-round sync
+ * would otherwise prepare thousands.  Prepared lazily on first use;
+ * every call resets + clears bindings.  Finalized in store_close (a
+ * NULL finalize is a no-op), so a close/reopen re-prepares cleanly. */
+static sqlite3_stmt *g_st_upsert_lookup; /* SELECT downloaded, local_path */
+static sqlite3_stmt *g_st_upsert;        /* INSERT OR REPLACE INTO books */
+static sqlite3_stmt *g_st_suggest_del;   /* DELETE FROM suggest */
+static sqlite3_stmt *g_st_suggest_ins;   /* INSERT OR IGNORE INTO suggest */
+
+/* Prepare `sql` into *slot once; returns the statement, or NULL when
+ * the db is closed or the prepare failed (callers degrade exactly as
+ * the old per-call prepare did). */
+static sqlite3_stmt *
+st_prep_once(sqlite3_stmt **slot, const char *sql)
+{
+  if (*slot == NULL && g_db != NULL)
+    sqlite3_prepare_v2(g_db, sql, -1, slot, NULL);
+  return *slot;
+}
 
 /* ── schema ------------------------------------------------------------- */
 
@@ -247,6 +267,11 @@ void store_open(void) {
     return;
   }
 
+  /* One connection, journal mode untouched (WAL would hammer the
+   * device flash): a transient lock holder (another process, or a
+   * crash-recovery pass) should delay us, not fail with SQLITE_BUSY. */
+  sqlite3_busy_timeout(g_db, 2000);
+
   /* Stores from older builds predate some columns; the index in
    * SCHEMA_SQL would fail on them, so add missing columns first.
    * `id` is present in every schema version, so it doubles as the
@@ -308,6 +333,14 @@ void store_open(void) {
 }
 
 void store_close(void) {
+  sqlite3_finalize(g_st_upsert_lookup);
+  sqlite3_finalize(g_st_upsert);
+  sqlite3_finalize(g_st_suggest_del);
+  sqlite3_finalize(g_st_suggest_ins);
+  g_st_upsert_lookup = NULL;
+  g_st_upsert = NULL;
+  g_st_suggest_del = NULL;
+  g_st_suggest_ins = NULL;
   if (g_db != NULL) {
     sqlite3_close(g_db);
     g_db = NULL;
@@ -330,16 +363,18 @@ int store_upsert_book(const Book *b) {
 
   int downloaded = b->downloaded;
   /* Copy the existing row's local_path into a local buffer BEFORE the
-   * lookup statement is finalised: sqlite3_column_text() pointers die
-   * with their statement, and the value is re-bound below.  Default to
-   * the caller's path so fresh rows (and rows whose downloaded flag is
-   * 0) keep the exact pre-fix semantics. */
+   * lookup statement is reused: sqlite3_column_text() pointers die
+   * with the statement's next step/reset, and the value is re-bound
+   * below.  Default to the caller's path so fresh rows (and rows
+   * whose downloaded flag is 0) keep the exact pre-fix semantics. */
   char lp[MAX_PATH_LEN];
   snprintf(lp, sizeof lp, "%s", b->local_path);
-  sqlite3_stmt *q = NULL;
-  if (sqlite3_prepare_v2(g_db,
-                         "SELECT downloaded, local_path FROM books WHERE id=?1",
-                         -1, &q, NULL) == SQLITE_OK) {
+  sqlite3_stmt *q = st_prep_once(
+      &g_st_upsert_lookup,
+      "SELECT downloaded, local_path FROM books WHERE id=?1");
+  if (q != NULL) {
+    sqlite3_reset(q);
+    sqlite3_clear_bindings(q);
     bind_text_trunc(q, 1, b->id);
     if (sqlite3_step(q) == SQLITE_ROW) {
       if (sqlite3_column_int(q, 0) == 1) {
@@ -348,18 +383,19 @@ int store_upsert_book(const Book *b) {
         snprintf(lp, sizeof lp, "%s", t ? t : "");
       }
     }
-    sqlite3_finalize(q);
   }
 
-  sqlite3_stmt *st = NULL;
-  if (sqlite3_prepare_v2(g_db,
-                         "INSERT OR REPLACE INTO books("
-                         "id,title,author,series,series_id,series_idx,"
-                         "ext,size,downloaded,local_path,added_at,"
-                         "filename,source,search_text)"
-                         " VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
-                         -1, &st, NULL) != SQLITE_OK)
+  sqlite3_stmt *st = st_prep_once(
+      &g_st_upsert,
+      "INSERT OR REPLACE INTO books("
+      "id,title,author,series,series_id,series_idx,"
+      "ext,size,downloaded,local_path,added_at,"
+      "filename,source,search_text)"
+      " VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)");
+  if (st == NULL)
     return -1;
+  sqlite3_reset(st);
+  sqlite3_clear_bindings(st);
   bind_text_trunc(st, 1, b->id);
   bind_text_trunc(st, 2, b->title);
   bind_text_trunc(st, 3, b->author);
@@ -378,7 +414,6 @@ int store_upsert_book(const Book *b) {
   if (rc != SQLITE_DONE)
     LOG("[bookshelf] upsert FAILED id=%s rc=%d: %s\n", b->id, rc,
         sqlite3_errmsg(g_db));
-  sqlite3_finalize(st);
   return rc == SQLITE_DONE ? 0 : -1;
 }
 
@@ -541,26 +576,6 @@ void store_series_name(const char *series_id, char *out, size_t cap) {
   sqlite3_finalize(st);
 }
 
-/* Fill up to cap members of a series, ordered by volume.  Series are
- * small, so a bounded in-memory list is fine here. */
-int store_series_members(const char *series_id, Book *out, int cap) {
-  if (g_db == NULL)
-    return 0;
-  sqlite3_stmt *st = NULL;
-  char sql[512];
-  snprintf(sql, sizeof sql,
-           "SELECT " BOOK_COLS " FROM books WHERE series_id=?1"
-           " ORDER BY series_idx, id");
-  if (sqlite3_prepare_v2(g_db, sql, -1, &st, NULL) != SQLITE_OK)
-    return 0;
-  bind_text_trunc(st, 1, series_id);
-  int n = 0;
-  while (n < cap && sqlite3_step(st) == SQLITE_ROW)
-    fill_book_from_stmt(st, &out[n++]);
-  sqlite3_finalize(st);
-  return n;
-}
-
 int store_count(void) {
   if (g_db == NULL)
     return 0;
@@ -656,54 +671,6 @@ void store_delete_book_file(const char *id) {
   DownloadItem *d = find_download(id);
   if (d != NULL)
     d->state = 3;
-}
-
-/* Distinct series with more than one member (the collapse rule: single-
- * member series render flat). */
-int store_count_series(void) {
-  if (g_db == NULL)
-    return 0;
-  sqlite3_stmt *st = NULL;
-  if (sqlite3_prepare_v2(g_db,
-                         "SELECT COUNT(*) FROM (SELECT 1 FROM books"
-                         " WHERE series_id IS NOT NULL AND series_id!=''"
-                         " GROUP BY series_id HAVING COUNT(*)>1)",
-                         -1, &st, NULL) != SQLITE_OK)
-    return 0;
-  int n = 0;
-  if (sqlite3_step(st) == SQLITE_ROW)
-    n = sqlite3_column_int(st, 0);
-  sqlite3_finalize(st);
-  return n;
-}
-
-/* Slice of distinct series (id + display name) in name order for the
- * launcher's series section.  Returns the number of rows written. */
-int store_list_series(char ids[][MAX_ID_LEN], char names[][48], int cap,
-                      int offset) {
-  if (g_db == NULL)
-    return 0;
-  sqlite3_stmt *st = NULL;
-  if (sqlite3_prepare_v2(g_db,
-                         "SELECT series_id, series FROM books"
-                         " WHERE series_id IS NOT NULL AND series_id!=''"
-                         " GROUP BY series_id HAVING COUNT(*)>1"
-                         " ORDER BY series COLLATE NOCASE, series_id"
-                         " LIMIT ?1 OFFSET ?2",
-                         -1, &st, NULL) != SQLITE_OK)
-    return 0;
-  sqlite3_bind_int(st, 1, cap);
-  sqlite3_bind_int(st, 2, offset);
-  int n = 0;
-  while (n < cap && sqlite3_step(st) == SQLITE_ROW) {
-    const char *sid = (const char *)sqlite3_column_text(st, 0);
-    const char *snm = (const char *)sqlite3_column_text(st, 1);
-    snprintf(ids[n], MAX_ID_LEN, "%s", sid ? sid : "");
-    snprintf(names[n], 48, "%s", snm ? snm : "");
-    n++;
-  }
-  sqlite3_finalize(st);
-  return n;
 }
 
 /* Slice of one series' member ids in volume order. */
@@ -877,30 +844,30 @@ void store_suggest_set(const char *book_id,
                        const char terms[][SUGGEST_TERM_MAX], int n) {
   if (g_db == NULL || book_id == NULL)
     return;
-  sqlite3_stmt *del = NULL;
-  if (sqlite3_prepare_v2(g_db, "DELETE FROM suggest WHERE book_id=?1", -1,
-                         &del, NULL) != SQLITE_OK)
+  sqlite3_stmt *del = st_prep_once(&g_st_suggest_del,
+                                   "DELETE FROM suggest WHERE book_id=?1");
+  if (del == NULL)
     return;
+  sqlite3_reset(del);
+  sqlite3_clear_bindings(del);
   bind_text_trunc(del, 1, book_id);
   sqlite3_step(del);
-  sqlite3_finalize(del);
   if (n <= 0 || terms == NULL)
     return;
-  sqlite3_stmt *ins = NULL;
-  if (sqlite3_prepare_v2(g_db,
-                         "INSERT OR IGNORE INTO suggest(term, book_id)"
-                         " VALUES(?1,?2)",
-                         -1, &ins, NULL) != SQLITE_OK)
+  sqlite3_stmt *ins = st_prep_once(
+      &g_st_suggest_ins,
+      "INSERT OR IGNORE INTO suggest(term, book_id) VALUES(?1,?2)");
+  if (ins == NULL)
     return;
   for (int i = 0; i < n; i++) {
     if (terms[i][0] == '\0')
       continue;
+    sqlite3_reset(ins);
+    sqlite3_clear_bindings(ins);
     bind_text_trunc(ins, 1, terms[i]);
     bind_text_trunc(ins, 2, book_id);
     sqlite3_step(ins);
-    sqlite3_reset(ins);
   }
-  sqlite3_finalize(ins);
 }
 
 /* Prefix lookup over the term index, most-popular first (a term's
@@ -967,8 +934,13 @@ void store_set_cursor(long long cursor) {
   if (g_db == NULL)
     return;
   sqlite3_stmt *st = NULL;
+  /* meta.value is TEXT: cast explicitly so the cursor is stored as a
+   * text value (a raw int64 bind would rely on affinity); reads parse
+   * it back via column_int64 either way. */
   if (sqlite3_prepare_v2(
-          g_db, "INSERT OR REPLACE INTO meta(key,value) VALUES('cursor',?1)",
+          g_db,
+          "INSERT OR REPLACE INTO meta(key,value)"
+          " VALUES('cursor', CAST(?1 AS TEXT))",
           -1, &st, NULL) != SQLITE_OK)
     return;
   sqlite3_bind_int64(st, 1, cursor);
@@ -1066,17 +1038,9 @@ static void like_escape(const char *in, char *out, size_t cap) {
  * qbind is the parameter index the query pattern will be bound at
  * (0 = no query parameter). */
 static void view_where(char *sql, size_t cap, int qbind) {
-  switch (g_state.filter) {
-  case FILTER_DOWNLOADED:
-    snprintf(sql + strlen(sql), cap - strlen(sql), " downloaded=1");
-    break;
-  case FILTER_REMOTE:
-    snprintf(sql + strlen(sql), cap - strlen(sql), " downloaded=0");
-    break;
-  default:
-    snprintf(sql + strlen(sql), cap - strlen(sql), " 1=1");
-    break;
-  }
+  /* The downloaded/remote filter was removed; every caller builds
+   * "WHERE" + this clause, so a constant true keeps the pattern. */
+  snprintf(sql + strlen(sql), cap - strlen(sql), " 1=1");
   if (qbind > 0 && g_state.query[0] != '\0') {
     /* One bound pattern serves all LIKEs (same ?qbind index).  The
      * folded search_text column joins the raw fields so folded
@@ -1291,18 +1255,22 @@ void view_rebuild(void) {
   if (rc != SQLITE_DONE && rc != SQLITE_OK) {
     LOG("[bookshelf] view_rebuild failed: %s\n", sqlite3_errmsg(g_db));
     sqlite3_exec(g_db, "ROLLBACK", NULL, NULL, NULL);
+    /* The rollback restores the previous view rows; resync the
+     * counter, which was zeroed above when the rebuild started. */
+    g_view_total = view_total();
     return; /* previous view and g_view_total stay intact */
   }
   if (sqlite3_exec(g_db, "COMMIT", NULL, NULL, NULL) != SQLITE_OK) {
     LOG("[bookshelf] view_rebuild: COMMIT failed: %s\n",
         sqlite3_errmsg(g_db));
     sqlite3_exec(g_db, "ROLLBACK", NULL, NULL, NULL);
+    g_view_total = view_total();
     return; /* previous view and g_view_total stay intact */
   }
 
   g_view_total = view_total();
-  LOG("[bookshelf] view_rebuild: view=%d filter=%d sort=%d group=%d drill=%d\n",
-      g_view_total, (int)g_state.filter, (int)g_state.sort, (int)g_state.group,
+  LOG("[bookshelf] view_rebuild: view=%d sort=%d group=%d drill=%d\n",
+      g_view_total, (int)g_state.sort, (int)g_state.group,
       g_drilled_series[0] != '\0');
 }
 

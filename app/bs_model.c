@@ -11,6 +11,8 @@
 #include "bs_ui.h"
 #include "bs_worker.h"
 
+#include <dirent.h>
+
 /* ── book record ─────────────────────────────────────────────────────── */
 
 /* A tile in the projected grid view.  At the top level (not drilled),
@@ -70,16 +72,13 @@ DownloadItem g_downloads[MAX_DOWNLOADS];
 int          g_download_count = 0;
 
 /* Download-all batch bookkeeping: total = undownloaded count at queue
- * time, done/failed = settled downloads.  failed_ids records every book
- * the batch already attempted and failed, so the next slice never
- * re-enqueues them (their downloaded flag stays 0, so without this the
- * batch would loop over the failing books forever). */
-int  g_dl_batch_active = 0;
-int  g_dl_batch_total = 0;
-int  g_dl_batch_done = 0;
-int  g_dl_batch_failed = 0;
-char g_dl_batch_failed_ids[MAX_DOWNLOADS * 4][MAX_ID_LEN];
-int  g_dl_batch_failed_count = 0;
+ * time, done/failed = settled downloads.  The set of failed ids (so a
+ * slice never re-enqueues them) lives in bs_downloads.c next to its
+ * only users, grown on the heap so a batch can exceed 256 failures. */
+int g_dl_batch_active = 0;
+int g_dl_batch_total = 0;
+int g_dl_batch_done = 0;
+int g_dl_batch_failed = 0;
 
 /* Directory downloads are written to.  Resolved at startup (and again
  * after a settings save) by resolve_downloads_dir(): the configured
@@ -375,11 +374,9 @@ parse_book_obj(const cJSON *obj, Book *b)
     /* Check if the file exists on local storage (resolved downloads dir). */
     char path[MAX_PATH_LEN];
     book_local_path(b, path, sizeof path);
-    FILE *f = fopen(path, "rb");
-    if (f) {
+    if (access(path, F_OK) == 0) {
         b->downloaded = 1;
         snprintf(b->local_path, sizeof b->local_path, "%s", path);
-        fclose(f);
     }
     return 0;
 }
@@ -397,21 +394,31 @@ parse_book_obj(const cJSON *obj, Book *b)
  * store state. */
 
 /* Round job argument: the delta URL + body are snapshotted on the main
- * thread (the worker never reads g_state). */
+ * thread (the worker never reads g_state).  gen tags the chain this
+ * round belongs to; sync_round_done drops jobs whose gen no longer
+ * matches (sync_abort + restart), so a stale response can never be
+ * applied to a new chain. */
 typedef struct {
     char url[MAX_URL_LEN + 16];
     char body[160];
+    int  gen;
 } SyncRoundArg;
 
-/* Round job result (worker-allocated; done_cb frees it). */
+/* Round job result (worker-allocated; done_cb frees it).  http_status
+ * is the firmware HTTP outcome surfaced by http_post_timeout_status
+ * (0 when unavailable); a non-200 status with a body is an error
+ * response, not a transport failure. */
 typedef struct {
     char *resp;
     int   rlen;
     int   rc;
+    int   http_status;
 } SyncRoundResult;
 
 static long long g_sync_cursor; /* main thread only now */
 static int       g_sync_rounds; /* main thread only */
+static int       g_sync_gen;    /* chain generation: bumped on every
+                                   do_sync / sync_abort */
 
 static void sync_submit_round(void);
 static void sync_submit_finish(void);
@@ -447,7 +454,9 @@ sync_fetch_round(BsJob *job)
     SyncRoundArg   *a = job->arg;
     char           *resp = NULL;
     int             rlen = 0;
-    int             rc = http_post_timeout(a->url, a->body, 60, &resp, &rlen);
+    int             status = 0;
+    int             rc = http_post_timeout_status(a->url, a->body, 60,
+                                                  &resp, &rlen, &status);
     SyncRoundResult *r = malloc(sizeof *r);
     if (r == NULL) {
         free(resp);
@@ -456,6 +465,7 @@ sync_fetch_round(BsJob *job)
         r->resp = resp;
         r->rlen = rlen;
         r->rc = rc;
+        r->http_status = status;
         job->result = r;
         job->rc = rc;
     }
@@ -475,6 +485,7 @@ sync_submit_round(void)
         sync_ui_active(0);
         return;
     }
+    a->gen = g_sync_gen;
     snprintf(a->url, sizeof a->url, "%s", g_state.url_delta);
     snprintf(a->body, sizeof a->body,
              "{\"cursor\":%lld,\"limit\":%d}", g_sync_cursor, SYNC_BATCH);
@@ -487,11 +498,24 @@ sync_submit_round(void)
     }
 }
 
+/* Round outcome codes from sync_apply_round: 0 = applied cleanly (the
+ * cursor was advanced and persisted), 1 = the response was unusable
+ * (bad JSON, an error body, or missing added/removed/nextCursor), 2 =
+ * a store write failed and the batch was rolled back.  Both failures
+ * abort the WHOLE chain visibly (no finish job, no "done") with the
+ * cursor un-advanced, so the next sync retries from this delta. */
+enum {
+    SYNC_ROUND_OK = 0,
+    SYNC_ROUND_BAD_RESP = 1,
+    SYNC_ROUND_STORE_FAIL = 2,
+};
+
 /* Apply one delta response on the main thread: the added/removed
- * parsing plus cursor/more, inside the batch transaction.  Malformed
- * JSON fails the round cleanly: the transaction is never opened, the
- * cursor is left unchanged, and the next sync retries from it. */
-static void
+ * parsing plus cursor/more, inside the batch transaction.  Returns a
+ * SYNC_ROUND_* outcome; on failure the transaction is never opened (or
+ * is rolled back), the cursor is left unchanged, and the caller aborts
+ * the chain visibly instead of chaining the finish "done". */
+static int
 sync_apply_round(char *resp, long long cursor, long long *next_out,
                  int *more_out)
 {
@@ -501,10 +525,29 @@ sync_apply_round(char *resp, long long cursor, long long *next_out,
     if (root == NULL) {
         LOG("[bookshelf] sync: delta response not valid JSON (%.80s)\n",
             cJSON_GetErrorPtr() ? cJSON_GetErrorPtr() : "?");
-        return;
+        return SYNC_ROUND_BAD_RESP;
+    }
+    /* An error body (the server's {error,more} 503 reply, or a proxy
+     * JSON error) must not be read as an empty delta: without this the
+     * round "succeeds" with zero books and the chain reports done. */
+    if (!cJSON_IsObject(root) ||
+        cJSON_GetObjectItemCaseSensitive(root, "error") != NULL ||
+        cJSON_GetObjectItemCaseSensitive(root, "detail") != NULL) {
+        LOG("[bookshelf] sync: delta response is an error body\n");
+        cJSON_Delete(root);
+        return SYNC_ROUND_BAD_RESP;
+    }
+    const cJSON *added = cJSON_GetObjectItemCaseSensitive(root, "added");
+    const cJSON *rem = cJSON_GetObjectItemCaseSensitive(root, "removed");
+    const cJSON *nc = cJSON_GetObjectItemCaseSensitive(root, "nextCursor");
+    if (!cJSON_IsArray(added) || !cJSON_IsArray(rem) ||
+        !cJSON_IsNumber(nc)) {
+        LOG("[bookshelf] sync: delta response missing added/removed/"
+            "nextCursor\n");
+        cJSON_Delete(root);
+        return SYNC_ROUND_BAD_RESP;
     }
     store_begin();
-    const cJSON *added = cJSON_GetObjectItemCaseSensitive(root, "added");
     if (cJSON_IsArray(added)) {
         Book tmp;
         const cJSON *it;
@@ -513,7 +556,7 @@ sync_apply_round(char *resp, long long cursor, long long *next_out,
                 continue;
             if (parse_book_obj(it, &tmp) == 0) {
                 if (store_upsert_book(&tmp) != 0) {
-                    /* A failed upsert aborts the whole round: roll
+                    /* A failed upsert aborts the whole sync: roll
                      * back so the half-written batch is not persisted
                      * (a later round would otherwise apply its rows on
                      * top of a partial batch), and leave the cursor
@@ -521,11 +564,11 @@ sync_apply_round(char *resp, long long cursor, long long *next_out,
                      * same delta.  *next_out / *more_out were already
                      * set to cursor/0 at the top. */
                     LOG("[bookshelf] sync: upsert failed id=%s; "
-                        "aborting round (cursor %lld kept)\n",
+                        "aborting sync (cursor %lld kept)\n",
                         tmp.id, cursor);
                     store_rollback();
                     cJSON_Delete(root);
-                    return;
+                    return SYNC_ROUND_STORE_FAIL;
                 }
                 /* Suggestion terms for this book, straight from the
                  * DOM — no bounded-copy tricks needed. */
@@ -548,7 +591,6 @@ sync_apply_round(char *resp, long long cursor, long long *next_out,
             }
         }
     }
-    const cJSON *rem = cJSON_GetObjectItemCaseSensitive(root, "removed");
     if (cJSON_IsArray(rem)) {
         const cJSON *it;
         cJSON_ArrayForEach(it, rem) {
@@ -559,7 +601,6 @@ sync_apply_round(char *resp, long long cursor, long long *next_out,
             }
         }
     }
-    const cJSON *nc = cJSON_GetObjectItemCaseSensitive(root, "nextCursor");
     if (cJSON_IsNumber(nc))
         *next_out = (long long)nc->valuedouble;
     const cJSON *mk = cJSON_GetObjectItemCaseSensitive(root, "more");
@@ -568,6 +609,7 @@ sync_apply_round(char *resp, long long cursor, long long *next_out,
     store_set_cursor(*next_out);
     store_commit();
     cJSON_Delete(root);
+    return SYNC_ROUND_OK;
 }
 
 /* Sync finished (any source): close the popup, rebuild the view, hand
@@ -633,7 +675,7 @@ sync_submit_finish(void)
     }
     snprintf(a->url, sizeof a->url, "%s", g_state.url_state);
     snprintf(a->body, sizeof a->body,
-             "{\"deviceId\":\"pbemu\",\"cursor\":%lld,\"books\":%d}",
+             "{\"device\":\"pbemu\",\"cursor\":%lld,\"books\":%d}",
              g_sync_cursor,
              store_count());
     if (bs_worker_submit(sync_finish_post, sync_finish_done, a) == NULL) {
@@ -649,15 +691,21 @@ sync_submit_finish(void)
 static void
 sync_round_done(BsJob *job)
 {
-    if (!g_state.sync_state) {
-        /* Sync aborted while the fetch was in flight: consume and drop
-         * the result. */
+    SyncRoundArg *arg = job->arg;
+    /* Consume and drop the result when the sync was aborted while the
+     * fetch was in flight — the sync_state check catches a plain abort
+     * (sync_state reset to 0), the generation check catches an abort
+     * followed by an immediate restart (settings_apply does both in one
+     * turn), where sync_state is already 1 again but the round belongs
+     * to the old chain with the old endpoint/cursor.  A stale response
+     * must never be applied to a newer chain. */
+    if (!g_state.sync_state || arg->gen != g_sync_gen) {
         SyncRoundResult *r = job->result;
         if (r != NULL) {
             free(r->resp);
             free(r);
         }
-        free(job->arg);
+        free(arg);
         return;
     }
     SyncRoundResult *r = job->result;
@@ -669,8 +717,6 @@ sync_round_done(BsJob *job)
         LOG("[bookshelf] do_sync FAILED: url=%s body=%p\n",
             g_state.url_delta, (void *)resp);
         g_state.sync_state = 2;
-        snprintf(g_state.status, sizeof g_state.status, "%s",
-                 i18n("status.fail"));
         sync_ui_active(0);
         if (resp)
             free(resp);
@@ -684,10 +730,32 @@ sync_round_done(BsJob *job)
 
     long long next = g_sync_cursor;
     int       more = 0;
-    sync_apply_round(resp, g_sync_cursor, &next, &more);
+    int       outcome;
+    if (r != NULL && r->http_status != 0 && r->http_status != 200) {
+        /* The server answered with an HTTP error status: the body is
+         * an error response, not a delta (a transport failure above
+         * yields no body at all).  Treat it exactly like a bad
+         * response — abort the chain visibly, cursor un-advanced. */
+        LOG("[bookshelf] sync: HTTP status %d with body; error response\n",
+            r->http_status);
+        outcome = SYNC_ROUND_BAD_RESP;
+    } else {
+        outcome = sync_apply_round(resp, g_sync_cursor, &next, &more);
+    }
     free(resp);
     free(r);
     free(job->arg);
+    if (outcome != SYNC_ROUND_OK) {
+        /* Bad response or store failure: abort the WHOLE chain here —
+         * no finish job, no "done" popup.  The cursor was not
+         * advanced, so the next sync retries from this delta. */
+        LOG("[bookshelf] do_sync: round failed (outcome=%d); aborting\n",
+            outcome);
+        g_state.sync_state = 2;
+        sync_ui_active(0);
+        sync_ui_popup_fail();
+        return;
+    }
     g_sync_cursor = next;
     g_sync_rounds++;
 
@@ -715,7 +783,8 @@ do_sync(void)
     }
     g_state.sync_state = 1;
     sync_ui_active(1);
-    snprintf(g_state.status, sizeof g_state.status, "%s", i18n("status.syncing"));
+    g_sync_gen++; /* new chain generation: stale rounds (see the gen
+                     check in sync_round_done) can never apply */
     /* A previous sync may have hit the server before its cover cache was
      * warm; give failed covers one more chance each sync. */
     for (int i = 0; i < NCOVER_SLOTS; i++) {
@@ -731,8 +800,11 @@ do_sync(void)
             g_state.sync_stage = SYNC_STAGE_SCAN;
             sync_ui_popup_refresh();
         }
+        /* The scan is async now: local_import_scanner() walks the tree
+         * on the worker and applies the collected books in bounded
+         * main-thread slices; its final slice ends the sync via
+         * sync_local_finish(), so no finish_sync() here. */
         local_import_scanner();
-        finish_sync();
         return;
     }
     if (g_state.source == SOURCE_FOLDER) {
@@ -750,6 +822,33 @@ do_sync(void)
     g_sync_cursor = store_get_cursor();
     g_sync_rounds = 0;
     sync_submit_round();
+}
+
+/* Abort any in-flight sync: bump the chain generation so rounds
+ * submitted before the abort are dropped by sync_round_done's stale
+ * guard (it consumes them without applying), clear the sync state and
+ * stop the spinner.  Called before settings/source changes that
+ * rebuild the endpoint URLs, so an in-flight chain never fetches the
+ * next round from the new endpoint with the old cursor — and never
+ * applies a stale response on top of the new configuration. */
+void
+sync_abort(void)
+{
+    g_sync_gen++;
+    g_state.sync_state = 0;
+    sync_ui_active(0);
+    /* Drop an in-flight local scan chain the same way (its apply
+     * slices check their own generation token). */
+    local_scan_abort();
+}
+
+/* Terminal bookkeeping for the async local scan chain (bs_local.c):
+ * the same close-out a remote sync's finish job runs, minus the
+ * server state POST. */
+void
+sync_local_finish(void)
+{
+    finish_sync();
 }
 
 /* ── cover PNG cache ─────────────────────────────────────────────────── */
@@ -846,6 +945,79 @@ cover_cache_load(const char *id, ibitmap **out_bmp)
     return 0;
 }
 
+/* Bounded cover-cache sweep.  Every COVER_SWEEP_EVERY saves, if the
+ * covers directory holds more than COVER_CACHE_MAX entries (.png and
+ * .raw both count), the oldest by mtime are deleted until the cache
+ * is back under the cap, so a huge library cannot grow the on-disk
+ * cache without bound.  Same bounded single-pass directory pattern as
+ * sweep_stale_parts in bs_downloads.c. */
+#define COVER_SWEEP_EVERY 64
+#define COVER_CACHE_MAX 4096
+
+typedef struct {
+    char name[MAX_ID_LEN + 8]; /* id + ".png"/".raw" */
+    long mtime;
+} CoverEnt;
+
+static int
+cover_mtime_cmp(const void *a, const void *b)
+{
+    const CoverEnt *ca = a;
+    const CoverEnt *cb = b;
+    return (ca->mtime > cb->mtime) - (ca->mtime < cb->mtime);
+}
+
+static int g_cover_saves; /* saves since the last sweep decision */
+
+static void
+cover_cache_sweep(void)
+{
+    DIR *d = opendir(g_covers_dir);
+    if (d == NULL)
+        return;
+    int       cap = 0, n = 0;
+    CoverEnt *ents = NULL;
+    struct dirent *e;
+    while ((e = readdir(d)) != NULL) {
+        size_t len = strlen(e->d_name);
+        int    is_png = len > 4 && strcmp(e->d_name + len - 4, ".png") == 0;
+        int    is_raw = len > 4 && strcmp(e->d_name + len - 4, ".raw") == 0;
+        if (!is_png && !is_raw)
+            continue;
+        if (n >= cap) {
+            int       newcap = cap == 0 ? 512 : cap * 2;
+            CoverEnt *nn = realloc(ents, (size_t)newcap * sizeof *nn);
+            if (nn == NULL)
+                break; /* grow failed: keep what we have */
+            ents = nn;
+            cap = newcap;
+        }
+        char path[MAX_PATH_LEN];
+        snprintf(path, sizeof path, "%s/%s", g_covers_dir, e->d_name);
+        struct stat st;
+        ents[n].mtime = 0;
+        if (iv_stat(path, &st) == 0)
+            ents[n].mtime = (long)st.st_mtime;
+        snprintf(ents[n].name, sizeof ents[n].name, "%s", e->d_name);
+        n++;
+    }
+    closedir(d);
+    if (n <= COVER_CACHE_MAX) {
+        free(ents);
+        return;
+    }
+    qsort(ents, (size_t)n, sizeof *ents, cover_mtime_cmp);
+    int remove_n = n - COVER_CACHE_MAX;
+    for (int i = 0; i < remove_n; i++) {
+        char path[MAX_PATH_LEN];
+        snprintf(path, sizeof path, "%s/%s", g_covers_dir, ents[i].name);
+        unlink(path);
+    }
+    LOG("[bookshelf] covers: swept %d oldest entries (%d remain)\n",
+        remove_n, n - remove_n);
+    free(ents);
+}
+
 /* Write raw PNG bytes to the cover cache.  Creates the covers
  * directory if needed. */
 void
@@ -862,4 +1034,7 @@ cover_cache_save(const char *id, const char *png_data, int len)
     }
     fwrite(png_data, 1, (size_t)len, f);
     fclose(f);
+    /* Bounded cache: check the directory size every 64th save. */
+    if ((++g_cover_saves % COVER_SWEEP_EVERY) == 0)
+        cover_cache_sweep();
 }

@@ -20,6 +20,29 @@ http_post_timeout(const char *url, const char *body, int timeout, char **resp_ou
 }
 
 int
+http_post_timeout_status(const char *url, const char *body, int timeout,
+                         char **resp_out, int *resp_len, int *status_out)
+{
+    int   retsize = 0;
+    int   err = 0;
+    /* QuickDownloadExt3 reports the firmware HTTP outcome in its
+     * error_code output.  The body may still be non-NULL for an HTTP
+     * error response, so callers must key on the status, not just the
+     * presence of a body (see bs_net.h). */
+    char *resp = QuickDownloadExt3(url, &retsize, timeout, NULL,
+                                   (char *)body, &err);
+    if (status_out)
+        *status_out = err;
+    if (resp_out)
+        *resp_out = resp;
+    if (resp_len)
+        *resp_len = retsize;
+    if (!resp)
+        return -1;
+    return 0;
+}
+
+int
 http_post(const char *url, const char *body, char **resp_out, int *resp_len)
 {
     return http_post_timeout(url, body, HTTP_TIMEOUT, resp_out, resp_len);

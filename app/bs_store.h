@@ -45,8 +45,6 @@ void store_rollback(void);
 
 void store_series_name(const char *series_id, char *out, size_t cap);
 
-int store_series_members(const char *series_id, Book *out, int cap);
-
 int store_count_undownloaded(void);
 
 int store_next_undownloaded(char ids[][MAX_ID_LEN], int cap);
