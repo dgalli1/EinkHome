@@ -80,7 +80,11 @@ extern void unlockCanvasDrawing(void);
 /* Books per /sync/delta round-trip.  The library itself is unbounded
  * (SQLite-backed); only one batch of parsed books lives in RAM at a
  * time, so 100k books never materialise as one array. */
-#define SYNC_BATCH 500
+/* Delta batch size: 1000 books per round.  Bigger than the original
+ * 500 cuts the per-round fixed costs (WiFi round trip, worker handoff,
+ * transaction fsync) in half for a 100k first sync; the server clamps
+ * limits to 2000, and the 400-round ceiling still covers 400k. */
+#define SYNC_BATCH 1000
 /* Upper bound on grid/list rows per page.  Grid pages hold ROWS rows;
  * list mode computes its row count from the screen geometry and stays
  * below this. */
