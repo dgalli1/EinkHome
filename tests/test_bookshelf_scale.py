@@ -72,6 +72,8 @@ def _start_scale_api() -> subprocess.Popen:  # type: ignore[type-arg]
             sys.executable,
             "-m",
             "api.api.server",
+            "--config",
+            str(EINKHOME_ROOT / "api" / "config" / "server-100k.json"),
             "--host",
             "0.0.0.0",
             "--port",

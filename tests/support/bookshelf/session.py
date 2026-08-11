@@ -252,10 +252,7 @@ class BookshelfSession:
 
     def tap_launcher_app(self, index: int = 0) -> None:
         """Tap launcher app cell *index* (0 = first app on page 0)."""
-        if index == 0:
-            self.tap_at(*self._g.launcher_first_app_center())
-        else:
-            self.tap_at(*self._g.launcher_first_app_center())
+        self.tap_at(*self._g.launcher_app_center(index))
 
     def scroll_launcher_down(self) -> None:
         """Drag the launcher body upward so the content scrolls down."""

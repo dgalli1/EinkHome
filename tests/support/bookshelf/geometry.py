@@ -294,11 +294,20 @@ class BookshelfGeometry:
         by = (LAUNCHER_HEADER_H - 56) // 2
         return (16 + 80, by + 28)
 
+    def launcher_app_center(self, index: int) -> tuple[int, int]:
+        """Centre of launcher app cell *index* (0-based, row-major) at
+        scroll 0: the launcher draws LAUNCHER_COLS columns of cells
+        directly under the first group header."""
+        cell_w = (self.screen_w - 2 * LAUNCHER_MARGIN) // LAUNCHER_COLS
+        col = index % LAUNCHER_COLS
+        row = index // LAUNCHER_COLS
+        x = LAUNCHER_MARGIN + col * cell_w + cell_w // 2
+        y = LAUNCHER_HEADER_H + LAUNCHER_GROUP_H + row * LAUNCHER_CELL_H
+        return (x, y + LAUNCHER_CELL_H // 2)
+
     def launcher_first_app_center(self) -> tuple[int, int]:
         """Centre of the first app cell (after the first header) at scroll 0."""
-        cell_w = (self.screen_w - 2 * LAUNCHER_MARGIN) // LAUNCHER_COLS
-        y = LAUNCHER_HEADER_H + LAUNCHER_GROUP_H
-        return (LAUNCHER_MARGIN + cell_w // 2, y + LAUNCHER_CELL_H // 2)
+        return self.launcher_app_center(0)
 
     def launcher_body_center(self) -> tuple[int, int]:
         """A point in the middle of the launcher's scrollable body."""

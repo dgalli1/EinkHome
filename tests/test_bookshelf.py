@@ -179,6 +179,12 @@ def _stage_binary(binary: Path) -> None:
     then ``podman exec`` with container-side paths to place it where
     monitor.app will find it (ebrmain/bin takes priority over
     /mnt/ext1/system/bin).
+
+    The host-side .live staging is always lenient (it is the fallback
+    when no container exists), but once the container IS running any
+    failed container-side copy raises: a silently failed ``podman cp``
+    would otherwise leave the previous binary in place and the guest
+    would keep running stale code.
     """
     live = PBEMU_ROOT / FIRMWARE / ".live"
     bin_dir = live / "mnt/ext1/system/bin"
@@ -202,7 +208,7 @@ def _stage_binary(binary: Path) -> None:
         # 1. Copy binary from host into container /tmp
         subprocess.run(
             ["podman", "cp", str(binary), f"{CONTAINER}:/tmp/bookshelf.app.new"],
-            check=False,
+            check=True,
             capture_output=True,
             timeout=10,
         )
@@ -215,7 +221,7 @@ def _stage_binary(binary: Path) -> None:
             "cp /workspace/firmware/.live/ebrmain/bin/bookshelf.app "
             "/mnt/ext1/system/bin/bookshelf.app && "
             "chmod +x /mnt/ext1/system/bin/bookshelf.app",
-            check=False,
+            check=True,
             timeout=10,
         )
         # 3. Copy config into container
@@ -226,7 +232,7 @@ def _stage_binary(binary: Path) -> None:
                 str(bin_dir / "bookshelf.cfg"),
                 f"{CONTAINER}:/mnt/ext1/system/bin/bookshelf.cfg",
             ],
-            check=False,
+            check=True,
             capture_output=True,
             timeout=5,
         )
@@ -374,76 +380,103 @@ def bookshelf_env():
     # 1. Build the binary
     binary = _build_bookshelf()
 
-    # 2. Start API server (mock provider)
-    api_proc = _start_api_server()
-
-    # 3. Stage binary + config.  Snapshot the dev cfgs first so the
-    #    run's test-pointing api_url can be restored afterwards — a
-    #    leftover override otherwise poisons the next manual emulator
-    #    session (the app keeps syncing to the dead test port).
+    # Paths + dev-cfg snapshots live outside the try so the failure path
+    # can restore them even when a setup step raises mid-way.  Snapshot
+    # the dev cfgs first so the run's test-pointing api_url can be
+    # restored afterwards — a leftover override otherwise poisons the
+    # next manual emulator session (the app keeps syncing to the dead
+    # test port).
     live = PBEMU_ROOT / FIRMWARE / ".live"
     bin_cfg = live / "mnt/ext1/system/bin/bookshelf.cfg"
     tmp_cfg = live / "tmp/bookshelf.cfg"
     saved_bin_cfg = _snapshot_cfg(bin_cfg)
     saved_tmp_cfg = _snapshot_cfg(tmp_cfg)
-    _stage_binary(binary)
+    api_proc = None
+    emulator = None
+    try:
+        # 2. Start API server (mock provider)
+        api_proc = _start_api_server()
 
-    # 4. Stop any existing emulator
-    subprocess.run(
-        [sys.executable, "-m", "pbemu", "stop"],
-        cwd=REPO_ROOT,
-        env=_pbemu_env(),
-        check=False,
-    )
-    time.sleep(1)
+        # 3. Stage binary + config.
+        _stage_binary(binary)
 
-    # 5. Start emulator with --network=host
-    emulator = _start_emulator()
-
-    # 6. Stage into ebrmain/bin (container-side, now that it's running)
-    _stage_binary(binary)
-
-    # 6b. Verify API is reachable from inside the container
-    api_check = container_sh(
-        f"wget -q -O /dev/null --header='Authorization: Bearer {API_TOKEN}' "
-        f"http://127.0.0.1:{API_PORT}/api/v1/healthz 2>&1 || "
-        f"echo 'API_UNREACHABLE'",
-        check=False,
-        timeout=10,
-    )
-    if "API_UNREACHABLE" in (api_check.stdout or ""):
-        # Dump diagnostics
-        api_log = (REPO_ROOT / "build" / "pbemu-api-test.log").read_text(
-            encoding="utf-8", errors="replace"
+        # 4. Stop any existing emulator
+        subprocess.run(
+            [sys.executable, "-m", "pbemu", "stop"],
+            cwd=REPO_ROOT,
+            env=_pbemu_env(),
+            check=False,
         )
-        raise RuntimeError(
-            f"API server not reachable from container on port {API_PORT}.\n"
-            f"API server log:\n{api_log[-2000:]}"
+        time.sleep(1)
+
+        # 5. Start emulator with --network=host
+        emulator = _start_emulator()
+
+        # 6. Stage into ebrmain/bin (container-side, now that it's running)
+        _stage_binary(binary)
+
+        # 6b. Verify API is reachable from inside the container
+        api_check = container_sh(
+            f"wget -q -O /dev/null --header='Authorization: Bearer {API_TOKEN}' "
+            f"http://127.0.0.1:{API_PORT}/api/v1/healthz 2>&1 || "
+            f"echo 'API_UNREACHABLE'",
+            check=False,
+            timeout=10,
+        )
+        if "API_UNREACHABLE" in (api_check.stdout or ""):
+            # Dump diagnostics
+            api_log = (REPO_ROOT / "build" / "pbemu-api-test.log").read_text(
+                encoding="utf-8", errors="replace"
+            )
+            raise RuntimeError(
+                f"API server not reachable from container on port {API_PORT}.\n"
+                f"API server log:\n{api_log[-2000:]}"
+            )
+
+        # 7. Kill bookshelf to trigger respawn with new binary
+        container_sh(
+            "killall bookshelf.app 2>/dev/null || true",
+            check=False,
+            timeout=5,
         )
 
-    # 7. Kill bookshelf to trigger respawn with new binary
-    container_sh(
-        "killall bookshelf.app 2>/dev/null || true",
-        check=False,
-        timeout=5,
-    )
+        # 8. Wait for bookshelf to be active
+        _wait_bookshelf_active(emulator, timeout=30)
+        time.sleep(4.0)
 
-    # 8. Wait for bookshelf to be active
-    _wait_bookshelf_active(emulator, timeout=30)
-    time.sleep(4.0)
+        # 9. Build geometry + session
+        snapshot = emulator.wait_for_informer_snapshot(timeout=10)
+        panel_h = _parse_panel_h(FIRMWARE)
+        geom = BookshelfGeometry(
+            screen_w=snapshot.width or 1072,
+            screen_h=snapshot.height or 1448,
+            panel_h=panel_h,
+        )
+        session = Session(emulator)
+        bs = BookshelfSession(session, geom, FIRMWARE)
 
-    # 9. Build geometry + session
-    snapshot = emulator.wait_for_informer_snapshot(timeout=10)
-    panel_h = _parse_panel_h(FIRMWARE)
-    geom = BookshelfGeometry(
-        screen_w=snapshot.width or 1072,
-        screen_h=snapshot.height or 1448,
-        panel_h=panel_h,
-    )
-    session = Session(emulator)
-    bs = BookshelfSession(session, geom, FIRMWARE)
-
-    yield bs, emulator
+        yield bs, emulator
+    except BaseException:
+        # A setup step failed part-way: stop whatever already started and
+        # restore the dev cfgs before propagating, so no stale listener,
+        # half-started emulator, or test-pointing api_url leaks into later
+        # runs (a later run could otherwise adopt a dead/fresh server on
+        # the test port, or the app could keep syncing to it).
+        if emulator is not None:
+            emulator.stop(force=True)
+        else:
+            # _start_emulator() may have died after creating the container.
+            subprocess.run(
+                [sys.executable, "-m", "pbemu", "stop"],
+                cwd=REPO_ROOT,
+                env=_pbemu_env(),
+                check=False,
+            )
+        if api_proc is not None:
+            _stop_api_server(api_proc)
+        _restore_cfg_file(bin_cfg, saved_bin_cfg)
+        _restore_cfg_file(tmp_cfg, saved_tmp_cfg, mode=0o666)
+        raise
 
     # Cleanup: restore the dev cfgs (the run wrote its own api_url),
     # then stop the emulator so no in-memory stale URL can re-poison

@@ -3,16 +3,22 @@
 # run.sh — end-to-end driver for EinkHome (the bookshelf replacement).
 #
 # Steps:
-#   1. Build the guest ELF via sdk/build_armel.sh (this repo).
+#   1. Build the guest ELF (make all; the pbemu submodule cross-compiles).
 #   2. (Re)start the API server (api/api/server.py) on
 #      127.0.0.1:8765 so the in-emulator app has a target to talk to.
-#   3. Stop the running emulator.
-#   4. Stage the ELF as /mnt/ext1/system/bin/bookshelf.app inside the
-#      container so monitor.app picks our binary on next respawn.
+#   3. Stop the running emulator (removes the container).
+#   4. Stage the ELF + bookshelf.cfg into the HOST .live tree
+#      (${FIRMWARE}/.live/mnt/ext1/system/bin/bookshelf.app) — this seeds
+#      the fresh container's /mnt on the next start.
 #   5. Restart the emulator.
-#   6. Wait for the foreground task to be our app, take a screenshot,
-#      dump recent bookserver state reports, and confirm the API server
-#      has seen the device's /sync/delta / /sync/state / /open-with calls.
+#   6. Stage the freshly built ELF INTO the running container
+#      (/workspace/firmware/.live/ebrmain/bin/bookshelf.app and
+#      /mnt/ext1/system/bin/bookshelf.app) and restart bookshelf.app so
+#      monitor.app respawns OUR binary — required because "pbemu start"
+#      rebuilds .live/ebrmain from the stock firmware, and the ebr bin
+#      takes priority over /mnt/ext1/system/bin.
+#   7. Take a screenshot, dump emulator state, and confirm the API server
+#      answers the device's /sync/delta / /sync/state / /open-with calls.
 #
 # The pbemu submodule must be checked out (git submodule update --init)
 # and its firmware staged (pbemu/pbemu install) before running.
@@ -34,7 +40,7 @@ FIRMWARE="U633_6.8.2817"
 
 cd "${REPO_ROOT}"
 
-echo "==> 1/6  building bookshelf.app"
+echo "==> 1/7  building bookshelf.app"
 # The source list lives in the root Makefile; build_armel.sh in the
 # pbemu submodule does the actual cross-compile.
 make all
@@ -48,15 +54,15 @@ fi
 
 case "${CONTAINER_STATE}" in
 present)
-	echo "==> 2/6  stopping container ${CONTAINER}"
+	echo "==> 2/7  stopping container ${CONTAINER}"
 	"${PBEMU_DIR}/pbemu" stop
 	;;
 *)
-	echo "==> 2/6  skipping container stop (not running)"
+	echo "==> 2/7  skipping container stop (not running)"
 	;;
 esac
 
-echo "==> 3/6  (re)starting pbemu-api on 127.0.0.1:${API_PORT}"
+echo "==> 3/7  (re)starting pbemu-api on 127.0.0.1:${API_PORT}"
 # Kill any stale server first.
 pkill -f "api.api.server" 2>/dev/null || true
 sleep 0.5
@@ -116,7 +122,7 @@ if [ -n "${LAN_IP}" ]; then
 EOF
 fi
 
-echo "==> 4/6  staging into ${CONTAINER:-new container}"
+echo "==> 4/7  staging into ${FIRMWARE}/.live (host side)"
 if [ ! -d "${PBEMU_DIR}/${FIRMWARE}/.live" ]; then
 	PBEMU_NO_KEEPID=1 "${PBEMU_DIR}/pbemu" start "${FIRMWARE}" --no-viewer --no-audio --reset --no-build
 	"${PBEMU_DIR}/pbemu" stop
@@ -125,21 +131,11 @@ mkdir -p "${PBEMU_DIR}/${FIRMWARE}/.live/mnt/ext1/system/bin"
 install -m 0755 "build/bookshelf.app" \
 	"${PBEMU_DIR}/${FIRMWARE}/.live/mnt/ext1/system/bin/bookshelf.app"
 echo "  staged $(wc -c <build/bookshelf.app) bytes to .live/mnt/ext1/system/bin/bookshelf.app"
-# Also push the binary into the running container so monitor.app launches
-# it on next respawn (it looks under both /ebrmain/bin and
-# /mnt/ext1/system/bin; the ebr bin takes priority).
-podman cp build/bookshelf.app "${CONTAINER}:/tmp/bookshelf.app.new" 2>/dev/null || true
-podman exec "${CONTAINER}" /usr/bin/rm -f \
-	/workspace/firmware/.live/ebrmain/bin/bookshelf.app 2>/dev/null || true
-podman exec "${CONTAINER}" /usr/bin/mv /tmp/bookshelf.app.new \
-	/workspace/firmware/.live/ebrmain/bin/bookshelf.app 2>/dev/null || true
-podman exec "${CONTAINER}" /usr/bin/chmod +x \
-	/workspace/firmware/.live/ebrmain/bin/bookshelf.app 2>/dev/null || true
-podman exec "${CONTAINER}" /usr/bin/cp \
-	/workspace/firmware/.live/ebrmain/bin/bookshelf.app \
-	/mnt/ext1/system/bin/bookshelf.app 2>/dev/null || true
-podman exec "${CONTAINER}" /usr/bin/chmod +x \
-	/mnt/ext1/system/bin/bookshelf.app 2>/dev/null || true
+# The container is not running at this point (step 2 stopped it), so the
+# binary is staged host-side only; it seeds the fresh container's /mnt
+# (bind-mounted from .live/mnt).  The container-side stage — the one that
+# actually wins, since the ebr bin takes priority — happens after
+# "pbemu start" in step 6.
 
 # Write a bookshelf.cfg that points at 127.0.0.1 (works with --network=host
 # and with the old shared-netns mode; 169.254.1.2 is unreachable under pasta).
@@ -167,17 +163,72 @@ if [ -f "${TMP_CFG}" ]; then
 	echo "  refreshed ${TMP_CFG} (api_url=http://127.0.0.1:${API_PORT})"
 fi
 
-echo "==> 5/6  starting container"
+echo "==> 5/7  starting container"
 PBEMU_NO_KEEPID=1 PBEMU_PODMAN_ARGS="--network=host" "${PBEMU_DIR}/pbemu" start "${FIRMWARE}" --no-viewer --no-audio --no-build
 sleep 3
-# kill the previous run if any
+
+echo "==> 6/7  staging built binary into running container"
+# "pbemu start" rebuilt .live/ebrmain from the stock firmware tree, so the
+# host-side staging alone would lose: monitor.app looks under both
+# /ebrmain/bin and /mnt/ext1/system/bin, and the ebr bin takes priority.
+# Push the freshly built binary into the running container so monitor.app
+# launches OURS on next respawn.  These must fail loudly if the container
+# is down, so no `|| true` masking.
+podman cp build/bookshelf.app "${CONTAINER}:/tmp/bookshelf.app.new"
+podman exec "${CONTAINER}" /usr/bin/rm -f \
+	/workspace/firmware/.live/ebrmain/bin/bookshelf.app
+podman exec "${CONTAINER}" /usr/bin/mv /tmp/bookshelf.app.new \
+	/workspace/firmware/.live/ebrmain/bin/bookshelf.app
+podman exec "${CONTAINER}" /usr/bin/chmod +x \
+	/workspace/firmware/.live/ebrmain/bin/bookshelf.app
+podman exec "${CONTAINER}" /usr/bin/cp \
+	/workspace/firmware/.live/ebrmain/bin/bookshelf.app \
+	/mnt/ext1/system/bin/bookshelf.app
+podman exec "${CONTAINER}" /usr/bin/chmod +x \
+	/mnt/ext1/system/bin/bookshelf.app
+# Restart bookshelf so monitor.app respawns the freshly staged binary.
+# killall failing (app not running) is fine — monitor.app relaunches it
+# either way, so this stays optional.
 podman exec "${CONTAINER}" /usr/bin/killall bookshelf.app 2>/dev/null || true
 sleep 5
 
-echo "==> 6/6  screenshot + state"
+echo "==> 7/7  screenshot + state + API confirmation"
 "${PBEMU_DIR}/pbemu" screenshot /tmp/pbemu_bookshelf.png --force
 echo "screenshot -> /tmp/pbemu_bookshelf.png ($(wc -c </tmp/pbemu_bookshelf.png) bytes)"
 "${PBEMU_DIR}/pbemu" state || true
 
 echo
-echo "API server recent state:"
+echo "API server confirmation:"
+# The in-emulator app talks to these three endpoints; poke each one
+# ourselves and summarize what the server reports.
+API_TOKEN="pbemu-dev-token"
+API_BASE="http://127.0.0.1:${API_PORT}/api/v1"
+
+# /sync/delta — the device polls this for new/removed books; the reply
+# carries a cursor for the next poll plus a `more` flag.
+DELTA=$(curl -s -X POST -H "Authorization: Bearer ${API_TOKEN}" \
+	-H "Content-Type: application/json" \
+	-d '{"cursor":0,"limit":20}' \
+	"${API_BASE}/sync/delta")
+DELTA_CURSOR=$(printf '%s' "${DELTA}" | sed -n 's/.*"nextCursor":\([0-9][0-9]*\).*/\1/p')
+DELTA_MORE=$(printf '%s' "${DELTA}" | sed -n 's/.*"more":\(true\|false\).*/\1/p')
+echo "  /sync/delta -> nextCursor=${DELTA_CURSOR:-?} more=${DELTA_MORE:-?}"
+
+# /sync/state — the device reports what it has; the server acks ok:true.
+STATE=$(curl -s -X POST -H "Authorization: Bearer ${API_TOKEN}" \
+	-H "Content-Type: application/json" \
+	-d '{"deviceId":"pbemu-check","known":[],"downloaded":[]}' \
+	"${API_BASE}/sync/state")
+STATE_OK=$(printf '%s' "${STATE}" | sed -n 's/.*"ok":\(true\|false\).*/\1/p')
+echo "  /sync/state -> ok=${STATE_OK:-?}"
+
+# /open-with — resolves a file extension to the app that opens it.
+OPENWITH=$(curl -s -X POST -H "Authorization: Bearer ${API_TOKEN}" \
+	-H "Content-Type: application/json" \
+	-d '{"id":"pbemu-check","ext":"epub"}' \
+	"${API_BASE}/open-with")
+OPENWITH_APP=$(printf '%s' "${OPENWITH}" | sed -n 's/.*"app":"\([^"]*\)".*/\1/p')
+echo "  /open-with -> app=${OPENWITH_APP:-?}"
+
+echo
+echo "Done. Screenshot: /tmp/pbemu_bookshelf.png  api log: /tmp/pbemu-api.log"

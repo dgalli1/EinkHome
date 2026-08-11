@@ -113,8 +113,15 @@ ssh ${SSH_COMMON} "root@${DEVICE}" rm -rf \
 	/mnt/ext1/applications/koreader \
 	/mnt/ext1/applications/koreader.app \
 	/mnt/ext1/system/bin/koreader.app
-tar -C "${UNPACK}" -cf - applications system |
-	ssh ${SSH_COMMON} "root@${DEVICE}" 'cd /mnt/ext1 && tar -xf -'
+# Stage the archive to a temp file first, then stream the file over ssh.
+# Inside a ``tar | ssh`` pipeline a failed local tar would be masked by
+# ssh's exit status (POSIX sh has no pipefail), silently leaving a
+# half-installed KOReader; with the file staged first, set -e catches a
+# tar failure directly and ssh's status still reflects the remote tar.
+TARBALL="/tmp/koreader-pocketbook-${TAG}.tar"
+tar -C "${UNPACK}" -cf "${TARBALL}" applications system
+ssh ${SSH_COMMON} "root@${DEVICE}" 'cd /mnt/ext1 && tar -xf -' < "${TARBALL}"
+rm -f "${TARBALL}"
 
 echo "==> installed.  verify with:"
 echo "    ssh root@${DEVICE} 'ls -l /mnt/ext1/applications/koreader.app'"
