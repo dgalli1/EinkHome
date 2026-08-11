@@ -31,9 +31,14 @@ from collections.abc import Sequence
 
 # Device constants this module must stay in sync with (app/bookshelf.h):
 #   MAX_QUERY_LEN  80  — a tapped term is copied into the query buffer
-#   SUGGEST_MAX_TERMS 96
+#   SUGGEST_MAX_TERMS 96 — an upper bound the device accepts; the wire
+#                          and the device-side term index are far
+#                          cheaper with a tighter cap (a 100k first
+#                          sync ships ~16 terms/book on average; long
+#                          titles hit the cap and dominate the payload
+#                          and the device's per-round inserts).
 _TERM_MAX = 79  # 80 - NUL
-_TERM_CAP = 96
+_TERM_CAP = 24
 
 _NON_ALNUM = re.compile(r"[^0-9a-z]+")
 

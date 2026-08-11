@@ -100,22 +100,22 @@ def test_length_cap_drops_only_long_terms():
     assert " ".join([word] * 9) not in terms  # 80 chars — dropped
 
 
-def test_term_cap_ninety_six():
+def test_term_cap_twenty_four():
     # 3 fields x 20 words = 120 terms (words + suffix phrases, all
     # <= 79 chars: 20*3 + 19 = 79 exactly for the longest phrase).
     # Dedupe collapses each field's last-word phrase into its word
-    # (3 fields x 39 = 117 distinct), then the cap keeps 96: title
-    # 39 + author 39 + series words s00..s17.
+    # (3 fields x 39 = 117 distinct), then the cap keeps 24: title
+    # 39 -> capped mid-phrases, then author words a00..a04.
     title = " ".join(f"t{i:02d}" for i in range(20))
     author = " ".join(f"a{i:02d}" for i in range(20))
     series = " ".join(f"s{i:02d}" for i in range(20))
     terms = suggest_terms(title, [author], series)
-    assert len(terms) == 96
+    assert len(terms) == 24
     assert terms[0] == "t00"
     assert terms[19] == "t19"
     assert terms[20] == " ".join(f"t{i:02d}" for i in range(20))
-    assert terms[95] == "s17"  # series words s00..s17 kept
-    assert "s18" not in terms  # the cap dropped the rest
+    assert terms[23] == " ".join(f"t{i:02d}" for i in range(3, 20))  # 4th title phrase
+    assert "a00" not in terms  # the cap never reached the author
 
 
 def test_search_text_folds_diacritics():
