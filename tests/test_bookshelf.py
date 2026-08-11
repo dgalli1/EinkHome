@@ -822,6 +822,150 @@ def test_search_history_persists_and_reruns(fresh_bookshelf):
     bs.assert_log_contains("search history tap: query=`alpha`")
 
 
+# ── search page top bar (source button hidden) ────────────────────────
+
+
+def _dump_frame(emulator: Emulator, name: str) -> bytes:
+    """Dump the live framebuffer as a PPM and return its bytes.
+
+    The probe runs inside the container; /workspace/firmware/.live/tmp is
+    the container-side alias of the host .live/tmp (the same mapping the
+    guest /tmp uses for its log), so the file is readable straight from
+    the host.
+    """
+    guest = f"/workspace/firmware/.live/tmp/{name}.ppm"
+    emulator.run_probe("frame_dump", "--ppm", guest)
+    return (PBEMU_ROOT / FIRMWARE / ".live" / "tmp" / f"{name}.ppm").read_bytes()
+
+
+def _ppm_region_white(ppm: bytes, x0: int, y0: int, x1: int, y1: int) -> bool:
+    """True when every pixel of the P6-PPM region is pure white."""
+    head, _, rest = ppm.partition(b"\n")
+    assert head == b"P6", f"expected a P6 PPM, got {head!r}"
+    dims, _, rest = rest.partition(b"\n")
+    w, h = map(int, dims.split())
+    maxval, _, data = rest.partition(b"\n")
+    assert int(maxval) == 255
+    assert 0 <= x0 < x1 <= w and 0 <= y0 < y1 <= h
+    for y in range(y0, y1):
+        row = y * w * 3
+        for x in range(x0, x1):
+            off = row + x * 3
+            if data[off] != 255 or data[off + 1] != 255 or data[off + 2] != 255:
+                return False
+    return True
+
+
+def test_search_page_hides_source_button(fresh_bookshelf):
+    """The Search page hides the source button and the right-side icon
+    stack (the top bar is just the back arrow), and the source button's
+    old spot must not open the chooser."""
+    bs = fresh_bookshelf
+    bs.wait_for_stable()
+    w = bs.geom.screen_w
+    # The firmware's fb_y_offset wrap renders the system strip at the
+    # physical top of the framebuffer, so the app's top bar (and its
+    # buttons) sits panel_h rows down in a frame dump.
+    panel = bs.geom.panel_h
+    # Source-button body: icon + label area (sample avoids the title).
+    sx0, sy0, sx1, sy1 = 112 + 20, panel + 48, 112 + 176 - 20, panel + 84
+    # Right-most icon (the menu button) spot.
+    mx0, my0, mx1, my1 = w - 104, panel + 48, w - 8, panel + 84
+
+    # Shelf: both spots are drawn (non-white).
+    shelf = _dump_frame(bs.emulator, "bs_source_shelf")
+    assert not _ppm_region_white(shelf, sx0, sy0, sx1, sy1), "source button not drawn on the shelf"
+    assert not _ppm_region_white(shelf, mx0, my0, mx1, my1), "menu icon not drawn on the shelf"
+
+    # Open the Search page.
+    bs.tap_search_and_verify()
+    bs.wait_for_stable()
+
+    # Both spots are now plain white — the buttons are gone.
+    search = _dump_frame(bs.emulator, "bs_source_search")
+    assert _ppm_region_white(search, sx0, sy0, sx1, sy1), "source button still drawn on Search page"
+    assert _ppm_region_white(search, mx0, my0, mx1, my1), "right icons still drawn on Search page"
+
+    # Tapping where the source button used to be must not open the
+    # source chooser: no overlay, framebuffer unchanged.
+    before = bs.frame_hash()
+    bs.tap_at(112 + 176 // 2, 64)
+    time.sleep(0.4)
+    assert bs.frame_hash() == before, "source chooser opened from the Search page"
+
+
+def _ppm_ink_xs(ppm: bytes, x0: int, y0: int, x1: int, y1: int) -> list[int]:
+    """Return the x positions of non-white pixels in a P6-PPM region."""
+    head, _, rest = ppm.partition(b"\n")
+    assert head == b"P6", f"expected a P6 PPM, got {head!r}"
+    dims, _, rest = rest.partition(b"\n")
+    w, h = map(int, dims.split())
+    maxval, _, data = rest.partition(b"\n")
+    assert int(maxval) == 255
+    assert 0 <= x0 < x1 <= w and 0 <= y0 < y1 <= h
+    xs: list[int] = []
+    for y in range(y0, y1):
+        row = y * w * 3
+        for x in range(x0, x1):
+            off = row + x * 3
+            if data[off] != 255 or data[off + 1] != 255 or data[off + 2] != 255:
+                xs.append(x)
+    return xs
+
+
+def test_search_page_layout_centered(fresh_bookshelf):
+    """The Search page top bar centres its title on the whole screen
+    width (no flanking buttons to narrow the band), and the search input
+    bar spans the full page width with the magnifier inside it."""
+    bs = fresh_bookshelf
+    bs.wait_for_stable()
+    w = bs.geom.screen_w
+    panel = bs.geom.panel_h
+    bs.tap_search_and_verify()
+    bs.wait_for_stable()
+    ppm = _dump_frame(bs.emulator, "bs_search_layout")
+
+    # Title: the only ink in the top-bar band between the back button
+    # and the right edge is the title text; its extent must be centred
+    # on the screen (within a small tolerance for font kerning).
+    xs = _ppm_ink_xs(ppm, w // 4, panel + 30, 3 * w // 4, panel + 82)
+    assert xs, "no title ink found in the top bar band"
+    center = (min(xs) + max(xs)) / 2.0
+    assert abs(center - w / 2) <= 16, f"title centred at x={center:.0f}, screen centre {w / 2}"
+
+    # Input bar: 1px border strokes at x=16 and x=w-17 (full width).
+    assert not _ppm_region_white(ppm, 16, panel + 150, 18, panel + 218), "bar missing left border"
+    assert not _ppm_region_white(
+        ppm, w - 18, panel + 150, w - 16, panel + 218
+    ), "bar missing right border"
+
+
+def test_search_keyboard_outside_tap_stays_on_search(fresh_bookshelf):
+    """Tapping outside the on-screen keyboard must not commit a search
+    or jump to the library: a dismissed, unedited keyboard leaves the
+    Search page untouched.
+
+    Regression: the dismissal delivered the unchanged (empty) buffer,
+    which the handler treated as an edit — it committed an empty query
+    and switched to TAB_LIBRARY, teleporting the user home."""
+    bs = fresh_bookshelf
+    bs.tap_search_and_verify()
+    time.sleep(0.5)
+    bs.tap_search_input_and_verify()  # opens the keyboard
+    time.sleep(0.5)
+    before = bs.current_log()
+    bs.tap_at(bs.geom.screen_w // 2, 500)  # outside the keyboard
+    time.sleep(0.8)
+    slice_ = bs.current_log()[len(before):]
+    assert "search commit" not in slice_, "outside tap committed a search"
+    assert "draw_grid view=" not in slice_, "outside tap jumped to the library"
+    # Still on the Search page: tapping the input row reopens the
+    # keyboard (the library grid has no input row to open one from).
+    h = bs.frame_hash()
+    bs.tap_search_input_and_verify()
+    bs.wait_hash_change(h)
+
+
 # ── book grid ──────────────────────────────────────────────────────────
 
 
@@ -1833,3 +1977,117 @@ def test_legacy_json_store_migrates_to_sqlite(bookshelf_env):
         assert (_OFFLINE_DIR / "bookshelf_lib.json.migrated").exists()
     finally:
         _restore_cfg(saved_cfg)
+
+
+
+# ── search suggestions (live, server-generated, device-local) ─────────
+
+
+def test_search_suggestions_live_and_commit(fresh_bookshelf):
+    """Typing in the system keyboard shows live suggestions from the
+    local term index; tapping one commits that search through the
+    keyboard handler.  Phase 2 proves the word-aligned suffix-phrase
+    term: "harry po" matches "harry potter order of the phoenix" style
+    phrase terms."""
+    bs = fresh_bookshelf
+    _BOOKS_DIR.mkdir(parents=True, exist_ok=True)
+    hp = _BOOKS_DIR / "Harry Potter.epub"
+    hp.write_bytes(b"PK\x03\x04 potter stub for suggest test")
+    try:
+        view_before, _ = _last_draw_grid(bs.current_log())
+        _restart_bookshelf(bs.emulator)
+        # Wait for the staged book to arrive via the sync delta.
+        deadline = time.monotonic() + 20
+        view = view_before
+        while time.monotonic() < deadline:
+            view, _ = _last_draw_grid(bs.current_log())
+            if view > view_before:
+                break
+            time.sleep(0.5)
+        assert view > view_before, (
+            f"staged Harry Potter never synced (view {view_before} -> {view})"
+        )
+
+        # ── Phase 1: word completion ("pott" -> "potter") ──
+        bs.tap_search_and_verify()
+        time.sleep(0.5)
+        bs.tap_search_input_and_verify()  # opens the keyboard
+        time.sleep(0.5)
+        bs.type_text("pott", commit=False)
+        time.sleep(0.9)  # debounce tick (200 ms) + draw
+        # Visual check: a left-aligned suggestion row is drawn in the
+        # band above the keyboard (the centered "No recent searches"
+        # placeholder does not reach x<300, so ink there is the row).
+        ppm = _dump_frame(bs.emulator, "bs_suggest_pott")
+        xs = _ppm_ink_xs(
+            ppm, 24, bs.geom.panel_h + 228, 300, bs.geom.panel_h + 430
+        )
+        assert xs, "no suggestion row ink in the band"
+        # Tap the suggestion row; the term commits through the keyboard
+        # handler and filters the grid to exactly the Potter book.
+        bs.tap_at(*bs.geom.suggestion_row_center(0))
+        time.sleep(0.8)
+        bs.assert_log_contains("suggest tap: term=`potter`")
+        # The tapped term committed (app-side, history-tap sequence)
+        # and the grid filtered to exactly the Potter book.
+        view, _ = _last_draw_grid(bs.current_log())
+        assert view == 1, f"grid not filtered to the potter book: view={view}"
+
+        # ── Phase 2: phrase completion ("harry po" -> "harry potter") ──
+        bs.tap_search_and_verify()
+        time.sleep(0.5)
+        bs.tap_search_input_and_verify()  # keyboard pre-fills "potter"
+        time.sleep(0.5)
+        # Clear the pre-filled query (6 backspaces), then type the
+        # phrase prefix.
+        for _ in range(6):
+            bs.emulator.run_probe("send_event", "common", "210", "0", "8", "0")
+            time.sleep(0.1)
+        time.sleep(0.4)
+        bs.type_text("harry po", commit=False)
+        time.sleep(0.9)
+        bs.tap_at(*bs.geom.suggestion_row_center(0))
+        time.sleep(0.8)
+        bs.assert_log_contains("suggest tap: term=`harry potter`")
+        view, _ = _last_draw_grid(bs.current_log())
+        assert view == 1, f"phrase search not filtered: view={view}"
+    finally:
+        hp.unlink(missing_ok=True)
+
+
+def test_search_folded_suggestion_finds_diacritic_title(fresh_bookshelf):
+    """A folded suggestion must find its book: "songgong" (from the
+    title "Sŏnggong") matches via the server-provided searchText, not
+    the raw title (LIKE '%songgong%' never matches "Sŏnggong").
+
+    Regression: tapping such a suggestion committed the folded term
+    and the grid came up empty."""
+    bs = fresh_bookshelf
+    _BOOKS_DIR.mkdir(parents=True, exist_ok=True)
+    hp = _BOOKS_DIR / "Sŏnggong.epub"
+    hp.write_bytes(b"PK\x03\x04 diacritic stub for suggest test")
+    try:
+        view_before, _ = _last_draw_grid(bs.current_log())
+        _restart_bookshelf(bs.emulator)
+        deadline = time.monotonic() + 20
+        view = view_before
+        while time.monotonic() < deadline:
+            view, _ = _last_draw_grid(bs.current_log())
+            if view > view_before:
+                break
+            time.sleep(0.5)
+        assert view > view_before, "staged Sŏnggong never synced"
+
+        bs.tap_search_and_verify()
+        time.sleep(0.5)
+        bs.tap_search_input_and_verify()
+        time.sleep(0.5)
+        bs.type_text("songgong", commit=False)
+        time.sleep(0.9)
+        bs.tap_at(*bs.geom.suggestion_row_center(0))
+        time.sleep(0.8)
+        bs.assert_log_contains("suggest tap: term=`songgong`")
+        view, _ = _last_draw_grid(bs.current_log())
+        assert view == 1, f"folded search found no book: view={view}"
+    finally:
+        hp.unlink(missing_ok=True)

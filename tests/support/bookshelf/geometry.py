@@ -153,6 +153,15 @@ class BookshelfGeometry:
             row_top + index * SEARCH_HISTORY_ROW_H + SEARCH_HISTORY_ROW_H // 2,
         )
 
+    def suggestion_row_center(self, index: int) -> tuple[int, int]:
+        """Centre of live suggestion row *index* in the band above the
+        on-screen keyboard (same row layout as the history list)."""
+        row_top = TOP_BAR_H + SEARCH_ROW_H
+        return (
+            self.screen_w // 2,
+            row_top + index * SEARCH_HISTORY_ROW_H + SEARCH_HISTORY_ROW_H // 2,
+        )
+
     # ── book grid ──────────────────────────────────────────────────────
 
     def _grid_params(self) -> tuple[int, int, int]:
