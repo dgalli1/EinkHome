@@ -188,8 +188,13 @@ refresh_downloaded_flags(void)
             book_local_path(&b, path, sizeof path);
             const char *base = strrchr(path, '/');
             base = base != NULL ? base + 1 : path;
+            /* bsearch's key is a POINTER TO the key value — for a
+             * char* array that is &base, not base (the comparator
+             * dereferences it; passing base read the first four bytes
+             * of the filename as a pointer and SIGSEGV'd on any
+             * non-empty downloads dir). */
             int dl = names != NULL &&
-                     bsearch(base, names, (size_t)n_names, sizeof *names,
+                     bsearch(&base, names, (size_t)n_names, sizeof *names,
                              dl_name_cmp) != NULL;
             if (!dl && p->local_path[0] != '\0' &&
                 access(p->local_path, F_OK) == 0) {
