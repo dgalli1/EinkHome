@@ -103,24 +103,54 @@ class LedgerEntry:
     suggest: str | None = None  # JSON array of suggestion terms, precomputed
 
 
+def fingerprint_blob(
+    title: str,
+    authors: list[str],
+    series: str | None,
+    series_id: str | None,
+    series_index: float | None,
+    file_format: str,
+    file_name: str | None,
+    file_size: int,
+    added_at: str | None,
+) -> str:
+    """sha1 over the fields the device renders, joined exactly the way
+    :func:`fingerprint` did before the blob was factored out.  Single
+    source of truth for the fingerprint join: both the BookMeta-based
+    :func:`fingerprint` and providers' compact fingerprint walkers
+    (which skip BookMeta construction) build their blobs through this,
+    so a provider's precomputed fp always matches the ledger's."""
+    blob = "|".join(
+        (
+            title or "",
+            ",".join(authors or []),
+            series or "",
+            series_id or "",
+            repr(series_index),
+            file_format or "",
+            file_name or "",
+            str(file_size),
+            added_at or "",
+        )
+    )
+    return hashlib.sha1(blob.encode("utf-8")).hexdigest()
+
+
 def fingerprint(meta: BookMeta) -> str:
     """Cheap content hash over the fields the device renders.  Two
     metas with the same fingerprint are indistinguishable to the app,
     so a matching fp means the ledger row needs no update."""
-    blob = "|".join(
-        (
-            meta.title or "",
-            ",".join(meta.authors or []),
-            meta.series or "",
-            meta.series_id or "",
-            repr(meta.series_index),
-            meta.file_format or "",
-            meta.file_name or "",
-            str(meta.file_size),
-            meta.added_at or "",
-        )
+    return fingerprint_blob(
+        meta.title,
+        meta.authors,
+        meta.series,
+        meta.series_id,
+        meta.series_index,
+        meta.file_format,
+        meta.file_name,
+        meta.file_size,
+        meta.added_at,
     )
-    return hashlib.sha1(blob.encode("utf-8")).hexdigest()
 
 
 class SyncLedger:
@@ -335,12 +365,50 @@ class SyncLedger:
     def _walk(self, provider: Any) -> None:
         """One full catalogue pass.  Only one provider page and its
         diff are materialised at a time; the persistent O(N) structure
-        is the (id → fp, added_at) index, which lives server-side."""
+        is the (id → fp, added_at) index, which lives server-side.
+
+        Providers that expose ``walk_fingerprints`` (a compact
+        fingerprint walk that skips BookMeta construction — e.g. the
+        mock provider's in-RAM fp index) get a fast first pass: ids and
+        fingerprints are compared against the ledger straight from the
+        index and only changed/new books are re-fetched via
+        walk_books.  Steady-state walks then never parse the catalogue
+        into metas at all.  Providers without the hook (and walkers
+        that fail mid-flight) fall back to the plain walk_books pass."""
         stored: dict[str, tuple[str, str | None]] = {
             r[0]: (r[1], r[2])
             for r in self.con.execute("SELECT id, fp, added_at FROM books")
         }
         seen: set[str] = set()
+        fp_walker = getattr(provider, "walk_fingerprints", None)
+        if callable(fp_walker):
+            try:
+                self._walk_fingerprints(provider, fp_walker, stored, seen)
+            except RuntimeError:
+                raise  # empty-catalogue refusal — never masked by a fallback
+            except Exception:
+                # Fingerprint index unusable (provider error mid-walk):
+                # the plain pass is self-contained and re-validates
+                # everything, so fall back to it verbatim.
+                self._walk_books(provider, stored, seen)
+        else:
+            self._walk_books(provider, stored, seen)
+
+        gone = [
+            bid
+            for bid, (_, added_at) in stored.items()
+            if added_at is not None and bid not in seen
+        ]
+        self._apply_tombstones(gone)
+
+    def _walk_books(
+        self,
+        provider: Any,
+        stored: dict[str, tuple[str, str | None]],
+        seen: set[str],
+    ) -> None:
+        """Plain walk_books pass (the historical _walk body): page the
+        provider, diff every meta against the ledger, apply per page."""
         first_page = True
         for batch in provider.walk_books(mode="all", chunk_size=SCAN_PAGE):
             if first_page:
@@ -378,12 +446,67 @@ class SyncLedger:
                 f"{len(stored)} rows in the ledger; refusing to tombstone"
             )
 
-        gone = [
-            bid
-            for bid, (_, added_at) in stored.items()
-            if added_at is not None and bid not in seen
-        ]
-        self._apply_tombstones(gone)
+    def _walk_fingerprints(
+        self,
+        provider: Any,
+        fp_walker: Any,
+        stored: dict[str, tuple[str, str | None]],
+        seen: set[str],
+    ) -> None:
+        """Fast catalogue pass over a provider's fingerprint walker.
+
+        First pass consumes ``(id, fp, added_at)`` triples without
+        materialising BookMeta: every id joins ``seen`` and only ids
+        whose fingerprint differs from the ledger (or that are new, or
+        a tombstone resurrecting) are queued in ``need_meta``
+        (insertion order = catalogue order).  A second walk_books pass
+        then re-fetches just those books and applies inserts/updates,
+        so a steady-state refresh never builds a BookMeta.  Tombstones
+        are computed from ``seen`` by the caller; ids queued but never
+        re-walked are left un-applied (never tombstoned — they were
+        seen in the first pass)."""
+        need_meta: dict[str, int] = {}
+        first_page = True
+        for i, (bid, fp, added_at) in enumerate(fp_walker()):
+            first_page = False
+            seen.add(bid)
+            row = stored.get(bid)
+            if row is None or row[0] != fp or row[1] is None:
+                need_meta[bid] = i
+        if first_page and stored and not self._ack_empty_catalogue:
+            # Same refusal as an empty walk_books first page: a
+            # fingerprint walker reporting no books while the ledger
+            # holds rows must not tombstone the library.
+            raise RuntimeError(
+                "provider returned an empty catalogue with "
+                f"{len(stored)} rows in the ledger; refusing to tombstone"
+            )
+        if not need_meta:
+            return
+        inserts: list[BookMeta] = []
+        updates: list[BookMeta] = []
+        for batch in provider.walk_books(mode="all", chunk_size=SCAN_PAGE):
+            for meta in batch:
+                if meta.id not in need_meta:
+                    continue
+                del need_meta[meta.id]
+                fp = fingerprint(meta)
+                row = stored.get(meta.id)
+                if row is None:
+                    inserts.append(meta)
+                    stored[meta.id] = (fp, meta.added_at)
+                else:
+                    # Pending ids either changed, are new, or are
+                    # resurrecting a tombstone — always an update.
+                    updates.append(meta)
+                    stored[meta.id] = (fp, meta.added_at)
+            self._apply_inserts(inserts)
+            self._apply_updates(updates)
+            inserts = []
+            updates = []
+        if inserts or updates:
+            self._apply_inserts(inserts)
+            self._apply_updates(updates)
 
     def _apply_inserts(self, metas: list[BookMeta]) -> None:
         if not metas:

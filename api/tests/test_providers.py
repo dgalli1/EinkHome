@@ -7,6 +7,7 @@ or:
 """
 
 # pylint: disable=missing-function-docstring,redefined-outer-name
+import json
 import os
 import sys
 
@@ -18,6 +19,7 @@ sys.path.insert(0, os.path.join(REPO_ROOT, "api"))
 
 from api.providers.base import BookMeta  # noqa: E402
 from api.providers.mock import MockProvider  # noqa: E402
+from api.storage.ledger import fingerprint  # noqa: E402
 
 
 def _make_provider(tmp_path, name="test lib"):
@@ -86,6 +88,60 @@ def test_book_meta_dataclass():
     assert b.id == "x"
     assert b.authors == ["a", "b"]
     assert b.series_index == 1.0
+
+
+def test_mock_walk_fingerprints_matches_walk_books_and_rebuilds(tmp_path):
+    """The compact fingerprint walk must agree with the full walk_books
+    pass (same ids, fingerprints, added_at) and rebuild its index when
+    the corpus file changes — even when only the mtime moves."""
+    corpus = tmp_path / "corpus.jsonl"
+    corpus.write_text(
+        "\n".join(
+            json.dumps(rec)
+            for rec in [
+                {"id": "ol_1", "title": "Old", "authors": ["Ann"]},
+                {"id": "ol_2", "title": "Two", "series": "Saga"},
+                {"id": "ol_3", "title": "Three", "added_at": "2024-01-02T00:00:00Z"},
+            ]
+        )
+        + "\n"
+    )
+    provider = MockProvider(
+        {"books_dir": str(tmp_path / "books"), "corpus": str(corpus), "count": 3}
+    )
+
+    triples = list(provider.walk_fingerprints())
+    metas = [
+        m for batch in provider.walk_books(mode="all", chunk_size=10) for m in batch
+    ]
+    assert [t[0] for t in triples] == [m.id for m in metas]
+    assert [t[1] for t in triples] == [fingerprint(m) for m in metas]
+    assert [t[2] for t in triples] == [m.added_at for m in metas]
+
+    # Rewrite record 1 with a same-length title (file size unchanged)
+    # and bump only the mtime: the index key's mtime component is what
+    # detects the edit, so the rebuilt walk must serve the new fp.
+    corpus.write_text(
+        "\n".join(
+            json.dumps(rec)
+            for rec in [
+                {"id": "ol_1", "title": "New", "authors": ["Ann"]},
+                {"id": "ol_2", "title": "Two", "series": "Saga"},
+                {"id": "ol_3", "title": "Three", "added_at": "2024-01-02T00:00:00Z"},
+            ]
+        )
+        + "\n"
+    )
+    st = corpus.stat()
+    os.utime(corpus, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000_000))
+    triples2 = list(provider.walk_fingerprints())
+    metas2 = [
+        m for batch in provider.walk_books(mode="all", chunk_size=10) for m in batch
+    ]
+    assert [t[0] for t in triples2] == [m.id for m in metas2]
+    assert [t[1] for t in triples2] == [fingerprint(m) for m in metas2]
+    assert [t[2] for t in triples2] == [m.added_at for m in metas2]
+    assert triples2[0][1] != triples[0][1]  # rebuild picked up the new title
 
 
 def test_mock_provider_unknown_book(tmp_path):

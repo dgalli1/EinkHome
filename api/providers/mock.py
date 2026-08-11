@@ -32,6 +32,7 @@ from .base import (
     Provider,
     SeriesInfo,
 )
+from storage.ledger import fingerprint_blob
 from storage.placeholder import PLACEHOLDER_PNG
 
 # Deterministic vocabulary for synthetic titles/authors.  Indexing by
@@ -53,17 +54,50 @@ _SYN_EPOCH = 1_700_000_000.0
 
 # The only record fields the mock provider reads (see _corpus_meta):
 # id (required), title, authors, series, added_at, ol_key (optional).
-# The columnar cache below stores exactly these six, in this order.
+# The compact fingerprint index below stores (id, fp, added_at) only —
+# the fp is the sha1 the ledger uses for change detection, so catalogue
+# walks compare against the ledger without re-parsing the file.
+
+
+def _corpus_fp(i: int, rec: dict[str, Any]) -> tuple[str, str, str]:
+    """(id, fp, added_at) for corpus record #i.  Derives EXACTLY the
+    fields _corpus_meta derives (title fallback, authors list, series,
+    series_id = ol_ser_+sha1 prefix, added_at fallback, format, size,
+    file_name = "") so the fingerprint always matches
+    ledger.fingerprint(_corpus_meta(i, rec)).  Keep the two in sync."""
+    book_id = rec["id"]
+    fmt = _SYN_FMTS[i % len(_SYN_FMTS)]
+    series_name: str | None = rec.get("series") or None
+    series_id: str | None = None
+    if series_name:
+        series_id = "ol_ser_" + hashlib.sha1(series_name.encode()).hexdigest()[:12]
+    ts = rec.get("added_at") or _iso(_SYN_EPOCH + i)
+    return (
+        book_id,
+        fingerprint_blob(
+            rec.get("title") or f"Untitled {i}",
+            list(rec.get("authors") or []),
+            series_name,
+            series_id,
+            None,  # corpus metas carry no series_index
+            fmt,
+            None,  # corpus metas carry no file_name
+            10_000 + (i % 900_000),
+            ts,
+        ),
+        ts,
+    )
 
 
 class _Corpus:
     """Lazy reader over a JSONL corpus: line offsets in RAM, records
-    parsed on demand.  Once built, a columnar cache holds the six
-    record fields the mock provider reads so catalogue walks never
-    re-parse the file.  An empty path yields an empty corpus (graceful
-    when the configured file is missing on a fresh clone)."""
+    parsed on demand.  A compact fingerprint index holds (id, fp,
+    added_at) as three parallel string lists so catalogue walks (and
+    the ledger's fingerprint walk) never re-json.loads the file.  An
+    empty path yields an empty corpus (graceful when the configured
+    file is missing on a fresh clone)."""
 
-    __slots__ = ("_path", "_offsets", "_len", "_cols", "_cols_key")
+    __slots__ = ("_path", "_offsets", "_len", "_fps", "_fps_key")
 
     def __init__(self, path: str) -> None:
         self._path = path
@@ -81,45 +115,47 @@ class _Corpus:
                 offs = []
         self._offsets = offs
         self._len = len(offs)
-        # Columnar cache: six parallel lists (one per cached record
-        # field, in the order listed in the comment above), keyed by
-        # (path, mtime-ns, size) so an edited corpus file invalidates
-        # it.  None until first build; a stale or unstat-able file
-        # drops it back to None and the lazy paths re-apply.
-        self._cols: tuple[list[Any], ...] | None = None
-        self._cols_key: tuple[str, int, int] | None = None
+        # Compact fingerprint index: three parallel lists (ids, fps,
+        # added_ats — all strings), keyed by (path, mtime-ns, size) so
+        # an edited corpus file invalidates it.  None until first
+        # build; a stale or unstat-able file drops it back to None and
+        # the streaming fallback applies.
+        self._fps: tuple[list[str], list[str], list[str]] | None = None
+        self._fps_key: tuple[str, int, int] | None = None
 
-    def _cache_valid(self) -> bool:
-        """True when the columnar cache exists and the corpus file is
-        unchanged since it was built (mtime-ns + size key).  An OSError
-        while statting (file gone, …) drops the cache."""
-        if self._cols is None:
+    def _fps_valid(self) -> bool:
+        """True when the fingerprint index exists and the corpus file
+        is unchanged since it was built (mtime-ns + size key).  An
+        OSError while statting (file gone, …) drops the index."""
+        if self._fps is None:
             return False
         try:
             st = os.stat(self._path)
         except OSError:
-            self._cols = None
-            self._cols_key = None
+            self._fps = None
+            self._fps_key = None
             return False
-        if (self._path, st.st_mtime_ns, st.st_size) != self._cols_key:
-            self._cols = None
-            self._cols_key = None
+        if (self._path, st.st_mtime_ns, st.st_size) != self._fps_key:
+            self._fps = None
+            self._fps_key = None
             return False
         return True
 
-    def _load_all(self) -> None:
-        """Parse the whole corpus once into six parallel column lists
-        (id, title, authors, series, added_at, ol_key).  Only one
-        parsed dict is ever in flight: each record's six fields are
-        appended to the columns and the dict is dropped, so the
-        transient peak stays ~1 dict and the retained cache is lists of
-        strings, never a list of dicts."""
+    def build_fps(self) -> None:
+        """One streaming pass over the JSONL building (ids, fps,
+        added_ats).  Only one parsed dict is ever in flight: each
+        record's derived strings are appended and the dict dropped, so
+        the transient peak stays ~1 dict and the retained index is
+        lists of strings, never a list of dicts."""
         if not self._path:
             return
         try:
             st = os.stat(self._path)
-            cols: list[list[Any]] = [[], [], [], [], [], []]
+            ids: list[str] = []
+            fps: list[str] = []
+            added_ats: list[str] = []
             with open(self._path, encoding="utf-8") as f:
+                i = 0
                 for line in f:
                     line = line.strip()
                     if not line:
@@ -128,26 +164,24 @@ class _Corpus:
                         rec = json.loads(line)
                     except ValueError:
                         continue
-                    cols[0].append(rec["id"])
-                    cols[1].append(rec.get("title"))
-                    cols[2].append(rec.get("authors"))
-                    cols[3].append(rec.get("series"))
-                    cols[4].append(rec.get("added_at"))
-                    cols[5].append(rec.get("ol_key"))
+                    bid, fp, ts = _corpus_fp(i, rec)
+                    ids.append(bid)
+                    fps.append(fp)
+                    added_ats.append(ts)
+                    i += 1
         except OSError:
-            return  # keep the cache unset; the streaming fallback applies
-        self._cols = tuple(cols)
-        self._cols_key = (self._path, st.st_mtime_ns, st.st_size)
+            return  # keep the index unset; the streaming fallback applies
+        self._fps = (ids, fps, added_ats)
+        self._fps_key = (self._path, st.st_mtime_ns, st.st_size)
 
-    def id_column(self) -> list[Any] | None:
-        """Guarantee the columnar cache (building it if needed) and
-        return the id column, or None when the corpus file cannot be
-        read — the caller then falls back to a streaming pass."""
-        if not self._cache_valid():
-            self._load_all()
-        if self._cols is None:
-            return None
-        return self._cols[0]
+    def fps(self) -> tuple[list[str], list[str], list[str]] | None:
+        """Guarantee the fingerprint index (building it if stale) and
+        return (ids, fps, added_ats), or None when the corpus file
+        cannot be read — the caller then falls back to a streaming
+        pass."""
+        if not self._fps_valid():
+            self.build_fps()
+        return self._fps
 
     def __len__(self) -> int:
         return self._len
@@ -157,24 +191,6 @@ class _Corpus:
 
     def __iter__(self) -> Iterator[dict[str, Any]]:
         if not self._path:
-            return
-        if not self._cache_valid():
-            # First walk builds the cache; a rebuild happens whenever
-            # the file's mtime-ns/size key no longer matches.  Only when
-            # the build itself fails (file unreadable) do we fall back
-            # to the streaming pass below.
-            self._load_all()
-        if self._cols is not None:
-            ids, titles, authors, series, added_ats, ol_keys = self._cols
-            for i in range(len(ids)):
-                yield {
-                    "id": ids[i],
-                    "title": titles[i],
-                    "authors": authors[i],
-                    "series": series[i],
-                    "added_at": added_ats[i],
-                    "ol_key": ol_keys[i],
-                }
             return
         with open(self._path, encoding="utf-8") as f:
             for line in f:
@@ -187,19 +203,8 @@ class _Corpus:
                     continue
 
     def __getitem__(self, i: int) -> dict[str, Any]:
-        """Random access: cached columns when valid (no file open),
-        otherwise open + seek per read so concurrent request threads
-        never share a seek cursor."""
-        if self._cache_valid():
-            ids, titles, authors, series, added_ats, ol_keys = self._cols
-            return {
-                "id": ids[i],
-                "title": titles[i],
-                "authors": authors[i],
-                "series": series[i],
-                "added_at": added_ats[i],
-                "ol_key": ol_keys[i],
-            }
+        """Random access: open + seek per read so concurrent request
+        threads never share a seek cursor."""
         with open(self._path, encoding="utf-8") as f:
             f.seek(self._offsets[i])
             line = f.readline()
@@ -253,9 +258,10 @@ class MockProvider(Provider):
         # Lazy corpus: 100k Open Library records as Python dicts cost
         # ~100 MB resident (measured) — far over the server's memory
         # budget.  _Corpus keeps per-line byte offsets (~1 MB) plus a
-        # columnar cache of the six fields the mock reads (est. 10-20 MB
-        # at 100k records) so the 30s ledger refresh parses the file
-        # once instead of re-json.loads-ing every line on every walk.
+        # compact fingerprint index of (id, fp, added_at) — three
+        # string lists, est. ~22-25 MB at 100k records — so the 30s
+        # ledger refresh compares against the ledger without
+        # re-json.loads-ing or re-deriving BookMeta on every walk.
         self.corpus = _Corpus(corpus_path)
         # id -> corpus index, built on first random-access lookup
         # (get_book / open_file).  The delta walk never needs it.
@@ -322,8 +328,11 @@ class MockProvider(Provider):
 
     def _corpus_id_index(self) -> dict[str, int]:
         if self._corpus_index is None:
-            ids = self.corpus.id_column()
-            if ids is not None:
+            index = self.corpus.fps()
+            if index is not None:
+                # Build from the fingerprint index's ids (the build
+                # re-runs when the corpus file changed).
+                ids, _fps, _added_ats = index
                 self._corpus_index = {ids[i]: i for i in range(len(ids))}
             else:
                 # Corpus file unreadable: fall back to a streaming pass
@@ -457,28 +466,35 @@ class MockProvider(Provider):
                 continue
             yield meta
 
-    def _book_from_path(self, entry: dict[str, Any]) -> BookMeta:
-        book_id = self._book_id(entry["abs"])
-        ext = entry["ext"]
-        stem = os.path.splitext(entry["name"])[0]
-        title = stem.replace("_", " ").strip() or entry["name"]
-
-        # Series convention: "Series Name - 03" → series="Series Name",
-        # series_index=3, series_id=stable hash.  Plain "book_NNN" names
-        # stay standalone (series=None) so existing tests are unaffected.
-        series_name: str | None = None
-        series_id: str | None = None
-        series_index: float | None = None
+    @staticmethod
+    def _series_from_stem(
+        stem: str,
+    ) -> tuple[str | None, str | None, float | None]:
+        """(series name, id, index) for a file stem, using the mock
+        series convention: "Series Name - 03" → series="Series Name",
+        series_index=3, series_id=stable hash.  Plain "book_NNN" names
+        stay standalone (series=None) so existing tests are unaffected.
+        Shared by _book_from_path and the fingerprint walker so both
+        derive identical series fields."""
         dash_pos = stem.rfind(" - ")
         if dash_pos > 0:
             tail = stem[dash_pos + 3 :].strip()
             if tail.isdigit():
                 series_name = stem[:dash_pos].replace("_", " ").strip()
-                series_index = float(tail)
-                series_id = (
+                return (
+                    series_name,
                     "mock_ser_"
-                    + hashlib.sha1(series_name.encode()).hexdigest()[:12]
+                    + hashlib.sha1(series_name.encode()).hexdigest()[:12],
+                    float(tail),
                 )
+        return None, None, None
+
+    def _book_from_path(self, entry: dict[str, Any]) -> BookMeta:
+        book_id = self._book_id(entry["abs"])
+        ext = entry["ext"]
+        stem = os.path.splitext(entry["name"])[0]
+        title = stem.replace("_", " ").strip() or entry["name"]
+        series_name, series_id, series_index = self._series_from_stem(stem)
 
         return BookMeta(
             id=book_id,
@@ -587,6 +603,107 @@ class MockProvider(Provider):
                 chunk = []
         if chunk:
             yield chunk
+
+    # --- fingerprint walk --------------------------------------------------
+
+    def walk_fingerprints(self) -> Iterator[tuple[str, str, str]]:
+        """Yield (id, fp, added_at) for every live book in catalogue
+        order (dir books, then corpus, then synthetic padding) without
+        materialising BookMeta objects.  Corpus records come from the
+        compact fingerprint index (one streaming build, then plain list
+        walks); synthetic books are pure arithmetic; dir books
+        re-derive exactly the fields _book_from_path would.  The
+        ledger's refresh uses this to diff a steady state against its
+        stored fingerprints without parsing the corpus — the same
+        output shape and values as walk_books' metas, so a provider
+        that implements it can skip BookMeta construction entirely."""
+        for entry in self._scan():
+            yield self._dir_fp(entry)
+        if self.corpus:
+            # Catalogue = dir books + the first `count` corpus records
+            # + synthetic padding (mirrors _all).
+            limit = min(self.synthetic_count, len(self.corpus))
+            yield from self._corpus_fps(limit)
+            for i in range(limit, self.synthetic_count):
+                yield self._syn_fp(i)
+        else:
+            for i in range(self.synthetic_count):
+                yield self._syn_fp(i)
+
+    def _corpus_fps(self, limit: int) -> Iterator[tuple[str, str, str]]:
+        """(id, fp, added_at) for the first ``limit`` corpus records in
+        file order, from the fingerprint index (built if stale).  If
+        the corpus file cannot be read, falls back to a streaming pass
+        with the same derivation and output shape."""
+        index = self.corpus.fps()
+        if index is not None:
+            ids, fps, added_ats = index
+            for i in range(limit):
+                yield ids[i], fps[i], added_ats[i]
+            return
+        i = 0
+        for rec in self.corpus:
+            if i >= limit:
+                break
+            yield _corpus_fp(i, rec)
+            i += 1
+
+    def _dir_fp(self, entry: dict[str, Any]) -> tuple[str, str, str]:
+        """(id, fp, added_at) for a books-dir entry — derives exactly
+        the fields _book_from_path derives (title, authors, series via
+        the dash convention, format, file_name, size, added_at)."""
+        book_id = self._book_id(entry["abs"])
+        stem = os.path.splitext(entry["name"])[0]
+        title = stem.replace("_", " ").strip() or entry["name"]
+        series_name, series_id, series_index = self._series_from_stem(stem)
+        ts = _iso(entry["mtime"])
+        return (
+            book_id,
+            fingerprint_blob(
+                title,
+                ["pbemu mock library"],
+                series_name,
+                series_id,
+                series_index,
+                entry["ext"],
+                entry["name"],
+                entry["size"],
+                ts,
+            ),
+            ts,
+        )
+
+    def _syn_fp(self, i: int) -> tuple[str, str, str]:
+        """(id, fp, added_at) for synthetic book #i — pure arithmetic,
+        deriving exactly the fields _synthetic derives."""
+        fmt = _SYN_FMTS[i % len(_SYN_FMTS)]
+        author = _SYN_AUTHORS[i % len(_SYN_AUTHORS)]
+        series_name: str | None = None
+        series_id: str | None = None
+        series_index: float | None = None
+        if i % self.synthetic_series_size != 0:
+            # Members 1..size-1 of each block join the block's series.
+            block = i // self.synthetic_series_size
+            name = f"{_SYN_SERIES[block % len(_SYN_SERIES)]} {block:04d}"
+            series_name = name
+            series_id = "syn_ser_" + hashlib.sha1(name.encode()).hexdigest()[:12]
+            series_index = float(i % self.synthetic_series_size)
+        ts = _iso(_SYN_EPOCH + i)
+        return (
+            self._syn_id(i),
+            fingerprint_blob(
+                f"Synthetic Book {i:07d}",
+                [author],
+                series_name,
+                series_id,
+                series_index,
+                fmt,
+                None,  # synthetic metas carry no file_name
+                10_000 + (i % 900_000),
+                ts,
+            ),
+            ts,
+        )
 
     def get_book(self, book_id: str) -> BookMeta | None:
         idx = self._syn_index(book_id)

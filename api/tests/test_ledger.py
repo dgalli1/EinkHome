@@ -21,7 +21,7 @@ sys.path.insert(0, REPO_ROOT)
 sys.path.insert(0, os.path.join(REPO_ROOT, "api"))
 
 from providers.base import BookMeta
-from storage.ledger import SyncLedger
+from storage.ledger import SyncLedger, fingerprint_blob
 
 
 def _meta(book_id, title="T", fmt="epub", size=10, series=None):
@@ -87,6 +87,59 @@ def test_steady_state_walk_touches_nothing(ledger):
     assert ledger.refresh(prov, max_age_s=0) is True
     assert ledger.cursor() == cursor_before
     assert ledger.count() == 2
+
+
+def test_fingerprint_walker_fast_path_skips_books_and_finds_changes(ledger):
+    """A provider exposing walk_fingerprints is diffed against the
+    ledger straight from its fingerprint index: steady-state refreshes
+    never call walk_books, and a changed record is still picked up via
+    a single walk_books pass."""
+
+    class FpFakeProvider(FakeProvider):
+        def __init__(self, metas):
+            super().__init__(metas)
+            self.walk_books_calls = 0
+
+        def walk_books(self, *, mode="all", chunk_size=500):
+            self.walk_books_calls += 1
+            return FakeProvider.walk_books(self, mode=mode, chunk_size=chunk_size)
+
+        def walk_fingerprints(self):
+            # Real providers derive fp without building metas; the fake
+            # delegates to the fingerprint_blob under test.
+            for meta in self.metas:
+                yield meta.id, fingerprint_blob(
+                    meta.title,
+                    meta.authors,
+                    meta.series,
+                    meta.series_id,
+                    meta.series_index,
+                    meta.file_format,
+                    meta.file_name,
+                    meta.file_size,
+                    meta.added_at,
+                ), meta.added_at
+
+    prov = FpFakeProvider([_meta("a"), _meta("b")])
+    assert ledger.refresh(prov, max_age_s=0) is True
+    assert ledger.count() == 2
+    assert prov.walk_books_calls == 1  # only the re-fetch pass for new rows
+
+    # Steady state: the fingerprint walk alone decides nothing changed —
+    # walk_books is never called and no revs are bumped.
+    assert ledger.refresh(prov, max_age_s=0) is True
+    assert prov.walk_books_calls == 1
+    assert ledger.cursor() == 2
+
+    # A changed record is re-fetched via walk_books and bumped; the
+    # untouched row is left alone.
+    cursor = ledger.cursor()
+    prov.metas = [_meta("a", title="New"), _meta("b")]
+    assert ledger.refresh(prov, max_age_s=0) is True
+    assert prov.walk_books_calls == 2
+    entries, _ = ledger.delta(cursor, 10)
+    assert [(e.book_id, e.title) for e in entries] == [("a", "New")]
+    assert ledger.cursor() == 3
 
 
 def test_rate_limit_skips_walk(ledger):
