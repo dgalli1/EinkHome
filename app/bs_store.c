@@ -49,7 +49,7 @@ static sqlite3_stmt *g_st_suggest_del;   /* DELETE FROM suggest */
 static sqlite3_stmt *g_st_suggest_ins;   /* INSERT OR IGNORE INTO suggest */
 static sqlite3_stmt *g_st_get_book;      /* SELECT ... FROM books WHERE id */
 static sqlite3_stmt *g_st_set_downloaded; /* UPDATE books SET downloaded ... */
-static sqlite3_stmt *g_st_next_ids;      /* rowid-keyset id scan */
+static sqlite3_stmt *g_st_next_dl_probes;      /* rowid-keyset id scan */
 
 /* Prepare `sql` into *slot once; returns the statement, or NULL when
  * the db is closed or the prepare failed (callers degrade exactly as
@@ -342,14 +342,14 @@ void store_close(void) {
   sqlite3_finalize(g_st_suggest_ins);
   sqlite3_finalize(g_st_get_book);
   sqlite3_finalize(g_st_set_downloaded);
-  sqlite3_finalize(g_st_next_ids);
+  sqlite3_finalize(g_st_next_dl_probes);
   g_st_upsert_lookup = NULL;
   g_st_upsert = NULL;
   g_st_suggest_del = NULL;
   g_st_suggest_ins = NULL;
   g_st_get_book = NULL;
   g_st_set_downloaded = NULL;
-  g_st_next_ids = NULL;
+  g_st_next_dl_probes = NULL;
   if (g_db != NULL) {
     sqlite3_close(g_db);
     g_db = NULL;
@@ -648,19 +648,23 @@ int store_next_undownloaded(char ids[][MAX_ID_LEN], int cap) {
   return n;
 }
 
-/* Slice of every book id in rowid order (downloaded or not), for the
- * startup flag refresh.  Rowid keyset pagination: the caller keeps the
- * last rowid seen (*after_rowid, 0 to start), so each page is one
- * b-tree scan of the rowid index with no OFFSET re-walk.  Results are
- * copied into ids[] before the statement is reused.  Returns the number
- * of ids written (< cap = done); *after_rowid advances to the last
- * rowid read and stays unchanged when no rows are returned. */
-int store_next_ids(char ids[][MAX_ID_LEN], int cap, long long *after_rowid) {
-  if (g_db == NULL || after_rowid == NULL)
+/* Paged scan over every book in rowid order (downloaded or not), for
+ * the startup flag refresh.  Rowid keyset pagination: the caller keeps
+ * the last rowid seen (*after_rowid, 0 to start), so each page is one
+ * b-tree scan of the rowid index with no OFFSET re-walk.  Returns only
+ * the probe fields — the boot scan must not pay a per-book SELECT (the
+ * old loop's store_get_book per id).  Results are copied into out[]
+ * before the statement is reused.  Returns the number of rows written
+ * (< cap = done); *after_rowid advances to the last rowid read and
+ * stays unchanged when no rows are returned. */
+int store_next_dl_probes(DownloadProbe *out, int cap,
+                         long long *after_rowid) {
+  if (g_db == NULL || after_rowid == NULL || out == NULL)
     return 0;
   sqlite3_stmt *st = st_prep_once(
-      &g_st_next_ids,
-      "SELECT rowid, id FROM books WHERE rowid > ?1 ORDER BY rowid LIMIT ?2");
+      &g_st_next_dl_probes,
+      "SELECT rowid, id, filename, local_path, downloaded, ext FROM books"
+      " WHERE rowid > ?1 ORDER BY rowid LIMIT ?2");
   if (st == NULL)
     return 0;
   sqlite3_reset(st);
@@ -669,8 +673,16 @@ int store_next_ids(char ids[][MAX_ID_LEN], int cap, long long *after_rowid) {
   sqlite3_bind_int(st, 2, cap);
   int n = 0;
   while (n < cap && sqlite3_step(st) == SQLITE_ROW) {
-    const char *id = (const char *)sqlite3_column_text(st, 1);
-    snprintf(ids[n], MAX_ID_LEN, "%s", id ? id : "");
+    DownloadProbe *p = &out[n];
+    snprintf(p->id, sizeof p->id, "%s",
+             (const char *)sqlite3_column_text(st, 1));
+    snprintf(p->filename, sizeof p->filename, "%s",
+             (const char *)sqlite3_column_text(st, 2));
+    snprintf(p->local_path, sizeof p->local_path, "%s",
+             (const char *)sqlite3_column_text(st, 3));
+    p->downloaded = sqlite3_column_int(st, 4);
+    snprintf(p->ext, sizeof p->ext, "%s",
+             (const char *)sqlite3_column_text(st, 5));
     *after_rowid = sqlite3_column_int64(st, 0);
     n++;
   }

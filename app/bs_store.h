@@ -49,7 +49,23 @@ int store_count_undownloaded(void);
 
 int store_next_undownloaded(char ids[][MAX_ID_LEN], int cap);
 
-int store_next_ids(char ids[][MAX_ID_LEN], int cap, long long *after_rowid);
+/* One row of the boot download-flag probe: the four fields the scan
+ * needs, fetched in one paged query (see store_next_dl_probes). */
+typedef struct {
+  char id[MAX_ID_LEN];
+  char filename[MAX_PATH_LEN];
+  char local_path[MAX_PATH_LEN];
+  char ext[8];
+  int  downloaded;
+} DownloadProbe;
+
+/* Paged scan over every book in rowid order (keyset on *after_rowid,
+ * 0 to start), filling exactly the probe fields — the boot flag
+ * refresh must not pay a per-book SELECT.  Returns the number of rows
+ * written (< cap = done); *after_rowid advances to the last rowid
+ * read. */
+int store_next_dl_probes(DownloadProbe *out, int cap,
+                         long long *after_rowid);
 
 void store_delete_book_file(const char *id);
 

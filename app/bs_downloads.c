@@ -107,11 +107,26 @@ refresh_downloaded(Book *b)
         snprintf(b->local_path, sizeof b->local_path, "%s", path);
 }
 
+/* qsort/bsearch comparator for the downloads-dir listing. */
+static int
+dl_name_cmp(const void *a, const void *b)
+{
+    return strcmp(*(const char *const *)a, *(const char *const *)b);
+}
+
 /* Re-probe every book's on-device file and resync its downloaded flag
  * (bounded slices, one transaction).  Files can vanish or appear while
  * the app is not running (tests clear the downloads dir, the reader or
  * the user deletes files), so the flag must be reconciled at startup
- * before anything counts "undownloaded" books. */
+ * before anything counts "undownloaded" books.
+ *
+ * The probe answers "does <downloads dir>/<sanitized filename> exist"
+ * (book_local_path is a flat name in g_downloads_dir), so instead of
+ * one access() per book — ~1ms of flash each, a 2-3 minute boot stall
+ * at 100k books — the dir is listed ONCE and membership is answered
+ * from the sorted listing.  The per-book stored-path fallback (a moved
+ * downloads folder) still access()es, but only for books whose file is
+ * not in the current dir. */
 void
 refresh_downloaded_flags(void)
 {
@@ -119,27 +134,61 @@ refresh_downloaded_flags(void)
      * (dl_fetch renames only on success); sweep them at startup. */
     sweep_stale_parts();
 
-    char ids[64][MAX_ID_LEN];
+    char **names = NULL;
+    int    n_names = 0, cap_names = 0;
+    DIR *d = opendir(g_downloads_dir);
+    if (d != NULL) {
+        struct dirent *e;
+        while ((e = readdir(d)) != NULL) {
+            if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0)
+                continue;
+            if (n_names == cap_names) {
+                int nc = cap_names ? cap_names * 2 : 256;
+                char **nn = realloc(names, sizeof *nn * (size_t)nc);
+                if (nn == NULL)
+                    break; /* keep what we have; membership still exact */
+                names = nn;
+                cap_names = nc;
+            }
+            char *dup = strdup(e->d_name);
+            if (dup == NULL)
+                break;
+            names[n_names++] = dup;
+        }
+        closedir(d);
+        if (n_names > 1)
+            qsort(names, (size_t)n_names, sizeof *names, dl_name_cmp);
+    }
+
+    DownloadProbe probes[64];
     int  got, changed = 0;
     long long rowid = 0;
     store_begin();
-    while ((got = store_next_ids(ids, 64, &rowid)) > 0) {
+    while ((got = store_next_dl_probes(probes, 64, &rowid)) > 0) {
         for (int i = 0; i < got; i++) {
+            DownloadProbe *p = &probes[i];
             Book b;
-            if (!store_get_book(ids[i], &b))
-                continue;
+            memset(&b, 0, sizeof b);
+            snprintf(b.id, sizeof b.id, "%s", p->id);
+            snprintf(b.filename, sizeof b.filename, "%s", p->filename);
+            snprintf(b.ext, sizeof b.ext, "%s", p->ext);
             char path[MAX_PATH_LEN];
             book_local_path(&b, path, sizeof path);
-            int dl = (access(path, F_OK) == 0);
-            if (!dl && b.local_path[0] != '\0' && access(b.local_path, F_OK) == 0) {
+            const char *base = strrchr(path, '/');
+            base = base != NULL ? base + 1 : path;
+            int dl = names != NULL &&
+                     bsearch(base, names, (size_t)n_names, sizeof *names,
+                             dl_name_cmp) != NULL;
+            if (!dl && p->local_path[0] != '\0' &&
+                access(p->local_path, F_OK) == 0) {
                 /* File still at its stored location although the
                  * downloads folder has moved; keep it downloaded and
                  * keep the stored path (see book_existing_path). */
                 dl = 1;
-                snprintf(path, sizeof path, "%s", b.local_path);
+                snprintf(path, sizeof path, "%s", p->local_path);
             }
-            if (dl != b.downloaded) {
-                store_set_downloaded(ids[i], dl, dl ? path : "");
+            if (dl != p->downloaded) {
+                store_set_downloaded(p->id, dl, dl ? path : "");
                 changed++;
             }
         }
@@ -147,6 +196,9 @@ refresh_downloaded_flags(void)
             break;
     }
     store_commit();
+    for (int i = 0; i < n_names; i++)
+        free(names[i]);
+    free(names);
     LOG("[bookshelf] refresh_downloaded_flags: changed=%d\n", changed);
 }
 
