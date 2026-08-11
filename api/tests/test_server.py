@@ -21,13 +21,14 @@ sys.path.insert(0, os.path.join(REPO_ROOT, "api"))
 from api.api.server import PbemuAPIServer, build_default_app  # noqa: E402
 
 
-def _make_app(tmp_path, token="test-token"):
+def _make_app(tmp_path, token="test-token", suggestions=True):
     (tmp_path / "Test.epub").write_bytes(b"abc")
     cfg = {
         "host": "127.0.0.1",
         "port": 0,
         "api_token": token,
         "provider": "mock",
+        "suggestions": suggestions,
         "providers": {
             "mock": {
                 "kind": "mock",
@@ -242,6 +243,29 @@ def test_sync_delta_carries_suggest_terms(server, tmp_path):
     assert all(t == t.casefold() for t in suggest)
     assert len(suggest) <= 96
     assert all(len(t) <= 79 for t in suggest)
+
+
+def test_sync_delta_suggestions_disabled_flag(tmp_path):
+    """With the top-level ``suggestions`` config flag off, delta
+    entries carry an empty term list — the device's suggest index
+    stays empty and the search UI falls back to history rows.
+    ``searchText`` is kept: it also serves folded manual search."""
+    hdr = {"Authorization": "Bearer test-token"}
+    (tmp_path / "Harry Potter.epub").write_bytes(b"abc")
+    app = _make_app(tmp_path, suggestions=False)
+    srv = _TestServer(app)
+    try:
+        status, body = _http_post(
+            srv.url("/api/v1/sync/delta"), {"cursor": 0, "limit": 500}, headers=hdr
+        )
+        assert status == 200
+        data = json.loads(body)
+        hp = [b for b in data["added"] if b["title"] == "Harry Potter"]
+        assert hp, "Harry Potter book missing from delta"
+        assert hp[0]["suggest"] == []
+        assert "potter" in hp[0]["searchText"]  # folded blob kept
+    finally:
+        srv.stop()
 
 
 def test_open_with_returns_app(server):

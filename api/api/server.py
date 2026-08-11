@@ -740,11 +740,20 @@ class PbemuAPIServer(http.server.BaseHTTPRequestHandler):
                     # Search-completion terms for the device-local
                     # index; computed at walk time from the same fields
                     # the fingerprint hashes, so any term-affecting
-                    # edit already bumped the rev.
+                    # edit already bumped the rev.  Gated behind the
+                    # top-level ``suggestions`` config flag: when
+                    # disabled the device gets an empty term list
+                    # (stored values from earlier runs included) and
+                    # its local suggest index stays empty — the search
+                    # UI falls back to history rows.
                     "suggest": (
-                        json.loads(e.suggest)
-                        if e.suggest
-                        else suggest_terms(e.title, authors, e.series)
+                        []
+                        if not self.app.suggestions_enabled
+                        else (
+                            json.loads(e.suggest)
+                            if e.suggest
+                            else suggest_terms(e.title, authors, e.series)
+                        )
                     ),
                 }
             )
@@ -854,6 +863,7 @@ class _AppState:
     open_with: dict[str, Any]
     ledger: SyncLedger | None
     ledger_max_age: float
+    suggestions_enabled: bool = True
     inflight: dict[str, threading.Event] = field(default_factory=dict)
     """Per-book-id cover-processing events: serialises concurrent cold
     cover fetches so only one thread downloads/decodes per book."""
@@ -911,6 +921,7 @@ def build_default_app(
         ledger: SyncLedger | None = SyncLedger(
             ledger_path,
             ack_empty_catalogue=bool(ledger_cfg.get("ack_empty_catalogue", False)),
+            suggestions_enabled=bool(cfg.get("suggestions", True)),
         )
     except sqlite3.Error as exc:
         sys.stderr.write(f"ledger: cannot open {ledger_path}: {exc}\n")
@@ -922,6 +933,7 @@ def build_default_app(
         open_with=cfg.get("open_with") or {},
         ledger=ledger,
         ledger_max_age=float(ledger_cfg.get("refresh_max_age_s", 30.0)),
+        suggestions_enabled=bool(cfg.get("suggestions", True)),
     )
     return state
 

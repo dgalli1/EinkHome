@@ -156,7 +156,14 @@ def fingerprint(meta: BookMeta) -> str:
 class SyncLedger:
     """SQLite-backed revision change log for one provider instance."""
 
-    def __init__(self, path: str, *, ack_empty_catalogue: bool = False) -> None:
+    def __init__(
+        self,
+        path: str,
+        *,
+        ack_empty_catalogue: bool = False,
+        suggestions_enabled: bool = True,
+    ) -> None:
+        self._suggestions_enabled = suggestions_enabled
         self.con = sqlite3.connect(path, check_same_thread=False)
         self.con.execute("PRAGMA journal_mode=WAL")
         # Cross-process safety: two processes touching the same DB file
@@ -342,21 +349,34 @@ class SyncLedger:
                     updates = []
                     for bid, title, authors, series in rows:
                         names = json.loads(authors) if authors else []
-                        updates.append(
-                            (
-                                _search_text(title or "", names, series),
-                                json.dumps(
-                                    _suggest_terms(title or "", names, series),
-                                    separators=(",", ":"),
-                                    ensure_ascii=False,
-                                ),
-                                bid,
+                        if self._suggestions_enabled:
+                            updates.append(
+                                (
+                                    _search_text(title or "", names, series),
+                                    json.dumps(
+                                        _suggest_terms(
+                                            title or "", names, series
+                                        ),
+                                        separators=(",", ":"),
+                                        ensure_ascii=False,
+                                    ),
+                                    bid,
+                                )
                             )
+                        else:
+                            updates.append(
+                                (_search_text(title or "", names, series), bid)
+                            )
+                    if self._suggestions_enabled:
+                        self.con.executemany(
+                            "UPDATE books SET search_text=?, suggest=? WHERE id=?",
+                            updates,
                         )
-                    self.con.executemany(
-                        "UPDATE books SET search_text=?, suggest=? WHERE id=?",
-                        updates,
-                    )
+                    else:
+                        self.con.executemany(
+                            "UPDATE books SET search_text=? WHERE id=?",
+                            updates,
+                        )
                     self.con.commit()
                     last_id = rows[-1][0]
         except Exception as exc:  # noqa: BLE001 — backfill must not crash startup
@@ -530,6 +550,14 @@ class SyncLedger:
         next_rev = self._state_get("next_rev")
         for meta in metas:
             names = list(meta.authors or [])
+            if self._suggestions_enabled:
+                suggest_json = json.dumps(
+                    _suggest_terms(meta.title or "", names, meta.series),
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                )
+            else:
+                suggest_json = None
             self.con.execute(
                 "UPDATE books SET rev=?, added_at=?, title=?, authors=?, "
                 "series=?, series_id=?, series_idx=?, format=?, size=?, fp=?, "
@@ -547,11 +575,7 @@ class SyncLedger:
                     fingerprint(meta),
                     meta.file_name,
                     _search_text(meta.title or "", names, meta.series),
-                    json.dumps(
-                        _suggest_terms(meta.title or "", names, meta.series),
-                        separators=(",", ":"),
-                        ensure_ascii=False,
-                    ),
+                    suggest_json,
                     meta.id,
                 ),
             )
@@ -570,9 +594,16 @@ class SyncLedger:
             next_rev += 1
         self._state_set("next_rev", next_rev)
 
-    @staticmethod
-    def _meta_row(meta: BookMeta, rev: int) -> tuple[Any, ...]:
+    def _meta_row(self, meta: BookMeta, rev: int) -> tuple[Any, ...]:
         names = list(meta.authors or [])
+        if self._suggestions_enabled:
+            suggest_json = json.dumps(
+                _suggest_terms(meta.title or "", names, meta.series),
+                separators=(",", ":"),
+                ensure_ascii=False,
+            )
+        else:
+            suggest_json = None
         return (
             meta.id,
             rev,
@@ -587,11 +618,7 @@ class SyncLedger:
             fingerprint(meta),
             meta.file_name,
             _search_text(meta.title or "", names, meta.series),
-            json.dumps(
-                _suggest_terms(meta.title or "", names, meta.series),
-                separators=(",", ":"),
-                ensure_ascii=False,
-            ),
+            suggest_json,
         )
 
     def _state_get(self, key: str) -> int:

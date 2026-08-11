@@ -13,12 +13,26 @@
         }
     },
     "open_with": {
-        "epub":  ["eink-reader", "bookshelf"],
-        "pdf":   ["eink-reader", "pdfviewer"],
-        "fb2":   ["eink-reader"],
-        "txt":   ["eink-reader"],
-        "djvu":  ["djvureader"],
-        "default": ["eink-reader"]
+        "epub": [
+            "eink-reader",
+            "bookshelf"
+        ],
+        "pdf": [
+            "eink-reader",
+            "pdfviewer"
+        ],
+        "fb2": [
+            "eink-reader"
+        ],
+        "txt": [
+            "eink-reader"
+        ],
+        "djvu": [
+            "djvureader"
+        ],
+        "default": [
+            "eink-reader"
+        ]
     },
     "cover_cache": {
         "dir": "/tmp/pbemu-covers-100k",
@@ -26,5 +40,6 @@
     },
     "ledger": {
         "refresh_max_age_s": 30.0
-    }
+    },
+    "suggestions": false
 }
