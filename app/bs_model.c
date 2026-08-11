@@ -518,7 +518,7 @@ sync_apply_round(char *resp, long long cursor, long long *next_out,
                      * (a later round would otherwise apply its rows on
                      * top of a partial batch), and leave the cursor
                      * unchanged so the next sync retries from this
-                     * same delta.  *next_out/*more_out were already
+                     * same delta.  *next_out / *more_out were already
                      * set to cursor/0 at the top. */
                     LOG("[bookshelf] sync: upsert failed id=%s; "
                         "aborting round (cursor %lld kept)\n",

@@ -335,7 +335,7 @@ int store_upsert_book(const Book *b) {
    * the caller's path so fresh rows (and rows whose downloaded flag is
    * 0) keep the exact pre-fix semantics. */
   char lp[MAX_PATH_LEN];
-  snprintf(lp, sizeof lp, "%s", b->local_path ? b->local_path : "");
+  snprintf(lp, sizeof lp, "%s", b->local_path);
   sqlite3_stmt *q = NULL;
   if (sqlite3_prepare_v2(g_db,
                          "SELECT downloaded, local_path FROM books WHERE id=?1",

@@ -442,7 +442,7 @@ typedef struct {
 typedef struct {
   int kind; /* 0 = header, 1 = app */
   char text[48];
-  char path[160];
+  char path[MAX_PATH_LEN]; /* full app path; MAX_PATH_LEN so long .app names survive */
   char icon[64];
   char params[LAUNCHER_MAX_PARAMS][LAUNCHER_PARAM_LEN];
   int nparams;
