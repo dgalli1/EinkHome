@@ -17,7 +17,9 @@ the delta protocol at 100k entries without materialising a library.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
+import sys
 import time
 from collections.abc import Iterator
 from contextlib import suppress
@@ -82,6 +84,31 @@ class MockProvider(Provider):
         except (TypeError, ValueError):
             self.synthetic_series_size = 5
         self.synthetic_series_size = max(2, self.synthetic_series_size)
+        # Realistic corpus: a JSONL file (see scripts/build_ol_corpus.py)
+        # of {id, title, authors[], series?, added_at?} records served in
+        # place of the synthetic layer.  Selected via the `corpus` config
+        # key or the PBEMU_MOCK_CORPUS env var; when the corpus is
+        # shorter than `count`, the remainder is padded with synthetic
+        # books so the advertised count always holds.
+        corpus_path = cfg.get("corpus") or os.environ.get("PBEMU_MOCK_CORPUS") or ""
+        self.corpus: list[dict[str, Any]] = []
+        if corpus_path:
+            try:
+                with open(corpus_path, encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            self.corpus.append(json.loads(line))
+                        except ValueError:
+                            continue
+            except OSError as exc:
+                sys.stderr.write(
+                    f"mock: cannot load corpus {corpus_path}: {exc}\n"
+                )
+        # id -> corpus index, built on first use.
+        self._corpus_index: dict[str, int] | None = None
         # Stable in-memory book id cache
         self._id_cache: dict[str, str] = {}
         self._rev_cache: dict[str, dict[str, Any]] = {}
@@ -143,6 +170,44 @@ class MockProvider(Provider):
             return None
         return i if 0 <= i < self.synthetic_count else None
 
+    def _corpus_id_index(self) -> dict[str, int]:
+        if self._corpus_index is None:
+            self._corpus_index = {
+                rec["id"]: i for i, rec in enumerate(self.corpus)
+            }
+        return self._corpus_index
+
+    def _corpus(self, i: int) -> BookMeta:
+        """Metadata for corpus entry #i (real Open Library data)."""
+        rec = self.corpus[i]
+        book_id = rec["id"]
+        fmt = _SYN_FMTS[i % len(_SYN_FMTS)]
+        series_name: str | None = rec.get("series") or None
+        series_id: str | None = None
+        series_index: float | None = None
+        if series_name:
+            series_id = "ol_ser_" + hashlib.sha1(series_name.encode()).hexdigest()[:12]
+        ts = rec.get("added_at") or _iso(_SYN_EPOCH + i)
+        return BookMeta(
+            id=book_id,
+            title=rec.get("title") or f"Untitled {i}",
+            authors=list(rec.get("authors") or []),
+            series=series_name,
+            series_id=series_id,
+            series_index=series_index,
+            summary=f"Open Library work {rec.get('ol_key') or book_id}",
+            language=None,
+            file_format=fmt,
+            file_size=10_000 + (i % 900_000),
+            page_count=0,
+            cover_url=f"/api/v1/books/{book_id}/cover",
+            download_url=f"/api/v1/books/{book_id}/file",
+            added_at=ts,
+            updated_at=ts,
+            remote_only=True,
+            extra={"index": i, "ol_key": rec.get("ol_key")},
+        )
+
     def _synthetic(self, i: int) -> BookMeta:
         """Metadata for synthetic book #i — pure arithmetic, O(1)."""
         book_id = self._syn_id(i)
@@ -197,6 +262,30 @@ class MockProvider(Provider):
             q = search.lower()
         else:
             q = None
+        if self.corpus:
+            used = 0
+            for i in range(min(self.synthetic_count, len(self.corpus))):
+                meta = self._corpus(i)
+                if series_id and meta.series_id != series_id:
+                    continue
+                if q is not None and q not in meta.title.lower():
+                    continue
+                if since and meta.updated_at and meta.updated_at <= since:
+                    continue
+                yield meta
+                used = i + 1
+            # Pad a short corpus with synthetic books so the advertised
+            # count always holds.
+            for i in range(used, self.synthetic_count):
+                meta = self._synthetic(i)
+                if series_id and meta.series_id != series_id:
+                    continue
+                if q is not None and q not in meta.title.lower():
+                    continue
+                if since and meta.updated_at and meta.updated_at <= since:
+                    continue
+                yield meta
+            return
         for i in range(self.synthetic_count):
             meta = self._synthetic(i)
             if series_id and meta.series_id != series_id:
@@ -255,9 +344,14 @@ class MockProvider(Provider):
 
     def health(self) -> dict[str, Any]:
         total = len(self._scan()) + self.synthetic_count
+        layer = (
+            f"{min(self.synthetic_count, len(self.corpus))} corpus"
+            if self.corpus
+            else f"{self.synthetic_count} synthetic"
+        )
         return {
             "ok": True,
-            "detail": f"mock: {total} books ({self.synthetic_count} synthetic)",
+            "detail": f"mock: {total} books ({layer})",
         }
 
     def list_libraries(self) -> list[LibraryInfo]:
@@ -314,6 +408,10 @@ class MockProvider(Provider):
         idx = self._syn_index(book_id)
         if idx is not None:
             return self._synthetic(idx)
+        if self.corpus:
+            ci = self._corpus_id_index().get(book_id)
+            if ci is not None:
+                return self._corpus(ci)
         for entry in self._scan():
             if self._book_id(entry["abs"]) == book_id:
                 return self._book_from_path(entry)
@@ -328,6 +426,11 @@ class MockProvider(Provider):
         if idx is not None:
             meta = self._synthetic(idx)
             return f"{meta.title}.{meta.file_format}", _synthetic_bytes(idx)
+        if self.corpus:
+            ci = self._corpus_id_index().get(book_id)
+            if ci is not None:
+                meta = self._corpus(ci)
+                return f"{meta.title}.{meta.file_format}", _synthetic_bytes(ci)
         for entry in self._scan():
             if self._book_id(entry["abs"]) == book_id:
                 return entry["name"], _file_iter(entry["abs"])

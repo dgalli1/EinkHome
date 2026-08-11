@@ -62,6 +62,7 @@ from typing import Any  # noqa: E402
 from providers.base import BookMeta  # noqa: E402
 from storage.cover_cache import CoverCache  # noqa: E402
 from storage.ledger import SyncLedger  # noqa: E402
+from storage.suggest import search_text, suggest_terms  # noqa: E402
 
 DEFAULT_CONFIG_PATH = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
@@ -600,11 +601,12 @@ class PbemuAPIServer(http.server.BaseHTTPRequestHandler):
             if e.added_at is None:
                 removed.append(e.book_id)
                 continue
+            authors = json.loads(e.authors)
             added.append(
                 {
                     "id": e.book_id,
                     "title": e.title,
-                    "authors": json.loads(e.authors),
+                    "authors": authors,
                     "series": e.series,
                     "seriesId": e.series_id,
                     "seriesIdx": e.series_idx,
@@ -614,6 +616,16 @@ class PbemuAPIServer(http.server.BaseHTTPRequestHandler):
                     "cover": f"/api/v1/books/{e.book_id}/cover",
                     "url": f"/api/v1/books/{e.book_id}/file",
                     "addedAt": e.added_at,
+                    # Folded search target: suggestions are folded
+                    # server-side, so the device must match LIKE
+                    # against folded text too (a "songgong" suggestion
+                    # from "sŏnggong" never matches the raw title).
+                    "searchText": search_text(e.title, authors, e.series),
+                    # Search-completion terms for the device-local
+                    # index; computed at serve time from the same
+                    # fields the fingerprint hashes, so any
+                    # term-affecting edit already bumped the rev.
+                    "suggest": suggest_terms(e.title, authors, e.series),
                 }
             )
         next_cursor = entries[-1].rev if entries else cursor

@@ -190,6 +190,31 @@ def test_sync_delta_cursor_protocol(server, tmp_path):
     assert data["more"] is False
 
 
+def test_sync_delta_carries_suggest_terms(server, tmp_path):
+    """Each delta `added` entry carries the book's suggestion terms,
+    including word-aligned suffix phrases from the title."""
+    hdr = {"Authorization": "Bearer test-token"}
+    (tmp_path / "Harry Potter.epub").write_bytes(b"abc")
+    status, body = _http_post(
+        server.url("/api/v1/sync/delta"), {"cursor": 0, "limit": 500}, headers=hdr
+    )
+    assert status == 200
+    data = json.loads(body)
+    hp = [b for b in data["added"] if b["title"] == "Harry Potter"]
+    assert hp, "Harry Potter book missing from delta"
+    suggest = hp[0]["suggest"]
+    assert "potter" in suggest
+    assert "harry potter" in suggest  # word-aligned suffix phrase
+    assert "harry potter" in suggest and suggest.index("potter") < suggest.index(
+        "harry potter"
+    )
+    # Every term is folded, deduped and bounded.
+    assert suggest == sorted(set(suggest), key=suggest.index)
+    assert all(t == t.casefold() for t in suggest)
+    assert len(suggest) <= 96
+    assert all(len(t) <= 79 for t in suggest)
+
+
 def test_open_with_returns_app(server):
     books_resp = _json_or_default(
         _http_get(
