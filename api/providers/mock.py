@@ -51,6 +51,61 @@ _SYN_FMTS = ("epub", "epub", "epub", "pdf", "fb2")
 _SYN_EPOCH = 1_700_000_000.0
 
 
+class _Corpus:
+    """Lazy reader over a JSONL corpus: line offsets in RAM, records
+    parsed on demand.  An empty path yields an empty corpus (graceful
+    when the configured file is missing on a fresh clone)."""
+
+    __slots__ = ("_path", "_offsets", "_len")
+
+    def __init__(self, path: str) -> None:
+        self._path = path
+        offs: list[int] = []
+        if path:
+            try:
+                with open(path, encoding="utf-8") as f:
+                    while True:
+                        offs.append(f.tell())
+                        if not f.readline():
+                            offs.pop()
+                            break
+            except OSError as exc:
+                sys.stderr.write(f"mock: cannot load corpus {path}: {exc}\n")
+                offs = []
+        self._offsets = offs
+        self._len = len(offs)
+
+    def __len__(self) -> int:
+        return self._len
+
+    def __bool__(self) -> bool:
+        return self._len > 0
+
+    def __iter__(self) -> Iterator[dict[str, Any]]:
+        if not self._path:
+            return
+        with open(self._path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    yield json.loads(line)
+                except ValueError:
+                    continue
+
+    def __getitem__(self, i: int) -> dict[str, Any]:
+        """Random access: open + seek per read so concurrent request
+        threads never share a seek cursor."""
+        with open(self._path, encoding="utf-8") as f:
+            f.seek(self._offsets[i])
+            line = f.readline()
+        try:
+            return json.loads(line)
+        except ValueError:
+            return {}
+
+
 class MockProvider(Provider):
     name = "mock"
 
@@ -91,28 +146,18 @@ class MockProvider(Provider):
         # key or the PBEMU_MOCK_CORPUS env var; when the corpus is
         # shorter than `count`, the remainder is padded with synthetic
         # books so the advertised count always holds.
-        corpus_path = cfg.get("corpus") or os.environ.get("PBEMU_MOCK_CORPUS") or ""
-        self.corpus: list[dict[str, Any]] = []
-        if corpus_path:
-            try:
-                with open(corpus_path, encoding="utf-8") as f:
-                    for line in f:
-                        line = line.strip()
-                        if not line:
-                            continue
-                        try:
-                            self.corpus.append(json.loads(line))
-                        except ValueError:
-                            continue
-            except OSError as exc:
-                sys.stderr.write(
-                    f"mock: cannot load corpus {corpus_path}: {exc}\n"
-                )
-        # id -> corpus index, built on first use.
+        corpus_path = os.environ.get("PBEMU_MOCK_CORPUS") or cfg.get("corpus") or ""
+        # Lazy corpus: 100k Open Library records as Python dicts cost
+        # ~100 MB resident (measured) — far over the server's memory
+        # budget.  _Corpus keeps only the per-line byte offsets (~1 MB)
+        # and parses a record on demand; sequential walks stream the
+        # file through one handle, random access seeks per read.
+        self.corpus = _Corpus(corpus_path)
+        # id -> corpus index, built on first random-access lookup
+        # (get_book / open_file).  The delta walk never needs it.
         self._corpus_index: dict[str, int] | None = None
         # Stable in-memory book id cache
         self._id_cache: dict[str, str] = {}
-        self._rev_cache: dict[str, dict[str, Any]] = {}
 
     # --- helpers -----------------------------------------------------------
 
@@ -180,7 +225,9 @@ class MockProvider(Provider):
 
     def _corpus(self, i: int) -> BookMeta:
         """Metadata for corpus entry #i (real Open Library data)."""
-        rec = self.corpus[i]
+        return self._corpus_meta(i, self.corpus[i])
+
+    def _corpus_meta(self, i: int, rec: dict[str, Any]) -> BookMeta:
         book_id = rec["id"]
         fmt = _SYN_FMTS[i % len(_SYN_FMTS)]
         series_name: str | None = rec.get("series") or None
@@ -265,8 +312,11 @@ class MockProvider(Provider):
             q = None
         if self.corpus:
             used = 0
-            for i in range(min(self.synthetic_count, len(self.corpus))):
-                meta = self._corpus(i)
+            limit = min(self.synthetic_count, len(self.corpus))
+            for i, rec in enumerate(self.corpus):
+                if i >= limit:
+                    break
+                meta = self._corpus_meta(i, rec)
                 if series_id and meta.series_id != series_id:
                     continue
                 if q is not None and q not in meta.title.lower():

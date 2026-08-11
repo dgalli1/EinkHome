@@ -53,6 +53,7 @@ import argparse  # noqa: E402
 import hmac  # noqa: E402
 import http.server  # noqa: E402
 import json  # noqa: E402
+import itertools  # noqa: E402
 import re  # noqa: E402
 import socketserver  # noqa: E402
 import sqlite3  # noqa: E402
@@ -992,12 +993,34 @@ def _warm_covers(app: Any) -> None:
     provider's full catalogue (no cap) chunk by chunk; each book is
     handled independently so one undecodable cover can't stall the rest,
     and already-processed books are skipped (idempotent re-runs).
+    Providers that only serve the 1x1 placeholder (mock) are detected
+    by probing the first chunk and skipped entirely: warming 100k
+    placeholder covers would waste CPU and pull Pillow into the
+    process for nothing.
     """
     cache = app.cover_cache
     provider = app.provider
     done = 0
     try:
         chunks = provider.walk_books(mode="all", chunk_size=500)
+        first = next(chunks, None)
+        if first is None:
+            sys.stderr.write("cover warm-up: empty catalogue, nothing to do\n")
+            return
+        probes = [meta.id for meta in first[:5]]
+        placeholder_hits = 0
+        for pid in probes:
+            try:
+                if provider.get_cover(pid) == PLACEHOLDER_PNG:
+                    placeholder_hits += 1
+            except Exception:  # noqa: BLE001 — probe failure = not placeholder
+                pass
+        if probes and placeholder_hits == len(probes):
+            sys.stderr.write(
+                "cover warm-up: provider serves placeholder covers only; skipping\n"
+            )
+            return
+        chunks = itertools.chain([first], chunks)
         for chunk in chunks:
             for meta in chunk:
                 try:

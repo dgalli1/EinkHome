@@ -61,6 +61,10 @@ def _scale_api_env() -> dict[str, str]:
     env["PYTHONPATH"] = f"{root}{os.pathsep}{api_dir}"
     env["PBEMU_MOCK_COUNT"] = str(SCALE_COUNT)
     env["PBEMU_MOCK_SERIES_SIZE"] = str(SERIES_SIZE)
+    # Absolute path: the server runs with cwd=PBEMU_ROOT, where the
+    # config's relative ".cover-cache/..." would not resolve.  Env wins
+    # over the config corpus key.
+    env["PBEMU_MOCK_CORPUS"] = str(EINKHOME_ROOT / ".cover-cache" / "mock_books.jsonl")
     return env
 
 
@@ -204,7 +208,7 @@ def scale_env():
     )
     bs = BookshelfSession(Session(emulator), geom, FIRMWARE)
 
-    yield bs, emulator
+    yield bs, emulator, api
 
     # Restore the dev cfgs first (the running guest holds the stale
     # scale-port URL in memory; stopping the emulator before restoring
@@ -226,10 +230,22 @@ def _last_view(log: str) -> int:
     return int(m.group(1)) if m else 0
 
 
+def _proc_rss_kb(pid: int) -> int:
+    """VmRSS of a host process (kB), -1 when it is gone."""
+    try:
+        with open(f"/proc/{pid}/status") as f:
+            for line in f:
+                if line.startswith("VmRSS"):
+                    return int(line.split()[1])
+    except (OSError, ValueError):
+        pass
+    return -1
+
+
 def test_scale_100k_sync_paging_memory(scale_env):
     """Full 100k sync completes, the pager reaches the last of several
     thousand pages, and guest RAM stays bounded."""
-    bs, _ = scale_env
+    bs, _, api = scale_env
 
     # The sync ingests 100k rows in 500-row rounds; wait for the final
     # view_rebuild to report the collapsed tile count.
@@ -254,5 +270,15 @@ def test_scale_100k_sync_paging_memory(scale_env):
     print(f"\n[bookshelf-scale] guest VmRSS with 100k books: {rss} kB")
     assert rss > 0, "guest bookshelf process not found"
     assert rss < 64 * 1024, f"guest VmRSS {rss} kB exceeds 64MB with 100k books"
+
+    # The API server must stay lean even while holding the 100k
+    # catalogue (lazy corpus + bounded ledger): 100MB is the pipeline
+    # budget so the suite can run on a small runner.
+    srv_rss = _proc_rss_kb(api.pid)
+    print(f"[bookshelf-scale] API server VmRSS with 100k books: {srv_rss} kB")
+    assert srv_rss > 0, "scale API server process not found"
+    assert srv_rss < 100 * 1024, (
+        f"API server VmRSS {srv_rss} kB exceeds the 100MB budget at 100k books"
+    )
 
     bs.assert_no_crash()
