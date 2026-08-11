@@ -84,6 +84,10 @@ int parse_book_obj(const cJSON *obj, Book *b, int probe_fs);
 
 void do_sync(void);
 
+/* Re-arm the device sleep ban while a sync chain is running (see
+ * bs_model.c); called from the sync engine and the local importer. */
+void sync_keep_awake(void);
+
 /* Abort any in-flight sync chain (settings/source changes must call
  * this before rebuilding endpoint URLs; see bs_model.c). */
 void sync_abort(void);

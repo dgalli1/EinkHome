@@ -318,6 +318,9 @@ local_apply_slice(BsJob *job)
         store_upsert_book(&b);
     }
     store_commit();
+    /* A full local import is also a long main-thread job: keep the
+     * device awake across the slices (auto-expires after the last one). */
+    sync_keep_awake();
     /* Rows were applied (every slice writes at least one book): the
      * finish path must rebuild the view. */
     g_sync_changed = 1;

@@ -541,6 +541,11 @@ sync_fetch_round(BsJob *job)
 static void
 sync_submit_round(void)
 {
+    /* Re-arm the sleep ban on every round: a 100k first sync runs for
+     * minutes with zero input, and the firmware's auto-sleep would
+     * otherwise stretch every batch to a wake cycle.  Auto-expires
+     * SYNC_BAN_SLEEP_SEC after the last round — no restore needed. */
+    sync_keep_awake();
     SyncRoundArg *a = malloc(sizeof *a);
     if (a == NULL) {
         /* Cannot happen in practice; fail gracefully instead of
@@ -659,6 +664,27 @@ sync_apply_round(cJSON *root, long long cursor, long long *next_out,
     store_commit();
     cJSON_Delete(root);
     return SYNC_ROUND_OK;
+}
+
+/* Sync keep-awake: the firmware's auto-sleep (reset only by input)
+ * would freeze a long sync mid-chain — the worker fetch included —
+ * and every batch would then complete only around a wake cycle.  The
+ * stock reader uses BanSleep() for exactly this; re-arm it only when
+ * the current ban is about to expire (a sync's worth of rounds runs
+ * on a handful of calls, not one per round).  The ban auto-expires
+ * after the sync ends, so nothing needs restoring. */
+#define SYNC_BAN_SLEEP_SEC 1800 /* 30 min per ban */
+
+static long g_sync_ban_until = 0;
+
+void
+sync_keep_awake(void)
+{
+    long now = (long)time(NULL);
+    if (now >= g_sync_ban_until - 300) {
+        BanSleep(SYNC_BAN_SLEEP_SEC);
+        g_sync_ban_until = now + SYNC_BAN_SLEEP_SEC;
+    }
 }
 
 /* Sync finished (any source): close the popup, rebuild the view, hand
@@ -849,6 +875,10 @@ do_sync(void)
     }
     g_state.sync_state = 1;
     sync_ui_active(1);
+    /* A first sync is 200+ rounds: keep the device awake for the whole
+     * chain (re-armed per round in sync_submit_round), or the auto-sleep
+     * timer, which only input resets, would freeze the app mid-fetch. */
+    sync_keep_awake();
     g_sync_gen++; /* new chain generation: stale rounds (see the gen
                      check in sync_round_done) can never apply */
     /* A previous sync may have hit the server before its cover cache was
