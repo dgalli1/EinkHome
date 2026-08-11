@@ -57,6 +57,7 @@ import socketserver  # noqa: E402
 import sqlite3  # noqa: E402
 import time  # noqa: E402
 import threading  # noqa: E402
+import traceback  # noqa: E402
 from typing import Any  # noqa: E402
 
 from providers.base import BookMeta  # noqa: E402
@@ -253,6 +254,12 @@ class PbemuAPIServer(http.server.BaseHTTPRequestHandler):
             f"[{time.strftime('%H:%M:%S')}] {self.address_string()} - {format % args}\n"
         )
 
+    def log_request(self, code: int = -1, size: int = -1) -> None:
+        """Log method + path + status, dropping the query string so an
+        embedded ``?access_token=...`` never reaches stderr."""
+        path = self.path.split("?", 1)[0]
+        self.log_message('"%s %s" %s', self.command, path, code)
+
     # --- helpers ---------------------------------------------------------
 
     def _send(self, status: int, hdrs: dict[str, str], body: bytes) -> None:
@@ -262,6 +269,7 @@ class PbemuAPIServer(http.server.BaseHTTPRequestHandler):
             for k, v in hdrs.items():
                 self.send_header(k, v)
             self.end_headers()
+            self._headers_sent = True
             if body:
                 self.wfile.write(body)
         except (BrokenPipeError, ConnectionResetError):
@@ -274,6 +282,7 @@ class PbemuAPIServer(http.server.BaseHTTPRequestHandler):
             for k, v in hdrs.items():
                 self.send_header(k, v)
             self.end_headers()
+            self._headers_sent = True
             for chunk in body_iter:
                 if not chunk:
                     continue
@@ -333,9 +342,31 @@ class PbemuAPIServer(http.server.BaseHTTPRequestHandler):
         except (UnicodeDecodeError, json.JSONDecodeError):
             return None
 
+    def _safe_handle(self, fn: Any) -> None:
+        """Outer safety net around the dispatch handlers.
+
+        Any uncaught exception (e.g. a provider crash) is logged as a
+        traceback and answered with a 500 JSON response instead of
+        killing the connection with no status line.  Once headers have
+        been sent there is nothing safe left to send, so the connection
+        is simply dropped.
+        """
+        self._headers_sent = False
+        try:
+            fn()
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        except Exception:  # noqa: BLE001 — outer net; per-endpoint try/excepts run first
+            traceback.print_exc()
+            if not self._headers_sent:
+                self._send(*_json(500, {"error": "internal server error"}))
+
     # --- routing ---------------------------------------------------------
 
     def do_GET(self) -> None:  # noqa: N802
+        self._safe_handle(self._dispatch_get)
+
+    def _dispatch_get(self) -> None:
         path, q = self._split_path()
         endpoint, full = self._route(path)
         if endpoint is None:
@@ -347,6 +378,9 @@ class PbemuAPIServer(http.server.BaseHTTPRequestHandler):
         self._handle_get(endpoint, full)
 
     def do_POST(self) -> None:  # noqa: N802
+        self._safe_handle(self._dispatch_post)
+
+    def _dispatch_post(self) -> None:
         path, _ = self._split_path()
         endpoint, full = self._route(path)
         if endpoint is None:
@@ -459,12 +493,14 @@ class PbemuAPIServer(http.server.BaseHTTPRequestHandler):
         search = (q.get("search") or [None])[0]
         try:
             limit = int((q.get("limit") or ["500"])[0])
-        except ValueError:
+        except (TypeError, ValueError):
             limit = 500
+        limit = max(1, min(limit, 2000))
         try:
             offset = int((q.get("offset") or ["0"])[0])
-        except ValueError:
+        except (TypeError, ValueError):
             offset = 0
+        offset = max(0, offset)
         since = (q.get("since") or [None])[0]
         provider = self.app.provider
         books = provider.list_books(

@@ -141,12 +141,23 @@ class SyncLedger:
         """Fold the provider's current catalogue into the ledger —
         unless the last walk finished less than ``max_age_s`` ago, in
         which case this is a cheap no-op.  Returns True when a walk
-        actually ran."""
+        actually ran.
+
+        A provider error mid-walk rolls the whole pass back (sqlite3
+        leaves an implicit transaction open after DML) and re-raises,
+        so a failed walk can never tombstone or partially update the
+        ledger.  ``last_walk`` stays untouched, so the next refresh
+        retries immediately and the server can keep serving the stale
+        ledger."""
         with self._lock:
             last = self._state_get("last_walk")
             if time.time() - last < max_age_s:
                 return False
-            self._walk(provider)
+            try:
+                self._walk(provider)
+            except Exception:
+                self.con.rollback()
+                raise
             self._state_set("last_walk", int(time.time()))
             self.con.commit()
             return True
@@ -161,10 +172,21 @@ class SyncLedger:
         }
         seen: set[str] = set()
         offset = 0
+        first_page = True
         while True:
             batch = provider.list_books(
                 mode="all", limit=SCAN_PAGE, offset=offset
             )
+            if first_page:
+                # An empty first page while the ledger holds rows means
+                # the provider error path collapsed the whole catalogue
+                # to nothing — tombstones would wipe the library.  Refuse.
+                if not batch and stored:
+                    raise RuntimeError(
+                        "provider returned an empty catalogue with "
+                        f"{len(stored)} rows in the ledger; refusing to tombstone"
+                    )
+                first_page = False
             inserts: list[BookMeta] = []
             updates: list[BookMeta] = []
             for meta in batch:

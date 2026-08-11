@@ -85,6 +85,12 @@ def _filename_from_content_disposition(cd: str) -> str | None:
 
 # ── low-level Kavita client (intentionally self-contained) ──────────────────
 
+# Hard cap on how many series a single library walk will fetch.  Real
+# Kavita libraries hold a few hundred at most; this only guarantees the
+# page loop in _series_in_library terminates against a server that never
+# returns a short page.
+_MAX_SERIES_PER_LIBRARY = 10000
+
 
 class _KavitaClient:
     """Minimal stdlib-only HTTP client for the Kavita endpoints we use.
@@ -257,7 +263,9 @@ class _KavitaClient:
         self.ensure_auth()
         status, body = self._request_json("GET", "/api/Library/libraries")
         if status != 200 or not isinstance(body, list):
-            return []
+            raise RuntimeError(
+                f"Kavita GET /api/Library/libraries failed: HTTP {status}"
+            )
         return body
 
     def list_series(
@@ -265,7 +273,9 @@ class _KavitaClient:
         library_id: int,
         page: int = 1,
         page_size: int = 50,
-    ) -> list[dict[str, Any]]:
+        *,
+        with_total: bool = False,
+    ) -> list[dict[str, Any]] | tuple[list[dict[str, Any]], int | None]:
         """Return ONE PAGE of series for ``library_id``.
 
         Kavita 0.8.x paginates by accepting ``PageNumber`` and ``PageSize``
@@ -274,6 +284,11 @@ class _KavitaClient:
         ``libraries: [int]`` field; ``libraryId`` is silently ignored.
         Some Kavita builds return a ``{result: [...], totalCount, ...}``
         envelope, others return a bare list — we accept both.
+
+        With ``with_total=True`` the return value is ``(items, total)``
+        where ``total`` is the envelope's ``totalCount`` when the server
+        sent one (None when it didn't — callers then loop until a short
+        page).
         """
         self.ensure_auth()
         body = {
@@ -301,26 +316,53 @@ class _KavitaClient:
         path = f"/api/Series/v2?PageNumber={page}&PageSize={page_size}"
         status, payload = self._request_json("POST", path, body=body)
         if status != 200 or payload is None:
-            return []
-        if isinstance(payload, list):
-            return payload
+            raise RuntimeError(
+                f"Kavita POST /api/Series/v2 (library {library_id}) "
+                f"failed: HTTP {status}"
+            )
+        total: int | None = None
         if isinstance(payload, dict):
-            return payload.get("result") or []
-        return []
+            raw_total = payload.get("totalCount")
+            if raw_total is not None:
+                total = _safe_int(raw_total)
+                if total <= 0:
+                    total = None  # 0 is indistinguishable from absent
+            items = payload.get("result")
+        else:
+            items = payload
+        if not isinstance(items, list):
+            # 200 with an unexpected shape — treat as empty rather than
+            # failing a healthy server.
+            return ([], total) if with_total else []
+        return (items, total) if with_total else items
 
     def get_volumes(self, series_id: int) -> list[dict[str, Any]]:
         self.ensure_auth()
         status, body = self._request_json(
             "GET", f"/api/Series/volumes?seriesId={series_id}"
         )
-        if status != 200 or not isinstance(body, list):
+        if status == 404:
+            return []  # series gone — absent resource, not an error
+        if status != 200:
+            raise RuntimeError(
+                f"Kavita GET /api/Series/volumes (series {series_id}) "
+                f"failed: HTTP {status}"
+            )
+        if not isinstance(body, list):
             return []
         return body
 
     def get_chapter(self, chapter_id: int) -> dict[str, Any] | None:
         self.ensure_auth()
         status, body = self._request_json("GET", f"/api/Chapter?chapterId={chapter_id}")
-        if status != 200 or not isinstance(body, dict):
+        if status == 404:
+            return None  # chapter gone — absent resource, not an error
+        if status != 200:
+            raise RuntimeError(
+                f"Kavita GET /api/Chapter (chapter {chapter_id}) "
+                f"failed: HTTP {status}"
+            )
+        if not isinstance(body, dict):
             return None
         return body
 
@@ -336,7 +378,14 @@ class _KavitaClient:
         """
         self.ensure_auth()
         status, body = self._request_json("GET", f"/api/Chapter?chapterId={chapter_id}")
-        if status != 200 or not isinstance(body, dict):
+        if status == 404:
+            return []  # chapter gone — absent resource, not an error
+        if status != 200:
+            raise RuntimeError(
+                f"Kavita GET /api/Chapter (chapter {chapter_id}) "
+                f"failed: HTTP {status}"
+            )
+        if not isinstance(body, dict):
             return []
         return list(body.get("files") or [])
 
@@ -356,7 +405,13 @@ class _KavitaClient:
         if vol_id is None:
             return None
         status, body = self._request_json("GET", f"/api/Volume?volumeId={vol_id}")
-        if status != 200 or not isinstance(body, dict):
+        if status == 404:
+            return None  # volume gone — absent resource, not an error
+        if status != 200:
+            raise RuntimeError(
+                f"Kavita GET /api/Volume (volume {vol_id}) failed: HTTP {status}"
+            )
+        if not isinstance(body, dict):
             return None
         return body
 
@@ -568,10 +623,28 @@ class KavitaProvider(Provider):
                 target_id = int(stripped)
             except ValueError:
                 return []
-        for s in self.client.list_series(library_id):
-            if target_id is not None and s.get("id") != target_id:
-                continue
-            out.append(s)
+        # Kavita paginates at 50/page; walk every page or the catalogue
+        # silently truncates past the first one.  totalCount (when the
+        # server sends an envelope) bounds the loop; otherwise a short
+        # page marks the end.  The hard cap guarantees termination even
+        # against a server that never returns a short page.
+        page = 1
+        page_size = 50
+        fetched = 0
+        while fetched < _MAX_SERIES_PER_LIBRARY:
+            items, total = self.client.list_series(
+                library_id, page=page, page_size=page_size, with_total=True
+            )
+            fetched += len(items)
+            for s in items:
+                if target_id is not None and s.get("id") != target_id:
+                    continue
+                out.append(s)
+            if len(items) < page_size:
+                break  # last (partial) page
+            if total is not None and fetched >= total:
+                break  # envelope's totalCount reached
+            page += 1
         return out
 
     # --- Provider interface -----------------------------------------------

@@ -17,6 +17,7 @@ import contextlib
 import hashlib
 import os
 import sys
+import threading
 import time
 from typing import Optional
 
@@ -81,7 +82,11 @@ class CoverCache:
 
     @staticmethod
     def _atomic(path: str, data: bytes) -> None:
-        tmp = path + ".tmp"
+        # Unique tmp per writer (pid + thread id): the cover warmer and
+        # request handlers can race on the same key, and a shared fixed
+        # name would let interleaved writes corrupt each other before
+        # os.replace makes the final file atomic.
+        tmp = f"{path}.{os.getpid()}.{threading.get_ident()}.tmp"
         try:
             with open(tmp, "wb") as fh:
                 fh.write(data)
