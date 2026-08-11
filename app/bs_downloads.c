@@ -356,6 +356,12 @@ launch_reader(Book *b)
      * folder's path. */
     book_existing_path(b, path, sizeof path);
 
+    /* Same hourglass the launcher shows: the reader draws over it once
+     * it becomes the foreground task, so a slow reader start reads as
+     * work-in-progress instead of a dead tap.  On launch failure no
+     * reader will ever draw over it, so hide it and repaint the shelf. */
+    show_hourglass();
+
     const char *reader_path = NULL;
     if (g_state.reader_pref > 0 && g_state.reader_pref <= g_reader_count)
         reader_path = g_readers[g_state.reader_pref - 1].path;
@@ -368,14 +374,20 @@ launch_reader(Book *b)
             rbase,
             path,
             g_state.reader_pref);
-        NewTaskEx(reader_path, args, rbase, b->title, NULL, 0x25, 0);
+        if (NewTaskEx(reader_path, args, rbase, b->title, NULL, 0x25, 0) < 0) {
+            HideHourglass();
+            redraw_shelf();
+        }
         return;
     }
 
     LOG("[bookshelf] launching reader via OpenBook path=%s reader_pref=%d\n",
         path,
         g_state.reader_pref);
-    OpenBook(path, NULL, 1);
+    if (OpenBook(path, NULL, 1) < 0) {
+        HideHourglass();
+        redraw_shelf();
+    }
 }
 
 /* Press a book (single tap or context-menu Open): if the file is not

@@ -107,6 +107,8 @@ int hit_scroll_button_at(int x, int y, int y0);
 
 void redraw_shelf(void);
 
+void show_hourglass(void);
+
 void flush_content(void);
 
 void draw_grid(void);

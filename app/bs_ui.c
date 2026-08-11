@@ -1563,6 +1563,30 @@ flush_content(void)
     PartialUpdate(0, 0, ScreenWidth(), content_bottom());
 }
 
+/* Show the theme's hourglass centered on the screen and leave it up
+ * until the launched task draws over it (or the caller hides it and
+ * redraws on launch failure).
+ *
+ * The firmware's own ShowHourglassForceAt() is not used: its animation
+ * is driven by monitor.app via REQ_HOURGLASS and never lands in the
+ * app framebuffer (verified: nothing appears).  Drawing the theme's
+ * hourglass bitmap directly with DrawBitmap() is guaranteed to show on
+ * any build. */
+void
+show_hourglass(void)
+{
+    ibitmap *hg = GetResource("hourglass", NULL);
+    if (hg == NULL)
+        return;
+    int x = (ScreenWidth() - hg->width) / 2;
+    int y = (content_bottom() - hg->height) / 2;
+    /* White backing so the glyph reads over the frozen screen. */
+    FillArea(x - 12, y - 12, hg->width + 24, hg->height + 24, WHITE);
+    DrawRect(x - 12, y - 12, hg->width + 24, hg->height + 24, BLACK);
+    DrawBitmap(x, y, hg);
+    PartialUpdate(x - 12, y - 12, hg->width + 24, hg->height + 24);
+}
+
 /* Repaint the whole shelf (top bar, body, pager) in the current tab,
  * then the download popup on top when one is open.  Centralises the
  * sequence every state change needs. */

@@ -739,25 +739,8 @@ launch_app(const LauncherItem *it)
      * foreground task and draws.  The caller suppresses the shelf redraw for
      * this path, so the screen freezes on the hourglass instead of falling
      * back to a static shelf that makes a slow launch look like a no-op.
-     *
-     * The firmware's own ShowHourglassForceAt() is not used here: its
-     * animation is driven by monitor.app via REQ_HOURGLASS and never lands
-     * in the app framebuffer (verified: nothing appears).  Drawing the
-     * theme's hourglass bitmap directly with DrawBitmap() is guaranteed to
-     * show on any build.
      */
-    {
-        ibitmap *hg = GetResource("hourglass", NULL);
-        if (hg != NULL) {
-            int x = (ScreenWidth() - hg->width) / 2;
-            int y = (content_bottom() - hg->height) / 2;
-            /* White backing so the glyph reads over the frozen launcher. */
-            FillArea(x - 12, y - 12, hg->width + 24, hg->height + 24, WHITE);
-            DrawRect(x - 12, y - 12, hg->width + 24, hg->height + 24, BLACK);
-            DrawBitmap(x, y, hg);
-            PartialUpdate(x - 12, y - 12, hg->width + 24, hg->height + 24);
-        }
-    }
+    show_hourglass();
     if (NewTaskEx(it->path, ai ? args : NULL, base, it->text, NULL, 0x25 | TASK_MAKEACTIVE, 0) <
         0) {
         /* Launch failed: drop the hourglass and bring the launcher back so
