@@ -50,11 +50,25 @@ folder_scan_dir(const char *dir, int depth, const char *src_label)
         path[dlen] = '/';
         memcpy(path + dlen + 1, e->d_name, nlen);
         path[dlen + 1 + nlen] = '\0';
-        if (e->d_type == DT_DIR) {
+        /* d_type is a hint: DT_UNKNOWN filesystems (FAT, some FUSE)
+         * report nothing and symlinks need following — resolve the
+         * real type by stat() whenever the dirent type is
+         * inconclusive.  The recursion depth cap below bounds any
+         * symlink cycle. */
+        int is_dir = e->d_type == DT_DIR;
+        int is_reg = e->d_type == DT_REG;
+        if (e->d_type == DT_UNKNOWN || e->d_type == DT_LNK) {
+            struct stat stbuf;
+            if (__xstat(0, path, &stbuf) == 0) {
+                is_dir = S_ISDIR(stbuf.st_mode);
+                is_reg = S_ISREG(stbuf.st_mode);
+            }
+        }
+        if (is_dir) {
             folder_scan_dir(path, depth + 1, src_label);
             continue;
         }
-        if (e->d_type != DT_REG)
+        if (!is_reg)
             continue;
         const char *dot = strrchr(e->d_name, '.');
         if (dot == NULL || dot[1] == '\0')

@@ -329,7 +329,13 @@ int store_upsert_book(const Book *b) {
     return -1;
 
   int downloaded = b->downloaded;
-  const char *local_path = b->local_path;
+  /* Copy the existing row's local_path into a local buffer BEFORE the
+   * lookup statement is finalised: sqlite3_column_text() pointers die
+   * with their statement, and the value is re-bound below.  Default to
+   * the caller's path so fresh rows (and rows whose downloaded flag is
+   * 0) keep the exact pre-fix semantics. */
+  char lp[MAX_PATH_LEN];
+  snprintf(lp, sizeof lp, "%s", b->local_path ? b->local_path : "");
   sqlite3_stmt *q = NULL;
   if (sqlite3_prepare_v2(g_db,
                          "SELECT downloaded, local_path FROM books WHERE id=?1",
@@ -338,7 +344,8 @@ int store_upsert_book(const Book *b) {
     if (sqlite3_step(q) == SQLITE_ROW) {
       if (sqlite3_column_int(q, 0) == 1) {
         downloaded = 1;
-        local_path = (const char *)sqlite3_column_text(q, 1);
+        const char *t = (const char *)sqlite3_column_text(q, 1);
+        snprintf(lp, sizeof lp, "%s", t ? t : "");
       }
     }
     sqlite3_finalize(q);
@@ -362,7 +369,7 @@ int store_upsert_book(const Book *b) {
   bind_text_trunc(st, 7, b->ext);
   sqlite3_bind_int(st, 8, b->size);
   sqlite3_bind_int(st, 9, downloaded);
-  bind_text_trunc(st, 10, local_path);
+  bind_text_trunc(st, 10, lp);
   sqlite3_bind_int64(st, 11, b->added_at);
   bind_text_trunc(st, 12, b->filename);
   bind_text_trunc(st, 13, b->source[0] ? b->source : "kavita");
@@ -995,7 +1002,47 @@ void store_commit(void) {
       sqlite3_free(msg);
   }
 }
+
+/* Abort the current transaction, discarding every write since the
+ * matching store_begin.  Used by the sync engine when a batch cannot
+ * be applied cleanly (see sync_apply_round). */
+void store_rollback(void) {
+  if (g_db != NULL) {
+    char *msg = NULL;
+    if (sqlite3_exec(g_db, "ROLLBACK", NULL, NULL, &msg) != SQLITE_OK) {
+      LOG("[bookshelf] store_rollback FAILED: %s\n",
+          msg ? msg : sqlite3_errmsg(g_db));
+      if (msg)
+        sqlite3_free(msg);
+    }
+  }
+}
 /* ── view projection ------------------------------------------------------- */
+
+/* Largest k <= n such that s[0..k) ends on a UTF-8 boundary: when the
+ * last kept byte is a continuation, walk back to its lead byte and
+ * drop the whole (now split) character; a bare lead byte at the cut
+ * is dropped as well.  Malformed input degrades to a safe shorter cut,
+ * never to a mid-sequence byte. */
+static size_t utf8_cut_back(const char *s, size_t n) {
+  if (s == NULL || n == 0)
+    return 0;
+  size_t k = n;
+  unsigned char last = (unsigned char)s[k - 1];
+  if ((last & 0xC0) == 0x80) {
+    /* Continuation byte: the character it belongs to started earlier
+     * and is cut in half; step back to the lead byte and drop the
+     * whole sequence (lead included). */
+    while (k > 0 && ((unsigned char)s[k - 1] & 0xC0) == 0x80)
+      k--;
+    if (k > 0)
+      k--; /* the lead byte itself is part of the split char */
+  } else if ((last & 0xE0) == 0xC0 || (last & 0xF0) == 0xE0 ||
+             (last & 0xF8) == 0xF0) {
+    k--; /* truncated lead byte with no continuation bytes */
+  }
+  return k;
+}
 
 /* Escape LIKE metacharacters so a user query is matched literally. */
 static void like_escape(const char *in, char *out, size_t cap) {
@@ -1009,6 +1056,9 @@ static void like_escape(const char *in, char *out, size_t cap) {
     }
     out[o++] = c;
   }
+  /* The capacity bound may have cut a multibyte character in half;
+   * back the cut off to a UTF-8 boundary. */
+  o = utf8_cut_back(out, o);
   out[o] = '\0';
 }
 
@@ -1085,6 +1135,12 @@ static void view_bind_query(sqlite3_stmt *st, int qbind) {
 void view_rebuild(void) {
   if (g_db == NULL)
     return;
+
+  /* A rebuilt view renumbers every tile: disarm any in-flight
+   * long-press so it cannot fire on a row that no longer maps to the
+   * same book (or is out of range). */
+  g_lp_vi = -1;
+  g_lp_armed = 0;
 
   if (sqlite3_exec(g_db, "BEGIN", NULL, NULL, NULL) != SQLITE_OK) {
     LOG("[bookshelf] view_rebuild: BEGIN failed: %s\n",

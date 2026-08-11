@@ -122,14 +122,22 @@ resolve_downloads_dir(void)
     if (access(wanted, W_OK) == 0) {
         /* Bounded: book paths are <dir>/<id>.<ext> and must fit
          * MAX_PATH_LEN, so the folder is capped well under it.  A
-         * deeper configured path is truncated (and logged). */
+         * deeper configured path cannot be used: the full path just
+         * passed access(W_OK), so a silently truncated prefix would
+         * point downloads at the wrong directory — fall back to the
+         * /tmp path instead. */
         size_t wlen = strlen(wanted);
-        if (wlen >= sizeof g_downloads_dir)
-            wlen = sizeof g_downloads_dir - 1;
-        memcpy(g_downloads_dir, wanted, wlen);
-        g_downloads_dir[wlen] = '\0';
-        if (wlen != strlen(wanted))
-            LOG("[bookshelf] downloads dir truncated to %s\n", g_downloads_dir);
+        if (wlen >= sizeof g_downloads_dir) {
+            LOG("[bookshelf] downloads dir too long (%d bytes, max %d); "
+                "falling back to %s\n",
+                (int)wlen, (int)(sizeof g_downloads_dir - 1),
+                LOCAL_DOWNLOADS_FALLBACK);
+            snprintf(g_downloads_dir, sizeof g_downloads_dir, "%s",
+                     LOCAL_DOWNLOADS_FALLBACK);
+        } else {
+            memcpy(g_downloads_dir, wanted, wlen);
+            g_downloads_dir[wlen] = '\0';
+        }
     } else {
         snprintf(g_downloads_dir, sizeof g_downloads_dir, "%s", LOCAL_DOWNLOADS_FALLBACK);
     }
@@ -504,7 +512,21 @@ sync_apply_round(char *resp, long long cursor, long long *next_out,
             if (!cJSON_IsObject(it))
                 continue;
             if (parse_book_obj(it, &tmp) == 0) {
-                store_upsert_book(&tmp);
+                if (store_upsert_book(&tmp) != 0) {
+                    /* A failed upsert aborts the whole round: roll
+                     * back so the half-written batch is not persisted
+                     * (a later round would otherwise apply its rows on
+                     * top of a partial batch), and leave the cursor
+                     * unchanged so the next sync retries from this
+                     * same delta.  *next_out/*more_out were already
+                     * set to cursor/0 at the top. */
+                    LOG("[bookshelf] sync: upsert failed id=%s; "
+                        "aborting round (cursor %lld kept)\n",
+                        tmp.id, cursor);
+                    store_rollback();
+                    cJSON_Delete(root);
+                    return;
+                }
                 /* Suggestion terms for this book, straight from the
                  * DOM — no bounded-copy tricks needed. */
                 char terms[SUGGEST_MAX_TERMS][SUGGEST_TERM_MAX];

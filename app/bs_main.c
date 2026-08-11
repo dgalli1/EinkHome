@@ -949,9 +949,15 @@ int on_event(int type, int par1, int par2) {
   if (type == EVT_EXIT) {
     /* Tell every in-flight worker job to stop (cooperative flag; the
      * detached threads then get killed by process exit, same as the
-     * old download/sync threads). */
+     * old download/sync threads).  The log is deliberately NOT closed
+     * here: detached workers may still be mid-LOG() (up to 60 s in
+     * flight) and would vfprintf into a freed FILE*.  Flush instead —
+     * the FILE* stays valid for stragglers and process exit reclaims
+     * it. */
     bs_worker_cancel_all();
     store_close();
+    if (g_log != NULL)
+        fflush(g_log);
     return 1;
   }
   return 0;
@@ -1021,6 +1027,11 @@ int main(int argc, char **argv) {
     SetDefaultOrientation(-1);
   SetPanelType(1); /* the stock bookshelf's literal value */
   InkViewMain(on_event);
-  log_close();
+  /* No log_close(): detached workers may still be mid-LOG() when the
+   * event loop unwinds (see the EVT_EXIT comment); freeing g_log
+   * under them would be a use-after-free.  Flush and let process
+   * exit reclaim the FILE*. */
+  if (g_log != NULL)
+      fflush(g_log);
   return 0;
 }

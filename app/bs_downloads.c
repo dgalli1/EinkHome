@@ -7,7 +7,58 @@
 #include "bs_ui.h"
 #include "bs_worker.h"
 
+#include <dirent.h>
+
 /* ── downloads, delete, context menu, long-press ───────────────────── */
+
+/* Generation token for download-queue entries.  Bumped at every
+ * enqueue and copied into the fetch job, so a job settles only the
+ * entry whose id AND gen match — a canceled job that outlives its
+ * queue entry can never mark the re-enqueued book failed (see
+ * dl_job_done). */
+static unsigned int g_dl_gen = 0;
+
+/* Drop the last character of a UTF-8 string at a character boundary:
+ * walk back over continuation bytes (10xxxxxx) to the sequence's lead
+ * byte, so a truncated title never ends in a half multibyte char. */
+static void
+utf8_drop_last_char(char *s)
+{
+    size_t len = strlen(s);
+    if (len == 0)
+        return;
+    size_t i = len - 1;
+    while (i > 0 && ((unsigned char)s[i] & 0xC0) == 0x80)
+        i--;
+    s[i] = '\0';
+}
+
+/* Unlink stale "<file>.part" fragments left in the downloads dir by a
+ * crash mid-fetch (dl_fetch writes the .part, then renames on success;
+ * on any other exit the fragment would otherwise stay forever).
+ * Bounded single pass over the directory; errors are ignored — the
+ * worst case is a fragment surviving until the next startup. */
+static void
+sweep_stale_parts(void)
+{
+    DIR *d = opendir(g_downloads_dir);
+    if (d == NULL)
+        return;
+    struct dirent *e;
+    int            seen = 0, removed = 0;
+    while ((e = readdir(d)) != NULL && seen < 8192) {
+        seen++;
+        size_t len = strlen(e->d_name);
+        if (len <= 5 || strcmp(e->d_name + len - 5, ".part") != 0)
+            continue;
+        char path[MAX_PATH_LEN];
+        snprintf(path, sizeof path, "%s/%s", g_downloads_dir, e->d_name);
+        if (unlink(path) == 0)
+            removed++;
+    }
+    closedir(d);
+    LOG("[bookshelf] stale .part sweep removed=%d\n", removed);
+}
 
 /* Local path a book downloads to (matches the open-with launch path).
  * Prefers the provider's original filename (sanitized to a bare
@@ -79,6 +130,10 @@ refresh_downloaded(Book *b)
 void
 refresh_downloaded_flags(void)
 {
+    /* A crashed fetch can leave a "<path>.part" fragment behind
+     * (dl_fetch renames only on success); sweep them at startup. */
+    sweep_stale_parts();
+
     char ids[64][MAX_ID_LEN];
     int  off = 0, got, changed = 0;
     store_begin();
@@ -140,18 +195,25 @@ clear_finished_downloads(void)
 static void dl_start_next(void);
 static void dl_job_done(BsJob *job);
 
-/* Add a book to the download queue (no-op if already queued/done) and
- * start its fetch (or the first queued fetch) right away. */
+/* Add a book to the download queue (no-op if already queued, in
+ * flight, or done; a failed entry is dropped and retried when no
+ * batch is active) and start its fetch (or the first queued fetch)
+ * right away. */
 void
 enqueue_download(const Book *b)
 {
     DownloadItem *d = find_download(b->id);
-    if (d != NULL)
+    if (d != NULL && (g_dl_batch_active || d->state != 3))
         return;
     if (!g_dl_batch_active) {
         /* Manual download: the retained tally of the last batch must
          * not mask this one, and its finished rows must not inflate
-         * the fresh queue tally (or crowd it out entirely). */
+         * the fresh queue tally (or crowd it out entirely).  A failed
+         * entry (state 3) falls through here so re-tapping a failed
+         * book retries it: clear_finished_downloads() drops the stale
+         * row and the book is enqueued fresh below.  Batch mode keeps
+         * its own semantics — failed ids stay tracked and are skipped
+         * by the batch drain. */
         g_dl_batch_total = 0;
         g_dl_batch_done = 0;
         g_dl_batch_failed = 0;
@@ -163,6 +225,8 @@ enqueue_download(const Book *b)
     snprintf(n->id, sizeof n->id, "%s", b->id);
     snprintf(n->title, sizeof n->title, "%s", b->title);
     n->state = 0;
+    n->gen = ++g_dl_gen; /* new generation: stale in-flight jobs for
+                            this id must not settle this entry */
     sync_set_active(1);
     /* Start the fetch right away (no-op when one is already in
      * flight; the in-flight job's done_cb advances the queue). */
@@ -170,8 +234,9 @@ enqueue_download(const Book *b)
 }
 
 /* Drop the oldest finished queue entry to make room (batch mode keeps
- * the queue bounded regardless of library size). */
-static void
+ * the queue bounded regardless of library size).  Returns 1 when an
+ * entry was dropped, 0 when the queue held nothing finished. */
+static int
 prune_finished_download(void)
 {
     int best = -1;
@@ -182,10 +247,11 @@ prune_finished_download(void)
         }
     }
     if (best < 0)
-        return;
+        return 0;
     for (int i = best; i + 1 < g_download_count; i++)
         g_downloads[i] = g_downloads[i + 1];
     g_download_count--;
+    return 1;
 }
 
 /* ── async download worker ────────────────────────────────────────────
@@ -203,6 +269,7 @@ typedef struct {
     char id[MAX_ID_LEN];
     char url[MAX_URL_LEN + 128];
     char path[MAX_PATH_LEN];
+    unsigned int gen; /* generation token of the queue entry this job serves */
 } DlJob;
 
 static BsJob *g_dl_inflight; /* the one in-flight download job, main thread */
@@ -461,6 +528,7 @@ dl_start_next(void)
              b.id,
              g_state.api_token);
     snprintf(a->path, sizeof a->path, "%s", path);
+    a->gen = target->gen; /* the settle must match this exact generation */
     BsJob *j = bs_worker_submit(dl_fetch, dl_job_done, a);
     if (j == NULL) {
         target->state = 3;
@@ -533,12 +601,15 @@ dl_job_done(BsJob *job)
     DlJob *a = job->arg;
     int    ok = job->rc == 0;
 
-    /* Settle the finished queue item.  After cancel_downloads the
-     * queue is gone, so find_download() misses and the completion is
+    /* Settle the finished queue item.  The entry must match BOTH the
+     * id and the generation token: after cancel_downloads the queue
+     * is gone, so find_download() misses and the completion is
      * absorbed harmlessly — no store update, no batch tally, no popup
-     * redraw, and the canceled job's .part was never renamed. */
+     * redraw, and the canceled job's .part was never renamed.  And a
+     * book canceled and re-enqueued while its old job was still in
+     * flight must not have the new entry settled by the stale job. */
     DownloadItem *d = find_download(a->id);
-    if (d != NULL) {
+    if (d != NULL && d->gen == a->gen) {
         d->state = ok ? 2 : 3;
         if (ok)
             store_set_downloaded(d->id, 1, a->path);
@@ -561,6 +632,14 @@ dl_job_done(BsJob *job)
         if (!g_state.dl_popup)
             draw_top_bar();
         sync_set_active(downloads_pending() > 0 || g_dl_batch_active);
+    } else if (d != NULL) {
+        /* Stale job: the queue holds a newer generation of this id
+         * (canceled and re-enqueued).  Leave the fresh entry alone —
+         * settling it would mis-mark the new download failed. */
+        LOG("[bookshelf] stale download job settle dropped id=%s gen=%u entry_gen=%u\n",
+            a->id,
+            a->gen,
+            d->gen);
     }
     if (g_dl_inflight == job)
         g_dl_inflight = NULL;
@@ -598,18 +677,27 @@ dl_advance(void)
                      * finished entry so the queue makes room and the
                      * next pass can enqueue, instead of looping on the
                      * same slice forever. */
-                    prune_finished_download();
-                    dl_kick();
+                    if (prune_finished_download()) {
+                        dl_kick();
+                        return;
+                    }
+                    /* Nothing finished left to prune: the whole slice
+                     * is made of ids that are already failed (or
+                     * unreadable), so no retry can ever make progress
+                     * — finalize the batch instead of kicking on the
+                     * same slice forever. */
+                    LOG("[bookshelf] download-all batch stalled, finalizing\n");
                 } else {
                     dl_start_next();
                     if (g_state.dl_popup)
                         refresh_dl_popup();
                     else
                         draw_top_bar();
+                    return;
                 }
-                return;
             }
-            /* Every batch book has settled (done + failed == total):
+            /* Every batch book has settled (done + failed == total),
+             * or the slice is exhausted with nothing left to enqueue:
              * end the batch.  Keep the final tally on screen — zeroing
              * the counters here made the bar fall back to queue-derived
              * counts, and the pruned queue only holds the last slice
@@ -779,7 +867,7 @@ draw_context_menu(void)
         char trunc[MAX_TITLE_LEN];
         snprintf(trunc, sizeof trunc, "%s", title);
         while (StringWidth(trunc) > pw - 2 * CTX_PAD && strlen(trunc) > 4)
-            trunc[strlen(trunc) - 1] = '\0';
+            utf8_drop_last_char(trunc); /* never split a multibyte char */
         DrawString(px + CTX_PAD, py + (CTX_TITLE_H - 28) / 2 - 2, trunc);
         CloseFont(tf);
     }

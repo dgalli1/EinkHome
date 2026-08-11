@@ -392,7 +392,7 @@ launcher_scan_ext1_apps(void)
             continue;
         if (strcasecmp(e->d_name + len - 4, ".app") != 0)
             continue;
-        char path[160];
+        char path[MAX_PATH_LEN];
         snprintf(path, sizeof path, "/mnt/ext1/applications/%s", e->d_name);
         struct stat st;
         if (iv_stat(path, &st) != 0)

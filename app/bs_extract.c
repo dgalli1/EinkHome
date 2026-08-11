@@ -57,13 +57,24 @@ xml_unescape(char *s)
             char *end = NULL;
             long  code = strtol(r + 2, &end, 10);
             if (end != NULL && *end == ';' && code > 0 && code < 0x110000) {
+                /* Surrogates are not valid Unicode scalar values (the
+                 * XML spec forbids them); encode the replacement
+                 * character instead of emitting invalid UTF-8. */
+                if (code >= 0xD800 && code <= 0xDFFF)
+                    code = 0xFFFD;
                 if (code < 0x80) {
                     *w++ = (char)code;
                 } else if (code < 0x800) {
                     *w++ = (char)(0xC0 | (code >> 6));
                     *w++ = (char)(0x80 | (code & 0x3F));
-                } else {
+                } else if (code < 0x10000) {
                     *w++ = (char)(0xE0 | (code >> 12));
+                    *w++ = (char)(0x80 | ((code >> 6) & 0x3F));
+                    *w++ = (char)(0x80 | (code & 0x3F));
+                } else {
+                    /* Up to 0x10FFFF: full 4-byte sequence. */
+                    *w++ = (char)(0xF0 | (code >> 18));
+                    *w++ = (char)(0x80 | ((code >> 12) & 0x3F));
                     *w++ = (char)(0x80 | ((code >> 6) & 0x3F));
                     *w++ = (char)(0x80 | (code & 0x3F));
                 }

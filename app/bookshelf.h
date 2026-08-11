@@ -403,6 +403,8 @@ typedef struct {
   char id[MAX_ID_LEN];
   char title[MAX_TITLE_LEN];
   int state;
+  unsigned int gen; /* generation token: separates a re-enqueued book from
+                       a stale in-flight job's settle (see bs_downloads.c) */
 } DownloadItem;
 typedef struct {
   const char *path;

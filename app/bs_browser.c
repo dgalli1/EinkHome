@@ -166,12 +166,35 @@ browser_load(void)
     while ((e = readdir(d)) != NULL && g_browse_count < max_entries) {
         if (e->d_name[0] == '.')
             continue;
+        /* d_type is a hint: DT_UNKNOWN filesystems (FAT, some FUSE)
+         * report nothing and symlinks need following, so resolve the
+         * real type by stat() whenever the dirent type is
+         * inconclusive.  The stat target is <path>/<name> where name
+         * comes from readdir (never ".." or "/"), so the browser-root
+         * confinement is untouched. */
         int is_dir = e->d_type == DT_DIR;
+        int is_reg = e->d_type == DT_REG;
+        if (e->d_type == DT_UNKNOWN || e->d_type == DT_LNK) {
+            char   path[MAX_PATH_LEN];
+            size_t plen = strlen(g_browse_path);
+            size_t nlen = strlen(e->d_name);
+            if (plen + 1 + nlen < sizeof path) {
+                memcpy(path, g_browse_path, plen);
+                path[plen] = '/';
+                memcpy(path + plen + 1, e->d_name, nlen);
+                path[plen + 1 + nlen] = '\0';
+                struct stat st;
+                if (iv_stat(path, &st) == 0) {
+                    is_dir = S_ISDIR(st.st_mode);
+                    is_reg = S_ISREG(st.st_mode);
+                }
+            }
+        }
         if (s_bmode == BR_MODE_PICKER) {
             if (!is_dir)
                 continue;
         } else {
-            if (!is_dir && e->d_type != DT_REG)
+            if (!is_dir && !is_reg)
                 continue;
             if (!is_dir) {
                 const char *dot = strrchr(e->d_name, '.');
@@ -225,6 +248,27 @@ browser_load(void)
     LOG("[bookshelf] browser: %s -> %d entries\n", g_browse_path, g_browse_count);
 }
 
+/* Drop whole characters from the end of `s` until it fits `max_w`
+ * pixels.  Never splits a multibyte UTF-8 sequence: the last char is
+ * backed up to over its continuation bytes, so a sequence is either
+ * kept intact or removed entirely.  Stops once the string is down to
+ * `min_len` bytes — a lone over-wide glyph then overflows the band
+ * instead of looping forever.  Returns `s`. */
+static char *
+utf8_fit_width(char *s, int max_w, size_t min_len)
+{
+    while (StringWidth(s) > max_w) {
+        size_t len = strlen(s);
+        if (len <= min_len)
+            break;
+        size_t i = len - 1;
+        while (i > 0 && ((unsigned char)s[i] & 0xC0) == 0x80)
+            i--;
+        s[i] = '\0';
+    }
+    return s;
+}
+
 /* Paint one list row across the full width: white fill, a separator
  * line under it, and the entry name in bold with a trailing "/" for
  * directories.  name == NULL paints the bare row (off-list slot). */
@@ -241,8 +285,7 @@ browser_draw_row(int row_y, const char *name, int is_dir)
         SetFont(f, BLACK);
         char trunc[MAX_PATH_LEN + 4];
         snprintf(trunc, sizeof trunc, "%s%s", name, is_dir ? "/" : "");
-        while (StringWidth(trunc) > w - 64 && strlen(trunc) > 4)
-            trunc[strlen(trunc) - 1] = '\0';
+        utf8_fit_width(trunc, w - 64, 4);
         DrawString(32, row_y + (FOLDER_ROW_H - 28) / 2 - 2, trunc);
         CloseFont(f);
     }
@@ -497,8 +540,7 @@ draw_overlay_folder(void)
         /* Show the path relative to /mnt/ext1 — the mount point is
          * hidden from the user. */
         user_path_display(g_browse_path, trunc, sizeof trunc);
-        while (StringWidth(trunc) > w - 64 && strlen(trunc) > 4)
-            trunc[strlen(trunc) - 1] = '\0';
+        utf8_fit_width(trunc, w - 64, 4);
         DrawString(32, 76, trunc);
         CloseFont(pf);
     }

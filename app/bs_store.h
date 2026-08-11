@@ -41,6 +41,8 @@ int store_meta_value(const char *key, char *out, size_t cap);
 
 void store_commit(void);
 
+void store_rollback(void);
+
 void store_series_name(const char *series_id, char *out, size_t cap);
 
 int store_series_members(const char *series_id, Book *out, int cap);

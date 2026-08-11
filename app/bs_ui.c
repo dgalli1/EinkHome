@@ -12,6 +12,39 @@
 #include "bs_ui.h"
 #include "bs_worker.h"
 
+/* ── UTF-8 helpers ──────────────────────────────────────────────────── */
+
+/* Cap `s` at `cap` bytes (NUL at cap-1), then walk back so the string
+ * never ends mid-character: the continuation bytes (0x80..0xBF) of a
+ * truncated multibyte char are removed together with its lead byte.
+ * ASCII text and complete trailing characters are left untouched, so a
+ * byte budget never leaves a dangling half character.  Every
+ * title/author/suggestion display truncation in this file goes through
+ * this. */
+static void
+utf8_cap(char *s, size_t cap)
+{
+    if (cap < 1)
+        return;
+    size_t n = cap - 1;
+    s[n] = '\0';
+    /* Walk back over continuation bytes to the last character's lead. */
+    size_t i = n;
+    while (i > 0 && ((unsigned char)s[i - 1] & 0xC0) == 0x80)
+        i--;
+    if (i == 0)
+        return; /* no lead byte to anchor on; leave as-is */
+    unsigned char lead = (unsigned char)s[i - 1];
+    if ((lead & 0xC0) != 0xC0)
+        return; /* ends with an ASCII char: already a boundary */
+    /* A multibyte char is kept only when every continuation byte it
+     * needs survived the cap; otherwise the whole char goes. */
+    size_t expect = (lead & 0xE0) == 0xC0 ? 1 : (lead & 0xF0) == 0xE0 ? 2 : 3;
+    if (n - i < expect)
+        i--;
+    s[i] = '\0';
+}
+
 /* ── drawing primitives ─────────────────────────────────────────────── */
 
 void
@@ -245,7 +278,7 @@ draw_top_bar(void)
                 int guard = home_x + home_w + 8;
                 int budget = w - 2 * guard;
                 while (StringWidth(title) > budget && strlen(title) > 4)
-                    title[strlen(title) - 1] = '\0';
+                    utf8_cap(title, strlen(title)); /* never split a multibyte char */
                 SetFont(tf, col);
                 DrawString(
                     (w - StringWidth(title)) / 2, y0 + (TOP_BAR_H - 40) / 2, title);
@@ -262,7 +295,7 @@ draw_top_bar(void)
                 if (band_w < 64)
                     band_w = 64;
                 while (StringWidth(title) > band_w && strlen(title) > 4)
-                    title[strlen(title) - 1] = '\0';
+                    utf8_cap(title, strlen(title)); /* never split a multibyte char */
                 SetFont(tf, col);
                 DrawString(left_w + (band_w - StringWidth(title)) / 2,
                            y0 + (TOP_BAR_H - 40) / 2,
@@ -518,9 +551,10 @@ draw_search_tab(void)
             char trunc[MAX_QUERY_LEN];
             strncpy(trunc, terms[i], sizeof trunc - 1);
             trunc[sizeof trunc - 1] = '\0';
+            utf8_cap(trunc, sizeof trunc);
             int maxw = w - 80;
             while (StringWidth(trunc) > maxw && strlen(trunc) > 4)
-                trunc[strlen(trunc) - 1] = '\0';
+                utf8_cap(trunc, strlen(trunc)); /* never split a multibyte char */
             DrawString(24, y + (SEARCH_HISTORY_ROW_H - 28) / 2 - 2, trunc);
             CloseFont(tf);
         }
@@ -568,9 +602,10 @@ draw_suggestions(int y_top, int y_bot)
             SetFont(tf, BLACK);
             char trunc[SUGGEST_TERM_MAX];
             snprintf(trunc, sizeof trunc, "%s", g_suggestions[i]);
+            utf8_cap(trunc, sizeof trunc);
             int maxw = w - 80;
             while (StringWidth(trunc) > maxw && strlen(trunc) > 4)
-                trunc[strlen(trunc) - 1] = '\0';
+                utf8_cap(trunc, strlen(trunc)); /* never split a multibyte char */
             DrawString(24, y + (SEARCH_HISTORY_ROW_H - 28) / 2 - 2, trunc);
             CloseFont(tf);
         }
@@ -1020,8 +1055,9 @@ draw_thumbnail(int x, int y, int w, int h, const TileRow *tr, int vi)
             SetFont(f, BLACK);
             char truncated[MAX_TITLE_LEN];
             snprintf(truncated, sizeof truncated, "%s", label);
+            utf8_cap(truncated, sizeof truncated);
             while (StringWidth(truncated) > tw0 && strlen(truncated) > 4)
-                truncated[strlen(truncated) - 1] = '\0';
+                utf8_cap(truncated, strlen(truncated)); /* never split a multibyte char */
             DrawString(tx0, y + pad + 8, truncated);
             CloseFont(f);
         }
@@ -1031,8 +1067,9 @@ draw_thumbnail(int x, int y, int w, int h, const TileRow *tr, int vi)
                 SetFont(af, DGRAY);
                 char truncated[80];
                 snprintf(truncated, sizeof truncated, "%s", b->author);
+                utf8_cap(truncated, sizeof truncated);
                 while (StringWidth(truncated) > tw0 && strlen(truncated) > 4)
-                    truncated[strlen(truncated) - 1] = '\0';
+                    utf8_cap(truncated, strlen(truncated)); /* never split a multibyte char */
                 DrawString(tx0, y + pad + 8 + 40, truncated);
                 CloseFont(af);
             }
@@ -1063,8 +1100,9 @@ draw_thumbnail(int x, int y, int w, int h, const TileRow *tr, int vi)
         SetFont(f, BLACK);
         char truncated[MAX_TITLE_LEN];
         snprintf(truncated, sizeof truncated, "%s", label);
+        utf8_cap(truncated, sizeof truncated);
         while (StringWidth(truncated) > w - 8 && strlen(truncated) > 4)
-            truncated[strlen(truncated) - 1] = '\0';
+            utf8_cap(truncated, strlen(truncated)); /* never split a multibyte char */
         DrawString(x + 4, cap_y, truncated);
         CloseFont(f);
     }
@@ -1076,8 +1114,9 @@ draw_thumbnail(int x, int y, int w, int h, const TileRow *tr, int vi)
             SetFont(af, DGRAY);
             char truncated[80];
             snprintf(truncated, sizeof truncated, "%s", b->author);
+            utf8_cap(truncated, sizeof truncated);
             while (StringWidth(truncated) > w - 8 && strlen(truncated) > 4)
-                truncated[strlen(truncated) - 1] = '\0';
+                utf8_cap(truncated, strlen(truncated)); /* never split a multibyte char */
             DrawString(x + 4, cap_y + 24, truncated);
             CloseFont(af);
         }
@@ -1312,8 +1351,9 @@ draw_dl_popup(void)
             SetFont(cf, BLACK);
             char trunc[MAX_TITLE_LEN];
             snprintf(trunc, sizeof trunc, "%s", cur->title);
+            utf8_cap(trunc, sizeof trunc);
             while (StringWidth(trunc) > pw - 2 * CTX_PAD && strlen(trunc) > 4)
-                trunc[strlen(trunc) - 1] = '\0';
+                utf8_cap(trunc, strlen(trunc)); /* never split a multibyte char */
             DrawString(px + CTX_PAD, py + CTX_TITLE_H + 22, trunc);
             CloseFont(cf);
         }
@@ -1529,6 +1569,16 @@ flush_content(void)
 void
 redraw_shelf(void)
 {
+    /* Clamp the page before the body draws: a view change that shrank
+     * the page count (list mode on a deep page, a tightening filter)
+     * would otherwise let draw_grid paint an empty page — draw_pager's
+     * own clamp only runs after the grid. */
+    int pages = current_pages();
+    if (g_state.page >= pages)
+        g_state.page = pages - 1;
+    if (g_state.page < 0)
+        g_state.page = 0;
+
     if (g_state.overlay == OV_LAUNCHER) {
         draw_overlay_launcher();
         FullUpdate();
@@ -1631,6 +1681,21 @@ cover_fetch_job(BsJob *job)
     __atomic_store_n(&job->done, 1, __ATOMIC_RELEASE);
 }
 
+/* 1 = the cover grid is the live on-screen view, so a per-tile cover
+ * blit is safe.  Matches what redraw_shelf() actually draws as the
+ * body: only the library tab with no modal overlay up and the folder
+ * browser closed shows the grid — on the search page, the launcher,
+ * the settings/source/menu overlays, or while the folder browser is
+ * open, a blit would paint shelf tiles over the wrong page.  The
+ * decoded bitmap is cached on the slot either way; the next full
+ * redraw (redraw_shelf) shows it. */
+static int
+shelf_active_view(void)
+{
+    return !modal_open() && g_state.tab == TAB_LIBRARY &&
+           !(g_state.source == SOURCE_FOLDER && g_browse_open);
+}
+
 /* Cover fetch finished (main thread): decode on the main thread and
  * blit the tile if it is still on the current page, then schedule the
  * next cover.  A failed or canceled job still schedules the next. */
@@ -1659,17 +1724,20 @@ cover_job_done(BsJob *job)
         s->state = 3;
     }
     /* The cached bitmap is stored on the slot regardless; only the
-     * on-screen blit is skipped while a modal owns the framebuffer, so a
-     * single-tile PartialUpdate can't punch a hole through the overlay's
-     * dim mask (the full redraw on close then shows the now-cached cover). */
+     * on-screen blit is skipped while a modal owns the framebuffer or
+     * the shelf is not the live view, so a single-tile PartialUpdate
+     * can't punch a hole through an overlay's dim mask or paint over
+     * the wrong page (the full redraw then shows the now-cached
+     * cover). */
     int modal = modal_open();
     LOG("[bookshelf] cover_job_done blit begin modal=%d\n", modal);
 
-    /* The fetch is async now, so the user may have flipped pages while
-     * it ran: blit only if the tile is still on the current page. */
+    /* The fetch is async now, so the user may have flipped pages (or
+     * left the shelf) while it ran: blit only when the grid is on
+     * screen and the tile is still on the current page. */
     int tx, ty, tw, th;
     int target = -1;
-    if (!modal) {
+    if (shelf_active_view()) {
         int top, bot, cell_w, cell_h;
         (void)top;
         (void)bot;
@@ -1829,14 +1897,16 @@ cover_tick(void *ctx)
         s->state = 3;
     }
     /* The cached bitmap is stored on the slot regardless; only the
-     * on-screen blit is skipped while a modal owns the framebuffer, so a
-     * single-tile PartialUpdate can't punch a hole through the overlay's
-     * dim mask (the full redraw on close then shows the now-cached cover). */
+     * on-screen blit is skipped while a modal owns the framebuffer or
+     * the shelf is not the live view, so a single-tile PartialUpdate
+     * can't punch a hole through an overlay's dim mask or paint over
+     * the wrong page (the full redraw then shows the now-cached
+     * cover). */
     int modal = modal_open();
     LOG("[bookshelf] cover_tick blit begin modal=%d\n", modal);
 
     int tx, ty, tw, th;
-    if (!modal && tile_rect_for_index(target, &tx, &ty, &tw, &th)) {
+    if (shelf_active_view() && tile_rect_for_index(target, &tx, &ty, &tw, &th)) {
         FillArea(tx, ty, tw, th, WHITE);
         draw_thumbnail(tx, ty, tw, th, &g_rows[target - page_start], target);
         PartialUpdate(tx, ty, tw, th);
@@ -2053,11 +2123,15 @@ settings_keyboard_handler(char *buffer)
     const char *val = buffer ? buffer : "";
     if (g_settings_edit == 1) {
         /* Normalise a bare host[:port] into a full http:// URL so the
- * endpoint builder always gets a scheme. */
+         * endpoint builder always gets a scheme.  Cap the host portion
+         * first so the prefixed URL always fits g_state.api_base: only
+         * the host's tail can be cut, never the "http://" prefix, so
+         * the committed value is never a truncated-mid-URL. */
         if (strncmp(val, "http://", 7) != 0 && strncmp(val, "https://", 8) != 0) {
-            char tmp[260];
-            snprintf(tmp, sizeof tmp, "http://%s", val);
-            snprintf(g_state.api_base, sizeof g_state.api_base, "%s", tmp);
+            char tmp[sizeof g_state.api_base];
+            snprintf(tmp, sizeof tmp, "%.*s", (int)(sizeof g_state.api_base - 8), val);
+            utf8_cap(tmp, sizeof tmp);
+            snprintf(g_state.api_base, sizeof g_state.api_base, "http://%s", tmp);
         } else {
             snprintf(g_state.api_base, sizeof g_state.api_base, "%s", val);
         }
@@ -2146,7 +2220,7 @@ draw_overlay_settings(void)
     const char *dl = g_settings_dl_dir[0] ? g_settings_dl_dir : g_downloads_dir;
     user_path_display(dl, dl_shown, sizeof dl_shown);
     while (StringWidth(dl_shown) > w - 2 * 32 - 16 && strlen(dl_shown) > 4)
-        dl_shown[strlen(dl_shown) - 1] = '\0';
+        utf8_cap(dl_shown, strlen(dl_shown)); /* never split a multibyte char */
 
     int y = 112;
     settings_draw_row(y, i18n("settings.api_host"), g_state.api_base, g_settings_edit == 1);
@@ -2371,7 +2445,7 @@ draw_log_view(void)
         char shown[200];
         snprintf(shown, sizeof shown, "%s", log_path());
         while (StringWidth(shown) > w - LOG_BACK_X - LOG_BACK_W - 32 && strlen(shown) > 8)
-            shown[strlen(shown) - 1] = '\0';
+            utf8_cap(shown, strlen(shown)); /* never split a multibyte char */
         DrawString(LOG_BACK_X + LOG_BACK_W + 16, LOG_BACK_Y + 46, shown);
         CloseFont(pf);
     }
@@ -2423,7 +2497,7 @@ draw_log_view(void)
                 memcpy(tmp, p, (size_t)len);
                 tmp[len] = '\0';
                 while (StringWidth(tmp) > w - 48 && strlen(tmp) > 4)
-                    tmp[strlen(tmp) - 1] = '\0';
+                    utf8_cap(tmp, strlen(tmp)); /* never split a multibyte char */
                 DrawString(24, body_top + i * LOG_ROW_H, tmp);
             }
             CloseFont(lf);
