@@ -392,6 +392,10 @@ int store_upsert_book(const Book *b) {
         snprintf(lp, sizeof lp, "%s", t ? t : "");
       }
     }
+    /* The lookup SELECT is left at ROW (hit) or DONE (miss); either
+     * way it may still hold a read cursor on books.  Reset before the
+     * INSERT below or the write fails with SQLITE_LOCKED. */
+    sqlite3_reset(q);
   }
 
   sqlite3_stmt *st = st_prep_once(
@@ -509,7 +513,9 @@ void store_set_downloaded(const char *id, int downloaded,
   bind_text_trunc(st, 1, id);
   sqlite3_bind_int(st, 2, downloaded);
   bind_text_trunc(st, 3, local_path);
-  sqlite3_step(st);
+  int rc = sqlite3_step(st);
+  if (rc != SQLITE_DONE)
+    LOG("[bookshelf] store_set_downloaded failed: %s\n", sqlite3_errmsg(g_db));
 }
 
 static void fill_book_from_stmt(sqlite3_stmt *st, Book *b) {
@@ -563,6 +569,10 @@ int store_get_book(const char *id, Book *out) {
   int found = sqlite3_step(st) == SQLITE_ROW;
   if (found)
     fill_book_from_stmt(st, out);
+  /* Data is copied out above; reset releases the statement's read
+   * cursor so a later write to books on this connection cannot hit
+   * SQLITE_LOCKED. */
+  sqlite3_reset(st);
   return found;
 }
 
@@ -664,6 +674,10 @@ int store_next_ids(char ids[][MAX_ID_LEN], int cap, long long *after_rowid) {
     *after_rowid = sqlite3_column_int64(st, 0);
     n++;
   }
+  /* A page that filled exactly cap leaves the statement at SQLITE_ROW
+   * (the LIMIT was reached before the scan exhausted); reset releases
+   * its read cursor so a later write to books is not locked out. */
+  sqlite3_reset(st);
   return n;
 }
 
@@ -1179,6 +1193,11 @@ void view_rebuild(void) {
       sqlite3_finalize(st);
     }
   } else if (g_state.group == GROUP_BY_SERIES || g_state.group == GROUP_ALL) {
+    /* idempotent: a failed earlier rebuild must not wedge the collapse
+     * (a leaked t_sorted makes the CREATE TEMP TABLE below fail). */
+    sqlite3_exec(g_db, "DROP TABLE IF EXISTS t_sorted", NULL, NULL, NULL);
+    sqlite3_exec(g_db, "DROP TABLE IF EXISTS t_grp", NULL, NULL, NULL);
+    sqlite3_exec(g_db, "DROP TABLE IF EXISTS t_out", NULL, NULL, NULL);
     /* Collapse mode: order the filtered set once into a temp table
      * (rowid = sort position), then emit flats and series cards
      * keyed by first-seen position. */
