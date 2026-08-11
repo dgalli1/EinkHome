@@ -19,9 +19,18 @@ import os
 import sys
 import threading
 import time
+from collections import OrderedDict
 from typing import Optional
 
 from storage.placeholder import PLACEHOLDER_PNG
+
+# Negative-cache bounds: a book whose cover fetch failed (provider miss
+# or undecodable bytes) is remembered as missing for at most _MISSING_TTL
+# seconds, and the in-memory table never holds more than _MISSING_MAX
+# ids (oldest evicted first).  This stops 100k-catalogue warm-ups from
+# hammering the provider every pass for books that provably have no cover.
+_MISSING_MAX = 10000
+_MISSING_TTL = 3600.0
 
 
 class CoverCache:
@@ -37,6 +46,8 @@ class CoverCache:
         self.max_age = max_age_seconds
         if create_dir:
             os.makedirs(self.directory, exist_ok=True)
+        self._missing: OrderedDict[str, float] = OrderedDict()
+        self._missing_lock = threading.Lock()
         self._sweep_stale_tmp()
 
     def _sweep_stale_tmp(self) -> None:
@@ -103,6 +114,35 @@ class CoverCache:
         except OSError:
             return None
 
+    # --- negative cache --------------------------------------------------
+
+    def is_missing(self, book_id: str) -> bool:
+        """True if ``book_id`` was recently seen without a usable cover.
+
+        Entries older than ``_MISSING_TTL`` are dropped on access (the
+        book becomes fetchable again); fresh entries are refreshed to
+        the LRU end so a hot set never gets evicted.
+        """
+        now = time.time()
+        with self._missing_lock:
+            stamp = self._missing.get(book_id)
+            if stamp is None:
+                return False
+            if now - stamp > _MISSING_TTL:
+                self._missing.pop(book_id, None)
+                return False
+            self._missing.move_to_end(book_id)
+            return True
+
+    def mark_missing(self, book_id: str) -> None:
+        """Record that ``book_id`` has no usable cover (TTL-bounded)."""
+        now = time.time()
+        with self._missing_lock:
+            self._missing[book_id] = now
+            self._missing.move_to_end(book_id)
+            while len(self._missing) > _MISSING_MAX:
+                self._missing.popitem(last=False)
+
     # --- writes ----------------------------------------------------------
 
     @staticmethod
@@ -110,7 +150,12 @@ class CoverCache:
         # Unique tmp per writer (pid + thread id): the cover warmer and
         # request handlers can race on the same key, and a shared fixed
         # name would let interleaved writes corrupt each other before
-        # os.replace makes the final file atomic.
+        # os.replace makes the final file atomic.  The tmp file is
+        # flushed and fsynced, then renamed into place; the parent-
+        # directory fsync is deliberately skipped — a lost rename after
+        # a crash only costs a re-fetch, and the startup sweep cleans up
+        # any leaked tmp, while the dir fsync cost would double on every
+        # write (100k covers).
         tmp = f"{path}.{os.getpid()}.{threading.get_ident()}.tmp"
         try:
             with open(tmp, "wb") as fh:
@@ -118,15 +163,6 @@ class CoverCache:
                 fh.flush()
                 os.fsync(fh.fileno())
             os.replace(tmp, path)
-            # Durability: fsync the parent directory so the rename
-            # survives a crash.  Not every platform allows fsync on a
-            # directory fd, so failures here are ignored.
-            with contextlib.suppress(OSError):
-                dir_fd = os.open(os.path.dirname(path) or ".", os.O_RDONLY)
-                try:
-                    os.fsync(dir_fd)
-                finally:
-                    os.close(dir_fd)
         except OSError as exc:
             sys.stderr.write(f"cover_cache: write failed {path}: {exc}\n")
             with contextlib.suppress(OSError):

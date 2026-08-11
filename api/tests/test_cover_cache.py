@@ -99,5 +99,34 @@ def test_process_and_store_skips_placeholder(tmp_path):
     assert cache.read_png("no-cover") is None
 
 
+def test_negative_cache_ttl(tmp_path):
+    """Marked-missing ids report missing until the TTL expires, then
+    become fetchable again."""
+    cache = _cache(tmp_path)
+    assert not cache.is_missing("b1")
+    cache.mark_missing("b1")
+    assert cache.is_missing("b1")
+    # Expire the entry by backdating it past _MISSING_TTL.
+    from storage.cover_cache import _MISSING_TTL
+
+    cache._missing["b1"] = time.time() - (_MISSING_TTL + 60)
+    assert not cache.is_missing("b1")
+    # Expired entries are dropped, not kept around.
+    assert "b1" not in cache._missing
+
+
+def test_negative_cache_bounded(tmp_path):
+    """The negative cache never grows past _MISSING_MAX entries; the
+    oldest are evicted first."""
+    from storage.cover_cache import _MISSING_MAX
+
+    cache = _cache(tmp_path)
+    for i in range(_MISSING_MAX + 100):
+        cache.mark_missing(f"b{i}")
+    assert len(cache._missing) == _MISSING_MAX
+    assert not cache.is_missing("b0"), "oldest entry must be evicted"
+    assert cache.is_missing(f"b{_MISSING_MAX + 99}"), "newest entry must survive"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

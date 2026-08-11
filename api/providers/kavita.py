@@ -10,6 +10,8 @@ Configuration (read from `config/server.json` → `providers.kavita`):
         "password":   "secret",               # only if no api_key
         "verify_tls": true,
         "timeout":    60,
+        "cache_ttl_s": 60,                   # seconds upstream DTOs are
+                                             # treated as immutable
         "library_ids": [1, 2]                # optional; default = all
     }
 """
@@ -118,6 +120,13 @@ _CHAPTER_FILES_CACHE_MAX = 8192
 _ID_CACHE_MAX = 16384
 _BOOK_CACHE_MAX = 16384
 
+# Default cap for _KavitaClient._resp_cache, the TTL-bounded cache of
+# raw upstream DTO responses (series pages, volumes, chapters).  Both
+# this and _CHAPTER_FILES_CACHE_MAX grow adaptively to the walked
+# catalogue size so a full catalogue fits without LRU thrashing
+# mid-walk (see KavitaProvider._iter_chapter_metas).
+_RESP_CACHE_MAX = 8192
+
 
 class _KavitaClient:
     """Minimal stdlib-only HTTP client for the Kavita endpoints we use.
@@ -136,12 +145,14 @@ class _KavitaClient:
         password: str = "",
         timeout: float = 60.0,
         verify_tls: bool = True,
+        cache_ttl_s: float = 60.0,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.username = username
         self.password = password
         self.timeout = timeout
+        self.cache_ttl_s = cache_ttl_s
         self._jwt: str | None = None
         self._jwt_expiry: float = 0.0
         self._ssl = (
@@ -149,6 +160,19 @@ class _KavitaClient:
             if verify_tls
             else ssl._create_unverified_context()
         )
+        # TTL-bounded cache of raw upstream JSON responses.  Keyed by
+        # (method, path, body-json-string); value is (fetch_time,
+        # status, parsed).  Series/volume/chapter DTOs are treated as
+        # immutable for cache_ttl_s seconds — a metadata change
+        # upstream propagates once the TTL expires (acceptable for a
+        # 30s-interval catalogue refresh).  Login (with_auth=False)
+        # and binary endpoints (_request / cover_bytes) bypass it.
+        # LRU-evicted; the cap adapts to the catalogue size (the
+        # provider raises _resp_cache_max after each walk).
+        self._resp_cache: OrderedDict[
+            tuple[str, str, str], tuple[float, int, Any]
+        ] = OrderedDict()
+        self._resp_cache_max = _RESP_CACHE_MAX
 
     def _url(self, path: str) -> str:
         if not path.startswith("/"):
@@ -223,13 +247,33 @@ class _KavitaClient:
         body: dict | None = None,
         with_auth: bool = True,
     ) -> tuple[int, Any]:
+        # Response cache: skip entirely for login (with_auth=False) so
+        # credential state is never cached.
+        cache_key: tuple[str, str, str] | None = None
+        if with_auth:
+            cache_key = (method, path, json.dumps(body) if body is not None else "")
+            now = time.time()
+            hit = self._resp_cache.get(cache_key)
+            if hit is not None:
+                fetch_time, status, parsed = hit
+                if now - fetch_time < self.cache_ttl_s:
+                    self._resp_cache.move_to_end(cache_key)
+                    return status, parsed
         status, body_bytes, _ = self._request(method, path, body, with_auth)
         if not body_bytes:
             return status, None
         try:
-            return status, json.loads(body_bytes.decode("utf-8"))
+            parsed: Any = json.loads(body_bytes.decode("utf-8"))
         except (json.JSONDecodeError, UnicodeDecodeError):
-            return status, body_bytes.decode("utf-8", errors="replace")
+            parsed = body_bytes.decode("utf-8", errors="replace")
+        # Don't cache auth failures (401) or transient server errors
+        # (5xx) — a retried call must see the fresh result.
+        if cache_key is not None and status not in (401,) and not (500 <= status < 600):
+            self._resp_cache[cache_key] = (time.time(), status, parsed)
+            self._resp_cache.move_to_end(cache_key)
+            if len(self._resp_cache) > self._resp_cache_max:
+                self._resp_cache.popitem(last=False)
+        return status, parsed
 
     def ensure_auth(self) -> None:
         if self._jwt and time.time() < self._jwt_expiry - 30:
@@ -533,7 +577,15 @@ class KavitaProvider(Provider):
             password=cfg.get("password") or _env("KAVITA_PASS", ""),
             timeout=cfg.get("timeout", 60.0),
             verify_tls=cfg.get("verify_tls", True),
+            cache_ttl_s=cfg.get("cache_ttl_s", 60.0),
         )
+        # Adaptive LRU caps: sized up to the walked catalogue after
+        # each walk so every DTO of a large catalogue stays cached
+        # between refreshes (see _iter_chapter_metas).  Start at the
+        # module defaults.
+        self._chapter_files_cache_max = _CHAPTER_FILES_CACHE_MAX
+        self._resp_cache_max = _RESP_CACHE_MAX
+        self._catalogue_size = 0
         # chapter_id -> book-id (our string id) for stable URLs.
         # LRU-capped: one entry per chapter at 100k books would
         # otherwise grow without bound.
@@ -599,8 +651,9 @@ class KavitaProvider(Provider):
         catalogue walk) so a cold miss doesn't need an extra
         ``/api/Volume`` round-trip; ``get_book``/``get_cover`` omit it
         and the volume is resolved here.  Entries are evicted
-        LRU-style past ``_CHAPTER_FILES_CACHE_MAX`` so a 30s-interval
-        refresh doesn't re-fetch every chapter's files.
+        LRU-style past ``self._chapter_files_cache_max`` (sized to the
+        catalogue after each walk) so a 30s-interval refresh doesn't
+        re-fetch every chapter's files.
         """
         cached = self._chapter_files_cache.get(chapter_id)
         if cached is not None:
@@ -611,7 +664,7 @@ class KavitaProvider(Provider):
             volume = self.client.get_chapter_volume(chapter_id)
         entry = (files, volume)
         self._chapter_files_cache[chapter_id] = entry
-        if len(self._chapter_files_cache) > _CHAPTER_FILES_CACHE_MAX:
+        if len(self._chapter_files_cache) > self._chapter_files_cache_max:
             self._chapter_files_cache.popitem(last=False)
         return entry
 
@@ -756,15 +809,34 @@ class KavitaProvider(Provider):
         Walks libraries → series → volumes → chapters exactly once, in
         stable order.  Shared by list_books and walk_books so both stay
         in the same order without duplicating the walk.
+
+        When the walk ends (fully consumed or abandoned), the LRU caps
+        are grown to fit the walked catalogue: at 100k books the
+        default 8192-entry caps would thrash within a single walk and
+        re-fetch everything on the next refresh.  Sizing them to
+        ``2 * catalogue_size`` keeps every DTO cached between the
+        30s-interval refreshes; partial walks only ever grow the caps
+        (``max``), never shrink them.
         """
-        for lid in lids:
-            for s in self._series_in_library(lid, series_id_filter):
-                sid = s.get("id")
-                if not sid:
-                    continue
-                for vol in self.client.get_volumes(sid):
-                    for ch in vol.get("chapters") or []:
-                        yield ch, s, vol
+        walked = 0
+        try:
+            for lid in lids:
+                for s in self._series_in_library(lid, series_id_filter):
+                    sid = s.get("id")
+                    if not sid:
+                        continue
+                    for vol in self.client.get_volumes(sid):
+                        for ch in vol.get("chapters") or []:
+                            walked += 1
+                            yield ch, s, vol
+        finally:
+            self._catalogue_size = max(self._catalogue_size, walked)
+            self._chapter_files_cache_max = self._resp_cache_max = max(
+                8192, self._catalogue_size * 2
+            )
+            # The response cache lives on the client; keep its cap in
+            # lockstep with the provider's.
+            self.client._resp_cache_max = self._resp_cache_max
 
     # --- Provider interface -----------------------------------------------
 

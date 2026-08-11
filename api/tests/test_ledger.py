@@ -7,7 +7,9 @@ across reopen.
 """
 
 # pylint: disable=missing-function-docstring,redefined-outer-name
+import json
 import os
+import sqlite3
 import sys
 import threading
 import time
@@ -295,13 +297,127 @@ def test_delta_during_refresh_smoke(ledger):
     )
     t.start()
     assert walked.wait(2.0), "refresh thread never entered the provider walk"
-    # The refresh holds the write lock; delta serialises behind it.
+    # The refresh holds the write lock, but delta reads the committed
+    # WAL snapshot on the dedicated read connection — no blocking.
     entries, more = ledger.delta(0, 100)
     assert len(entries) == 100
     assert isinstance(more, bool)
     t.join(timeout=10)
     assert not t.is_alive(), "refresh thread hung"
     assert ledger.count() == 5000  # post-walk state fully visible
+
+
+def test_refresh_async_runs_walk_in_background(ledger):
+    """refresh_async kicks the walk onto a daemon thread and reports
+    completion through walk_done_event."""
+    prov = FakeProvider([_meta("a"), _meta("b"), _meta("c")])
+    assert ledger.walk_in_progress() is False
+    assert ledger.walk_done_event() is None  # no walk started yet
+    assert ledger.refresh_async(prov, max_age_s=0) is True
+    ev = ledger.walk_done_event()
+    assert ev is not None
+    assert ev.wait(10.0), "background walk never finished"
+    assert ledger.walk_in_progress() is False
+    assert ledger.count() == 3
+    assert ledger.cursor() == 3
+
+
+def test_refresh_async_refuses_concurrent_walks(ledger):
+    """A second refresh_async while a walk is in flight is refused."""
+    entered = threading.Event()
+    release = threading.Event()
+
+    class BlockingProvider(FakeProvider):
+        def list_books(self, *, mode="all", limit=500, offset=0, **_kw):
+            if offset == 0:
+                entered.set()
+                assert release.wait(5.0)
+            return super().list_books(mode=mode, limit=limit, offset=offset)
+
+    prov = BlockingProvider([_meta("a")])
+    assert ledger.refresh_async(prov, max_age_s=0) is True
+    assert entered.wait(2.0), "walk thread never reached the provider"
+    assert ledger.walk_in_progress() is True
+    assert ledger.refresh_async(prov, max_age_s=0) is False
+    release.set()
+    ev = ledger.walk_done_event()
+    assert ev.wait(10.0), "background walk never finished"
+    assert ledger.count() == 1
+
+
+def test_refresh_async_failed_walk_cooldowns(ledger):
+    """A failing background walk stamps last_walk so the next kick is
+    refused (no per-request respawn) and the error is swallowed."""
+
+    class FailingProvider(FakeProvider):
+        def list_books(self, *, mode="all", limit=500, offset=0, **_kw):
+            raise RuntimeError("provider is down")
+
+    prov = FailingProvider([])
+    assert ledger.refresh_async(prov, max_age_s=30) is True
+    ev = ledger.walk_done_event()
+    assert ev.wait(10.0), "background walk never finished"
+    assert ledger.walk_in_progress() is False
+    # Cooldown applied: last_walk is fresh, so the next kick is refused.
+    assert ledger.refresh_async(prov, max_age_s=30) is False
+
+
+def test_delta_carries_stored_search_fields(ledger):
+    """search_text/suggest are computed at walk time and ride along on
+    every delta entry."""
+    prov = FakeProvider([_meta("a", title="Harry Potter")])
+    ledger.refresh(prov, max_age_s=0)
+    entries, _ = ledger.delta(0, 10)
+    assert len(entries) == 1
+    e = entries[0]
+    assert e.search_text == "harry potter a"  # folded, fields joined
+    suggest = json.loads(e.suggest)
+    assert "harry potter" in suggest
+    assert suggest[0] == "harry"
+
+
+def test_backfill_fills_missing_search_columns(tmp_path):
+    """Rows written before the columns existed get search_text/suggest
+    backfilled on a daemon thread at open."""
+    path = str(tmp_path / "old.db")
+    con = sqlite3.connect(path)
+    con.execute(
+        "CREATE TABLE books("
+        "id TEXT PRIMARY KEY, rev INTEGER UNIQUE, added_at TEXT, "
+        "title TEXT, authors TEXT, series TEXT, series_id TEXT, "
+        "series_idx REAL, format TEXT, size INTEGER, fp TEXT, file_name TEXT)"
+    )
+    con.execute("CREATE TABLE state(key TEXT PRIMARY KEY, value INTEGER)")
+    con.execute(
+        "CREATE TABLE device_cursors("
+        "device_id TEXT PRIMARY KEY, last_rev INTEGER NOT NULL, "
+        "updated_at TEXT NOT NULL)"
+    )
+    con.execute("INSERT INTO state VALUES ('next_rev', 1)")
+    con.execute("INSERT INTO state VALUES ('last_walk', 0)")
+    con.execute(
+        "INSERT INTO books VALUES ('a', 1, '2026-01-01T00:00:00Z', "
+        "'Harry Potter', '[\"Rowling\"]', NULL, NULL, NULL, 'epub', 10, "
+        "'fp', NULL)"
+    )
+    con.commit()
+    con.close()
+
+    led = SyncLedger(path)
+    try:
+        deadline = time.time() + 10
+        row = None
+        while time.time() < deadline:
+            row = led.rdcon.execute(
+                "SELECT search_text, suggest FROM books WHERE id = 'a'"
+            ).fetchone()
+            if row[0] is not None:
+                break
+            time.sleep(0.02)
+        assert row is not None and row[0] == "harry potter rowling"
+        assert json.loads(row[1]) == ["harry", "potter", "harry potter", "rowling"]
+    finally:
+        led.close()
 
 
 if __name__ == "__main__":

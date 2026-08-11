@@ -36,11 +36,15 @@ Schema:
 
     books(id TEXT PRIMARY KEY, rev INTEGER UNIQUE, added_at TEXT,
           title TEXT, authors TEXT, series TEXT, series_id TEXT,
-          series_idx REAL, format TEXT, size INTEGER, fp TEXT)
-        rev       — current revision; bumped on every change
-        added_at  — ISO timestamp first seen; NULL = tombstone
-        authors   — JSON array of names
-        fp        — fingerprint of the metadata columns (change detect)
+          series_idx REAL, format TEXT, size INTEGER, fp TEXT,
+          file_name TEXT, search_text TEXT, suggest TEXT)
+        rev         — current revision; bumped on every change
+        added_at    — ISO timestamp first seen; NULL = tombstone
+        authors     — JSON array of names
+        fp          — fingerprint of the metadata columns (change detect)
+        search_text — folded search blob, precomputed at walk time
+        suggest     — JSON array of suggestion terms, precomputed at
+                      walk time (NULL only for pre-backfill rows)
 
     state(key TEXT PRIMARY KEY, value INTEGER)
         next_rev   — next revision to hand out (starts at 1)
@@ -58,10 +62,13 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+import sys
 import threading
 import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
+
+from storage.suggest import search_text as _search_text, suggest_terms as _suggest_terms
 
 if TYPE_CHECKING:
     from providers.base import BookMeta
@@ -92,6 +99,8 @@ class LedgerEntry:
     format: str
     size: int
     file_name: str | None = None
+    search_text: str | None = None  # folded search blob, precomputed at walk time
+    suggest: str | None = None  # JSON array of suggestion terms, precomputed
 
 
 def fingerprint(meta: BookMeta) -> str:
@@ -137,6 +146,17 @@ class SyncLedger:
             self.con.execute("ALTER TABLE books ADD COLUMN file_name TEXT")
         except sqlite3.OperationalError:
             pass  # column already present
+        # search_text/suggest are folded at walk time so the delta
+        # endpoint never re-computes them per request.  Old ledgers
+        # get the columns now and are backfilled on a daemon thread.
+        try:
+            self.con.execute("ALTER TABLE books ADD COLUMN search_text TEXT")
+        except sqlite3.OperationalError:
+            pass  # column already present
+        try:
+            self.con.execute("ALTER TABLE books ADD COLUMN suggest TEXT")
+        except sqlite3.OperationalError:
+            pass  # column already present
         self.con.execute(
             "CREATE TABLE IF NOT EXISTS state(key TEXT PRIMARY KEY, value INTEGER)"
         )
@@ -152,8 +172,22 @@ class SyncLedger:
             "INSERT OR IGNORE INTO state(key, value) VALUES ('last_walk', 0)"
         )
         self.con.commit()
+        # Dedicated read-only connection for the delta/cursor/count
+        # reads: WAL gives it a committed snapshot, so those calls
+        # never block on (or take the lock for) an in-flight walk.
+        self.rdcon = sqlite3.connect(path, check_same_thread=False)
+        self.rdcon.execute("PRAGMA busy_timeout=3000")
         self._lock = threading.Lock()
+        self._walking = False
+        self._walk_done: threading.Event | None = None
         self._ack_empty_catalogue = ack_empty_catalogue
+        row = self.con.execute(
+            "SELECT COUNT(*) FROM books WHERE search_text IS NULL"
+        ).fetchone()
+        if row and int(row[0]) > 0:
+            threading.Thread(
+                target=self._backfill_search, name="ledger-backfill", daemon=True
+            ).start()
 
     # -- write side --------------------------------------------------------
 
@@ -189,6 +223,114 @@ class SyncLedger:
             self._state_set("last_walk", int(time.time()))
             self.con.commit()
             return True
+
+    def refresh_async(self, provider: Any, max_age_s: float = 30.0) -> bool:
+        """Kick off a catalogue walk on a daemon thread if one is due
+        (same ``max_age_s`` check as :meth:`refresh`) and none is
+        already in flight.  Returns True when a walk was started.
+
+        The request thread never blocks on the provider or on the
+        writer lock here; callers that need the freshest data wait on
+        :meth:`walk_done_event`.  If a walk is in flight or the lock
+        is momentarily held by a synchronous writer (a ``refresh()``
+        walk or the startup backfill), this returns False immediately
+        instead of queueing behind it — the caller serves the last
+        committed ledger state."""
+        if self._walking:
+            return False
+        if not self._lock.acquire(blocking=False):
+            return False
+        try:
+            last = self._state_get("last_walk")
+            if time.time() - last < max_age_s or self._walking:
+                return False
+            self._walking = True
+            self._walk_done = threading.Event()
+        finally:
+            self._lock.release()
+        threading.Thread(
+            target=self._refresh_bg,
+            args=(provider, max_age_s),
+            name="ledger-walk",
+            daemon=True,
+        ).start()
+        return True
+
+    def _refresh_bg(self, provider: Any, max_age_s: float) -> None:
+        """Background runner for :meth:`refresh_async`.  A failed walk
+        still stamps ``last_walk`` so a down provider does not respawn
+        a walk on every request (cooldown); the error is logged."""
+        try:
+            self.refresh(provider, max_age_s=max_age_s)
+        except Exception as exc:  # noqa: BLE001 — provider may be down
+            sys.stderr.write(f"ledger: background walk failed: {exc}\n")
+            try:
+                with self._lock:
+                    self._state_set("last_walk", int(time.time()))
+                    self.con.commit()
+            except Exception:  # noqa: BLE001 — nothing left to do
+                pass
+        finally:
+            with self._lock:
+                self._walking = False
+                self._walk_done.set()
+
+    def walk_in_progress(self) -> bool:
+        """True while a background walk is running.  Plain GIL-atomic
+        read — never blocks on the writer lock."""
+        return self._walking
+
+    def walk_done_event(self) -> threading.Event | None:
+        """Event set when the current background walk finishes, or None
+        when no walk has ever been started.  Plain read — never blocks
+        on the writer lock."""
+        return self._walk_done
+
+    def _backfill_search(self) -> None:
+        """Chunked keyset backfill of search_text/suggest for rows
+        written before the columns existed.  Runs once on a daemon
+        thread at startup; 5000 rows per chunk, one commit per chunk,
+        stops when no NULL rows remain."""
+        try:
+            last_id: str | None = None
+            while True:
+                with self._lock:
+                    if last_id is None:
+                        rows = self.con.execute(
+                            "SELECT id, title, authors, series FROM books "
+                            "WHERE search_text IS NULL ORDER BY id LIMIT 5000"
+                        ).fetchall()
+                    else:
+                        rows = self.con.execute(
+                            "SELECT id, title, authors, series FROM books "
+                            "WHERE search_text IS NULL AND id > ? "
+                            "ORDER BY id LIMIT 5000",
+                            (last_id,),
+                        ).fetchall()
+                    if not rows:
+                        return
+                    updates = []
+                    for bid, title, authors, series in rows:
+                        names = json.loads(authors) if authors else []
+                        updates.append(
+                            (
+                                _search_text(title or "", names, series),
+                                json.dumps(
+                                    _suggest_terms(title or "", names, series),
+                                    separators=(",", ":"),
+                                    ensure_ascii=False,
+                                ),
+                                bid,
+                            )
+                        )
+                    self.con.executemany(
+                        "UPDATE books SET search_text=?, suggest=? WHERE id=?",
+                        updates,
+                    )
+                    self.con.commit()
+                    last_id = rows[-1][0]
+        except Exception as exc:  # noqa: BLE001 — backfill must not crash startup
+            sys.stderr.write(f"ledger: search backfill failed: {exc}\n")
 
     def _walk(self, provider: Any) -> None:
         """One full catalogue pass.  Only one provider page and its
@@ -253,8 +395,8 @@ class SyncLedger:
             next_rev += 1
         self.con.executemany(
             "INSERT OR IGNORE INTO books(id, rev, added_at, title, authors, "
-            "series, series_id, series_idx, format, size, fp, file_name) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            "series, series_id, series_idx, format, size, fp, file_name, "
+            "search_text, suggest) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             rows,
         )
         self._state_set("next_rev", next_rev)
@@ -264,15 +406,16 @@ class SyncLedger:
             return
         next_rev = self._state_get("next_rev")
         for meta in metas:
+            names = list(meta.authors or [])
             self.con.execute(
                 "UPDATE books SET rev=?, added_at=?, title=?, authors=?, "
                 "series=?, series_id=?, series_idx=?, format=?, size=?, fp=?, "
-                "file_name=? WHERE id=?",
+                "file_name=?, search_text=?, suggest=? WHERE id=?",
                 (
                     next_rev,
                     meta.added_at,
                     meta.title,
-                    json.dumps(list(meta.authors or [])),
+                    json.dumps(names),
                     meta.series,
                     meta.series_id,
                     meta.series_index,
@@ -280,6 +423,12 @@ class SyncLedger:
                     meta.file_size,
                     fingerprint(meta),
                     meta.file_name,
+                    _search_text(meta.title or "", names, meta.series),
+                    json.dumps(
+                        _suggest_terms(meta.title or "", names, meta.series),
+                        separators=(",", ":"),
+                        ensure_ascii=False,
+                    ),
                     meta.id,
                 ),
             )
@@ -300,12 +449,13 @@ class SyncLedger:
 
     @staticmethod
     def _meta_row(meta: BookMeta, rev: int) -> tuple[Any, ...]:
+        names = list(meta.authors or [])
         return (
             meta.id,
             rev,
             meta.added_at,
             meta.title,
-            json.dumps(list(meta.authors or [])),
+            json.dumps(names),
             meta.series,
             meta.series_id,
             meta.series_index,
@@ -313,6 +463,12 @@ class SyncLedger:
             meta.file_size,
             fingerprint(meta),
             meta.file_name,
+            _search_text(meta.title or "", names, meta.series),
+            json.dumps(
+                _suggest_terms(meta.title or "", names, meta.series),
+                separators=(",", ":"),
+                ensure_ascii=False,
+            ),
         )
 
     def _state_get(self, key: str) -> int:
@@ -331,14 +487,16 @@ class SyncLedger:
 
     def delta(self, cursor: int, limit: int) -> tuple[list[LedgerEntry], bool]:
         """Up to ``limit`` entries with rev > cursor, ordered by rev,
-        plus whether more entries remain beyond the batch."""
-        with self._lock:
-            rows = self.con.execute(
-                "SELECT rev, id, added_at, title, authors, series, series_id, "
-                "series_idx, format, size, file_name FROM books "
-                "WHERE rev > ? ORDER BY rev LIMIT ?",
-                (cursor, limit + 1),
-            ).fetchall()
+        plus whether more entries remain beyond the batch.
+
+        Reads run on the dedicated read connection (a committed WAL
+        snapshot), so they never block on an in-flight walk."""
+        rows = self.rdcon.execute(
+            "SELECT rev, id, added_at, title, authors, series, series_id, "
+            "series_idx, format, size, file_name, search_text, suggest "
+            "FROM books WHERE rev > ? ORDER BY rev LIMIT ?",
+            (cursor, limit + 1),
+        ).fetchall()
         more = len(rows) > limit
         entries = [
             LedgerEntry(
@@ -353,6 +511,8 @@ class SyncLedger:
                 format=r[8] or "",
                 size=r[9] or 0,
                 file_name=r[10],
+                search_text=r[11],
+                suggest=r[12],
             )
             for r in rows[:limit]
         ]
@@ -360,16 +520,14 @@ class SyncLedger:
 
     def cursor(self) -> int:
         """Highest rev assigned so far (0 for an empty ledger)."""
-        with self._lock:
-            row = self.con.execute("SELECT MAX(rev) FROM books").fetchone()
+        row = self.rdcon.execute("SELECT MAX(rev) FROM books").fetchone()
         return int(row[0]) if row and row[0] is not None else 0
 
     def count(self) -> int:
         """Number of live (non-tombstone) books."""
-        with self._lock:
-            row = self.con.execute(
-                "SELECT COUNT(*) FROM books WHERE added_at IS NOT NULL"
-            ).fetchone()
+        row = self.rdcon.execute(
+            "SELECT COUNT(*) FROM books WHERE added_at IS NOT NULL"
+        ).fetchone()
         return int(row[0])
 
     def record_device(self, device_id: str, last_rev: int) -> None:
@@ -391,10 +549,9 @@ class SyncLedger:
     def min_device_rev(self) -> int | None:
         """Smallest ``last_rev`` any device has reported, or None when
         no device has ever posted a cursor."""
-        with self._lock:
-            row = self.con.execute(
-                "SELECT MIN(last_rev) FROM device_cursors"
-            ).fetchone()
+        row = self.rdcon.execute(
+            "SELECT MIN(last_rev) FROM device_cursors"
+        ).fetchone()
         return int(row[0]) if row and row[0] is not None else None
 
     def compact_tombstones(self, min_rev: int | None = None) -> int:
@@ -419,4 +576,5 @@ class SyncLedger:
         return cur.rowcount
 
     def close(self) -> None:
+        self.rdcon.close()
         self.con.close()

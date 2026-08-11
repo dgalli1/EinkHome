@@ -51,12 +51,19 @@ _SYN_FMTS = ("epub", "epub", "epub", "pdf", "fb2")
 _SYN_EPOCH = 1_700_000_000.0
 
 
+# The only record fields the mock provider reads (see _corpus_meta):
+# id (required), title, authors, series, added_at, ol_key (optional).
+# The columnar cache below stores exactly these six, in this order.
+
+
 class _Corpus:
     """Lazy reader over a JSONL corpus: line offsets in RAM, records
-    parsed on demand.  An empty path yields an empty corpus (graceful
+    parsed on demand.  Once built, a columnar cache holds the six
+    record fields the mock provider reads so catalogue walks never
+    re-parse the file.  An empty path yields an empty corpus (graceful
     when the configured file is missing on a fresh clone)."""
 
-    __slots__ = ("_path", "_offsets", "_len")
+    __slots__ = ("_path", "_offsets", "_len", "_cols", "_cols_key")
 
     def __init__(self, path: str) -> None:
         self._path = path
@@ -74,6 +81,73 @@ class _Corpus:
                 offs = []
         self._offsets = offs
         self._len = len(offs)
+        # Columnar cache: six parallel lists (one per cached record
+        # field, in the order listed in the comment above), keyed by
+        # (path, mtime-ns, size) so an edited corpus file invalidates
+        # it.  None until first build; a stale or unstat-able file
+        # drops it back to None and the lazy paths re-apply.
+        self._cols: tuple[list[Any], ...] | None = None
+        self._cols_key: tuple[str, int, int] | None = None
+
+    def _cache_valid(self) -> bool:
+        """True when the columnar cache exists and the corpus file is
+        unchanged since it was built (mtime-ns + size key).  An OSError
+        while statting (file gone, …) drops the cache."""
+        if self._cols is None:
+            return False
+        try:
+            st = os.stat(self._path)
+        except OSError:
+            self._cols = None
+            self._cols_key = None
+            return False
+        if (self._path, st.st_mtime_ns, st.st_size) != self._cols_key:
+            self._cols = None
+            self._cols_key = None
+            return False
+        return True
+
+    def _load_all(self) -> None:
+        """Parse the whole corpus once into six parallel column lists
+        (id, title, authors, series, added_at, ol_key).  Only one
+        parsed dict is ever in flight: each record's six fields are
+        appended to the columns and the dict is dropped, so the
+        transient peak stays ~1 dict and the retained cache is lists of
+        strings, never a list of dicts."""
+        if not self._path:
+            return
+        try:
+            st = os.stat(self._path)
+            cols: list[list[Any]] = [[], [], [], [], [], []]
+            with open(self._path, encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        rec = json.loads(line)
+                    except ValueError:
+                        continue
+                    cols[0].append(rec["id"])
+                    cols[1].append(rec.get("title"))
+                    cols[2].append(rec.get("authors"))
+                    cols[3].append(rec.get("series"))
+                    cols[4].append(rec.get("added_at"))
+                    cols[5].append(rec.get("ol_key"))
+        except OSError:
+            return  # keep the cache unset; the streaming fallback applies
+        self._cols = tuple(cols)
+        self._cols_key = (self._path, st.st_mtime_ns, st.st_size)
+
+    def id_column(self) -> list[Any] | None:
+        """Guarantee the columnar cache (building it if needed) and
+        return the id column, or None when the corpus file cannot be
+        read — the caller then falls back to a streaming pass."""
+        if not self._cache_valid():
+            self._load_all()
+        if self._cols is None:
+            return None
+        return self._cols[0]
 
     def __len__(self) -> int:
         return self._len
@@ -83,6 +157,24 @@ class _Corpus:
 
     def __iter__(self) -> Iterator[dict[str, Any]]:
         if not self._path:
+            return
+        if not self._cache_valid():
+            # First walk builds the cache; a rebuild happens whenever
+            # the file's mtime-ns/size key no longer matches.  Only when
+            # the build itself fails (file unreadable) do we fall back
+            # to the streaming pass below.
+            self._load_all()
+        if self._cols is not None:
+            ids, titles, authors, series, added_ats, ol_keys = self._cols
+            for i in range(len(ids)):
+                yield {
+                    "id": ids[i],
+                    "title": titles[i],
+                    "authors": authors[i],
+                    "series": series[i],
+                    "added_at": added_ats[i],
+                    "ol_key": ol_keys[i],
+                }
             return
         with open(self._path, encoding="utf-8") as f:
             for line in f:
@@ -95,8 +187,19 @@ class _Corpus:
                     continue
 
     def __getitem__(self, i: int) -> dict[str, Any]:
-        """Random access: open + seek per read so concurrent request
-        threads never share a seek cursor."""
+        """Random access: cached columns when valid (no file open),
+        otherwise open + seek per read so concurrent request threads
+        never share a seek cursor."""
+        if self._cache_valid():
+            ids, titles, authors, series, added_ats, ol_keys = self._cols
+            return {
+                "id": ids[i],
+                "title": titles[i],
+                "authors": authors[i],
+                "series": series[i],
+                "added_at": added_ats[i],
+                "ol_key": ol_keys[i],
+            }
         with open(self._path, encoding="utf-8") as f:
             f.seek(self._offsets[i])
             line = f.readline()
@@ -149,9 +252,10 @@ class MockProvider(Provider):
         corpus_path = os.environ.get("PBEMU_MOCK_CORPUS") or cfg.get("corpus") or ""
         # Lazy corpus: 100k Open Library records as Python dicts cost
         # ~100 MB resident (measured) — far over the server's memory
-        # budget.  _Corpus keeps only the per-line byte offsets (~1 MB)
-        # and parses a record on demand; sequential walks stream the
-        # file through one handle, random access seeks per read.
+        # budget.  _Corpus keeps per-line byte offsets (~1 MB) plus a
+        # columnar cache of the six fields the mock reads (est. 10-20 MB
+        # at 100k records) so the 30s ledger refresh parses the file
+        # once instead of re-json.loads-ing every line on every walk.
         self.corpus = _Corpus(corpus_path)
         # id -> corpus index, built on first random-access lookup
         # (get_book / open_file).  The delta walk never needs it.
@@ -218,9 +322,15 @@ class MockProvider(Provider):
 
     def _corpus_id_index(self) -> dict[str, int]:
         if self._corpus_index is None:
-            self._corpus_index = {
-                rec["id"]: i for i, rec in enumerate(self.corpus)
-            }
+            ids = self.corpus.id_column()
+            if ids is not None:
+                self._corpus_index = {ids[i]: i for i in range(len(ids))}
+            else:
+                # Corpus file unreadable: fall back to a streaming pass
+                # (identical to the pre-cache behaviour).
+                self._corpus_index = {
+                    rec["id"]: i for i, rec in enumerate(self.corpus)
+                }
         return self._corpus_index
 
     def _corpus(self, i: int) -> BookMeta:

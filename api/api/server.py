@@ -50,6 +50,7 @@ if _API_DIR not in sys.path:
     sys.path.insert(0, _API_DIR)
 
 import argparse  # noqa: E402
+import concurrent.futures  # noqa: E402
 import hmac  # noqa: E402
 import http.server  # noqa: E402
 import json  # noqa: E402
@@ -586,35 +587,26 @@ class PbemuAPIServer(http.server.BaseHTTPRequestHandler):
         if inm and inm.strip('"') == etag:
             # ETag is derived from the book id, so a matching client
             # already holds the identical bytes; 304, no body.
-            self._send(304, {"ETag": etag}, b"")
+            self._send(
+                304, {"ETag": etag, "Cache-Control": "public, max-age=3600"}, b""
+            )
             return
         png = cache.read_png(book_id)
-        if png is None:
+        if png is None and not cache.is_missing(book_id):
             # Not pre-heated yet: process synchronously now so the device
             # still gets a real (small) cover instead of the raw multi-MB
-            # upstream bytes.  Concurrent cold fetches for the same book
-            # share one download/decode: the first thread registers an
-            # event, the rest wait (bounded) and then serve from cache.
-            inflight = self.app.inflight
-            ev = inflight.get(book_id)
-            if ev is not None:
-                ev.wait(timeout=20.0)
-                png = cache.read_png(book_id)
-            if png is None:
-                # Owner of the slot, or the waiter timed out — process
-                # anyway (never deadlock on a slow owner).
-                ev = inflight.setdefault(book_id, threading.Event())
-                try:
-                    raw = self.app.provider.get_cover(book_id)
-                    if raw:
-                        png = cache.process_and_store(book_id, raw)
-                finally:
-                    inflight.pop(book_id, None)
-                    ev.set()
+            # upstream bytes.  Books negative-cached as missing are
+            # served the placeholder without another provider round-trip.
+            png = _cover_png(self.app, book_id)
         if not png:
             png = PLACEHOLDER_PNG
         self._send(
-            *_bytes(200, png, "image/png", {"ETag": etag})
+            *_bytes(
+                200,
+                png,
+                "image/png",
+                {"ETag": etag, "Cache-Control": "public, max-age=3600"},
+            )
         )
 
     def _handle_file(self, book_id: str) -> None:
@@ -676,8 +668,10 @@ class PbemuAPIServer(http.server.BaseHTTPRequestHandler):
         rows; ``removed`` lists tombstoned ids.  Rows are served from
         the on-disk ledger (SQLite), never from the provider directly,
         so the endpoint stays fast even while the upstream is slow.
-        The ledger refreshes from the provider at most once per
-        ``ledger.refresh_max_age_s`` seconds.
+        Ledger refreshes run on a background thread at most once per
+        ``ledger.refresh_max_age_s`` seconds; the first sync waits (up
+        to 30s) for the initial walk so the device never sees an
+        empty delta.
         """
         body = self._read_body_json() or {}
         ledger = getattr(self.app, "ledger", None)
@@ -699,10 +693,17 @@ class PbemuAPIServer(http.server.BaseHTTPRequestHandler):
             limit = 500
         limit = max(1, min(limit, 2000))
         max_age = getattr(self.app, "ledger_max_age", 30.0)
+        started = False
         try:
-            ledger.refresh(self.app.provider, max_age_s=max_age)
+            started = ledger.refresh_async(self.app.provider, max_age_s=max_age)
         except Exception as exc:  # noqa: BLE001 — provider may be down
             sys.stderr.write(f"sync/delta: ledger refresh failed: {exc}\n")
+        # The walk runs on a background thread; the first sync waits for
+        # the initial walk so the device never sees an empty delta.
+        if started or ledger.walk_in_progress():
+            ev = ledger.walk_done_event()
+            if ev is not None:
+                ev.wait(timeout=30.0)
         entries, more = ledger.delta(cursor, limit)
         added: list[dict[str, Any]] = []
         removed: list[str] = []
@@ -729,12 +730,22 @@ class PbemuAPIServer(http.server.BaseHTTPRequestHandler):
                     # server-side, so the device must match LIKE
                     # against folded text too (a "songgong" suggestion
                     # from "sŏnggong" never matches the raw title).
-                    "searchText": search_text(e.title, authors, e.series),
+                    # Precomputed at walk time; fall back to a live
+                    # computation only for pre-backfill rows.
+                    "searchText": (
+                        e.search_text
+                        if e.search_text is not None
+                        else search_text(e.title, authors, e.series)
+                    ),
                     # Search-completion terms for the device-local
-                    # index; computed at serve time from the same
-                    # fields the fingerprint hashes, so any
-                    # term-affecting edit already bumped the rev.
-                    "suggest": suggest_terms(e.title, authors, e.series),
+                    # index; computed at walk time from the same fields
+                    # the fingerprint hashes, so any term-affecting
+                    # edit already bumped the rev.
+                    "suggest": (
+                        json.loads(e.suggest)
+                        if e.suggest
+                        else suggest_terms(e.title, authors, e.series)
+                    ),
                 }
             )
         next_cursor = entries[-1].rev if entries else cursor
@@ -985,6 +996,43 @@ def _coerce_env_value(raw: str) -> Any:
         return raw
 
 
+def _cover_png(app: Any, book_id: str) -> bytes | None:
+    """Fetch + process one cover, returning the cached PNG bytes.
+
+    Single-flights per book id via ``app.inflight`` so concurrent cold
+    fetches (request path and warm-up workers alike) share one
+    download/decode: the first thread registers an event, the rest wait
+    (bounded) and then serve from cache.  Returns None when the cover is
+    unavailable — provider miss or undecodable bytes — and negative-
+    caches the id so callers can skip repeat provider round-trips for a
+    while.  A provider's literal placeholder bytes are returned as-is
+    (served, not stored, not negative-cached).
+    """
+    cache = app.cover_cache
+    png = cache.read_png(book_id)
+    if png is not None:
+        return png
+    inflight = app.inflight
+    ev = inflight.get(book_id)
+    if ev is not None:
+        ev.wait(timeout=20.0)
+        png = cache.read_png(book_id)
+    if png is None:
+        # Owner of the slot, or the waiter timed out — process
+        # anyway (never deadlock on a slow owner).
+        ev = inflight.setdefault(book_id, threading.Event())
+        try:
+            raw = app.provider.get_cover(book_id)
+            if raw:
+                png = cache.process_and_store(book_id, raw)
+            if png is None:
+                cache.mark_missing(book_id)
+        finally:
+            inflight.pop(book_id, None)
+            ev.set()
+    return png
+
+
 def _warm_covers(app: Any) -> None:
     """Background pre-heat: process every cover once so the very first
     sync's cover fetches already hit the cache.
@@ -993,10 +1041,13 @@ def _warm_covers(app: Any) -> None:
     provider's full catalogue (no cap) chunk by chunk; each book is
     handled independently so one undecodable cover can't stall the rest,
     and already-processed books are skipped (idempotent re-runs).
-    Providers that only serve the 1x1 placeholder (mock) are detected
-    by probing the first chunk and skipped entirely: warming 100k
-    placeholder covers would waste CPU and pull Pillow into the
-    process for nothing.
+    Processing runs in a 4-worker thread pool and shares the request
+    path's single-flight + negative cache (:func:`_cover_png`), so the
+    warmer and live traffic never duplicate a download/decode for the
+    same book.  Providers that only serve the 1x1 placeholder (mock)
+    are detected by probing the first chunk and skipped entirely:
+    warming 100k placeholder covers would waste CPU and pull Pillow
+    into the process for nothing.
     """
     cache = app.cover_cache
     provider = app.provider
@@ -1021,17 +1072,23 @@ def _warm_covers(app: Any) -> None:
             )
             return
         chunks = itertools.chain([first], chunks)
-        for chunk in chunks:
-            for meta in chunk:
-                try:
-                    if not cache.has_png(meta.id):
-                        raw = provider.get_cover(meta.id)
-                        if raw:
-                            cache.process_and_store(meta.id, raw)
-                except Exception as exc:  # noqa: BLE001
-                    sys.stderr.write(f"cover warm-up: {meta.id} failed: {exc}\n")
-                done += 1
-            sys.stderr.write(f"cover warm-up: {done} processed\n")
+
+        def _warm_one(meta: Any) -> None:
+            if cache.has_png(meta.id) or cache.is_missing(meta.id):
+                return
+            _cover_png(app, meta.id)
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+            for chunk in chunks:
+                pending = {pool.submit(_warm_one, meta): meta.id for meta in chunk}
+                for fut in concurrent.futures.as_completed(pending):
+                    book_id = pending[fut]
+                    try:
+                        fut.result()
+                    except Exception as exc:  # noqa: BLE001
+                        sys.stderr.write(f"cover warm-up: {book_id} failed: {exc}\n")
+                    done += 1
+                sys.stderr.write(f"cover warm-up: {done} processed\n")
     except Exception as exc:  # noqa: BLE001
         sys.stderr.write(f"cover warm-up: walk_books failed: {exc}\n")
         return

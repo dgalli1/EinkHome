@@ -431,10 +431,12 @@ def test_cover_etag_304(server):
     assert status == 200
     etag = hdrs.get("ETag")
     assert etag
+    assert hdrs.get("Cache-Control") == "public, max-age=3600"
     status, body, hdrs2 = _http_get_headers(url, headers={"If-None-Match": etag})
     assert status == 304
     assert body == b""
     assert hdrs2.get("ETag") == etag
+    assert hdrs2.get("Cache-Control") == "public, max-age=3600"
 
 
 def test_head_healthz(server):
