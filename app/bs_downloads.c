@@ -160,7 +160,19 @@ refresh_downloaded_flags(void)
             qsort(names, (size_t)n_names, sizeof *names, dl_name_cmp);
     }
 
-    DownloadProbe probes[64];
+    /* The probe array must live on the heap: 64 x DownloadProbe is
+     * ~32KB, and the device's task stack overflows with that on the
+     * frame (boot crashed in an endless respawn loop on hardware
+     * while the emulator's bigger stack stayed green). */
+    DownloadProbe *probes = malloc(sizeof *probes * 64);
+    if (probes == NULL) {
+        LOG("[bookshelf] refresh_downloaded_flags: probe alloc failed\n");
+        for (int i = 0; i < n_names; i++)
+            free(names[i]);
+        free(names);
+        return; /* stale flags are better than a crash */
+    }
+
     int  got, changed = 0;
     long long rowid = 0;
     store_begin();
@@ -196,6 +208,7 @@ refresh_downloaded_flags(void)
             break;
     }
     store_commit();
+    free(probes);
     for (int i = 0; i < n_names; i++)
         free(names[i]);
     free(names);
