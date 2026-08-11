@@ -1,6 +1,7 @@
 /* bs_launcher.c — part of the bookshelf app (see bookshelf.h) */
 
 #include "bookshelf.h"
+#include "cJSON.h"
 #include "bs_downloads.h"
 #include "bs_launcher.h"
 #include "bs_model.h"
@@ -50,133 +51,95 @@ lc_prof_val(const char *dim)
 }
 
 const char *
-lc_pick_key(const char *obj_body, const char *want)
+lc_pick_key(const cJSON *obj, const char *want)
 {
-    static char first[32];
-    first[0] = '\0';
+    const char *first = NULL;
     int         all_present = 0, def_present = 0;
-    const char *p = obj_body;
-    while (*p) {
-        p = json_skip_ws(p);
-        if (*p == '}' || *p != '"')
+    const cJSON *it;
+    cJSON_ArrayForEach(it, obj) {
+        const char *k = it->string;
+        if (k == NULL)
             break;
-        const char *ks = ++p;
-        while (*p && *p != '"') {
-            if (*p == '\\')
-                p++;
-            p++;
-        }
-        size_t kl = (size_t)(p - ks);
-        if (*p == '"')
-            p++;
-        if (first[0] == '\0' && kl < sizeof first) {
-            memcpy(first, ks, kl);
-            first[kl] = '\0';
-        }
-        if (want && kl == strlen(want) && memcmp(ks, want, kl) == 0)
+        if (first == NULL)
+            first = k;
+        if (want != NULL && strcmp(k, want) == 0)
             return want;
-        if (kl == 3 && memcmp(ks, "all", 3) == 0)
+        if (strcmp(k, "all") == 0)
             all_present = 1;
-        if (kl == 7 && memcmp(ks, "default", 7) == 0)
+        if (strcmp(k, "default") == 0)
             def_present = 1;
-        p = json_skip_ws(p);
-        if (*p == ':')
-            p++;
-        p = json_skip_value(p);
-        if (!p)
-            break;
-        p = json_skip_ws(p);
-        if (*p == ',')
-            p++;
     }
     if (all_present)
         return "all";
     if (def_present)
         return "default";
-    return first[0] ? first : NULL;
+    return first;
 }
 
 void
-lc_resolve(const char *p, const char *cur_dim, char *out, size_t cap)
+lc_resolve(const cJSON *v, const char *cur_dim, char *out, size_t cap)
 {
     if (cap == 0)
         return;
     out[0] = '\0';
-    p = json_skip_ws(p);
-    if (!p || !*p)
+    if (v == NULL)
         return;
-    if (*p == '"') {
-        json_copy_string(p, out, cap);
+    if (cJSON_IsString(v)) {
+        snprintf(out, cap, "%s", v->valuestring);
         return;
     }
-    if (*p != '{')
+    if (!cJSON_IsObject(v))
         return;
-    const char *body = p + 1;
     for (int d = 0; d < LC_NDIMS; d++) {
-        const char *vp = json_find_member(body, lc_dims[d]);
-        if (vp) {
+        const cJSON *vp = cJSON_GetObjectItemCaseSensitive(v, lc_dims[d]);
+        if (vp != NULL) {
             lc_resolve(vp, lc_dims[d], out, cap);
             return;
         }
     }
     if (!cur_dim) {
-        const char *k = lc_pick_key(body, NULL);
-        if (k) {
-            const char *vp = json_find_member(body, k);
-            if (vp)
+        const char *k = lc_pick_key(v, NULL);
+        if (k != NULL) {
+            const cJSON *vp = cJSON_GetObjectItemCaseSensitive(v, k);
+            if (vp != NULL)
                 lc_resolve(vp, cur_dim, out, cap);
         }
         return;
     }
     if (strcmp(cur_dim, "globalcfg") == 0) {
-        const char *p2 = body;
-        while (*p2) {
-            p2 = json_skip_ws(p2);
-            if (*p2 == '}' || *p2 != '"')
+        /* The globalcfg variant: the first member whose value is an
+         * object carrying a "default" wins. */
+        const cJSON *m = NULL;
+        const cJSON *it;
+        cJSON_ArrayForEach(it, v) {
+            if (!cJSON_IsObject(it))
+                continue;
+            const cJSON *defp = cJSON_GetObjectItemCaseSensitive(it, "default");
+            if (defp != NULL) {
+                m = defp;
                 break;
-            ++p2;
-            while (*p2 && *p2 != '"') {
-                if (*p2 == '\\')
-                    p2++;
-                p2++;
             }
-            if (*p2 == '"')
-                p2++;
-            p2 = json_skip_ws(p2);
-            if (*p2 == ':')
-                p2++;
-            p2 = json_skip_ws(p2);
-            const char *inner = json_skip_ws(p2);
-            if (*inner == '{') {
-                const char *defp = json_find_member(inner + 1, "default");
-                if (defp) {
-                    lc_resolve(defp, cur_dim, out, cap);
-                    return;
-                }
-            }
-            p2 = json_skip_value(p2);
-            if (!p2)
-                break;
-            p2 = json_skip_ws(p2);
-            if (*p2 == ',')
-                p2++;
         }
+        if (m != NULL)
+            lc_resolve(m, cur_dim, out, cap);
         return;
     }
     const char *want = lc_prof_val(cur_dim);
-    const char *k = lc_pick_key(body, want);
-    if (k) {
-        const char *vp = json_find_member(body, k);
-        if (vp)
+    const char *k = lc_pick_key(v, want);
+    if (k != NULL) {
+        const cJSON *vp = cJSON_GetObjectItemCaseSensitive(v, k);
+        if (vp != NULL)
             lc_resolve(vp, cur_dim, out, cap);
     }
 }
 
 int
-lc_resolve_bool(const char *p)
+lc_resolve_bool(const cJSON *v)
 {
+    if (v != NULL && cJSON_IsBool(v))
+        return cJSON_IsTrue(v);
     char buf[8];
-    lc_resolve(p, NULL, buf, sizeof buf);
+    lc_resolve(v, NULL, buf, sizeof buf);
     return buf[0] != '0';
 }
 
@@ -337,60 +300,48 @@ launcher_layout(void)
 }
 
 void
-launcher_add_app(const char *apps_body, const char *id)
+launcher_add_app(const cJSON *apps, const char *id)
 {
     if (g_launcher_count >= LAUNCHER_MAX_ITEMS)
         return;
-    const char *def = json_find_member(apps_body, id);
-    if (!def)
+    const cJSON *def = cJSON_GetObjectItemCaseSensitive(apps, id);
+    if (!cJSON_IsObject(def))
         return;
-    const char *def_body = json_object_body(def);
-    if (!def_body)
-        return;
-    const char *vis = json_find_member(def_body, "visible");
-    if (vis && !lc_resolve_bool(vis))
+    const cJSON *vis = cJSON_GetObjectItemCaseSensitive(def, "visible");
+    if (vis != NULL && !lc_resolve_bool(vis))
         return;
     LauncherItem *it = &g_launcher_items[g_launcher_count];
     memset(it, 0, sizeof *it);
     it->kind = 1;
-    const char *tp = json_find_member(def_body, "title");
-    if (tp) {
+    const cJSON *tp = cJSON_GetObjectItemCaseSensitive(def, "title");
+    if (tp != NULL) {
         char raw[64];
         lc_resolve(tp, NULL, raw, sizeof raw);
         lc_translate(raw, it->text, sizeof it->text);
     }
     if (!it->text[0])
         snprintf(it->text, sizeof it->text, "%s", id);
-    const char *pp = json_find_member(def_body, "path");
-    if (pp)
+    const cJSON *pp = cJSON_GetObjectItemCaseSensitive(def, "path");
+    if (pp != NULL)
         lc_resolve(pp, NULL, it->path, sizeof it->path);
-    const char *ip = json_find_member(def_body, "icon");
-    if (ip)
+    const cJSON *ip = cJSON_GetObjectItemCaseSensitive(def, "icon");
+    if (ip != NULL)
         lc_resolve(ip, NULL, it->icon, sizeof it->icon);
-    const char *par = json_find_member(def_body, "params");
-    if (!par)
-        par = json_find_member(def_body, "param");
-    if (par) {
-        par = json_skip_ws(par);
-        if (*par == '[') {
-            const char *q = par + 1;
-            while (*q && *q != ']' && it->nparams < LAUNCHER_MAX_PARAMS) {
-                q = json_skip_ws(q);
-                if (*q != '"')
-                    break;
-                json_copy_string(q, it->params[it->nparams], LAUNCHER_PARAM_LEN);
-                it->nparams++;
-                q = json_skip_value(q);
-                if (!q)
-                    break;
-                q = json_skip_ws(q);
-                if (*q == ',')
-                    q++;
-            }
-        } else if (*par == '"') {
-            json_copy_string(par, it->params[0], LAUNCHER_PARAM_LEN);
-            it->nparams = 1;
+    const cJSON *par = cJSON_GetObjectItemCaseSensitive(def, "params");
+    if (!cJSON_IsArray(par))
+        par = cJSON_GetObjectItemCaseSensitive(def, "param");
+    if (cJSON_IsArray(par)) {
+        const cJSON *q;
+        cJSON_ArrayForEach(q, par) {
+            if (it->nparams >= LAUNCHER_MAX_PARAMS)
+                break;
+            if (cJSON_IsString(q))
+                snprintf(it->params[it->nparams++], LAUNCHER_PARAM_LEN,
+                         "%s", q->valuestring);
         }
+    } else if (cJSON_IsString(par)) {
+        snprintf(it->params[0], LAUNCHER_PARAM_LEN, "%s", par->valuestring);
+        it->nparams = 1;
     }
     g_launcher_count++;
 }
@@ -448,14 +399,14 @@ launcher_scan_ext1_apps(void)
             continue;
         if (launcher_has_path(path))
             continue;
-        if (g_launcher_count >= LAUNCHER_MAX_ITEMS)
-            break;
-        if (!launcher_has_user_header()) {
+        if (!launcher_has_user_header() && g_launcher_count < LAUNCHER_MAX_ITEMS) {
             LauncherItem *hdr = &g_launcher_items[g_launcher_count++];
             memset(hdr, 0, sizeof *hdr);
             hdr->kind = 0;
             snprintf(hdr->text, sizeof hdr->text, "Users");
         }
+        if (g_launcher_count >= LAUNCHER_MAX_ITEMS)
+            break;
         LauncherItem *it = &g_launcher_items[g_launcher_count];
         memset(it, 0, sizeof *it);
         it->kind = 1;
@@ -476,168 +427,105 @@ launcher_build(void)
     g_launcher_count = 0;
     g_launcher_body_h = 0;
 
-    char *db = read_text_file("/mnt/ext1/system/config/desktop/apps_db.json");
-    if (!db)
-        db = read_text_file("/ebrmain/config/desktop/apps_db.json");
-    char *vw = read_text_file("/mnt/ext1/system/config/desktop/view.json");
-    if (!vw)
-        vw = read_text_file("/ebrmain/config/desktop/view.json");
+    char *db_txt = read_text_file("/mnt/ext1/system/config/desktop/apps_db.json");
+    if (!db_txt)
+        db_txt = read_text_file("/ebrmain/config/desktop/apps_db.json");
+    char *vw_txt = read_text_file("/mnt/ext1/system/config/desktop/view.json");
+    if (!vw_txt)
+        vw_txt = read_text_file("/ebrmain/config/desktop/view.json");
 
-    if (!db || !vw) {
-        free(db);
-        free(vw);
+    cJSON *db = db_txt ? cJSON_Parse(db_txt) : NULL;
+    cJSON *vw = vw_txt ? cJSON_Parse(vw_txt) : NULL;
+    free(db_txt);
+    free(vw_txt);
+
+    const cJSON *db_apps = db ? cJSON_GetObjectItemCaseSensitive(db, "applications") : NULL;
+    if (db == NULL || vw == NULL || !cJSON_IsObject(db_apps)) {
+        cJSON_Delete(db);
+        cJSON_Delete(vw);
         launcher_layout();
         g_launcher_built = 1;
         return;
     }
 
-    const char *db_root = json_object_body(db);
-    const char *db_apps = db_root ? json_find_member(db_root, "applications") : NULL;
-    const char *db_apps_body = db_apps ? json_object_body(db_apps) : NULL;
-    if (!db_apps_body) {
-        free(db);
-        free(vw);
-        launcher_layout();
-        g_launcher_built = 1;
-        return;
-    }
-
-    const char *vw_root = json_object_body(vw);
-    const char *view_obj = vw_root ? json_find_member(vw_root, "view") : NULL;
-    const char *view_body = view_obj ? json_object_body(view_obj) : NULL;
-    const char *groups = view_body ? json_find_member(view_body, "groups") : NULL;
-    if (groups) {
-        groups = json_skip_ws(groups);
-        if (*groups == '[') {
-            const char *q = groups + 1;
-            while (*q && *q != ']') {
-                q = json_skip_ws(q);
-                if (*q != '{') {
-                    q = json_skip_value(q);
-                    if (!q)
-                        break;
-                    q = json_skip_ws(q);
-                    if (*q == ',')
-                        q++;
-                    continue;
+    const cJSON *view_obj = cJSON_GetObjectItemCaseSensitive(vw, "view");
+    const cJSON *groups = cJSON_IsObject(view_obj)
+        ? cJSON_GetObjectItemCaseSensitive(view_obj, "groups")
+        : NULL;
+    if (cJSON_IsArray(groups)) {
+        const cJSON *g;
+        cJSON_ArrayForEach(g, groups) {
+            if (!cJSON_IsObject(g))
+                continue;
+            const cJSON *tp = cJSON_GetObjectItemCaseSensitive(g, "title");
+            char        raw_title[64] = "";
+            char        disp_title[64] = "";
+            if (tp != NULL) {
+                lc_resolve(tp, NULL, raw_title, sizeof raw_title);
+                lc_translate(raw_title, disp_title, sizeof disp_title);
+            }
+            const cJSON *apps_arr = cJSON_GetObjectItemCaseSensitive(g, "apps");
+            if (cJSON_IsArray(apps_arr)) {
+                if (g_launcher_count < LAUNCHER_MAX_ITEMS && disp_title[0]) {
+                    LauncherItem *hdr = &g_launcher_items[g_launcher_count++];
+                    memset(hdr, 0, sizeof *hdr);
+                    hdr->kind = 0;
+                    snprintf(hdr->text, sizeof hdr->text, "%s", disp_title);
                 }
-                const char *grp_body = q + 1;
-                const char *tp = json_find_member(grp_body, "title");
-                char        raw_title[64] = "";
-                char        disp_title[64] = "";
-                if (tp) {
-                    lc_resolve(tp, NULL, raw_title, sizeof raw_title);
-                    lc_translate(raw_title, disp_title, sizeof disp_title);
+                const cJSON *a;
+                cJSON_ArrayForEach(a, apps_arr) {
+                    if (cJSON_IsString(a) && a->valuestring != NULL)
+                        launcher_add_app(db_apps, a->valuestring);
                 }
-                const char *apps_arr = json_find_member(grp_body, "apps");
-                if (apps_arr) {
-                    apps_arr = json_skip_ws(apps_arr);
-                    if (*apps_arr == '[') {
-                        if (g_launcher_count < LAUNCHER_MAX_ITEMS && disp_title[0]) {
-                            LauncherItem *hdr = &g_launcher_items[g_launcher_count++];
-                            memset(hdr, 0, sizeof *hdr);
-                            hdr->kind = 0;
-                            snprintf(hdr->text, sizeof hdr->text, "%s", disp_title);
-                        }
-                        const char *r = apps_arr + 1;
-                        while (*r && *r != ']') {
-                            r = json_skip_ws(r);
-                            if (*r == '"') {
-                                char id[48];
-                                json_copy_string(r, id, sizeof id);
-                                launcher_add_app(db_apps_body, id);
-                                r = json_skip_value(r);
-                                if (!r)
-                                    break;
-                            } else {
-                                r = json_skip_value(r);
-                                if (!r)
-                                    break;
-                            }
-                            r = json_skip_ws(r);
-                            if (*r == ',')
-                                r++;
-                        }
-                    }
-                }
-                q = json_skip_value(q);
-                if (!q)
-                    break;
-                q = json_skip_ws(q);
-                if (*q == ',')
-                    q++;
             }
         }
     }
 
     /* Scan view.json applications for U_* user apps not in any group. */
-    const char *vw_apps = vw_root ? json_find_member(vw_root, "applications") : NULL;
-    const char *vw_apps_body = vw_apps ? json_object_body(vw_apps) : NULL;
-    if (vw_apps_body) {
-        int         user_hdr_added = 0;
-        const char *p = vw_apps_body;
-        while (*p) {
-            p = json_skip_ws(p);
-            if (*p == '}' || *p != '"')
-                break;
-            const char *ks = ++p;
-            while (*p && *p != '"') {
-                if (*p == '\\')
-                    p++;
-                p++;
+    const cJSON *vw_apps = cJSON_GetObjectItemCaseSensitive(vw, "applications");
+    if (cJSON_IsObject(vw_apps)) {
+        int user_hdr_added = 0;
+        const cJSON *it;
+        cJSON_ArrayForEach(it, vw_apps) {
+            const char *key = it->string;
+            if (key == NULL || key[0] != 'U' || key[1] != '_')
+                continue;
+            int vis = 1;
+            if (cJSON_IsObject(it)) {
+                const cJSON *v2 = cJSON_GetObjectItemCaseSensitive(it, "visible");
+                if (v2 != NULL && !lc_resolve_bool(v2))
+                    vis = 0;
             }
-            size_t kl = (size_t)(p - ks);
-            if (*p == '"')
-                p++;
-            p = json_skip_ws(p);
-            if (*p == ':')
-                p++;
-            p = json_skip_ws(p);
-            if (kl >= 2 && ks[0] == 'U' && ks[1] == '_') {
-                const char *def_body2 = (*p == '{') ? p + 1 : NULL;
-                int         vis = 1;
-                if (def_body2) {
-                    const char *v2 = json_find_member(def_body2, "visible");
-                    if (v2 && !lc_resolve_bool(v2))
-                        vis = 0;
-                }
-                if (vis && g_launcher_count < LAUNCHER_MAX_ITEMS) {
-                    char   id[48];
-                    size_t cl = kl < sizeof id - 1 ? kl : sizeof id - 1;
-                    memcpy(id, ks, cl);
-                    id[cl] = '\0';
-                    if (!user_hdr_added) {
-                        LauncherItem *hdr = &g_launcher_items[g_launcher_count++];
-                        memset(hdr, 0, sizeof *hdr);
-                        hdr->kind = 0;
-                        snprintf(hdr->text, sizeof hdr->text, "Users");
-                        user_hdr_added = 1;
-                    }
-                    LauncherItem *it = &g_launcher_items[g_launcher_count];
-                    memset(it, 0, sizeof *it);
-                    it->kind = 1;
-                    if (def_body2) {
-                        const char *tp2 = json_find_member(def_body2, "title");
-                        if (tp2)
-                            lc_resolve(tp2, NULL, it->text, sizeof it->text);
-                        const char *pp2 = json_find_member(def_body2, "path");
-                        if (pp2)
-                            lc_resolve(pp2, NULL, it->path, sizeof it->path);
-                        const char *ip2 = json_find_member(def_body2, "icon");
-                        if (ip2)
-                            lc_resolve(ip2, NULL, it->icon, sizeof it->icon);
-                    }
-                    if (!it->text[0])
-                        snprintf(it->text, sizeof it->text, "%s", id);
-                    g_launcher_count++;
-                }
+            if (!vis)
+                continue;
+            if (!user_hdr_added && g_launcher_count < LAUNCHER_MAX_ITEMS) {
+                LauncherItem *hdr = &g_launcher_items[g_launcher_count++];
+                memset(hdr, 0, sizeof *hdr);
+                hdr->kind = 0;
+                snprintf(hdr->text, sizeof hdr->text, "Users");
+                user_hdr_added = 1;
             }
-            p = json_skip_value(p);
-            if (!p)
-                break;
-            p = json_skip_ws(p);
-            if (*p == ',')
-                p++;
+            if (g_launcher_count >= LAUNCHER_MAX_ITEMS)
+                continue;
+            char id[48];
+            snprintf(id, sizeof id, "%s", key);
+            LauncherItem *li = &g_launcher_items[g_launcher_count];
+            memset(li, 0, sizeof *li);
+            li->kind = 1;
+            if (cJSON_IsObject(it)) {
+                const cJSON *tp2 = cJSON_GetObjectItemCaseSensitive(it, "title");
+                if (tp2 != NULL)
+                    lc_resolve(tp2, NULL, li->text, sizeof li->text);
+                const cJSON *pp2 = cJSON_GetObjectItemCaseSensitive(it, "path");
+                if (pp2 != NULL)
+                    lc_resolve(pp2, NULL, li->path, sizeof li->path);
+                const cJSON *ip2 = cJSON_GetObjectItemCaseSensitive(it, "icon");
+                if (ip2 != NULL)
+                    lc_resolve(ip2, NULL, li->icon, sizeof li->icon);
+            }
+            if (!li->text[0])
+                snprintf(li->text, sizeof li->text, "%s", id);
+            g_launcher_count++;
         }
     }
 
@@ -646,8 +534,8 @@ launcher_build(void)
      * runs in AppDataManager::scanUnregisteredUserApplication). */
     launcher_scan_ext1_apps();
 
-    free(db);
-    free(vw);
+    cJSON_Delete(db);
+    cJSON_Delete(vw);
     launcher_layout();
     g_launcher_built = 1;
     LOG("[bookshelf] launcher built: %d items, %d body height\n",

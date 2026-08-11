@@ -26,6 +26,7 @@
  */
 
 #include "bookshelf.h"
+#include "cJSON.h"
 #include "bs_config.h"
 #include "bs_downloads.h"
 #include "bs_launcher.h"
@@ -182,32 +183,44 @@ int store_meta_value(const char *key, char *out, size_t cap) {
 /* ── open / close -------------------------------------------------------- */
 
 /* Import a legacy JSON store into an open db.  The JSON text is the old
- * on-disk format (a bare array of book objects), parsed one balanced
- * object at a time so no in-memory library array is needed.  Returns
- * the number of books imported. */
+ * on-disk format (a bare array of book objects), parsed with cJSON so
+ * no in-memory library array is needed.  Returns the number of books
+ * imported. */
 static int store_import_legacy(const char *legacy_path) {
   char *txt = read_text_file(legacy_path);
   if (txt == NULL)
     return 0;
+  cJSON *root = cJSON_Parse(txt);
+  free(txt);
+  if (root == NULL) {
+    LOG("[bookshelf] store: legacy import: JSON parse failed\n");
+    return -1;
+  }
   int count = 0;
   int failed = 0;
-  const char *p = txt;
-  const char *end = NULL;
   Book tmp;
   if (sqlite3_exec(g_db, "BEGIN", NULL, NULL, NULL) != SQLITE_OK) {
     LOG("[bookshelf] store: legacy import BEGIN failed: %s\n",
         sqlite3_errmsg(g_db));
-    free(txt);
+    cJSON_Delete(root);
     return -1;
   }
-  while ((p = json_next_object(p, &end)) != NULL) {
-    if (parse_book_obj(p, &tmp) == 0 && store_upsert_book(&tmp) == 0)
-      count++;
-    else
-      failed = 1;
-    p = end + 1;
+  if (cJSON_IsArray(root)) {
+    const cJSON *it;
+    cJSON_ArrayForEach(it, root) {
+      if (!cJSON_IsObject(it)) {
+        failed = 1;
+        continue;
+      }
+      if (parse_book_obj(it, &tmp) == 0 && store_upsert_book(&tmp) == 0)
+        count++;
+      else
+        failed = 1;
+    }
+  } else {
+    failed = 1;
   }
-  free(txt);
+  cJSON_Delete(root);
   if (failed || sqlite3_exec(g_db, "COMMIT", NULL, NULL, NULL) != SQLITE_OK) {
     /* Any parse/upsert error or a failed COMMIT aborts the whole
      * import: roll back and report failure so the caller keeps the

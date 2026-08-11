@@ -20,6 +20,7 @@ BUILD_ARMEL := $(CURDIR)/sdk/build_armel.sh
 OUT := $(CURDIR)/build/bookshelf.app
 
 SOURCES := \
+	cJSON.c \
 	bs_i18n.c \
 	bs_config.c \
 	bs_model.c \

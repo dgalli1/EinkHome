@@ -5,6 +5,7 @@
  * download batch state, the sync engine, and the cover cache. */
 
 #include "bookshelf.h"
+#include "cJSON.h"
 
 extern char g_drilled_series[MAX_ID_LEN];
 
@@ -79,7 +80,7 @@ int save_config_file(void);
 
 ibitmap *load_image_scaled(const char *path);
 
-int parse_book_obj(const char *obj, Book *b);
+int parse_book_obj(const cJSON *obj, Book *b);
 
 void do_sync(void);
 

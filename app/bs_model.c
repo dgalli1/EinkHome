@@ -1,6 +1,7 @@
 /* bs_model.c — part of the bookshelf app (see bookshelf.h) */
 
 #include "bookshelf.h"
+#include "cJSON.h"
 #include "bs_config.h"
 #include "bs_downloads.h"
 #include "bs_local.h"
@@ -250,35 +251,98 @@ save_config_file(void)
     return 0;
 }
 
-/* ── loader (parses /books and /sync/delta JSON) ─────────────────────── */
+/* ── loader (parses /books and /sync/delta JSON via cJSON) ──────────── */
+
+/* Copy a string member into a fixed buffer (truncating). */
+static void
+js_copy(const cJSON *obj, const char *key, char *out, size_t cap)
+{
+    const cJSON *v = cJSON_GetObjectItemCaseSensitive(obj, key);
+    if (v != NULL && cJSON_IsString(v) && v->valuestring != NULL)
+        snprintf(out, cap, "%s", v->valuestring);
+    else if (cap > 0)
+        out[0] = '\0';
+}
+
+/* Copy a string node into a fixed buffer (truncating). */
+static void
+js_str(const cJSON *v, char *out, size_t cap)
+{
+    if (v != NULL && cJSON_IsString(v) && v->valuestring != NULL)
+        snprintf(out, cap, "%s", v->valuestring);
+    else if (cap > 0)
+        out[0] = '\0';
+}
+
+static int
+js_int(const cJSON *obj, const char *key, int dflt)
+{
+    const cJSON *v = cJSON_GetObjectItemCaseSensitive(obj, key);
+    return (v != NULL && cJSON_IsNumber(v)) ? (int)v->valuedouble : dflt;
+}
+
+static float
+js_float(const cJSON *obj, const char *key, float dflt)
+{
+    const cJSON *v = cJSON_GetObjectItemCaseSensitive(obj, key);
+    return (v != NULL && cJSON_IsNumber(v)) ? (float)v->valuedouble : dflt;
+}
+
+/* "addedAt": the server sends ISO-8601 UTC ("2026-08-11T09:07:00Z",
+ * with or without fractional seconds); the store sorts on unix epoch,
+ * so convert.  A plain epoch number is accepted as-is. */
+static long
+js_epoch(const cJSON *obj, const char *key)
+{
+    const cJSON *v = cJSON_GetObjectItemCaseSensitive(obj, key);
+    if (v == NULL)
+        return 0;
+    if (cJSON_IsNumber(v))
+        return (long)v->valuedouble;
+    if (!cJSON_IsString(v) || v->valuestring == NULL)
+        return 0;
+    int y = 0, mo = 0, d = 0, h = 0, mi = 0;
+    double sec = 0.0;
+    if (sscanf(v->valuestring, "%4d-%2d-%2dT%2d:%2d:%lf",
+               &y, &mo, &d, &h, &mi, &sec) < 6)
+        return 0;
+    /* days-from-civil (Howard Hinnant), UTC (the server emits Z). */
+    long long yy = y - (mo <= 2);
+    long long era = (yy >= 0 ? yy : yy - 399) / 400;
+    unsigned  yoe = (unsigned)(yy - era * 400);
+    unsigned  doy = (153 * (mo + (mo > 2 ? -3 : 9)) + 2) / 5 + (unsigned)d - 1;
+    unsigned  doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    long long days = era * 146097 + (long long)doe - 719468;
+    return (long)(days * 86400 + h * 3600 + mi * 60 + (long long)sec);
+}
 
 int
-parse_book_obj(const char *obj, Book *b)
+parse_book_obj(const cJSON *obj, Book *b)
 {
     memset(b, 0, sizeof *b);
-    json_find_key(obj, "id", b->id, sizeof b->id);
+    js_copy(obj, "id", b->id, sizeof b->id);
     if (b->id[0] == '\0')
         return -1;
-    if (json_find_key(obj, "title", b->title, sizeof b->title) == NULL || b->title[0] == '\0') {
-        json_find_key(obj, "summary", b->title, sizeof b->title);
+    js_copy(obj, "title", b->title, sizeof b->title);
+    if (b->title[0] == '\0') {
+        js_copy(obj, "summary", b->title, sizeof b->title);
     }
-    /* authors is a JSON array; take first.  If the server emits a
-     * plain string instead of an array, fall back to copying it
-     * directly. */
-    char auth[sizeof b->author];
-    if (json_find_key(obj, "authors", auth, sizeof auth)) {
-        if (json_next_string(auth, b->author, sizeof b->author) == NULL && auth[0] != '\0' &&
-            auth[0] != '[')
-            snprintf(b->author, sizeof b->author, "%s", auth);
+    /* authors is a JSON array; take the first.  If the server emits a
+     * plain string instead of an array, fall back to it directly. */
+    const cJSON *a = cJSON_GetObjectItemCaseSensitive(obj, "authors");
+    if (a != NULL) {
+        if (cJSON_IsArray(a) && cJSON_GetArraySize(a) > 0)
+            js_str(cJSON_GetArrayItem(a, 0), b->author, sizeof b->author);
+        else
+            js_str(a, b->author, sizeof b->author);
     }
-    json_find_key(obj, "series", b->series, sizeof b->series);
-    json_find_key(obj, "seriesId", b->series_id, sizeof b->series_id);
-    b->series_idx = json_find_float(obj, "seriesIdx", 0.0f);
-    /* Folded search blob (delta "searchText"); pattern is
-     * case-sensitive and no payload field/term collides ("searchtext"
-     * terms are lowercase, this key precedes the suggest array). */
-    json_find_key(obj, "searchText", b->search_text, sizeof b->search_text);
-    json_find_key(obj, "format", b->ext, sizeof b->ext);
+    js_copy(obj, "series", b->series, sizeof b->series);
+    js_copy(obj, "seriesId", b->series_id, sizeof b->series_id);
+    b->series_idx = js_float(obj, "seriesIdx", 0.0f);
+    /* Folded search blob (delta "searchText"): the server folds, so the
+     * device matches LIKE against the same folded text. */
+    js_copy(obj, "searchText", b->search_text, sizeof b->search_text);
+    js_copy(obj, "format", b->ext, sizeof b->ext);
     /* Strip format string past first non-alnum. */
     for (char *q = b->ext; *q; q++) {
         if (*q >= 'A' && *q <= 'Z')
@@ -288,12 +352,12 @@ parse_book_obj(const char *obj, Book *b)
             break;
         }
     }
-    b->size = json_find_int(obj, "size", 0);
-    b->added_at = json_find_int(obj, "addedAt", 0);
+    b->size = js_int(obj, "size", 0);
+    b->added_at = js_epoch(obj, "addedAt");
     /* Server books come from the remote library; local imports set
      * their own source. */
     snprintf(b->source, sizeof b->source, "kavita");
-    json_find_key(obj, "filename", b->filename, sizeof b->filename);
+    js_copy(obj, "filename", b->filename, sizeof b->filename);
     /* Sanitize to a bare basename right away: the downloads path is
      * built from this and must stay inside the downloads dir. */
     char *slash = strrchr(b->filename, '/');
@@ -416,102 +480,72 @@ sync_submit_round(void)
 }
 
 /* Apply one delta response on the main thread: the added/removed
- * parsing plus cursor/more, inside the batch transaction.  Mirrors the
- * old blocking loop body exactly. */
+ * parsing plus cursor/more, inside the batch transaction.  Malformed
+ * JSON fails the round cleanly: the transaction is never opened, the
+ * cursor is left unchanged, and the next sync retries from it. */
 static void
 sync_apply_round(char *resp, long long cursor, long long *next_out,
                  int *more_out)
 {
+    *next_out = cursor;
+    *more_out = 0;
+    cJSON *root = cJSON_Parse(resp);
+    if (root == NULL) {
+        LOG("[bookshelf] sync: delta response not valid JSON (%.80s)\n",
+            cJSON_GetErrorPtr() ? cJSON_GetErrorPtr() : "?");
+        return;
+    }
     store_begin();
-    /* Top-level keys are located with COLON-qualified patterns
-     * ("\"added\":"): an unqualified "\"added\"" matches a book's
-     * suggest term "added" inside the payload and mislocates the
-     * array.  Real Open Library data made the same bug bite for
-     * "more" — a "more" suggest term made the sync end silently
-     * at 1000 books (more=false).  Payload fields/terms are never
-     * followed by ':', so the colon form cannot collide. */
-    const char *added = strstr(resp, "\"added\":");
-    if (added != NULL) {
-        const char *p = strchr(added, '[');
-        const char *end = NULL;
-        Book        tmp;
-        while (p != NULL && (p = json_next_object(p, &end)) != NULL) {
-            if (parse_book_obj(p, &tmp) == 0) {
+    const cJSON *added = cJSON_GetObjectItemCaseSensitive(root, "added");
+    if (cJSON_IsArray(added)) {
+        Book tmp;
+        const cJSON *it;
+        cJSON_ArrayForEach(it, added) {
+            if (!cJSON_IsObject(it))
+                continue;
+            if (parse_book_obj(it, &tmp) == 0) {
                 store_upsert_book(&tmp);
-                /* Suggestion terms for this book.  json_find_key
-                 * is an unbounded strstr (reads past this object
-                 * when the key is absent) and copies only up to
-                 * the first comma of an array value, so it can
-                 * never be used here: copy the bounded object
-                 * [p, end] and walk it with the removed-branch
-                 * string idiom instead. */
-                char   objbuf[10240];
-                size_t olen = (size_t)(end - p) + 1; /* include '}' */
-                char   terms[SUGGEST_MAX_TERMS][SUGGEST_TERM_MAX];
-                int    n = 0;
-                if (olen < sizeof objbuf) {
-                    memcpy(objbuf, p, olen);
-                    objbuf[olen] = '\0';
-                    const char *sg = strstr(objbuf, "\"suggest\"");
-                    if (sg != NULL) {
-                        sg = strchr(sg, '[');
-                        if (sg != NULL) {
-                            /* Bounded walk: close the array at its
-                             * ']' so json_next_string stops there
-                             * instead of reading the following
-                             * keys as bogus terms (json_next_string
-                             * only stops on a missing '"'). */
-                            char *arr_end = strchr(sg, ']');
-                            if (arr_end != NULL)
-                                *arr_end = '\0';
-                            while (sg != NULL && n < SUGGEST_MAX_TERMS) {
-                                char term[SUGGEST_TERM_MAX];
-                                sg = json_next_string(sg, term,
-                                                      sizeof term);
-                                if (sg != NULL)
-                                    snprintf(terms[n++],
-                                             SUGGEST_TERM_MAX, "%s",
-                                             term);
-                            }
-                        }
+                /* Suggestion terms for this book, straight from the
+                 * DOM — no bounded-copy tricks needed. */
+                char terms[SUGGEST_MAX_TERMS][SUGGEST_TERM_MAX];
+                int  n = 0;
+                const cJSON *sg =
+                    cJSON_GetObjectItemCaseSensitive(it, "suggest");
+                if (cJSON_IsArray(sg)) {
+                    const cJSON *t;
+                    cJSON_ArrayForEach(t, sg) {
+                        if (n >= SUGGEST_MAX_TERMS)
+                            break;
+                        if (cJSON_IsString(t) && t->valuestring != NULL &&
+                            t->valuestring[0] != '\0')
+                            snprintf(terms[n++], SUGGEST_TERM_MAX, "%s",
+                                     t->valuestring);
                     }
-                } else {
-                    /* Oversized book object (phrase terms make
-                     * suggest the dominant size): skip terms, the
-                     * upsert above is unaffected. */
-                    LOG("[bookshelf] do_sync: obj %zu bytes, suggest "
-                        "skipped\n", olen);
                 }
                 store_suggest_set(tmp.id, n > 0 ? terms : NULL, n);
             }
-            p = end + 1;
         }
     }
-    const char *rem = strstr(resp, "\"removed\":");
-    if (rem != NULL) {
-        const char *p = strchr(rem, '[');
-        char        id[MAX_ID_LEN];
-        while (p != NULL && (p = json_next_string(p, id, sizeof id)) != NULL) {
-            store_delete_book(id);
-            store_suggest_set(id, NULL, 0);
+    const cJSON *rem = cJSON_GetObjectItemCaseSensitive(root, "removed");
+    if (cJSON_IsArray(rem)) {
+        const cJSON *it;
+        cJSON_ArrayForEach(it, rem) {
+            if (cJSON_IsString(it) && it->valuestring != NULL &&
+                it->valuestring[0] != '\0') {
+                store_delete_book(it->valuestring);
+                store_suggest_set(it->valuestring, NULL, 0);
+            }
         }
     }
-    long long next = (long long)json_find_int(resp, "nextCursor", (int)cursor);
-    /* "more" parsed colon-aware: an unqualified "\"more\"" search
-     * matches a "more" suggest term in the payload (see the
-     * added-branch comment) and would end the sync early. */
-    int more = 0;
-    const char *more_k = strstr(resp, "\"more\":");
-    if (more_k != NULL) {
-        const char *v = more_k + 7;
-        while (*v == ' ' || *v == '\t')
-            v++;
-        more = strncmp(v, "true", 4) == 0;
-    }
-    *next_out = next;
-    *more_out = more;
-    store_set_cursor(next);
+    const cJSON *nc = cJSON_GetObjectItemCaseSensitive(root, "nextCursor");
+    if (cJSON_IsNumber(nc))
+        *next_out = (long long)nc->valuedouble;
+    const cJSON *mk = cJSON_GetObjectItemCaseSensitive(root, "more");
+    if (cJSON_IsBool(mk))
+        *more_out = cJSON_IsTrue(mk);
+    store_set_cursor(*next_out);
     store_commit();
+    cJSON_Delete(root);
 }
 
 /* Sync finished (any source): close the popup, rebuild the view, hand

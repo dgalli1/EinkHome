@@ -5,6 +5,7 @@
  * overlay and the lc_* conditional-visibility helpers. */
 
 #include "bookshelf.h"
+#include "cJSON.h"
 
 extern const LcProfile g_lcprof;
 
@@ -23,11 +24,11 @@ extern int g_launcher_built;
 
 const char *lc_prof_val(const char *dim);
 
-const char *lc_pick_key(const char *obj_body, const char *want);
+const char *lc_pick_key(const cJSON *obj, const char *want);
 
-void lc_resolve(const char *p, const char *cur_dim, char *out, size_t cap);
+void lc_resolve(const cJSON *v, const char *cur_dim, char *out, size_t cap);
 
-int lc_resolve_bool(const char *p);
+int lc_resolve_bool(const cJSON *v);
 
 char *read_text_file(const char *path);
 
@@ -37,7 +38,7 @@ void lc_translate(const char *raw, char *out, size_t cap);
 
 void launcher_layout(void);
 
-void launcher_add_app(const char *apps_body, const char *id);
+void launcher_add_app(const cJSON *apps, const char *id);
 
 void launcher_build(void);
 
