@@ -1,6 +1,16 @@
 /* bs_ui.c — part of the bookshelf app (see bookshelf.h) */
 
 #include "bookshelf.h"
+#include "bs_browser.h"
+#include "bs_config.h"
+#include "bs_downloads.h"
+#include "bs_extract.h"
+#include "bs_launcher.h"
+#include "bs_model.h"
+#include "bs_progress.h"
+#include "bs_store.h"
+#include "bs_ui.h"
+#include "bs_worker.h"
 
 /* ── drawing primitives ─────────────────────────────────────────────── */
 
@@ -193,8 +203,10 @@ draw_top_bar(void)
     }
     /* Source button right of the house: the active library source as a
      * small icon plus its label (globe = Kavita, book = Local,
-     * folder = Folder). */
-    draw_source_button();
+     * folder = Folder).  Hidden on the Search page like the right-side
+     * icons — the source chooser only makes sense on the shelf. */
+    if (g_state.tab != TAB_SEARCH)
+        draw_source_button();
 
     /* Centered title — series name when drilled, "Search" on the search
      * page, the active query on the filtered library shelf, nothing on
@@ -223,22 +235,39 @@ draw_top_bar(void)
             title[0] = '\0';
         }
         if (title[0] != '\0') {
-            /* Centre the title inside the free band between the flanking
-             * icon stacks (home + source left; search + downloads + menu
-             * right).  Centring on the whole screen width lets a long
-             * series name run under the right icons: the trim budget
-             * must be the band width, not w - 420, and the draw origin
-             * the band, not 0. */
-            int left_w = 8 + 96 + 8 + SOURCE_BTN_W;
-            int right_w = 8 + 3 * 96;
-            int band_w = w - left_w - right_w;
-            if (band_w < 64)
-                band_w = 64;
-            while (StringWidth(title) > band_w && strlen(title) > 4)
-                title[strlen(title) - 1] = '\0';
-            SetFont(tf, col);
-            DrawString(
-                left_w + (band_w - StringWidth(title)) / 2, y0 + (TOP_BAR_H - 40) / 2, title);
+            if (g_state.tab == TAB_SEARCH) {
+                /* The Search bar carries only the back arrow: centre
+                 * the title on the whole screen width, trimmed only so
+                 * it cannot run under the back button (the button box
+                 * plus its margin, mirrored around the screen centre).
+                 * Centring itself is StringWidth-based, so translated
+                 * titles of any length stay centred. */
+                int guard = home_x + home_w + 8;
+                int budget = w - 2 * guard;
+                while (StringWidth(title) > budget && strlen(title) > 4)
+                    title[strlen(title) - 1] = '\0';
+                SetFont(tf, col);
+                DrawString(
+                    (w - StringWidth(title)) / 2, y0 + (TOP_BAR_H - 40) / 2, title);
+            } else {
+                /* Centre the title inside the free band between the
+                 * flanking icon stacks (home + source left; search +
+                 * downloads + menu right).  Centring on the whole
+                 * screen width lets a long series name run under the
+                 * right icons: the trim budget must be the band width,
+                 * not w - 420, and the draw origin the band, not 0. */
+                int left_w = 8 + 96 + 8 + SOURCE_BTN_W;
+                int right_w = 8 + 3 * 96;
+                int band_w = w - left_w - right_w;
+                if (band_w < 64)
+                    band_w = 64;
+                while (StringWidth(title) > band_w && strlen(title) > 4)
+                    title[strlen(title) - 1] = '\0';
+                SetFont(tf, col);
+                DrawString(left_w + (band_w - StringWidth(title)) / 2,
+                           y0 + (TOP_BAR_H - 40) / 2,
+                           title);
+            }
         }
         CloseFont(tf);
     }
@@ -284,11 +313,12 @@ sync_active(void)
     return g_state.sync_state == 1 || downloads_pending() > 0 || g_dl_batch_active;
 }
 
-static int
-sync_modal_open(void)
+/* 1 = any modal overlay or popup is up (input routing, long-press
+ * arming, and background work like cover fetches should pause). */
+int
+modal_open(void)
 {
-    return g_state.ctx_open || g_state.menu_open || g_state.more_open || g_state.settings_open ||
-           g_state.launcher_open;
+    return g_state.overlay != OV_NONE || g_state.dl_popup || g_state.sync_popup;
 }
 
 static int spin_armed = 0;
@@ -304,7 +334,7 @@ sync_spin_tick(void *ctx)
     g_state.sync_angle = (g_state.sync_angle + 15) % 360;
     /* The glyph only exists on the Library tab; elsewhere the top bar
      * is redrawn whole when the state that feeds it changes. */
-    if (!sync_modal_open() && g_state.tab != TAB_SEARCH) {
+    if (!modal_open() && g_state.tab != TAB_SEARCH) {
         draw_sync_icon();
         PartialUpdate(ScreenWidth() - 96 - 8 - 96, 0, 96, TOP_BAR_H);
     }
@@ -320,7 +350,7 @@ sync_set_active(int on)
         spin_armed = 1;
         SetWeakTimerEx("bspin", sync_spin_tick, NULL, 1000);
     }
-    if (!sync_modal_open() && g_state.tab != TAB_SEARCH) {
+    if (!modal_open() && g_state.tab != TAB_SEARCH) {
         draw_sync_icon();
         PartialUpdate(ScreenWidth() - 96 - 8 - 96, 0, 96, TOP_BAR_H);
     }
@@ -419,42 +449,41 @@ draw_search_tab(void)
     FillArea(0, top, w, bot - top, WHITE);
     LOG("[bookshelf] draw_search_tab page=%d\n", g_state.page);
 
-    /* ── input row: magnifier icon + text box ── */
-    int gx = 30, gy = top + SEARCH_ROW_H / 2 - 8;
+    /* ── input row: full-width search bar, magnifier inside ── */
+    int bx = 16, bw = w - 32; /* bar spans the page width */
+    int by = top + 10, bh = SEARCH_ROW_H - 20;
+    DrawRect(bx, by, bw, bh, BLACK);
+    FillArea(bx + 1, by + 1, bw - 2, bh - 2, g_state.search_kb ? BLACK : WHITE);
+    int col = g_state.search_kb ? WHITE : BLACK;
+    int gx = bx + 30, gy = by + bh / 2;
     int px = 0, py = 0;
     for (int s = 0; s <= 16; s++) {
         double a = s * 2 * M_PI / 16.0;
         int    x = gx + (int)(13 * cos(a));
         int    yy = gy + (int)(13 * sin(a));
         if (s > 0) {
-            DrawLine(px, py, x, yy, BLACK);
-            DrawLine(px, py + 1, x, yy + 1, BLACK);
+            DrawLine(px, py, x, yy, col);
+            DrawLine(px, py + 1, x, yy + 1, col);
         }
         px = x;
         py = yy;
     }
-    DrawLine(gx + 9, gy + 10, gx + 22, gy + 23, BLACK);
-    DrawLine(gx + 10, gy + 9, gx + 23, gy + 22, BLACK);
+    DrawLine(gx + 9, gy + 10, gx + 22, gy + 23, col);
+    DrawLine(gx + 10, gy + 9, gx + 23, gy + 22, col);
 
     ifont *f = OpenFont(DEFAULTFONT, 28, 0);
     if (f != NULL) {
-        int tx = 64;
-        int tw = w - 128;
-        int ty = top + 10;
-        int th = SEARCH_ROW_H - 20;
-        DrawRect(tx, ty, tw, th, BLACK);
-        FillArea(tx + 1, ty + 1, tw - 2, th - 2, g_state.search_kb ? BLACK : WHITE);
+        int tx = bx + 68;
+        SetFont(f, col);
         if (g_state.query[0] != '\0') {
-            SetFont(f, g_state.search_kb ? WHITE : BLACK);
-            DrawString(tx + 10, ty + (th - 28) / 2 - 2, g_state.query);
+            DrawString(tx, by + (bh - 28) / 2 - 2, g_state.query);
         } else if (!g_state.search_kb) {
-            SetFont(f, BLACK);
-            DrawString(tx + 10, ty + (th - 28) / 2 - 2, i18n("search.ph"));
+            DrawString(tx, by + (bh - 28) / 2 - 2, i18n("search.ph"));
         }
         /* cursor when the keyboard is editing the input */
         if (g_state.search_kb) {
-            int cursor_x = tx + 10 + StringWidth(g_state.query) + 1;
-            DrawLine(cursor_x, ty + 6, cursor_x, ty + th - 6, WHITE);
+            int cursor_x = tx + StringWidth(g_state.query) + 1;
+            DrawLine(cursor_x, by + 6, cursor_x, by + bh - 6, WHITE);
         }
         CloseFont(f);
     }
@@ -500,15 +529,69 @@ draw_search_tab(void)
     }
 }
 
+/* Screen rect of the live suggestion band: below the search input
+ * row, above the on-screen keyboard.  While the keyboard is open the
+ * band replaces the history list (draw_suggestions); when it is
+ * empty the underlying page (history) stays visible underneath. */
+void
+suggest_band(int *y_top, int *y_bot)
+{
+    int top, bot, cell_w, cell_h;
+    (void)cell_w;
+    (void)cell_h;
+    grid_geom(&top, &bot, &cell_w, &cell_h);
+    if (y_top)
+        *y_top = top + SEARCH_ROW_H;
+    int kb = ScreenHeight() / 2; /* fallback when the rect is unknown */
+    if (GetKeyboardRect) {
+        irect r;
+        GetKeyboardRect(&r);
+        if (r.y > 0)
+            kb = r.y;
+    }
+    if (y_bot)
+        *y_bot = kb;
+}
+
+/* Draw the suggestion rows into the band, exact history-row style
+ * (see draw_search_tab).  Only rows that fully fit above the keyboard
+ * are drawn; the hit-test (bs_input.c) uses the same rule. */
+void
+draw_suggestions(int y_top, int y_bot)
+{
+    int w = ScreenWidth();
+    FillArea(0, y_top, w, y_bot - y_top, WHITE);
+    int y = y_top;
+    for (int i = 0; i < g_nsuggest && y + SEARCH_HISTORY_ROW_H <= y_bot; i++) {
+        ifont *tf = OpenFont(DEFAULTFONTB, 28, 0);
+        if (tf != NULL) {
+            SetFont(tf, BLACK);
+            char trunc[SUGGEST_TERM_MAX];
+            snprintf(trunc, sizeof trunc, "%s", g_suggestions[i]);
+            int maxw = w - 80;
+            while (StringWidth(trunc) > maxw && strlen(trunc) > 4)
+                trunc[strlen(trunc) - 1] = '\0';
+            DrawString(24, y + (SEARCH_HISTORY_ROW_H - 28) / 2 - 2, trunc);
+            CloseFont(tf);
+        }
+        DrawLine(20, y + SEARCH_HISTORY_ROW_H - 1, w - 20,
+                 y + SEARCH_HISTORY_ROW_H - 1, LGRAY);
+        y += SEARCH_HISTORY_ROW_H;
+    }
+}
+
 /* Number of downloads still pending (queued or in flight) — shown as a
  * badge on the downloads icon so the user can see work is in progress. */
 int
 downloads_pending(void)
 {
     int n = 0;
-    for (int i = 0; i < g_download_count; i++)
-        if (g_downloads[i].state == 0 || g_downloads[i].state == 1)
+    for (int i = 0; i < g_download_count; i++) {
+        if (g_downloads[i].state == 0)
             n++;
+        else if (g_downloads[i].state == 1 && !dl_fetch_idle())
+            n++; /* in flight; counts until the fetch's worker fn is done */
+    }
     return n;
 }
 
@@ -666,7 +749,7 @@ view_rows(void)
         return ROWS;
     int t = TOP_BAR_H + TOP_BAR_PAD;
     int b = content_bottom() - PAGER_H;
-    if (g_state.menu_open || g_state.more_open)
+    if (g_state.overlay == OV_MENU || g_state.overlay == OV_MORE)
         b = content_bottom();
     int rows = (b - t - 8) / LIST_ROW_H;
     if (rows < 1)
@@ -688,7 +771,7 @@ grid_geom(int *top, int *bot, int *cell_w, int *cell_h)
     int w = ScreenWidth();
     int t = TOP_BAR_H + TOP_BAR_PAD;
     int b = content_bottom() - PAGER_H;
-    if (g_state.menu_open || g_state.more_open)
+    if (g_state.overlay == OV_MENU || g_state.overlay == OV_MORE)
         b = content_bottom();
     int avail_h = b - t - 8;
     int avail_w = w - 16;
@@ -1134,11 +1217,11 @@ dl_cancel_rect(int *x, int *y)
 }
 
 /* Repaint just the download-popup sheet (progress bar, current item,
- * status line).  download_tick() calls this on every queue change:
- * the shelf around the popup is untouched during a download, so a
- * sheet-sized partial keeps the e-ink flicker local instead of
- * re-flashing the whole content area once per item (which is what
- * redraw_shelf() did — three times per finished download). */
+ * status line).  The download job's completion calls this on every
+ * queue change: the shelf around the popup is untouched during a
+ * download, so a sheet-sized partial keeps the e-ink flicker local
+ * instead of re-flashing the whole content area once per item (which
+ * is what redraw_shelf() did — three times per finished download). */
 void
 refresh_dl_popup(void)
 {
@@ -1167,15 +1250,15 @@ dl_popup_geom(int *px, int *py, int *pw, int *ph)
 /* Download-progress popup: a centred modal sheet over a dimmed shelf.
  * Title, the current item, the batch progress bar, and a status line.
  * A cancel (X) button right of the progress bar aborts the whole
- * queue — the single in-flight fetch cannot be interrupted
- * (QuickDownload blocks), so it is left to finish while every queued
- * item is dropped (see cancel_downloads).  Shown whenever downloads
- * run (book press, context-menu Download, Download all).  While any
- * download is active the popup is non-dismissable — downloads never
- * run in the background; once the queue drains a tap or Back closes
- * it.  When the popup was opened by a single-book press
- * (dl_popup_auto_open), download_tick() launches the reader as soon
- * as the queue drains. */
+ * queue — the in-flight fetch is told to cancel (it will not rename
+ * its .part file into place), but QuickDownload still blocks to its
+ * timeout, so it is left to finish while every queued item is dropped
+ * (see cancel_downloads).  Shown whenever downloads run (book press,
+ * context-menu Download, Download all).  While any download is active
+ * the popup is non-dismissable — downloads never run in the
+ * background; once the queue drains a tap or Back closes it.  When
+ * the popup was opened by a single-book press (dl_popup_auto_open),
+ * dl_job_done() launches the reader as soon as the queue drains. */
 void
 draw_dl_popup(void)
 {
@@ -1446,7 +1529,7 @@ flush_content(void)
 void
 redraw_shelf(void)
 {
-    if (g_state.launcher_open) {
+    if (g_state.overlay == OV_LAUNCHER) {
         draw_overlay_launcher();
         FullUpdate();
         return;
@@ -1510,15 +1593,131 @@ done:
     cover_schedule_next();
 }
 
-/* Fetch one not-yet-loaded visible cover per tick, then blit just that
- * tile.  Running on the event loop keeps the SDK single-threaded; the
- * blocking download is short (cached PNGs over the loopback link). */
+/* The one remote cover fetch in flight, main thread only. */
+static BsJob *g_cover_job;
+
+/* Remote cover fetch job: download the raw PNG and persist it.  Pure
+ * file I/O on the worker — the SDK decode stays on the main thread
+ * (libinkview is not thread-safe). */
+typedef struct {
+    char url[MAX_URL_LEN + 128];
+    char id[MAX_ID_LEN];
+    char cache_path[MAX_PATH_LEN];
+} CoverJobArg;
+
+static void
+cover_fetch_job(BsJob *job)
+{
+    CoverJobArg *a = job->arg;
+    int          rsize = 0;
+    char        *data = QuickDownload(a->url, &rsize, HTTP_TIMEOUT);
+    int          ok = 0;
+    if (data != NULL && rsize > 8 &&
+        !__atomic_load_n(&job->cancel, __ATOMIC_ACQUIRE)) {
+        /* Stage the decode source in COVER_TMP (always writable) and
+         * best-effort persist the raw PNG so the next launch can skip
+         * the network entirely. */
+        FILE *f = fopen(COVER_TMP, "wb");
+        if (f != NULL) {
+            size_t w = fwrite(data, 1, (size_t)rsize, f);
+            if (w == (size_t)rsize && fclose(f) == 0) {
+                ok = 1;
+                cover_cache_save(a->id, data, rsize);
+            }
+        }
+    }
+    free(data);
+    job->rc = ok ? 0 : -1;
+    __atomic_store_n(&job->done, 1, __ATOMIC_RELEASE);
+}
+
+/* Cover fetch finished (main thread): decode on the main thread and
+ * blit the tile if it is still on the current page, then schedule the
+ * next cover.  A failed or canceled job still schedules the next. */
+static void
+cover_job_done(BsJob *job)
+{
+    CoverJobArg *a = job->arg;
+    g_cover_job = NULL;
+
+    CoverSlot *s = cover_slot(a->id, 1);
+    ibitmap   *bmp = NULL;
+    if (job->rc == 0) {
+        LOG("[bookshelf] cover_job_done load_cover_scaled begin id=%s\n", a->id);
+        bmp = load_cover_scaled(COVER_TMP);
+        LOG("[bookshelf] cover_job_done load_cover_scaled done bmp=%p\n", (void *)bmp);
+    }
+    if (bmp != NULL) {
+        if (s->cover_bmp) {
+            LOG("[bookshelf] cover_job_done free(old cover_bmp) begin\n");
+            free(s->cover_bmp);
+            LOG("[bookshelf] cover_job_done free(old cover_bmp) done\n");
+        }
+        s->cover_bmp = bmp;
+        s->state = 2;
+    } else {
+        s->state = 3;
+    }
+    /* The cached bitmap is stored on the slot regardless; only the
+     * on-screen blit is skipped while a modal owns the framebuffer, so a
+     * single-tile PartialUpdate can't punch a hole through the overlay's
+     * dim mask (the full redraw on close then shows the now-cached cover). */
+    int modal = modal_open();
+    LOG("[bookshelf] cover_job_done blit begin modal=%d\n", modal);
+
+    /* The fetch is async now, so the user may have flipped pages while
+     * it ran: blit only if the tile is still on the current page. */
+    int tx, ty, tw, th;
+    int target = -1;
+    if (!modal) {
+        int top, bot, cell_w, cell_h;
+        (void)top;
+        (void)bot;
+        (void)cell_w;
+        (void)cell_h;
+        grid_geom(&top, &bot, &cell_w, &cell_h);
+        int ps = view_pagesize();
+        int page_start = g_state.page * ps;
+        int lim = page_start + ps;
+        if (lim > g_view_total)
+            lim = g_view_total;
+        for (int i = page_start; i < lim; i++) {
+            const char *id = page_row_id(i - page_start);
+            if (id != NULL && strcmp(id, a->id) == 0) {
+                target = i;
+                break;
+            }
+        }
+        if (target >= 0 && tile_rect_for_index(target, &tx, &ty, &tw, &th)) {
+            FillArea(tx, ty, tw, th, WHITE);
+            draw_thumbnail(tx, ty, tw, th, &g_rows[target - page_start], target);
+            PartialUpdate(tx, ty, tw, th);
+        }
+    }
+    LOG("[bookshelf] cover_job_done blit done, scheduling next\n");
+    free(a);
+    cover_schedule_next();
+}
+
+/* Fetch one not-yet-loaded visible cover per tick.  Local (EPUB/PDF)
+ * covers are extracted and decoded here on the main thread as before;
+ * a remote cover that misses the on-disk cache is fetched by a
+ * one-shot job on the shared background worker (bs_worker.c) — the
+ * old code called QuickDownload() directly on the event loop, freezing
+ * the UI for up to the 8 s HTTP timeout.  The job fn only downloads
+ * and writes the PNG files; its done_cb decodes on the main thread
+ * (libinkview is not thread-safe) and blits just that tile. */
 void
 cover_tick(void *ctx)
 {
     (void)ctx;
     LOG("[bookshelf] cover_tick ENTER page=%d view=%d armed->0\n", g_state.page, g_view_total);
     g_cover_armed = 0;
+
+    /* One remote fetch at a time: the in-flight job's done_cb
+     * schedules the next cover when it lands. */
+    if (g_cover_job != NULL)
+        return;
 
     int top, bot, cell_w, cell_h;
     (void)top;
@@ -1584,7 +1783,17 @@ cover_tick(void *ctx)
         }
     } else if (cover_cache_load(bid, &bmp) == 0) {
         LOG("[bookshelf] cover_tick cache hit id=%s\n", bid);
+    } else if (!(QueryNetwork() & 0xf00)) {
+        /* No active connection: skip the fetch silently and let the
+         * slot land in the failed state below so the next sync — the
+         * only place the app may ask for WiFi — retries it.  An
+         * unguarded QuickDownload() here would pop the firmware's
+         * "Turn on WiFi" dialog whenever an offline launch shows
+         * books whose covers are not in the on-disk cache. */
+        LOG("[bookshelf] cover_tick offline, skipping cover fetch id=%s\n", bid);
     } else {
+        /* Remote cover, not cached, online: hand the fetch to the
+         * shared worker; the done_cb decodes and blits. */
         char url[MAX_URL_LEN + 128];
         snprintf(url,
                  sizeof url,
@@ -1592,29 +1801,20 @@ cover_tick(void *ctx)
                  g_state.api_base,
                  bid,
                  g_state.api_token);
-
-        int rsize = 0;
-        LOG("[bookshelf] cover_tick downloading url=%s\n", url);
-        char *data = QuickDownload(url, &rsize, HTTP_TIMEOUT);
-        LOG("[bookshelf] cover_tick downloaded data=%p rsize=%d\n", (void *)data, rsize);
-        if (data != NULL && rsize > 8) {
-            /* Persist the raw PNG so the next launch can skip the
-     * network entirely. */
-            cover_cache_save(bid, data, rsize);
-            FILE *f = fopen(COVER_TMP, "wb");
-            if (f != NULL) {
-                fwrite(data, 1, (size_t)rsize, f);
-                fclose(f);
-                LOG("[bookshelf] cover_tick load_cover_scaled begin\n");
-                bmp = load_cover_scaled(COVER_TMP);
-                LOG("[bookshelf] cover_tick load_cover_scaled done bmp=%p\n", (void *)bmp);
+        LOG("[bookshelf] cover_tick submitting fetch url=%s\n", url);
+        CoverJobArg *a = calloc(1, sizeof *a);
+        if (a != NULL) {
+            snprintf(a->url, sizeof a->url, "%s", url);
+            snprintf(a->id, sizeof a->id, "%s", bid);
+            cover_cache_path(bid, a->cache_path, sizeof a->cache_path);
+            BsJob *j = bs_worker_submit(cover_fetch_job, cover_job_done, a);
+            if (j != NULL) {
+                g_cover_job = j;
+                return; /* the done_cb blits and schedules the next */
             }
+            free(a);
         }
-        if (data != NULL) {
-            LOG("[bookshelf] cover_tick free(data) begin\n");
-            free(data);
-            LOG("[bookshelf] cover_tick free(data) done\n");
-        }
+        /* Cannot submit: fall through to the failed state. */
     }
 
     if (bmp != NULL) {
@@ -1632,8 +1832,7 @@ cover_tick(void *ctx)
      * on-screen blit is skipped while a modal owns the framebuffer, so a
      * single-tile PartialUpdate can't punch a hole through the overlay's
      * dim mask (the full redraw on close then shows the now-cached cover). */
-    int modal = g_state.ctx_open || g_state.menu_open || g_state.more_open ||
-                g_state.settings_open || g_state.dl_popup || g_state.sync_popup;
+    int modal = modal_open();
     LOG("[bookshelf] cover_tick blit begin modal=%d\n", modal);
 
     int tx, ty, tw, th;
@@ -1785,8 +1984,6 @@ draw_status_line(void)
 }
 
 /* ── source chooser ──────────────────────────────────────────────────── */
-
-int g_source_open = 0;
 
 /* Sheet geometry of the source chooser (top-bar button right of home):
  * a centred 3/4-width sheet with the title row and three source rows. */

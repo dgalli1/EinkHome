@@ -1,6 +1,14 @@
 /* bs_model.c — part of the bookshelf app (see bookshelf.h) */
 
 #include "bookshelf.h"
+#include "bs_config.h"
+#include "bs_downloads.h"
+#include "bs_local.h"
+#include "bs_model.h"
+#include "bs_net.h"
+#include "bs_store.h"
+#include "bs_ui.h"
+#include "bs_worker.h"
 
 /* ── book record ─────────────────────────────────────────────────────── */
 
@@ -33,6 +41,12 @@ State g_state;
  * searches" bug).  A dedicated scratch buffer breaks the alias. */
 char g_search_kb_buf[MAX_QUERY_LEN];
 
+/* Live suggestion band: filled by the suggest_debounce_tick in
+ * bs_main.c while the search keyboard is open; drawn and hit-tested
+ * by bs_ui.c / bs_input.c.  g_nsuggest == 0 = band hidden. */
+int  g_nsuggest = 0;
+char g_suggestions[SUGGEST_MAX_HITS][SUGGEST_TERM_MAX];
+
 /* Forward declarations — defined below grid_geom; needed by do_sync
  * which runs before them in file order. */
 
@@ -44,15 +58,15 @@ char g_search_kb_buf[MAX_QUERY_LEN];
 CoverSlot g_covers[NCOVER_SLOTS];
 int       g_cover_armed = 0;
 
-/* One queued/finished download in the drain queue.  Downloads run
- * synchronously on the event loop, so the queue is drained one item
- * per timer tick; `state` records the outcome so the popup can show a
+/* One queued/finished download in the drain queue.  Each file fetch
+ * runs on the shared background worker (bs_worker.c), one download at
+ * a time; a completed job's done_cb settles its queue entry and starts
+ * the next.  `state` records the outcome so the popup can show a
  * running tally of what finished.  state: 0 queued, 1 in flight,
  * 2 done, 3 failed. */
 
 DownloadItem g_downloads[MAX_DOWNLOADS];
 int          g_download_count = 0;
-int          g_download_armed = 0;
 
 /* Download-all batch bookkeeping: total = undownloaded count at queue
  * time, done/failed = settled downloads.  failed_ids records every book
@@ -260,6 +274,10 @@ parse_book_obj(const char *obj, Book *b)
     json_find_key(obj, "series", b->series, sizeof b->series);
     json_find_key(obj, "seriesId", b->series_id, sizeof b->series_id);
     b->series_idx = json_find_float(obj, "seriesIdx", 0.0f);
+    /* Folded search blob (delta "searchText"); pattern is
+     * case-sensitive and no payload field/term collides ("searchtext"
+     * terms are lowercase, this key precedes the suggest array). */
+    json_find_key(obj, "searchText", b->search_text, sizeof b->search_text);
     json_find_key(obj, "format", b->ext, sizeof b->ext);
     /* Strip format string past first non-alnum. */
     for (char *q = b->ext; *q; q++) {
@@ -294,58 +312,353 @@ parse_book_obj(const char *obj, Book *b)
     return 0;
 }
 
-/* Balanced JSON object scanner — returns pointer to the opening '{'
- * of the next top-level object at or after `p`, and sets *end_out to
- * the matching '}'.  Respects quoted strings (including escapes) and
- * nested braces/brackets so a '}' inside a string value or nested
- * object doesn't terminate the scan early.  Returns NULL when no
- * further object is found. */
-const char *
-json_next_object(const char *p, const char **end_out)
+/* ── /sync/delta POST ────────────────────────────────────────────────── */
+
+/* ── async delta sync ──────────────────────────────────────────────────
+ * Each /sync/delta round-trip runs as a one-shot job on the shared
+ * background worker (bs_worker.c), so the event loop stays responsive
+ * during a big first sync (100k books ≈ 200 rounds of HTTP).  The job
+ * fn only does the blocking HTTP fetch; its done_cb applies the
+ * response on the main thread — store writes stay single-threaded —
+ * and chains the next round job, so no pacing timer is needed (the
+ * HTTP round-trip paces the loop).  The worker touches no UI and no
+ * store state. */
+
+/* Round job argument: the delta URL + body are snapshotted on the main
+ * thread (the worker never reads g_state). */
+typedef struct {
+    char url[MAX_URL_LEN + 16];
+    char body[160];
+} SyncRoundArg;
+
+/* Round job result (worker-allocated; done_cb frees it). */
+typedef struct {
+    char *resp;
+    int   rlen;
+    int   rc;
+} SyncRoundResult;
+
+static long long g_sync_cursor; /* main thread only now */
+static int       g_sync_rounds; /* main thread only */
+
+static void sync_submit_round(void);
+static void sync_submit_finish(void);
+static void sync_round_done(BsJob *job);
+
+/* ── sync-engine → UI hooks ────────────────────────────────────────────
+ * Registered once at startup (bs_main.c EVT_INIT) via sync_set_hooks().
+ * The sync engine never calls bs_ui.c by name — every UI side effect
+ * (spinner state, sync popup, shelf repaint) goes through these
+ * NULL-checked wrappers, so bs_model.c depends on the UI only through
+ * the hook struct (dependency inversion).  All hook invocations happen
+ * on the main thread, exactly where the direct calls used to run. */
+static SyncUiHooks g_sync_ui;
+
+void
+sync_set_hooks(const SyncUiHooks *hooks)
 {
-    while (*p && *p != '{')
-        p++;
-    if (*p != '{')
-        return NULL;
-    const char *start = p;
-    int         depth = 0;
-    while (*p) {
-        if (*p == '"') {
-            p++;
-            while (*p && *p != '"') {
-                if (*p == '\\')
-                    p++;
-                p++;
-            }
-            if (*p == '"')
-                p++;
-            continue;
-        }
-        if (*p == '{' || *p == '[')
-            depth++;
-        else if (*p == '}' || *p == ']') {
-            depth--;
-            if (depth == 0) {
-                if (end_out)
-                    *end_out = p;
-                return start;
-            }
-        }
-        p++;
-    }
-    if (end_out)
-        *end_out = p;
-    return start; /* unterminated; best effort */
+    if (hooks != NULL)
+        g_sync_ui = *hooks;
 }
 
-/* ── /sync/delta POST ────────────────────────────────────────────────── */
+static void sync_ui_active(int on) { if (g_sync_ui.set_active) g_sync_ui.set_active(on); }
+static void sync_ui_popup_refresh(void) { if (g_sync_ui.popup_refresh) g_sync_ui.popup_refresh(); }
+static void sync_ui_popup_finish(void) { if (g_sync_ui.popup_finish) g_sync_ui.popup_finish(); }
+static void sync_ui_popup_fail(void) { if (g_sync_ui.popup_fail) g_sync_ui.popup_fail(); }
+static void sync_ui_repaint(void) { if (g_sync_ui.repaint) g_sync_ui.repaint(); }
+
+/* Worker: fetch one delta batch (blocking HTTP).  The response is
+ * owned by the job (freed by the done_cb on the main thread). */
+static void
+sync_fetch_round(BsJob *job)
+{
+    SyncRoundArg   *a = job->arg;
+    char           *resp = NULL;
+    int             rlen = 0;
+    int             rc = http_post_timeout(a->url, a->body, 60, &resp, &rlen);
+    SyncRoundResult *r = malloc(sizeof *r);
+    if (r == NULL) {
+        free(resp);
+        job->rc = -1;
+    } else {
+        r->resp = resp;
+        r->rlen = rlen;
+        r->rc = rc;
+        job->result = r;
+        job->rc = rc;
+    }
+    __atomic_store_n(&job->done, 1, __ATOMIC_RELEASE);
+}
+
+/* Submit one round job (main thread only). */
+static void
+sync_submit_round(void)
+{
+    SyncRoundArg *a = malloc(sizeof *a);
+    if (a == NULL) {
+        /* Cannot happen in practice; fail gracefully instead of
+         * hanging with sync_state stuck at 1. */
+        LOG("[bookshelf] do_sync: worker submit failed\n");
+        g_state.sync_state = 0;
+        sync_ui_active(0);
+        return;
+    }
+    snprintf(a->url, sizeof a->url, "%s", g_state.url_delta);
+    snprintf(a->body, sizeof a->body,
+             "{\"cursor\":%lld,\"limit\":%d}", g_sync_cursor, SYNC_BATCH);
+    if (bs_worker_submit(sync_fetch_round, sync_round_done, a) == NULL) {
+        free(a);
+        LOG("[bookshelf] do_sync: worker submit failed\n");
+        g_state.sync_state = 0;
+        sync_ui_active(0);
+        return;
+    }
+}
+
+/* Apply one delta response on the main thread: the added/removed
+ * parsing plus cursor/more, inside the batch transaction.  Mirrors the
+ * old blocking loop body exactly. */
+static void
+sync_apply_round(char *resp, long long cursor, long long *next_out,
+                 int *more_out)
+{
+    store_begin();
+    /* Top-level keys are located with COLON-qualified patterns
+     * ("\"added\":"): an unqualified "\"added\"" matches a book's
+     * suggest term "added" inside the payload and mislocates the
+     * array.  Real Open Library data made the same bug bite for
+     * "more" — a "more" suggest term made the sync end silently
+     * at 1000 books (more=false).  Payload fields/terms are never
+     * followed by ':', so the colon form cannot collide. */
+    const char *added = strstr(resp, "\"added\":");
+    if (added != NULL) {
+        const char *p = strchr(added, '[');
+        const char *end = NULL;
+        Book        tmp;
+        while (p != NULL && (p = json_next_object(p, &end)) != NULL) {
+            if (parse_book_obj(p, &tmp) == 0) {
+                store_upsert_book(&tmp);
+                /* Suggestion terms for this book.  json_find_key
+                 * is an unbounded strstr (reads past this object
+                 * when the key is absent) and copies only up to
+                 * the first comma of an array value, so it can
+                 * never be used here: copy the bounded object
+                 * [p, end] and walk it with the removed-branch
+                 * string idiom instead. */
+                char   objbuf[10240];
+                size_t olen = (size_t)(end - p) + 1; /* include '}' */
+                char   terms[SUGGEST_MAX_TERMS][SUGGEST_TERM_MAX];
+                int    n = 0;
+                if (olen < sizeof objbuf) {
+                    memcpy(objbuf, p, olen);
+                    objbuf[olen] = '\0';
+                    const char *sg = strstr(objbuf, "\"suggest\"");
+                    if (sg != NULL) {
+                        sg = strchr(sg, '[');
+                        if (sg != NULL) {
+                            /* Bounded walk: close the array at its
+                             * ']' so json_next_string stops there
+                             * instead of reading the following
+                             * keys as bogus terms (json_next_string
+                             * only stops on a missing '"'). */
+                            char *arr_end = strchr(sg, ']');
+                            if (arr_end != NULL)
+                                *arr_end = '\0';
+                            while (sg != NULL && n < SUGGEST_MAX_TERMS) {
+                                char term[SUGGEST_TERM_MAX];
+                                sg = json_next_string(sg, term,
+                                                      sizeof term);
+                                if (sg != NULL)
+                                    snprintf(terms[n++],
+                                             SUGGEST_TERM_MAX, "%s",
+                                             term);
+                            }
+                        }
+                    }
+                } else {
+                    /* Oversized book object (phrase terms make
+                     * suggest the dominant size): skip terms, the
+                     * upsert above is unaffected. */
+                    LOG("[bookshelf] do_sync: obj %zu bytes, suggest "
+                        "skipped\n", olen);
+                }
+                store_suggest_set(tmp.id, n > 0 ? terms : NULL, n);
+            }
+            p = end + 1;
+        }
+    }
+    const char *rem = strstr(resp, "\"removed\":");
+    if (rem != NULL) {
+        const char *p = strchr(rem, '[');
+        char        id[MAX_ID_LEN];
+        while (p != NULL && (p = json_next_string(p, id, sizeof id)) != NULL) {
+            store_delete_book(id);
+            store_suggest_set(id, NULL, 0);
+        }
+    }
+    long long next = (long long)json_find_int(resp, "nextCursor", (int)cursor);
+    /* "more" parsed colon-aware: an unqualified "\"more\"" search
+     * matches a "more" suggest term in the payload (see the
+     * added-branch comment) and would end the sync early. */
+    int more = 0;
+    const char *more_k = strstr(resp, "\"more\":");
+    if (more_k != NULL) {
+        const char *v = more_k + 7;
+        while (*v == ' ' || *v == '\t')
+            v++;
+        more = strncmp(v, "true", 4) == 0;
+    }
+    *next_out = next;
+    *more_out = more;
+    store_set_cursor(next);
+    store_commit();
+}
+
+/* Sync finished (any source): close the popup, rebuild the view, hand
+ * the spinner off, repaint, and clear the sync state.  The remote
+ * state-report POST runs as a separate finish job (sync_submit_finish)
+ * so it does not block the main thread; local/folder sources call this
+ * directly. */
+static void
+finish_sync(void)
+{
+    sync_ui_popup_finish();
+    view_rebuild();
+    if (g_state.page * view_pagesize() >= view_total())
+        g_state.page = 0;
+
+    g_state.sync_state = 0;
+    sync_ui_active(0);
+    /* do_sync is async now: the callers' redraw runs before the sync
+     * lands, so the shelf repaints itself here. */
+    sync_ui_repaint();
+}
+
+/* ── finish job: report the final state back to the server ───────────── */
+
+typedef struct {
+    char url[MAX_URL_LEN + 16];
+    char body[160];
+} SyncFinishArg;
+
+/* Worker: POST the final state (best-effort). */
+static void
+sync_finish_post(BsJob *job)
+{
+    SyncFinishArg *a = job->arg;
+    char          *resp = NULL;
+    int            rl = 0;
+    http_post(a->url, a->body, &resp, &rl);
+    if (resp)
+        free(resp);
+    job->rc = 0; /* best-effort; the outcome is not used */
+    __atomic_store_n(&job->done, 1, __ATOMIC_RELEASE);
+}
+
+/* done_cb for the finish job: the terminal bookkeeping. */
+static void
+sync_finish_done(BsJob *job)
+{
+    free(job->arg);
+    finish_sync();
+}
+
+/* Submit the finish job (main thread).  The state body is built here —
+ * store_count() is SQLite and may only run on the main thread; the
+ * worker only POSTs the snapshot.  Only ever called from the remote
+ * round loop (the server progress report makes no sense otherwise). */
+static void
+sync_submit_finish(void)
+{
+    SyncFinishArg *a = malloc(sizeof *a);
+    if (a == NULL) {
+        finish_sync(); /* best-effort: skip the report POST */
+        return;
+    }
+    snprintf(a->url, sizeof a->url, "%s", g_state.url_state);
+    snprintf(a->body, sizeof a->body,
+             "{\"deviceId\":\"pbemu\",\"cursor\":%lld,\"books\":%d}",
+             g_sync_cursor,
+             store_count());
+    if (bs_worker_submit(sync_finish_post, sync_finish_done, a) == NULL) {
+        free(a);
+        finish_sync();
+        return;
+    }
+}
+
+/* done_cb for a round job: apply the batch and chain the next round or
+ * the finish job.  The terminal paths (done, failed, capped) do not
+ * chain. */
+static void
+sync_round_done(BsJob *job)
+{
+    if (!g_state.sync_state) {
+        /* Sync aborted while the fetch was in flight: consume and drop
+         * the result. */
+        SyncRoundResult *r = job->result;
+        if (r != NULL) {
+            free(r->resp);
+            free(r);
+        }
+        free(job->arg);
+        return;
+    }
+    SyncRoundResult *r = job->result;
+    int   rc = (r != NULL) ? r->rc : job->rc;
+    char *resp = (r != NULL) ? r->resp : NULL;
+    int   rlen = (r != NULL) ? r->rlen : 0;
+
+    if (rc != 0 || resp == NULL) {
+        LOG("[bookshelf] do_sync FAILED: url=%s body=%p\n",
+            g_state.url_delta, (void *)resp);
+        g_state.sync_state = 2;
+        snprintf(g_state.status, sizeof g_state.status, "%s",
+                 i18n("status.fail"));
+        sync_ui_active(0);
+        if (resp)
+            free(resp);
+        free(r);
+        free(job->arg);
+        sync_ui_popup_fail();
+        return;
+    }
+    LOG("[bookshelf] do_sync: body=%p retsize=%d cursor=%lld\n",
+        (void *)resp, rlen, g_sync_cursor);
+
+    long long next = g_sync_cursor;
+    int       more = 0;
+    sync_apply_round(resp, g_sync_cursor, &next, &more);
+    free(resp);
+    free(r);
+    free(job->arg);
+    g_sync_cursor = next;
+    g_sync_rounds++;
+
+    if (more && g_sync_rounds < 400) { /* 400 * SYNC_BATCH = 200k ceiling */
+        g_state.sync_round = g_sync_rounds + 1;
+        /* Repaint the progress sheet every few batches; the round trip
+         * itself is the slow part, so the sheet tracks it live. */
+        if (g_state.sync_popup && (g_sync_rounds % 5 == 0))
+            sync_ui_popup_refresh();
+        sync_submit_round();
+        return;
+    }
+    LOG("[bookshelf] do_sync: rounds=%d cursor=%lld\n", g_sync_rounds,
+        g_sync_cursor);
+    sync_submit_finish();
+}
 
 void
 do_sync(void)
 {
     LOG("[bookshelf] do_sync ENTER url_delta=%s\n", g_state.url_delta);
+    if (g_state.sync_state == 1) {
+        LOG("[bookshelf] do_sync: already syncing, skipping\n");
+        return;
+    }
     g_state.sync_state = 1;
-    sync_set_active(1);
+    sync_ui_active(1);
     snprintf(g_state.status, sizeof g_state.status, "%s", i18n("status.syncing"));
     /* A previous sync may have hit the server before its cover cache was
      * warm; give failed covers one more chance each sync. */
@@ -354,103 +667,33 @@ do_sync(void)
             g_covers[i].state = 0;
     }
 
-    long long cursor = store_get_cursor();
-
     /* Local sources have no server: sync = (re)import the on-device
      * library (all of /mnt/ext1), or nothing for the live Folder file
      * browser. */
     if (g_state.source == SOURCE_LOCAL) {
         if (g_state.sync_popup) {
             g_state.sync_stage = SYNC_STAGE_SCAN;
-            sync_popup_refresh();
+            sync_ui_popup_refresh();
         }
         local_import_scanner();
-        goto synced;
-    }
-    if (g_state.source == SOURCE_FOLDER)
-        goto synced;
-
-    /* Cursor-based delta: each round fetches at most SYNC_BATCH books,
-     * writes them in one transaction and persists the cursor, so a
-     * 100k-book library syncs in bounded-RAM rounds and resumes after a
-     * crash. */
-    int more = 1;
-    int rounds = 0;
-    while (more && rounds < 400) { /* 400 * SYNC_BATCH = 200k ceiling */
-        g_state.sync_round = rounds + 1;
-        /* Repaint the progress sheet every few batches; the round trip
-         * itself is the slow part, so the sheet tracks it live. */
-        if (g_state.sync_popup && (rounds % 5 == 0))
-            sync_popup_refresh();
-        char body[128];
-        snprintf(body, sizeof body, "{\"cursor\":%lld,\"limit\":%d}", cursor, SYNC_BATCH);
-        char *resp = NULL;
-        int   rlen = 0;
-        if (http_post_timeout(g_state.url_delta, body, 60, &resp, &rlen) != 0 || resp == NULL) {
-            LOG("[bookshelf] do_sync FAILED: url=%s body=%p\n", g_state.url_delta, (void *)resp);
-            g_state.sync_state = 2;
-            snprintf(g_state.status, sizeof g_state.status, "%s", i18n("status.fail"));
-            sync_set_active(0);
-            if (resp)
-                free(resp);
-            sync_popup_fail();
-            return;
-        }
-        LOG("[bookshelf] do_sync: body=%p retsize=%d cursor=%lld\n", (void *)resp, rlen, cursor);
-
-        store_begin();
-        const char *added = strstr(resp, "\"added\"");
-        if (added != NULL) {
-            const char *p = strchr(added, '[');
-            const char *end = NULL;
-            Book        tmp;
-            while (p != NULL && (p = json_next_object(p, &end)) != NULL) {
-                if (parse_book_obj(p, &tmp) == 0)
-                    store_upsert_book(&tmp);
-                p = end + 1;
-            }
-        }
-        const char *rem = strstr(resp, "\"removed\"");
-        if (rem != NULL) {
-            const char *p = strchr(rem, '[');
-            char        id[MAX_ID_LEN];
-            while (p != NULL && (p = json_next_string(p, id, sizeof id)) != NULL)
-                store_delete_book(id);
-        }
-        long long next = (long long)json_find_int(resp, "nextCursor", (int)cursor);
-        more = json_find_bool(resp, "more", 0);
-        cursor = next;
-        store_set_cursor(cursor);
-        store_commit();
-        free(resp);
-        rounds++;
-    }
-    LOG("[bookshelf] do_sync: rounds=%d cursor=%lld\n", rounds, cursor);
-
-synced:
-    sync_popup_finish();
-    view_rebuild();
-    if (g_state.page * view_pagesize() >= view_total())
-        g_state.page = 0;
-
-    g_state.sync_state = 0;
-    sync_set_active(0);
-    /* The server progress report only makes sense for the remote
-     * source. */
-    if (g_state.source != SOURCE_KAVITA)
+        finish_sync();
         return;
-    /* post state back (best-effort) */
-    char state_body[160];
-    snprintf(state_body,
-             sizeof state_body,
-             "{\"deviceId\":\"pbemu\",\"cursor\":%lld,\"books\":%d}",
-             cursor,
-             store_count());
-    char *resp = NULL;
-    int   rl = 0;
-    http_post(g_state.url_state, state_body, &resp, &rl);
-    if (resp)
-        free(resp);
+    }
+    if (g_state.source == SOURCE_FOLDER) {
+        finish_sync();
+        return;
+    }
+
+    /* Remote: async rounds.  One HTTP fetch per round runs as a worker
+     * job; its done_cb applies each response on the main thread and
+     * chains the next round, so the event loop keeps serving input
+     * during a big first sync.  Cursor-based delta: each round fetches
+     * at most SYNC_BATCH books, writes them in one transaction and
+     * persists the cursor, so a 100k-book library syncs in bounded-RAM
+     * rounds and resumes after a crash. */
+    g_sync_cursor = store_get_cursor();
+    g_sync_rounds = 0;
+    sync_submit_round();
 }
 
 /* ── cover PNG cache ─────────────────────────────────────────────────── */

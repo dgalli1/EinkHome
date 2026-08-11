@@ -25,12 +25,12 @@ SOURCES := \
 	bs_model.c \
 	bs_net.c \
 	bs_ui.c \
+	bs_worker.c \
 	bs_input.c \
 	bs_launcher.c \
 	bs_downloads.c \
-	bs_folder.c \
+	bs_browser.c \
 	bs_local.c \
-	bs_browse.c \
 	bs_extract.c \
 	bs_progress.c \
 	bs_store.c \

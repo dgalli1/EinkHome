@@ -1,6 +1,8 @@
 /* bs_extract.c — part of the bookshelf app (see bookshelf.h) */
 
 #include "bookshelf.h"
+#include "bs_extract.h"
+
 #include <zlib.h>
 
 /* ── metadata extraction for local book files ──────────────────────────

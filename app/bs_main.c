@@ -1,12 +1,36 @@
 /* bs_main.c — part of the bookshelf app (see bookshelf.h) */
 
 #include "bookshelf.h"
+#include "bs_browser.h"
+#include "bs_config.h"
+#include "bs_downloads.h"
+#include "bs_input.h"
+#include "bs_launcher.h"
+#include "bs_local.h"
+#include "bs_model.h"
+#include "bs_net.h"
+#include "bs_progress.h"
+#include "bs_store.h"
+#include "bs_ui.h"
+#include "bs_worker.h"
 
 /* Exported by the firmware's libinkview but absent from this SDK
  * vintage's headers (and its bundled lib).  Weak so the link succeeds
  * either way; the guard skips the call if the runtime library lacks it. */
 extern void IvSetAppCapability(int caps) __attribute__((weak));
 extern void SetDefaultOrientation(int n) __attribute__((weak));
+
+/* Sync-engine → UI hook table (see bookshelf.h): the sync engine
+ * (bs_model.c) drives the spinner, the sync popup and the shelf
+ * repaint through these pointers instead of calling bs_ui.c by name.
+ * Registered once on EVT_INIT, before the deferred boot sync can run. */
+static const SyncUiHooks g_sync_ui_hooks = {
+    .set_active = sync_set_active,
+    .popup_refresh = sync_popup_refresh,
+    .popup_finish = sync_popup_finish,
+    .popup_fail = sync_popup_fail,
+    .repaint = redraw_shelf,
+};
 
 /* ── event loop ──────────────────────────────────────────────────────── */
 
@@ -24,8 +48,8 @@ extern void SetDefaultOrientation(int n) __attribute__((weak));
 
 /* One-shot deferred init work (see the EVT_INIT comments): ask monitor
  * to start the resident firmware services the way the stock bookshelf
- * does, then run the first sync.  The firmware's main-menu task binding
- * must not wait on the network. */
+ * does, then run the first sync when a connection is already up.  The
+ * firmware's main-menu task binding must not wait on the network. */
 static void init_sync_tick(void *ctx) {
   (void)ctx;
   /* The stock desktop sends MSG_START_SERVICES (0x600) to monitor
@@ -34,13 +58,125 @@ static void init_sync_tick(void *ctx) {
    * global-request target.  Without it a fresh boot runs only scanner
    * + bookshelf.  iv_ipc_cmd() is the stock's exact transport. */
   iv_ipc_cmd(MSG_START_SERVICES, 0);
-  do_sync();
+  /* Startup must never ask to enable WiFi: the firmware's
+   * QuickDownload() pops the "Turn on WiFi" dialog whenever it sees
+   * no ACTIVE connection — even with the adapter enabled — so an
+   * unconditional first sync would nag on every launch.  Only
+   * auto-sync when the device is already connected (the same
+   * connection bits, 0xf00, that QuickDownload itself tests before
+   * prompting) or when the sync is local-only and never touches the
+   * network.  Pressing Sync still attempts the connection and may
+   * ask; an offline launch just renders the cached library. */
+  if (g_state.source == SOURCE_LOCAL || g_state.source == SOURCE_FOLDER ||
+      (QueryNetwork() & 0xf00))
+    do_sync();
   redraw_shelf();
+}
+
+/* ── live search suggestions (see plan: suggest-completion) ─────────── */
+
+/* Last buffer the tick acted on; a keystroke batch only re-queries the
+ * store when the buffer moved (200 ms re-arm gives the debounce). */
+static char g_last_suggest_q[SUGGEST_TERM_MAX] = "";
+
+/* Poll the keyboard buffer (the firmware's setKeyboardTextChangeCallback
+ * never fires on this build — verified in the emulator spike) and keep
+ * the suggestion band above the keyboard live.  Re-arms itself while
+ * the keyboard is open; the keyboard handler clears it on close. */
+static void suggest_debounce_tick(void *ctx) {
+  (void)ctx;
+  if (!g_state.search_kb)
+    return; /* keyboard closed: the handler cleared us; do not re-arm */
+  SetWeakTimerEx("suggest_debounce", suggest_debounce_tick, NULL, 200);
+
+  char q[SUGGEST_TERM_MAX];
+  snprintf(q, sizeof q, "%s", g_search_kb_buf);
+  if (strcmp(q, g_last_suggest_q) == 0)
+    return; /* nothing typed since the last tick */
+  snprintf(g_last_suggest_q, sizeof g_last_suggest_q, "%s", q);
+
+  char rows[SUGGEST_MAX_HITS][SUGGEST_TERM_MAX];
+  int  n = store_suggest_list(q, rows, SUGGEST_MAX_HITS);
+  int  changed = n != g_nsuggest ||
+                 (n > 0 && memcmp(rows, g_suggestions,
+                                  sizeof g_suggestions[0] * (size_t)n) != 0);
+  if (!changed)
+    return;
+  g_nsuggest = n;
+  for (int i = 0; i < n; i++)
+    snprintf(g_suggestions[i], SUGGEST_TERM_MAX, "%s", rows[i]);
+
+  int y_top, y_bot;
+  suggest_band(&y_top, &y_bot);
+  if (y_bot <= y_top + 16)
+    return;
+  if (n > 0)
+    draw_suggestions(y_top, y_bot);
+  else
+    draw_search_tab(); /* restore the history rows the band covered */
+  PartialUpdate(0, y_top, ScreenWidth(), y_bot - y_top);
+}
+
+/* ── shared drag-scroll driver (browser + launcher) ──────────────────
+ * The folder-source browser (body mode and the download-folder picker
+ * overlay) and the launcher body all scroll by dragging: POINTERDOWN
+ * anchors the press point, POINTERMOVE feeds the finger travel into
+ * the scroll offset once it has passed LAUNCHER_DRAG_SLOP (the slop
+ * keeps a stationary tap from jittering the list), and POINTERUP
+ * clamps, redraws and flushes when the lift ended a drag — a plain
+ * lift falls through to the tap handlers.  Each branch supplies its
+ * own scroll state, draw and flush; the draw functions clamp the
+ * upper scroll bound themselves. */
+static void
+drag_scroll_press(int y, int *drag, int *drag_y, int *moved)
+{
+  *drag = 1;
+  *drag_y = y;
+  *moved = 0;
+}
+
+static void
+drag_scroll_move(int y, int *scroll, int *drag, int *drag_y, int *moved,
+                 void (*draw)(void))
+{
+  if (!*drag)
+    return;
+  int dy = y - *drag_y;
+  if (*moved || dy > LAUNCHER_DRAG_SLOP || dy < -LAUNCHER_DRAG_SLOP) {
+    *moved = 1;
+    *scroll -= dy;
+    *drag_y = y;
+    /* Draw, do NOT flush; the refresh happens once on lift. */
+    draw();
+  }
+}
+
+/* Returns 1 when the lift ended a drag (the caller then skips the tap
+ * handling).  Only the lower scroll bound is kept non-negative here;
+ * the upper bound is clamped by the draw functions. */
+static int
+drag_scroll_lift(int *scroll, int *drag, int *moved, void (*draw)(void),
+                 void (*flush)(void))
+{
+  int was_drag = *moved;
+  *drag = 0;
+  *moved = 0;
+  if (was_drag) {
+    if (*scroll < 0)
+      *scroll = 0;
+    draw();
+    flush();
+  }
+  return was_drag;
 }
 
 int on_event(int type, int par1, int par2) {
   if (type == EVT_INIT) {
     memset(&g_state, 0, sizeof g_state);
+    /* Wire the sync engine to the UI before anything can trigger a
+     * sync: the boot sync is deferred to the one-shot init_sync_tick
+     * timer below, so the hook table is always in place first. */
+    sync_set_hooks(&g_sync_ui_hooks);
     g_state.sort = SORT_TITLE_ASC;
     g_state.group = GROUP_ALL;
     g_state.filter = FILTER_ALL;
@@ -118,8 +254,9 @@ int on_event(int type, int par1, int par2) {
 
     struct cfg_out cfg = {
         .api_url = g_state.api_base,
+        .url_cap = sizeof g_state.api_base,
         .api_token = g_state.api_token,
-        .cap = sizeof g_state.api_base,
+        .token_cap = sizeof g_state.api_token,
     };
     g_state.api_base[0] = '\0';
     load_config_file(g_argv0, &cfg);
@@ -184,16 +321,19 @@ int on_event(int type, int par1, int par2) {
 
     build_endpoint_urls();
     /* Auto-sync on first launch so the shelf populates without a
-     * manual tap.  The sync is DEFERRED to a one-shot timer: a
-     * blocking network sync inside EVT_INIT (up to 60 s per round
-     * when the API is unreachable) delays the firmware's main-menu
-     * task binding on the real device, which leaves the
-     * global-request target unset — the control-panel Task Manager
-     * button and the reader_controller service both fail (taskmgr
-     * never opens; OpenBook's reader_controller poll times out).
-     * EVT_INIT returns immediately like the stock bookshelf; the
-     * shelf renders from the local store first and init_sync_tick
-     * refreshes it once the sync settles. */
+     * manual tap — but only when the device is already online (see
+     * init_sync_tick): an offline launch must render the cached
+     * library without ever asking to enable WiFi.  The sync is
+     * DEFERRED to a one-shot timer: a blocking network sync inside
+     * EVT_INIT (up to 60 s per round when the API is unreachable)
+     * delays the firmware's main-menu task binding on the real
+     * device, which leaves the global-request target unset — the
+     * control-panel Task Manager button and the reader_controller
+     * service both fail (taskmgr never opens; OpenBook's
+     * reader_controller poll times out).  EVT_INIT returns
+     * immediately like the stock bookshelf; the shelf renders from
+     * the local store first and init_sync_tick refreshes it once the
+     * sync settles. */
     SetWeakTimerEx("initsync", init_sync_tick, NULL, 100);
     draw_top_bar();
     draw_grid();
@@ -214,27 +354,27 @@ int on_event(int type, int par1, int par2) {
     /* The user may have been reading with the integrated reader or
      * KOReader while we were away — refresh their progress. */
     progress_reload();
-    if (g_source_open) {
+    if (g_state.overlay == OV_SOURCE) {
       draw_overlay_source();
       FullUpdate();
       return 1;
     }
-    if (g_state.launcher_open) {
+    if (g_state.overlay == OV_LAUNCHER) {
       draw_overlay_launcher();
       FullUpdate();
       return 1;
     }
-    if (g_folder_open) {
+    if (g_state.overlay == OV_FOLDER) {
       draw_overlay_folder();
       FullUpdate();
       return 1;
     }
-    if (g_state.settings_open) {
+    if (g_state.overlay == OV_SETTINGS) {
       draw_overlay_settings();
       FullUpdate();
       return 1;
     }
-    if (g_state.log_open) {
+    if (g_state.overlay == OV_LOG) {
       draw_log_view();
       FullUpdate();
       return 1;
@@ -252,9 +392,9 @@ int on_event(int type, int par1, int par2) {
       draw_dl_popup();
     if (g_state.sync_popup)
       draw_sync_popup();
-    if (g_state.menu_open)
+    if (g_state.overlay == OV_MENU)
       draw_overlay_menu();
-    else if (g_state.more_open)
+    else if (g_state.overlay == OV_MORE)
       draw_overlay_more();
     FullUpdate();
     return 1;
@@ -267,23 +407,18 @@ int on_event(int type, int par1, int par2) {
      * scroll. */
     /* The source chooser is tap-only; swallow the press so nothing
      * underneath arms (long-press, drag). */
-    if (g_source_open)
+    if (g_state.overlay == OV_SOURCE)
       return 1;
-    /* The download-folder picker body is drag-scrolled like the
-     * launcher: remember the press point so POINTERMOVE can
+    /* The download-folder picker body and the launcher body are
+     * drag-scrolled: anchor the press point so POINTERMOVE can
      * translate the finger travel into scroll. */
-    if (g_folder_open) {
-      g_folder_drag = 1;
-      g_folder_drag_y = y;
-      g_folder_moved = 0;
+    if (g_state.overlay == OV_FOLDER) {
+      drag_scroll_press(y, &g_browser_drag, &g_browser_drag_y, &g_browser_moved);
       return 1;
     }
-    /* The launcher body is drag-scrolled: remember the press point so
-     * POINTERMOVE can translate the finger travel into scroll. */
-    if (g_state.launcher_open) {
-      g_state.launcher_drag = 1;
-      g_state.launcher_drag_y = y;
-      g_state.launcher_moved = 0;
+    if (g_state.overlay == OV_LAUNCHER) {
+      drag_scroll_press(y, &g_state.launcher_drag, &g_state.launcher_drag_y,
+                        &g_state.launcher_moved);
       return 1;
     }
     /* The file browser body is drag-scrolled like the launcher; a
@@ -291,19 +426,16 @@ int on_event(int type, int par1, int par2) {
      * scroll. */
     if (g_browse_open && g_state.source == SOURCE_FOLDER &&
         y >= TOP_BAR_H + TOP_BAR_PAD) {
-      g_browse_drag = 1;
-      g_browse_drag_y = y;
-      g_browse_moved = 0;
+      drag_scroll_press(y, &g_browser_drag, &g_browser_drag_y, &g_browser_moved);
       return 1;
     }
     /* Arm a long-press only on the Library tab's grid, and only when
-     * no modal overlay is up.  The timer (longpress_tick) opens the
-     * context menu if the finger stays put. */
+     * no modal overlay or popup is up (source, folder and launcher
+     * were already swallowed above).  The timer (longpress_tick)
+     * opens the context menu if the finger stays put. */
     g_lp_armed = 0;
     g_lp_vi = -1;
-    if (g_state.tab == TAB_LIBRARY && !g_state.settings_open &&
-        !g_state.menu_open && !g_state.more_open && !g_state.ctx_open &&
-        !g_state.dl_popup && !g_state.log_open && !g_state.sync_popup) {
+    if (g_state.tab == TAB_LIBRARY && !modal_open()) {
       int vi = hit_thumbnail(x, y);
       if (vi >= 0) {
         g_lp_armed = 1;
@@ -318,51 +450,19 @@ int on_event(int type, int par1, int par2) {
 
   if (type == EVT_POINTERMOVE) {
     if (g_browse_open && g_state.source == SOURCE_FOLDER) {
-      if (g_browse_drag) {
-        int dy = par2 - g_browse_drag_y;
-        if (g_browse_moved || dy > LAUNCHER_DRAG_SLOP ||
-            dy < -LAUNCHER_DRAG_SLOP) {
-          g_browse_moved = 1;
-          g_browse_scroll -= dy;
-          g_browse_drag_y = par2;
-          /* Draw, do NOT flush; the refresh happens on lift. */
-          draw_browse();
-        }
-      }
+      drag_scroll_move(par2, &g_browse_scroll, &g_browser_drag,
+                       &g_browser_drag_y, &g_browser_moved, draw_browse);
       return 1;
     }
-    if (g_folder_open) {
-      if (g_folder_drag) {
-        int dy = par2 - g_folder_drag_y;
-        if (g_folder_moved || dy > LAUNCHER_DRAG_SLOP ||
-            dy < -LAUNCHER_DRAG_SLOP) {
-          g_folder_moved = 1;
-          g_folder_scroll -= dy;
-          g_folder_drag_y = par2;
-          /* Draw the new scroll position into the framebuffer
-           * but do NOT flush; the refresh happens once on
-           * finger lift (see the POINTERUP path). */
-          draw_overlay_folder();
-        }
-      }
+    if (g_state.overlay == OV_FOLDER) {
+      drag_scroll_move(par2, &g_browse_scroll, &g_browser_drag,
+                       &g_browser_drag_y, &g_browser_moved, draw_overlay_folder);
       return 1;
     }
-    if (g_state.launcher_open) {
-      if (g_state.launcher_drag) {
-        int dy = par2 - g_state.launcher_drag_y;
-        if (g_state.launcher_moved || dy > LAUNCHER_DRAG_SLOP ||
-            dy < -LAUNCHER_DRAG_SLOP) {
-          g_state.launcher_moved = 1;
-          g_state.launcher_scroll -= dy;
-          g_state.launcher_drag_y = par2;
-          /* Draw the new scroll position into the framebuffer
-           * but do NOT flush.  A FullUpdate here per move event
-           * takes 300-500ms on e-ink and looks broken; the
-           * stock firmware draws during the drag and refreshes
-           * once on finger lift (see the POINTERUP path). */
-          draw_overlay_launcher();
-        }
-      }
+    if (g_state.overlay == OV_LAUNCHER) {
+      drag_scroll_move(par2, &g_state.launcher_scroll, &g_state.launcher_drag,
+                       &g_state.launcher_drag_y, &g_state.launcher_moved,
+                       draw_overlay_launcher);
       return 1;
     }
     /* A drag away from the press point cancels the pending long-press
@@ -379,8 +479,8 @@ int on_event(int type, int par1, int par2) {
 
   if (type == EVT_POINTERUP) {
     int x = par1, y = par2;
-    LOG("[bookshelf] EVT_POINTERUP x=%d y=%d menu=%d more=%d tab=%d\n", x, y,
-        g_state.menu_open, g_state.more_open, (int)g_state.tab);
+    LOG("[bookshelf] EVT_POINTERUP x=%d y=%d overlay=%d tab=%d\n", x, y,
+        (int)g_state.overlay, (int)g_state.tab);
     g_lp_armed = 0;
     g_lp_vi = -1;
     /* Drop the release that opened the context menu (see longpress_tick). */
@@ -392,50 +492,35 @@ int on_event(int type, int par1, int par2) {
     /* The file browser body is drag-scrolled; a lift that ended a
      * scroll drag is not a tap.  Plain taps fall through to the
      * normal top-bar / body routing below. */
-    if (g_browse_open && g_state.source == SOURCE_FOLDER && g_browse_moved) {
-      g_browse_drag = 0;
-      g_browse_moved = 0;
-      if (g_browse_scroll < 0)
-        g_browse_scroll = 0;
-      draw_browse();
-      flush_content();
-      return 1;
+    if (g_browse_open && g_state.source == SOURCE_FOLDER) {
+      if (drag_scroll_lift(&g_browse_scroll, &g_browser_drag,
+                           &g_browser_moved, draw_browse, flush_content))
+        return 1;
     }
-    g_browse_drag = 0;
-    g_browse_moved = 0;
     /* The source chooser owns all taps while open. */
-    if (g_source_open) {
+    if (g_state.overlay == OV_SOURCE) {
       on_tap_source(x, y);
       return 1;
     }
     /* The download-folder picker owns the screen while open (it
      * sits on top of the settings page).  A lift that ended a
      * scroll drag is not a tap. */
-    if (g_folder_open) {
-      int was_drag = g_folder_moved;
-      g_folder_drag = 0;
-      g_folder_moved = 0;
-      if (was_drag) {
-        /* The full clamp (list height, ".." row) lives in
-         * draw_overlay_folder; only keep the offset
-         * non-negative here. */
-        if (g_folder_scroll < 0)
-          g_folder_scroll = 0;
-        draw_overlay_folder();
-        flush_content();
-      } else {
+    if (g_state.overlay == OV_FOLDER) {
+      int was_drag = drag_scroll_lift(&g_browse_scroll, &g_browser_drag,
+                                      &g_browser_moved, draw_overlay_folder,
+                                      flush_content);
+      if (!was_drag)
         on_tap_folder(x, y);
-      }
       return 1;
     }
 
     /* Settings overlay owns the whole screen and repaints itself. */
-    if (g_state.settings_open) {
+    if (g_state.overlay == OV_SETTINGS) {
       on_tap_overlay_settings(x, y);
       return 1;
     }
     /* The log viewer owns all taps while open. */
-    if (g_state.log_open) {
+    if (g_state.overlay == OV_LOG) {
       on_tap_log_view(x, y);
       return 1;
     }
@@ -448,35 +533,21 @@ int on_event(int type, int par1, int par2) {
       return 1;
     }
     /* Launcher overlay owns the whole screen while open.  A lift that
-     * ended a scroll drag is not a tap. */
-    if (g_state.launcher_open) {
-      int was_drag = g_state.launcher_moved;
-      g_state.launcher_drag = 0;
-      g_state.launcher_moved = 0;
-      if (was_drag) {
-        /* Clamp the scroll to the laid-out body height, then
-         * flush the framebuffer drawn during the drag — the
-         * single refresh the stock firmware performs on lift. */
-        int body_top = LAUNCHER_HEADER_H;
-        int body_h = content_bottom() - body_top;
-        int max_scroll = g_launcher_body_h - body_h;
-        if (max_scroll < 0)
-          max_scroll = 0;
-        if (g_state.launcher_scroll < 0)
-          g_state.launcher_scroll = 0;
-        if (g_state.launcher_scroll > max_scroll)
-          g_state.launcher_scroll = max_scroll;
-        draw_overlay_launcher();
-        FullUpdate();
-      } else {
+     * ended a scroll drag is not a tap (draw_overlay_launcher clamps
+     * the offset to the laid-out body height itself). */
+    if (g_state.overlay == OV_LAUNCHER) {
+      int was_drag = drag_scroll_lift(&g_state.launcher_scroll,
+                                      &g_state.launcher_drag,
+                                      &g_state.launcher_moved,
+                                      draw_overlay_launcher, FullUpdate);
+      if (!was_drag)
         on_tap_overlay_launcher(x, y);
-      }
       return 1;
     }
 
     /* Context (long-press) menu owns all taps while open: a tap on
      * an item runs it, anything else dismisses the sheet. */
-    if (g_state.ctx_open) {
+    if (g_state.overlay == OV_CTX) {
       on_tap_context(x, y);
       return 1;
     }
@@ -496,6 +567,11 @@ int on_event(int type, int par1, int par2) {
         return 1;
       }
       if (downloads_pending() == 0 && !g_dl_batch_active) {
+        /* Single-book press whose fetch just finished: the settle has
+         * not run yet, so swallow the tap — dl_advance() closes the
+         * popup and launches the reader itself. */
+        if (g_state.dl_popup_auto_open && dl_job_pending())
+          return 1;
         g_state.dl_popup = 0;
         g_state.dl_popup_auto_open = 0;
         redraw_shelf();
@@ -504,7 +580,7 @@ int on_event(int type, int par1, int par2) {
     }
 
     /* Overlay taps take priority; outside-of-panel taps close. */
-    if (g_state.menu_open) {
+    if (g_state.overlay == OV_MENU) {
       on_tap_overlay_menu(x, y);
       /* Clear entire screen then redraw.  The overlay drew a black
        * mask across the whole screen, so we need to repaint
@@ -513,7 +589,7 @@ int on_event(int type, int par1, int par2) {
       redraw_shelf();
       return 1;
     }
-    if (g_state.more_open) {
+    if (g_state.overlay == OV_MORE) {
       /* on_tap_overlay_more reports 1 when its action already
        * repainted (settings / launcher / download-all); without
        * that, this follow-up redraw would flush the whole content
@@ -521,7 +597,7 @@ int on_event(int type, int par1, int par2) {
       int repainted = on_tap_overlay_more(x, y);
       /* If Settings was opened, it already drew itself; don't
        * repaint the shelf over it. */
-      if (!g_state.settings_open && !repainted) {
+      if (g_state.overlay != OV_SETTINGS && !repainted) {
         redraw_shelf();
       }
       return 1;
@@ -573,13 +649,13 @@ int on_event(int type, int par1, int par2) {
     }
     if (which == 6) {
       /* Source chooser (Kavita / Local / Folder). */
-      g_source_open = 1;
+      g_state.overlay = OV_SOURCE;
       draw_overlay_source();
       flush_content();
       return 1;
     }
     if (which == 3) {
-      g_state.more_open = 1;
+      g_state.overlay = OV_MORE;
       draw_overlay_more();
       flush_content();
       return 1;
@@ -629,14 +705,76 @@ int on_event(int type, int par1, int par2) {
     /* Below the pager the body is tab-specific.  The Search page
      * owns its whole body: the input row opens the keyboard, a
      * history term re-runs that search, anything else is swallowed.
-     * The Library tab falls through to the book-grid hit-test
-     * below. */
+     * While the keyboard is open (KBD_PASSEVENTS passes pointer
+     * events through), the suggestion band above it is hit-tested
+     * first; any other tap returns 0 so the firmware keyboard sees
+     * it (it may be a key press). */
     if (g_state.tab == TAB_SEARCH) {
+      if (g_state.search_kb) {
+        if (g_nsuggest > 0) {
+          int si = hit_suggestion(x, y);
+          if (si >= 0 && si < g_nsuggest) {
+            LOG("[bookshelf] suggest tap: term=`%s`\n", g_suggestions[si]);
+            /* CloseKeyboard() CANCELS the edit: the handler receives
+             * the keyboard's pre-edit text (empty here) and its
+             * else-branch keeps the Search page — it never commits,
+             * so the app performs the commit (history-tap sequence)
+             * after the keyboard is gone. */
+            if (CloseKeyboard)
+              CloseKeyboard();
+            snprintf(g_state.query, sizeof g_state.query, "%s",
+                     g_suggestions[si]);
+            store_search_add(g_state.query);
+            g_state.search_kb = 0;
+            g_state.tab = TAB_LIBRARY;
+            g_state.page = 0;
+            view_rebuild();
+            redraw_shelf();
+            return 1;
+          }
+        } else {
+          /* No suggestions: the band shows the history list; a tap
+           * there runs that search (keyboard closes first). */
+          int hi = hit_history(x, y);
+          if (hi >= 0) {
+            char terms[SEARCH_HISTORY_MAX][MAX_QUERY_LEN];
+            int got = store_search_list(terms, SEARCH_HISTORY_MAX, 0);
+            if (hi < got) {
+              LOG("[bookshelf] search history tap: query=`%s`\n", terms[hi]);
+              if (CloseKeyboard)
+                CloseKeyboard();
+              snprintf(g_state.query, sizeof g_state.query, "%s", terms[hi]);
+              store_search_add(g_state.query);
+              g_state.search_kb = 0;
+              g_state.tab = TAB_LIBRARY;
+              g_state.page = 0;
+              view_rebuild();
+              redraw_shelf();
+            }
+            return 1;
+          }
+        }
+        /* Outside the band: a tap above the keyboard dismisses it
+         * (KBD_PASSEVENTS stopped the stock outside-tap close, so the
+         * app restores it); a tap on the keyboard itself returns 0 so
+         * the firmware key handling acts (keys, return, shift...). */
+        int y_top, y_bot;
+        (void)y_top;
+        suggest_band(&y_top, &y_bot);
+        if (y < y_bot) {
+          if (CloseKeyboard)
+            CloseKeyboard();
+          return 1;
+        }
+        return 0;
+      }
       if (hit_search_input(x, y) == 1) {
         g_state.search_kb = 1;
         snprintf(g_search_kb_buf, sizeof g_search_kb_buf, "%s", g_state.query);
-        OpenKeyboard("Search", g_search_kb_buf, sizeof g_search_kb_buf - 1, 0,
-                     keyboard_handler);
+        g_last_suggest_q[0] = '\0';
+        OpenKeyboard("Search", g_search_kb_buf, sizeof g_search_kb_buf - 1,
+                     KBD_PASSEVENTS, keyboard_handler);
+        SetWeakTimerEx("suggest_debounce", suggest_debounce_tick, NULL, 200);
         return 1;
       }
       int hi = hit_history(x, y);
@@ -682,15 +820,13 @@ int on_event(int type, int par1, int par2) {
      * overlay).  It stays inert while a full-screen or modal sheet
      * is up so it can never fight the active surface. */
     if (par1 == IV_KEY_MENU) {
-      if (!g_state.settings_open && !g_state.ctx_open && !g_state.dl_popup &&
-          !g_state.launcher_open && !g_folder_open && !g_browse_open) {
-        g_state.menu_open = !g_state.menu_open;
-        if (g_state.menu_open) {
-          draw_overlay_menu();
-          flush_content();
-        } else {
-          redraw_shelf();
-        }
+      if (g_state.overlay == OV_MENU) {
+        g_state.overlay = OV_NONE;
+        redraw_shelf();
+      } else if (!modal_open() && !g_browse_open) {
+        g_state.overlay = OV_MENU;
+        draw_overlay_menu();
+        flush_content();
       }
       return 1;
     }
@@ -706,10 +842,7 @@ int on_event(int type, int par1, int par2) {
     /* Page-turn buttons paginate the shelf.  With a modal open they
      * fall through to the Back logic below (close the topmost
      * sheet), matching how the stock bookshelf treats them. */
-    if (is_page_key && !g_state.ctx_open && !g_state.dl_popup &&
-        !g_state.settings_open && !g_state.launcher_open &&
-        !g_state.menu_open && !g_state.more_open && !g_folder_open &&
-        !g_source_open && !g_browse_open) {
+    if (is_page_key && !modal_open() && !g_browse_open) {
       int pages = current_pages();
       if ((par1 == IV_KEY_NEXT || par1 == IV_KEY_NEXT2) &&
           g_state.page + 1 < pages) {
@@ -732,18 +865,18 @@ int on_event(int type, int par1, int par2) {
           browse_page(fwd ? 1 : -1);
         } else if (!browse_up()) {
           g_browse_open = 0;
-          g_source_open = 1;
+          g_state.overlay = OV_SOURCE;
           draw_overlay_source();
           flush_content();
         }
         return 1;
       }
-      if (g_source_open) {
-        g_source_open = 0;
+      if (g_state.overlay == OV_SOURCE) {
+        g_state.overlay = OV_NONE;
         redraw_shelf();
         return 1;
       }
-      if (g_state.ctx_open) {
+      if (g_state.overlay == OV_CTX) {
         close_context();
         return 1;
       }
@@ -751,37 +884,50 @@ int on_event(int type, int par1, int par2) {
         /* Modal while downloading; Back only closes a finished
          * popup. */
         if (downloads_pending() == 0 && !g_dl_batch_active) {
+          /* Single-book press whose fetch just finished: let
+           * dl_advance() close the popup and launch the reader. */
+          if (g_state.dl_popup_auto_open && dl_job_pending())
+            return 1;
           g_state.dl_popup = 0;
           g_state.dl_popup_auto_open = 0;
           redraw_shelf();
         }
         return 1;
       }
-      if (g_folder_open) {
+      if (g_state.overlay == OV_FOLDER) {
         folder_close();
         return 1;
       }
-      if (g_state.settings_open) {
+      if (g_state.overlay == OV_SETTINGS) {
         settings_close();
         return 1;
       }
-      if (g_state.launcher_open) {
+      if (g_state.overlay == OV_LAUNCHER) {
         launcher_close();
         return 1;
       }
-      if (g_state.menu_open) {
-        g_state.menu_open = 0;
+      if (g_state.overlay == OV_MENU) {
+        g_state.overlay = OV_NONE;
         redraw_shelf();
         return 1;
       }
-      if (g_state.more_open) {
-        g_state.more_open = 0;
+      if (g_state.overlay == OV_MORE) {
+        g_state.overlay = OV_NONE;
         redraw_shelf();
         return 1;
       }
       if (g_state.tab == TAB_SEARCH) {
-        /* Back from the Search page returns to the library,
-         * keeping the active query filter in place. */
+        /* Back from the Search page returns to the library, keeping
+         * the active query filter in place.  A still-open keyboard
+         * must close first (KBD_PASSEVENTS keeps it up on outside
+         * taps; its handler then tears the suggestions down). */
+        if (g_state.search_kb) {
+          ClearTimerByName("suggest_debounce");
+          g_nsuggest = 0;
+          if (CloseKeyboard)
+            CloseKeyboard();
+          g_state.search_kb = 0;
+        }
         g_state.tab = TAB_LIBRARY;
         g_state.page = 0;
         g_state.search_kb = 0;
@@ -801,6 +947,10 @@ int on_event(int type, int par1, int par2) {
   }
 
   if (type == EVT_EXIT) {
+    /* Tell every in-flight worker job to stop (cooperative flag; the
+     * detached threads then get killed by process exit, same as the
+     * old download/sync threads). */
+    bs_worker_cancel_all();
     store_close();
     return 1;
   }
@@ -808,29 +958,40 @@ int on_event(int type, int par1, int par2) {
 }
 
 void keyboard_handler(char *buffer) {
+  /* The keyboard is closing: tear the live suggestion band down. */
+  ClearTimerByName("suggest_debounce");
+  g_nsuggest = 0;
   /* buffer aliases g_search_kb_buf (never g_state.query), so this copy
    * is safe and the committed text survives into the filter pass.
-   * Only a real edit counts as a new search: a dismissed keyboard
-   * delivers the unchanged buffer, which must not pollute history. */
+   * Only a real edit commits a search and leaves the Search page: a
+   * dismissed keyboard (OK / cancel / tap outside) delivers the buffer
+   * unchanged, and committing that used to teleport the user home —
+   * an empty dismissal even counted as an "edit".  A dismissed,
+   * unedited keyboard just closes and the Search page stays put. */
   const char *t = buffer ? buffer : "";
-  if (strcmp(t, g_state.query) != 0 || t[0] == '\0') {
+  if (strcmp(t, g_state.query) != 0) {
     snprintf(g_state.query, sizeof g_state.query, "%s", t);
     if (g_state.query[0] != '\0')
       store_search_add(g_state.query);
     LOG("[bookshelf] search commit: query=`%s`\n", g_state.query);
+    g_state.search_kb = 0;
+    g_state.tab = TAB_LIBRARY;
+    g_state.page = 0;
+    view_rebuild();
+    /* The on-screen keyboard draws full-screen and wipes the bottom
+     * status strip; re-stamp it before redraw_shelf() flushes so the
+     * panel survives the commit redraw.  redraw_shelf() only flushes
+     * the content area, so follow with a full-screen flush to repaint
+     * the panel band the keyboard wiped. */
+    stamp_panel();
+    redraw_shelf();
+    FullUpdate();
+  } else {
+    g_state.search_kb = 0;
+    stamp_panel();
+    redraw_shelf();
+    FullUpdate();
   }
-  g_state.search_kb = 0;
-  g_state.tab = TAB_LIBRARY;
-  g_state.page = 0;
-  view_rebuild();
-  /* The on-screen keyboard draws full-screen and wipes the bottom
-   * status strip; re-stamp it before redraw_shelf() flushes so the
-   * panel survives the commit redraw.  redraw_shelf() only flushes
-   * the content area, so follow with a full-screen flush to repaint
-   * the panel band the keyboard wiped. */
-  stamp_panel();
-  redraw_shelf();
-  FullUpdate();
 }
 
 int main(int argc, char **argv) {

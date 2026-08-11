@@ -1,6 +1,11 @@
 /* bs_local.c — part of the bookshelf app (see bookshelf.h) */
 
 #include "bookshelf.h"
+#include "bs_browser.h"
+#include "bs_extract.h"
+#include "bs_local.h"
+#include "bs_store.h"
+#include "bs_ui.h"
 
 #include <dirent.h>
 
@@ -9,35 +14,14 @@
  *
  *  - SOURCE_LOCAL: every folder under /mnt/ext1 is walked for book
  *    files (the firmware's own library lives there).  The Folder
- *    source is a live file browser (bs_browse.c), not an import.
+ *    source is a live file browser (bs_browser.c), not an import.
  *
  * The import replaces the source's rows wholesale (store_delete_source)
  * and marks every book downloaded=1 — the files ARE the books. */
 
-/* Extensions the shelf treats as books. */
-static const char *const BOOK_EXTS[] = {
-    "epub", "pdf", "mobi", "azw", "azw3", "fb2", "djvu", "txt", "cbr", "cbz"};
-
-static int
-is_book_ext(const char *ext)
-{
-    if (ext == NULL)
-        return 0;
-    for (size_t i = 0; i < sizeof BOOK_EXTS / sizeof BOOK_EXTS[0]; i++)
-        if (strcmp(ext, BOOK_EXTS[i]) == 0)
-            return 1;
-    return 0;
-}
-
-/* djb2 hash → 8 hex chars, for stable opaque ids from strings. */
-static void
-hash_hex(const char *s, char out[9])
-{
-    unsigned long h = 5381;
-    for (const unsigned char *p = (const unsigned char *)s; *p; p++)
-        h = h * 33 + *p;
-    snprintf(out, 9, "%08lx", h & 0xfffffffful);
-}
+/* The book-extension table (is_book_ext) and the djb2 "fld_" id hash
+ * (hash_hex) live in bs_browser.c, shared with the folder-source
+ * browser so both sources derive identical ids. */
 
 /* The firmware libc exports __xstat (no plain `stat` alias) and the
  * cross headers hide it; ARM glibc uses kernel stat version 0. */

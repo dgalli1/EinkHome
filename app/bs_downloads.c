@@ -1,6 +1,11 @@
 /* bs_downloads.c — part of the bookshelf app (see bookshelf.h) */
 
 #include "bookshelf.h"
+#include "bs_downloads.h"
+#include "bs_model.h"
+#include "bs_store.h"
+#include "bs_ui.h"
+#include "bs_worker.h"
 
 /* ── downloads, delete, context menu, long-press ───────────────────── */
 
@@ -132,8 +137,11 @@ clear_finished_downloads(void)
     g_download_count = w;
 }
 
+static void dl_start_next(void);
+static void dl_job_done(BsJob *job);
+
 /* Add a book to the download queue (no-op if already queued/done) and
- * arm the drain timer. */
+ * start its fetch (or the first queued fetch) right away. */
 void
 enqueue_download(const Book *b)
 {
@@ -155,11 +163,10 @@ enqueue_download(const Book *b)
     snprintf(n->id, sizeof n->id, "%s", b->id);
     snprintf(n->title, sizeof n->title, "%s", b->title);
     n->state = 0;
-    if (!g_download_armed) {
-        g_download_armed = 1;
-        SetWeakTimerEx("bdl", download_tick, NULL, 120);
-    }
     sync_set_active(1);
+    /* Start the fetch right away (no-op when one is already in
+     * flight; the in-flight job's done_cb advances the queue). */
+    dl_start_next();
 }
 
 /* Drop the oldest finished queue entry to make room (batch mode keeps
@@ -182,13 +189,15 @@ prune_finished_download(void)
 }
 
 /* ── async download worker ────────────────────────────────────────────
- * The file fetch runs on a worker thread so the event loop stays
- * responsive while a book downloads — QuickDownload blocks for the
- * whole transfer (up to the 60 s timeout), which used to freeze the UI
- * for the duration.  download_tick() polls the worker and settles each
- * queue item when it finishes.  The worker touches no UI and no store
- * state: it only fetches the file and writes it to disk; the main
- * thread applies store_set_downloaded() afterwards. */
+ * Each file fetch runs as a one-shot job on the shared background
+ * worker (bs_worker.c) so the event loop stays responsive while a book
+ * downloads — QuickDownload blocks for the whole transfer (up to the
+ * 60 s timeout), which used to freeze the UI for the duration.  One
+ * job is in flight at a time, matching the old single-worker drain;
+ * the job fn only fetches the file and writes it to disk, and its
+ * done_cb settles each queue item on the main thread and applies
+ * store_set_downloaded().  The worker touches no UI and no store
+ * state. */
 
 typedef struct {
     char id[MAX_ID_LEN];
@@ -196,51 +205,56 @@ typedef struct {
     char path[MAX_PATH_LEN];
 } DlJob;
 
-static pthread_t   g_dl_thread;
-static _Atomic int g_dl_thread_running; /* 1 while a worker is active */
-static _Atomic int g_dl_thread_ok;      /* 0 pending, 1 ok, -1 failed */
-static char        g_dl_thread_id[MAX_ID_LEN];
-static char        g_dl_thread_path[MAX_PATH_LEN];
+static BsJob *g_dl_inflight; /* the one in-flight download job, main thread */
 
-/* Worker: fetch one book's file to disk (blocking).  Returns 1 on
- * success.  No UI, no store access — the caller settles the store. */
-static void *
-dl_thread_main(void *arg)
+/* Worker: fetch one book's file to disk (blocking).  Writes to
+ * "<path>.part", verifies the write, then renames into place, so a
+ * crash, canceled job, or failed download never leaves a truncated
+ * file at the final path (the .part is unlinked).  No UI, no store
+ * access — the caller settles the store. */
+static void
+dl_fetch(BsJob *job)
 {
-    DlJob *job = arg;
+    DlJob *a = job->arg;
     int    rsize = 0;
-    char  *data = QuickDownload(job->url, &rsize, 60);
+    char  *data = QuickDownload(a->url, &rsize, 60);
     int    ok = 0;
     if (data != NULL && rsize > 0) {
-        FILE *f = fopen(job->path, "wb");
-        if (f != NULL) {
-            fwrite(data, 1, (size_t)rsize, f);
-            fclose(f);
-            ok = 1;
-            LOG("[bookshelf] download_book_file OK id=%s path=%s bytes=%d\n",
-                job->id,
-                job->path,
-                rsize);
+        if (__atomic_load_n(&job->cancel, __ATOMIC_ACQUIRE)) {
+            LOG("[bookshelf] download_book_file CANCELED id=%s\n", a->id);
         } else {
-            LOG("[bookshelf] download_book_file fopen FAILED id=%s path=%s errno=%d\n",
-                job->id,
-                job->path,
-                errno);
+            char tmp[MAX_PATH_LEN + 8]; /* room for ".part" suffix */
+            snprintf(tmp, sizeof tmp, "%s.part", a->path);
+            FILE *f = fopen(tmp, "wb");
+            if (f != NULL) {
+                size_t w = fwrite(data, 1, (size_t)rsize, f);
+                int    werr = (w != (size_t)rsize);
+                if (fclose(f) != 0)
+                    werr = 1;
+                if (!werr && rename(tmp, a->path) == 0) {
+                    ok = 1;
+                    LOG("[bookshelf] download_book_file OK id=%s path=%s bytes=%d\n",
+                        a->id, a->path, rsize);
+                } else {
+                    LOG("[bookshelf] download_book_file write/rename FAILED "
+                        "id=%s path=%s errno=%d\n",
+                        a->id, a->path, errno);
+                    unlink(tmp); /* never leave the .part behind */
+                }
+            } else {
+                LOG("[bookshelf] download_book_file fopen FAILED id=%s path=%s errno=%d\n",
+                    a->id, a->path, errno);
+            }
         }
         free(data);
     } else {
         if (data != NULL)
             free(data);
         LOG("[bookshelf] download_book_file FAILED id=%s url=%s rsize=%d errno=%d\n",
-            job->id,
-            job->url,
-            rsize,
-            errno);
+            a->id, a->url, rsize, errno);
     }
-    __atomic_store_n(&g_dl_thread_ok, ok ? 1 : -1, __ATOMIC_RELEASE);
-    __atomic_store_n(&g_dl_thread_running, 0, __ATOMIC_RELEASE);
-    free(job);
-    return NULL;
+    job->rc = ok ? 0 : -1;
+    __atomic_store_n(&job->done, 1, __ATOMIC_RELEASE);
 }
 
 /* Launch the configured reader on an already-downloaded book.
@@ -299,7 +313,7 @@ launch_reader(Book *b)
 
 /* Press a book (single tap or context-menu Open): if the file is not
  * on device, show the download-progress popup, queue the download, and
- * auto-open the reader when the queue drains (see download_tick).
+ * auto-open the reader when the queue drains (see dl_job_done).
  * Already-downloaded books open immediately.  Persists the downloaded
  * flag so the next launch sees the file. */
 void
@@ -388,8 +402,9 @@ batch_enqueue_slice(int *got)
 
 /* Start (or restart) the download-all batch.  The first bounded slice
  * is queued synchronously so the popup shows the whole batch right
- * away; the drain timer tops the queue up as items finish.  The popup
- * opens here (no auto-open — a batch never launches a reader). */
+ * away; each completed download job tops the queue up as items
+ * finish.  The popup opens here (no auto-open — a batch never
+ * launches a reader). */
 void
 download_all_start(void)
 {
@@ -398,68 +413,171 @@ download_all_start(void)
     g_dl_batch_done = 0;
     g_dl_batch_failed_count = 0;
     int got = 0;
-    batch_enqueue_slice(&got);
-    if (!g_download_armed) {
-        g_download_armed = 1;
-        SetWeakTimerEx("bdl", download_tick, NULL, 300);
-    }
+    batch_enqueue_slice(&got); /* starts the first fetch via enqueue */
     g_state.dl_popup = 1;
     g_state.dl_popup_auto_open = 0;
     redraw_shelf();
     LOG("[bookshelf] download-all queued=%d\n", g_dl_batch_total);
 }
 
-/* Drain the download queue one item per tick.  Each item's file fetch
- * runs on the worker thread; the tick polls it, settles the finished
- * item, and starts the next, so the event loop never blocks on the
- * network. */
-void
-download_tick(void *ctx)
-{
-    (void)ctx;
-    g_download_armed = 0;
+static void dl_advance(void);
 
-    /* Worker still fetching: keep the popup/live UI ticking and return
-     * without touching the queue — the settle happens on the next tick
-     * after the worker finishes. */
-    if (__atomic_load_n(&g_dl_thread_running, __ATOMIC_ACQUIRE)) {
-        if (g_dl_batch_active || downloads_pending() > 0 || g_state.dl_popup) {
-            g_download_armed = 1;
-            SetWeakTimerEx("bdl", download_tick, NULL, 120);
+/* Start the job for the first queued item (main thread).  One download
+ * is in flight at a time; each job's done_cb advances the queue, so
+ * starting the first item here kicks the drain. */
+static void
+dl_start_next(void)
+{
+    if (g_dl_inflight != NULL)
+        return;
+    DownloadItem *target = NULL;
+    for (int i = 0; i < g_download_count; i++) {
+        if (g_downloads[i].state == 0) {
+            target = &g_downloads[i];
+            break;
         }
+    }
+    if (target == NULL)
+        return;
+    target->state = 1;
+
+    Book b;
+    if (!store_get_book(target->id, &b)) {
+        target->state = 3;
         return;
     }
+    DlJob *a = calloc(1, sizeof *a);
+    if (a == NULL) {
+        target->state = 3;
+        return;
+    }
+    char path[MAX_PATH_LEN];
+    book_local_path(&b, path, sizeof path);
+    snprintf(a->id, sizeof a->id, "%s", b.id);
+    snprintf(a->url,
+             sizeof a->url,
+             "%s/api/v1/books/%s/file?access_token=%s",
+             g_state.api_base,
+             b.id,
+             g_state.api_token);
+    snprintf(a->path, sizeof a->path, "%s", path);
+    BsJob *j = bs_worker_submit(dl_fetch, dl_job_done, a);
+    if (j == NULL) {
+        target->state = 3;
+        free(a);
+        return;
+    }
+    g_dl_inflight = j;
+}
 
-    /* A worker just finished: settle its queue item. */
-    if (g_dl_thread_id[0] != '\0') {
-        int           ok = __atomic_load_n(&g_dl_thread_ok, __ATOMIC_ACQUIRE);
-        DownloadItem *d = find_download(g_dl_thread_id);
-        if (d != NULL) {
-            d->state = (ok == 1) ? 2 : 3;
-            if (ok == 1)
-                store_set_downloaded(d->id, 1, g_dl_thread_path);
-            if (g_dl_batch_active) {
-                /* Successes and failures both settle a batch slot; the
-                 * bar counts failures separately so it reaches full
-                 * width even if some books fail.  A failure is recorded
-                 * so the batch never re-enqueues the book. */
-                if (ok == 1)
-                    g_dl_batch_done++;
-                else {
-                    g_dl_batch_failed++;
-                    batch_note_failed(d->id);
-                }
+/* No-op job that re-enters the drain on the main thread.  Reproduces
+ * the old drain-timer poll for the batch slice-stall case, where every
+ * id the store returned already owns a queue entry or already failed
+ * (see dl_advance). */
+static void
+dl_kick_fn(BsJob *job)
+{
+    (void)job;
+    __atomic_store_n(&job->done, 1, __ATOMIC_RELEASE);
+}
+
+static void
+dl_kick_done(BsJob *job)
+{
+    (void)job;
+    dl_advance();
+}
+
+/* Submit a kick job (main thread). */
+static void
+dl_kick(void)
+{
+    bs_worker_submit(dl_kick_fn, dl_kick_done, NULL);
+}
+
+/* 1 = no download fetch is actively running right now: either no job
+ * is in flight, or the in-flight job's worker fn already finished (its
+ * done flag is set) and only the main-thread settle (next worker tick,
+ * <=100 ms later) is pending.  The file is already on disk in that
+ * case, so the queue item counts as finished for dismiss checks — a
+ * tap that lands in the settle window must close the popup, not be
+ * swallowed. */
+int
+dl_fetch_idle(void)
+{
+    return g_dl_inflight == NULL ||
+           __atomic_load_n(&g_dl_inflight->done, __ATOMIC_ACQUIRE);
+}
+
+/* 1 = a download job is in flight whose settle has not run yet (the
+ * queue item is still marked in-flight even though the worker fn may
+ * be done).  Used to keep the single-book auto-open flow intact: a
+ * dismiss tap in the settle window is swallowed so dl_advance() still
+ * launches the reader. */
+int
+dl_job_pending(void)
+{
+    return g_dl_inflight != NULL;
+}
+
+/* Settle the finished download and advance the queue (main thread).
+ * Each job's file fetch runs on the worker thread; the done_cb marks
+ * the item, applies the store update and batch tally, then starts the
+ * next queued item or tops the batch up from the store; when the
+ * queue is fully drained it finalises (auto-open the reader or show
+ * the finished tally in the popup).  The event loop never blocks on
+ * the network. */
+static void
+dl_job_done(BsJob *job)
+{
+    DlJob *a = job->arg;
+    int    ok = job->rc == 0;
+
+    /* Settle the finished queue item.  After cancel_downloads the
+     * queue is gone, so find_download() misses and the completion is
+     * absorbed harmlessly — no store update, no batch tally, no popup
+     * redraw, and the canceled job's .part was never renamed. */
+    DownloadItem *d = find_download(a->id);
+    if (d != NULL) {
+        d->state = ok ? 2 : 3;
+        if (ok)
+            store_set_downloaded(d->id, 1, a->path);
+        if (g_dl_batch_active) {
+            /* Successes and failures both settle a batch slot; the
+             * bar counts failures separately so it reaches full
+             * width even if some books fail.  A failure is recorded
+             * so the batch never re-enqueues the book. */
+            if (ok)
+                g_dl_batch_done++;
+            else {
+                g_dl_batch_failed++;
+                batch_note_failed(d->id);
             }
         }
-        g_dl_thread_id[0] = '\0';
-        /* The popup refresh is deferred to the spawn path below, which
-         * runs in the same tick and repaints the sheet once with the
-         * settled tally AND the next item's title.  Without a popup,
-         * just refresh the top-bar badge. */
+        /* The popup refresh is deferred to the spawn path in
+         * dl_advance, which repaints the sheet once with the settled
+         * tally AND the next item's title.  Without a popup, just
+         * refresh the top-bar badge. */
         if (!g_state.dl_popup)
             draw_top_bar();
         sync_set_active(downloads_pending() > 0 || g_dl_batch_active);
     }
+    if (g_dl_inflight == job)
+        g_dl_inflight = NULL;
+    free(a);
+
+    dl_advance();
+}
+
+/* Advance the queue (main thread): start the next queued item, or top
+ * the batch up / finalise when the queue is drained.  Started by
+ * enqueue_download and by every completed download job; a no-op while
+ * a job is in flight. */
+static void
+dl_advance(void)
+{
+    if (g_dl_inflight != NULL)
+        return;
 
     DownloadItem *target = NULL;
     for (int i = 0; i < g_download_count; i++) {
@@ -475,16 +593,20 @@ download_tick(void *ctx)
             int settled = g_dl_batch_done + g_dl_batch_failed;
             if (enq > 0 || (got == 64 && settled < g_dl_batch_total)) {
                 if (enq == 0) {
-                    /* Full slice, nothing enqueued: every id already owns
-                     * a queue entry or already failed.  Prune one
+                    /* Full slice, nothing enqueued: every id already
+                     * owns a queue entry or already failed.  Prune one
                      * finished entry so the queue makes room and the
-                     * next slice can enqueue, instead of re-arming
-                     * forever on the same slice. */
+                     * next pass can enqueue, instead of looping on the
+                     * same slice forever. */
                     prune_finished_download();
+                    dl_kick();
+                } else {
+                    dl_start_next();
+                    if (g_state.dl_popup)
+                        refresh_dl_popup();
+                    else
+                        draw_top_bar();
                 }
-                /* Keep draining until every batch book settles. */
-                SetWeakTimerEx("bdl", download_tick, NULL, enq > 0 ? 120 : 300);
-                g_download_armed = 1;
                 return;
             }
             /* Every batch book has settled (done + failed == total):
@@ -513,46 +635,12 @@ download_tick(void *ctx)
                 }
             }
             redraw_shelf(); /* popup shows the finished/failed state */
-            return;
         }
         return;
     }
-    target->state = 1;
 
-    /* Spawn the worker for this item. */
-    Book b;
-    if (store_get_book(target->id, &b)) {
-        DlJob *job = calloc(1, sizeof *job);
-        if (job != NULL) {
-            char path[MAX_PATH_LEN];
-            book_local_path(&b, path, sizeof path);
-            snprintf(job->id, sizeof job->id, "%s", b.id);
-            snprintf(job->url,
-                     sizeof job->url,
-                     "%s/api/v1/books/%s/file?access_token=%s",
-                     g_state.api_base,
-                     b.id,
-                     g_state.api_token);
-            snprintf(job->path, sizeof job->path, "%s", path);
-            snprintf(g_dl_thread_id, sizeof g_dl_thread_id, "%s", b.id);
-            snprintf(g_dl_thread_path, sizeof g_dl_thread_path, "%s", path);
-            __atomic_store_n(&g_dl_thread_ok, 0, __ATOMIC_RELEASE);
-            __atomic_store_n(&g_dl_thread_running, 1, __ATOMIC_RELEASE);
-            if (pthread_create(&g_dl_thread, NULL, dl_thread_main, job) == 0) {
-                pthread_detach(g_dl_thread);
-            } else {
-                __atomic_store_n(&g_dl_thread_running, 0, __ATOMIC_RELEASE);
-                g_dl_thread_id[0] = '\0';
-                target->state = 3;
-                free(job);
-            }
-        } else {
-            target->state = 3;
-        }
-    } else {
-        target->state = 3;
-    }
-
+    /* Start the next queued item. */
+    dl_start_next();
     /* One popup refresh per item: the sheet now shows the settled
      * tally and the new current-item title.  The dimmed shelf behind
      * it never changed, so a sheet-sized partial suffices — a
@@ -562,40 +650,31 @@ download_tick(void *ctx)
         refresh_dl_popup();
     else
         draw_top_bar(); /* refresh the pending-count badge in top bar */
-
-    /* More work queued?  Also re-arm when the batch is still topping
-     * up, and always once more while the popup is open so the
-     * queue-drained branch can finalise (auto-open the reader or show
-     * the finished tally) after the last item settles. */
-    if (g_dl_batch_active || downloads_pending() > 0 || g_state.dl_popup) {
-        g_download_armed = 1;
-        SetWeakTimerEx("bdl", download_tick, NULL, 120);
-    }
 }
 
 /* Abort every open download: drop the whole queue and end the batch
  * (download-all, series, or single-book).  The one in-flight file fetch
  * cannot be interrupted — QuickDownload blocks until the transfer or
- * its timeout ends — so the worker is left to finish in the
- * background.  Its completion is absorbed harmlessly: download_tick()
- * only settles items still present in the queue, and g_dl_thread_id is
- * cleared here so the settle path skips it entirely (no store update,
- * no batch tally, no popup redraw).  Any file that lands anyway stays
- * on disk and is reconciled by refresh_downloaded_flags() on the next
- * launch. */
+ * its timeout ends — so its job is told to cancel (it will not rename
+ * its .part file into place) and is left to finish in the background.
+ * Its completion is absorbed harmlessly: dl_job_done() only settles
+ * items still present in the queue, and the queue is gone here, so the
+ * settle path skips it entirely (no store update, no batch tally, no
+ * popup redraw).  Any file that landed before the cancel stays on disk
+ * and is reconciled by refresh_downloaded_flags() on the next launch. */
 void
 cancel_downloads(void)
 {
-    LOG("[bookshelf] cancel_downloads batch=%d in_flight=%s\n",
-        g_dl_batch_active,
-        g_dl_thread_id[0] != '\0' ? g_dl_thread_id : "(none)");
+    LOG("[bookshelf] cancel_downloads batch=%d in_flight=%p\n",
+        g_dl_batch_active, (void *)g_dl_inflight);
     g_dl_batch_active = 0;
     g_dl_batch_total = 0;
     g_dl_batch_done = 0;
     g_dl_batch_failed = 0;
     g_dl_batch_failed_count = 0;
     g_download_count = 0;
-    g_dl_thread_id[0] = '\0';
+    if (g_dl_inflight != NULL)
+        bs_worker_cancel(g_dl_inflight);
     g_state.dl_popup = 0;
     g_state.dl_popup_auto_open = 0;
     sync_set_active(0);
@@ -732,7 +811,7 @@ draw_context_menu(void)
 void
 close_context(void)
 {
-    g_state.ctx_open = 0;
+    g_state.overlay = OV_NONE;
     redraw_shelf();
 }
 
@@ -743,7 +822,7 @@ open_context_for_tile(int vi)
     TileRow tr;
     if (!view_fetch_row(vi, &tr))
         return;
-    g_state.ctx_open = 1;
+    g_state.overlay = OV_CTX;
     g_state.ctx_is_series = tr.is_series;
     if (tr.is_series) {
         snprintf(g_state.ctx_series_id, sizeof g_state.ctx_series_id, "%s", tr.series_id);
@@ -786,7 +865,7 @@ on_tap_context(int x, int y)
     int  is_series = g_state.ctx_is_series;
     char series_id[MAX_ID_LEN];
     snprintf(series_id, sizeof series_id, "%s", g_state.ctx_series_id);
-    g_state.ctx_open = 0;
+    g_state.overlay = OV_NONE;
 
     if (is_series) {
         if (item == 0)

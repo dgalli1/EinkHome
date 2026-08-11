@@ -1,6 +1,8 @@
 /* bs_progress.c — part of the bookshelf app (see bookshelf.h) */
 
 #include "bookshelf.h"
+#include "bs_progress.h"
+
 #include "sqlite3.h"
 
 /* ── reading progress ──────────────────────────────────────────────────

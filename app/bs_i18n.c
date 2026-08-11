@@ -1,6 +1,7 @@
 /* bs_i18n.c — part of the bookshelf app (see bookshelf.h) */
 
 #include "bookshelf.h"
+#include "bs_i18n.h"
 
 /* ── i18n ────────────────────────────────────────────────────────────── */
 

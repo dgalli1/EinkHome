@@ -1,6 +1,12 @@
 /* bs_launcher.c — part of the bookshelf app (see bookshelf.h) */
 
 #include "bookshelf.h"
+#include "bs_downloads.h"
+#include "bs_launcher.h"
+#include "bs_model.h"
+#include "bs_net.h"
+#include "bs_store.h"
+#include "bs_ui.h"
 
 /* -- app launcher ------------------------------------------------------- *
  * Reproduces the firmware's grouped application grid (the "Apps" screen
@@ -10,114 +16,6 @@
  * the current device profile (Era: touch + audio + en/WW + stock partner)
  * so the grid matches what the real device shows (e.g. Snake hidden on a
  * touch panel).  Tapping a tile launches the app via NewTaskEx. */
-
-/* -- minimal JSON scanner ----------------------------------------------- */
-
-const char *
-js_skip_ws(const char *p)
-{
-    while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r')
-        p++;
-    return p;
-}
-
-const char *
-js_skip_value(const char *p)
-{
-    p = js_skip_ws(p);
-    if (*p == '"') {
-        p++;
-        while (*p && *p != '"') {
-            if (*p == '\\')
-                p++;
-            p++;
-        }
-        return *p == '"' ? p + 1 : NULL;
-    }
-    if (*p == '{' || *p == '[') {
-        int depth = 1;
-        p++;
-        while (*p && depth > 0) {
-            if (*p == '"') {
-                p = js_skip_value(p);
-                if (!p)
-                    return NULL;
-                continue;
-            }
-            if (*p == '{' || *p == '[')
-                depth++;
-            else if (*p == '}' || *p == ']')
-                depth--;
-            p++;
-        }
-        return depth == 0 ? p : NULL;
-    }
-    while (*p && *p != ',' && *p != '}' && *p != ']' && *p != ' ' && *p != '\n' && *p != '\r' &&
-           *p != '\t')
-        p++;
-    return p;
-}
-
-void
-js_copy_string(const char *p, char *out, size_t cap)
-{
-    if (cap == 0)
-        return;
-    if (*p != '"') {
-        out[0] = '\0';
-        return;
-    }
-    p++;
-    size_t i = 0;
-    while (*p && *p != '"' && i + 1 < cap) {
-        if (*p == '\\' && p[1])
-            p++;
-        out[i++] = *p++;
-    }
-    out[i] = '\0';
-}
-
-const char *
-js_object_body(const char *p)
-{
-    p = js_skip_ws(p);
-    return *p == '{' ? p + 1 : NULL;
-}
-
-const char *
-js_find_member(const char *p, const char *key)
-{
-    size_t klen = strlen(key);
-    while (*p) {
-        p = js_skip_ws(p);
-        if (*p == '}')
-            return NULL;
-        if (*p != '"')
-            return NULL;
-        const char *ks = ++p;
-        while (*p && *p != '"') {
-            if (*p == '\\')
-                p++;
-            p++;
-        }
-        size_t kl = (size_t)(p - ks);
-        if (*p == '"')
-            p++;
-        p = js_skip_ws(p);
-        if (*p == ':')
-            p++;
-        p = js_skip_ws(p);
-        if (kl == klen && memcmp(ks, key, klen) == 0)
-            return p;
-        p = js_skip_value(p);
-        if (!p)
-            return NULL;
-        p = js_skip_ws(p);
-        if (*p == ',')
-            p++;
-    }
-    return NULL;
-}
 
 /* -- device profile for conditional resolution -------------------------- */
 
@@ -159,7 +57,7 @@ lc_pick_key(const char *obj_body, const char *want)
     int         all_present = 0, def_present = 0;
     const char *p = obj_body;
     while (*p) {
-        p = js_skip_ws(p);
+        p = json_skip_ws(p);
         if (*p == '}' || *p != '"')
             break;
         const char *ks = ++p;
@@ -181,13 +79,13 @@ lc_pick_key(const char *obj_body, const char *want)
             all_present = 1;
         if (kl == 7 && memcmp(ks, "default", 7) == 0)
             def_present = 1;
-        p = js_skip_ws(p);
+        p = json_skip_ws(p);
         if (*p == ':')
             p++;
-        p = js_skip_value(p);
+        p = json_skip_value(p);
         if (!p)
             break;
-        p = js_skip_ws(p);
+        p = json_skip_ws(p);
         if (*p == ',')
             p++;
     }
@@ -204,18 +102,18 @@ lc_resolve(const char *p, const char *cur_dim, char *out, size_t cap)
     if (cap == 0)
         return;
     out[0] = '\0';
-    p = js_skip_ws(p);
+    p = json_skip_ws(p);
     if (!p || !*p)
         return;
     if (*p == '"') {
-        js_copy_string(p, out, cap);
+        json_copy_string(p, out, cap);
         return;
     }
     if (*p != '{')
         return;
     const char *body = p + 1;
     for (int d = 0; d < LC_NDIMS; d++) {
-        const char *vp = js_find_member(body, lc_dims[d]);
+        const char *vp = json_find_member(body, lc_dims[d]);
         if (vp) {
             lc_resolve(vp, lc_dims[d], out, cap);
             return;
@@ -224,7 +122,7 @@ lc_resolve(const char *p, const char *cur_dim, char *out, size_t cap)
     if (!cur_dim) {
         const char *k = lc_pick_key(body, NULL);
         if (k) {
-            const char *vp = js_find_member(body, k);
+            const char *vp = json_find_member(body, k);
             if (vp)
                 lc_resolve(vp, cur_dim, out, cap);
         }
@@ -233,7 +131,7 @@ lc_resolve(const char *p, const char *cur_dim, char *out, size_t cap)
     if (strcmp(cur_dim, "globalcfg") == 0) {
         const char *p2 = body;
         while (*p2) {
-            p2 = js_skip_ws(p2);
+            p2 = json_skip_ws(p2);
             if (*p2 == '}' || *p2 != '"')
                 break;
             ++p2;
@@ -244,22 +142,22 @@ lc_resolve(const char *p, const char *cur_dim, char *out, size_t cap)
             }
             if (*p2 == '"')
                 p2++;
-            p2 = js_skip_ws(p2);
+            p2 = json_skip_ws(p2);
             if (*p2 == ':')
                 p2++;
-            p2 = js_skip_ws(p2);
-            const char *inner = js_skip_ws(p2);
+            p2 = json_skip_ws(p2);
+            const char *inner = json_skip_ws(p2);
             if (*inner == '{') {
-                const char *defp = js_find_member(inner + 1, "default");
+                const char *defp = json_find_member(inner + 1, "default");
                 if (defp) {
                     lc_resolve(defp, cur_dim, out, cap);
                     return;
                 }
             }
-            p2 = js_skip_value(p2);
+            p2 = json_skip_value(p2);
             if (!p2)
                 break;
-            p2 = js_skip_ws(p2);
+            p2 = json_skip_ws(p2);
             if (*p2 == ',')
                 p2++;
         }
@@ -268,7 +166,7 @@ lc_resolve(const char *p, const char *cur_dim, char *out, size_t cap)
     const char *want = lc_prof_val(cur_dim);
     const char *k = lc_pick_key(body, want);
     if (k) {
-        const char *vp = js_find_member(body, k);
+        const char *vp = json_find_member(body, k);
         if (vp)
             lc_resolve(vp, cur_dim, out, cap);
     }
@@ -443,19 +341,19 @@ launcher_add_app(const char *apps_body, const char *id)
 {
     if (g_launcher_count >= LAUNCHER_MAX_ITEMS)
         return;
-    const char *def = js_find_member(apps_body, id);
+    const char *def = json_find_member(apps_body, id);
     if (!def)
         return;
-    const char *def_body = js_object_body(def);
+    const char *def_body = json_object_body(def);
     if (!def_body)
         return;
-    const char *vis = js_find_member(def_body, "visible");
+    const char *vis = json_find_member(def_body, "visible");
     if (vis && !lc_resolve_bool(vis))
         return;
     LauncherItem *it = &g_launcher_items[g_launcher_count];
     memset(it, 0, sizeof *it);
     it->kind = 1;
-    const char *tp = js_find_member(def_body, "title");
+    const char *tp = json_find_member(def_body, "title");
     if (tp) {
         char raw[64];
         lc_resolve(tp, NULL, raw, sizeof raw);
@@ -463,34 +361,34 @@ launcher_add_app(const char *apps_body, const char *id)
     }
     if (!it->text[0])
         snprintf(it->text, sizeof it->text, "%s", id);
-    const char *pp = js_find_member(def_body, "path");
+    const char *pp = json_find_member(def_body, "path");
     if (pp)
         lc_resolve(pp, NULL, it->path, sizeof it->path);
-    const char *ip = js_find_member(def_body, "icon");
+    const char *ip = json_find_member(def_body, "icon");
     if (ip)
         lc_resolve(ip, NULL, it->icon, sizeof it->icon);
-    const char *par = js_find_member(def_body, "params");
+    const char *par = json_find_member(def_body, "params");
     if (!par)
-        par = js_find_member(def_body, "param");
+        par = json_find_member(def_body, "param");
     if (par) {
-        par = js_skip_ws(par);
+        par = json_skip_ws(par);
         if (*par == '[') {
             const char *q = par + 1;
             while (*q && *q != ']' && it->nparams < LAUNCHER_MAX_PARAMS) {
-                q = js_skip_ws(q);
+                q = json_skip_ws(q);
                 if (*q != '"')
                     break;
-                js_copy_string(q, it->params[it->nparams], LAUNCHER_PARAM_LEN);
+                json_copy_string(q, it->params[it->nparams], LAUNCHER_PARAM_LEN);
                 it->nparams++;
-                q = js_skip_value(q);
+                q = json_skip_value(q);
                 if (!q)
                     break;
-                q = js_skip_ws(q);
+                q = json_skip_ws(q);
                 if (*q == ',')
                     q++;
             }
         } else if (*par == '"') {
-            js_copy_string(par, it->params[0], LAUNCHER_PARAM_LEN);
+            json_copy_string(par, it->params[0], LAUNCHER_PARAM_LEN);
             it->nparams = 1;
         }
     }
@@ -593,9 +491,9 @@ launcher_build(void)
         return;
     }
 
-    const char *db_root = js_object_body(db);
-    const char *db_apps = db_root ? js_find_member(db_root, "applications") : NULL;
-    const char *db_apps_body = db_apps ? js_object_body(db_apps) : NULL;
+    const char *db_root = json_object_body(db);
+    const char *db_apps = db_root ? json_find_member(db_root, "applications") : NULL;
+    const char *db_apps_body = db_apps ? json_object_body(db_apps) : NULL;
     if (!db_apps_body) {
         free(db);
         free(vw);
@@ -604,36 +502,36 @@ launcher_build(void)
         return;
     }
 
-    const char *vw_root = js_object_body(vw);
-    const char *view_obj = vw_root ? js_find_member(vw_root, "view") : NULL;
-    const char *view_body = view_obj ? js_object_body(view_obj) : NULL;
-    const char *groups = view_body ? js_find_member(view_body, "groups") : NULL;
+    const char *vw_root = json_object_body(vw);
+    const char *view_obj = vw_root ? json_find_member(vw_root, "view") : NULL;
+    const char *view_body = view_obj ? json_object_body(view_obj) : NULL;
+    const char *groups = view_body ? json_find_member(view_body, "groups") : NULL;
     if (groups) {
-        groups = js_skip_ws(groups);
+        groups = json_skip_ws(groups);
         if (*groups == '[') {
             const char *q = groups + 1;
             while (*q && *q != ']') {
-                q = js_skip_ws(q);
+                q = json_skip_ws(q);
                 if (*q != '{') {
-                    q = js_skip_value(q);
+                    q = json_skip_value(q);
                     if (!q)
                         break;
-                    q = js_skip_ws(q);
+                    q = json_skip_ws(q);
                     if (*q == ',')
                         q++;
                     continue;
                 }
                 const char *grp_body = q + 1;
-                const char *tp = js_find_member(grp_body, "title");
+                const char *tp = json_find_member(grp_body, "title");
                 char        raw_title[64] = "";
                 char        disp_title[64] = "";
                 if (tp) {
                     lc_resolve(tp, NULL, raw_title, sizeof raw_title);
                     lc_translate(raw_title, disp_title, sizeof disp_title);
                 }
-                const char *apps_arr = js_find_member(grp_body, "apps");
+                const char *apps_arr = json_find_member(grp_body, "apps");
                 if (apps_arr) {
-                    apps_arr = js_skip_ws(apps_arr);
+                    apps_arr = json_skip_ws(apps_arr);
                     if (*apps_arr == '[') {
                         if (g_launcher_count < LAUNCHER_MAX_ITEMS && disp_title[0]) {
                             LauncherItem *hdr = &g_launcher_items[g_launcher_count++];
@@ -643,29 +541,29 @@ launcher_build(void)
                         }
                         const char *r = apps_arr + 1;
                         while (*r && *r != ']') {
-                            r = js_skip_ws(r);
+                            r = json_skip_ws(r);
                             if (*r == '"') {
                                 char id[48];
-                                js_copy_string(r, id, sizeof id);
+                                json_copy_string(r, id, sizeof id);
                                 launcher_add_app(db_apps_body, id);
-                                r = js_skip_value(r);
+                                r = json_skip_value(r);
                                 if (!r)
                                     break;
                             } else {
-                                r = js_skip_value(r);
+                                r = json_skip_value(r);
                                 if (!r)
                                     break;
                             }
-                            r = js_skip_ws(r);
+                            r = json_skip_ws(r);
                             if (*r == ',')
                                 r++;
                         }
                     }
                 }
-                q = js_skip_value(q);
+                q = json_skip_value(q);
                 if (!q)
                     break;
-                q = js_skip_ws(q);
+                q = json_skip_ws(q);
                 if (*q == ',')
                     q++;
             }
@@ -673,13 +571,13 @@ launcher_build(void)
     }
 
     /* Scan view.json applications for U_* user apps not in any group. */
-    const char *vw_apps = vw_root ? js_find_member(vw_root, "applications") : NULL;
-    const char *vw_apps_body = vw_apps ? js_object_body(vw_apps) : NULL;
+    const char *vw_apps = vw_root ? json_find_member(vw_root, "applications") : NULL;
+    const char *vw_apps_body = vw_apps ? json_object_body(vw_apps) : NULL;
     if (vw_apps_body) {
         int         user_hdr_added = 0;
         const char *p = vw_apps_body;
         while (*p) {
-            p = js_skip_ws(p);
+            p = json_skip_ws(p);
             if (*p == '}' || *p != '"')
                 break;
             const char *ks = ++p;
@@ -691,15 +589,15 @@ launcher_build(void)
             size_t kl = (size_t)(p - ks);
             if (*p == '"')
                 p++;
-            p = js_skip_ws(p);
+            p = json_skip_ws(p);
             if (*p == ':')
                 p++;
-            p = js_skip_ws(p);
+            p = json_skip_ws(p);
             if (kl >= 2 && ks[0] == 'U' && ks[1] == '_') {
                 const char *def_body2 = (*p == '{') ? p + 1 : NULL;
                 int         vis = 1;
                 if (def_body2) {
-                    const char *v2 = js_find_member(def_body2, "visible");
+                    const char *v2 = json_find_member(def_body2, "visible");
                     if (v2 && !lc_resolve_bool(v2))
                         vis = 0;
                 }
@@ -719,13 +617,13 @@ launcher_build(void)
                     memset(it, 0, sizeof *it);
                     it->kind = 1;
                     if (def_body2) {
-                        const char *tp2 = js_find_member(def_body2, "title");
+                        const char *tp2 = json_find_member(def_body2, "title");
                         if (tp2)
                             lc_resolve(tp2, NULL, it->text, sizeof it->text);
-                        const char *pp2 = js_find_member(def_body2, "path");
+                        const char *pp2 = json_find_member(def_body2, "path");
                         if (pp2)
                             lc_resolve(pp2, NULL, it->path, sizeof it->path);
-                        const char *ip2 = js_find_member(def_body2, "icon");
+                        const char *ip2 = json_find_member(def_body2, "icon");
                         if (ip2)
                             lc_resolve(ip2, NULL, it->icon, sizeof it->icon);
                     }
@@ -734,10 +632,10 @@ launcher_build(void)
                     g_launcher_count++;
                 }
             }
-            p = js_skip_value(p);
+            p = json_skip_value(p);
             if (!p)
                 break;
-            p = js_skip_ws(p);
+            p = json_skip_ws(p);
             if (*p == ',')
                 p++;
         }
@@ -1019,7 +917,7 @@ on_tap_overlay_launcher(int x, int y)
              * stays until the launched task draws.  A redraw here would
              * flash the shelf back and make a slow app start look like the
              * tap did nothing. */
-            g_state.launcher_open = 0;
+            g_state.overlay = OV_NONE;
             g_state.launcher_drag = 0;
             g_state.launcher_moved = 0;
             launch_app(it);
@@ -1033,7 +931,7 @@ launcher_open_set(void)
 {
     if (!g_launcher_built)
         launcher_build();
-    g_state.launcher_open = 1;
+    g_state.overlay = OV_LAUNCHER;
     g_state.launcher_scroll = 0;
     g_state.launcher_drag = 0;
     g_state.launcher_moved = 0;
@@ -1044,7 +942,7 @@ launcher_open_set(void)
 void
 launcher_close(void)
 {
-    g_state.launcher_open = 0;
+    g_state.overlay = OV_NONE;
     g_state.launcher_drag = 0;
     g_state.launcher_moved = 0;
     redraw_shelf();

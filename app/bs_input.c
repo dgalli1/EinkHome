@@ -1,6 +1,14 @@
 /* bs_input.c — part of the bookshelf app (see bookshelf.h) */
 
 #include "bookshelf.h"
+#include "bs_browser.h"
+#include "bs_downloads.h"
+#include "bs_input.h"
+#include "bs_launcher.h"
+#include "bs_model.h"
+#include "bs_net.h"
+#include "bs_store.h"
+#include "bs_ui.h"
 
 /* ── hit-testing ─────────────────────────────────────────────────────── */
 
@@ -17,12 +25,13 @@ hit_top_bar(int x, int y)
      * otherwise (the home icon was removed). */
     if (x >= 8 && x < 8 + 96)
         return 1;
+    /* The Search page has no right-side icons and no source button —
+     * its top bar is just the back arrow, so taps there fall through. */
+    if (g_state.tab == TAB_SEARCH)
+        return -1;
     /* Source button — icon + label right of the house button. */
     if (x >= SOURCE_BTN_X && x < SOURCE_BTN_X + SOURCE_BTN_W)
         return 6;
-    /* The Search page has no right-side icons — its corner is empty. */
-    if (g_state.tab == TAB_SEARCH)
-        return -1;
     /* Right 96×96 region, padded 8 px on the right: the hamburger/More
      * button. */
     if (x >= w - 96 - 8 && x < w - 8)
@@ -55,7 +64,7 @@ hit_search_input(int x, int y)
     if (y < row_top || y >= row_bot)
         return -1;
     int w = ScreenWidth();
-    int tx = 64, tw = w - 128;
+    int tx = 16, tw = w - 32; /* full-width bar (see draw_search_tab) */
     int ty = row_top + 10;
     int th = SEARCH_ROW_H - 20;
     if (x < tx || x >= tx + tw)
@@ -88,6 +97,24 @@ hit_history(int x, int y)
     if (idx >= store_search_count())
         return -1;
     return idx;
+}
+
+/* 0-based index of the suggestion row tapped, or -1.  Mirrors
+ * hit_history over the live band geometry; only rows that are
+ * actually drawn (fit above the keyboard) are hit-testable. */
+int
+hit_suggestion(int x, int y)
+{
+    (void)x;
+    int y_top, y_bot;
+    suggest_band(&y_top, &y_bot);
+    if (y < y_top || y >= y_bot)
+        return -1;
+    int drawn = (y_bot - y_top) / SEARCH_HISTORY_ROW_H;
+    int rel = (y - y_top) / SEARCH_HISTORY_ROW_H;
+    if (rel >= drawn || rel >= g_nsuggest)
+        return -1;
+    return rel;
 }
 
 int
@@ -145,18 +172,18 @@ on_tap_overlay_menu(int x, int y)
     int y0 = 96, item_h = 88;
     int pw = ScreenWidth() * 3 / 4;
     if (x < 0 || x >= pw) {
-        g_state.menu_open = 0;
+        g_state.overlay = OV_NONE;
         return;
     }
     for (int i = 0; i < 4; i++) {
         if (y >= y0 + i * item_h && y < y0 + i * item_h + item_h) {
             g_state.group = (GroupMode)i;
             g_drilled_series[0] = '\0';
-            g_state.menu_open = 0;
+            g_state.overlay = OV_NONE;
             view_rebuild();
         }
     }
-    g_state.menu_open = 0;
+    g_state.overlay = OV_NONE;
 }
 
 /* Handle a tap while the More overlay is open.  Returns 1 when the
@@ -169,19 +196,18 @@ on_tap_overlay_more(int x, int y)
     int pw = ScreenWidth() * 3 / 4;
     int px = ScreenWidth() - pw;
     if (x < px || x >= ScreenWidth()) {
-        g_state.more_open = 0;
+        g_state.overlay = OV_NONE;
         return 0;
     }
     if (y >= MORE_Y0 && y < MORE_Y0 + MORE_ITEM_H) {
-        g_state.more_open = 0;
+        g_state.overlay = OV_NONE;
         do_sync();
         return 0;
     }
     /* Settings row opens the full-screen settings page. */
     if (y >= MORE_Y0 + MORE_SETTINGS_IDX * MORE_ITEM_H &&
         y < MORE_Y0 + (MORE_SETTINGS_IDX + 1) * MORE_ITEM_H) {
-        g_state.more_open = 0;
-        g_state.settings_open = 1;
+        g_state.overlay = OV_SETTINGS;
         g_settings_edit = 0;
         draw_overlay_settings();
         FullUpdate();
@@ -190,7 +216,7 @@ on_tap_overlay_more(int x, int y)
     /* Applications row opens the in-app launcher overlay. */
     if (y >= MORE_Y0 + MORE_APPS_IDX * MORE_ITEM_H &&
         y < MORE_Y0 + (MORE_APPS_IDX + 1) * MORE_ITEM_H) {
-        g_state.more_open = 0;
+        g_state.overlay = OV_NONE;
         launcher_open_set();
         return 1;
     }
@@ -198,13 +224,13 @@ on_tap_overlay_more(int x, int y)
      * download-progress popup so the user watches the queue drain. */
     if (y >= MORE_Y0 + MORE_DLALL_IDX * MORE_ITEM_H &&
         y < MORE_Y0 + (MORE_DLALL_IDX + 1) * MORE_ITEM_H) {
-        g_state.more_open = 0;
+        g_state.overlay = OV_NONE;
         download_all_start();
         return 1;
     }
     for (int i = 1; i < MORE_DLALL_IDX; i++) {
         if (y >= MORE_Y0 + i * MORE_ITEM_H && y < MORE_Y0 + i * MORE_ITEM_H + MORE_ITEM_H) {
-            g_state.more_open = 0;
+            g_state.overlay = OV_NONE;
             if (i == MORE_GRID_IDX) {
                 g_state.view_mode = VIEW_GRID;
                 g_state.page = 0;
@@ -220,7 +246,7 @@ on_tap_overlay_more(int x, int y)
             return 0;
         }
     }
-    g_state.more_open = 0;
+    g_state.overlay = OV_NONE;
     return 0;
 }
 
@@ -235,25 +261,25 @@ on_tap_source(int x, int y)
     int pw, ph, px, py;
     source_geom(&px, &py, &pw, &ph);
     if (x < px || x >= px + pw || y < py || y >= py + ph) {
-        g_source_open = 0;
+        g_state.overlay = OV_NONE;
         redraw_shelf();
         return 1;
     }
     int row = (y - (py + 80)) / 96;
     if (row < 0 || row >= 3)
         return 1;
-    g_source_open = 0;
+    g_state.overlay = OV_NONE;
     if (row == 0) {
         g_state.source = SOURCE_KAVITA;
         g_browse_open = 0;
-        g_browse_drag = 0;
+        g_browser_drag = 0;
         save_config_file();
         do_sync();
         redraw_shelf();
     } else if (row == 1) {
         g_state.source = SOURCE_LOCAL;
         g_browse_open = 0;
-        g_browse_drag = 0;
+        g_browser_drag = 0;
         save_config_file();
         do_sync();
         redraw_shelf();
@@ -273,7 +299,7 @@ on_tap_source(int x, int y)
 void
 settings_close(void)
 {
-    g_state.settings_open = 0;
+    g_state.overlay = OV_NONE;
     g_settings_edit = 0;
     g_settings_dl_dir[0] = '\0';
     redraw_shelf();
@@ -289,7 +315,7 @@ settings_apply(void)
     build_endpoint_urls();
     resolve_downloads_dir();
     g_settings_dl_dir[0] = '\0';
-    g_state.settings_open = 0;
+    g_state.overlay = OV_NONE;
     g_settings_edit = 0;
     /* Re-sync with the new settings; show the progress sheet (unless
      * the Folder source, which has nothing to sync). */
@@ -357,10 +383,11 @@ on_tap_overlay_settings(int x, int y)
         return;
     }
     if (y >= y_logs && y < y_logs + SETTINGS_BTN_H - 12) {
-        /* Show the app log directly (Settings → Show logs). */
-        g_state.settings_open = 0;
+        /* Show the app log directly (Settings → Show logs).  Settings
+         * is NOT restored when the log closes — the log's Back goes
+         * straight to the shelf (see on_tap_log_view). */
         g_settings_edit = 0;
-        g_state.log_open = 1;
+        g_state.overlay = OV_LOG;
         g_state.log_scroll = -1; /* start at the tail */
         draw_log_view();
         FullUpdate();
@@ -376,7 +403,7 @@ on_tap_log_view(int x, int y)
 {
     if (x >= LOG_BACK_X && x < LOG_BACK_X + LOG_BACK_W && y >= LOG_BACK_Y &&
         y < LOG_BACK_Y + LOG_BACK_H) {
-        g_state.log_open = 0;
+        g_state.overlay = OV_NONE;
         g_state.log_scroll = -1;
         redraw_shelf();
         return;

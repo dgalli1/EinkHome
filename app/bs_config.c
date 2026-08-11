@@ -1,6 +1,8 @@
 /* bs_config.c — part of the bookshelf app (see bookshelf.h) */
 
 #include "bookshelf.h"
+#include "bs_config.h"
+#include "bs_model.h"
 
 /* ── log file ────────────────────────────────────────────────────────── */
 
@@ -121,9 +123,9 @@ cfg_set_kv(const char *key, const char *value, void *user)
 {
     struct cfg_out *out = user;
     if (strcmp(key, "api_url") == 0 || strcmp(key, "url") == 0) {
-        snprintf(out->api_url, out->cap, "%s", value);
+        snprintf(out->api_url, out->url_cap, "%s", value);
     } else if (strcmp(key, "api_token") == 0 || strcmp(key, "token") == 0) {
-        snprintf(out->api_token, out->cap, "%s", value);
+        snprintf(out->api_token, out->token_cap, "%s", value);
     } else if (strcmp(key, "language") == 0 || strcmp(key, "lang") == 0) {
         snprintf(g_lang, sizeof g_lang, "%.3s", value);
         for (char *p = g_lang; *p; p++)
@@ -163,7 +165,7 @@ dirname_of(const char *path, char *out, size_t out_cap)
 void
 load_config_file(const char *argv0, struct cfg_out *out)
 {
-    snprintf(out->api_token, out->cap, "%s", TOKEN_DEFAULT);
+    snprintf(out->api_token, out->token_cap, "%s", TOKEN_DEFAULT);
     char path[512];
 
     if (argv0 != NULL && strchr(argv0, '/') != NULL) {
