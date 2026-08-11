@@ -47,6 +47,9 @@ static sqlite3_stmt *g_st_upsert_lookup; /* SELECT downloaded, local_path */
 static sqlite3_stmt *g_st_upsert;        /* INSERT OR REPLACE INTO books */
 static sqlite3_stmt *g_st_suggest_del;   /* DELETE FROM suggest */
 static sqlite3_stmt *g_st_suggest_ins;   /* INSERT OR IGNORE INTO suggest */
+static sqlite3_stmt *g_st_get_book;      /* SELECT ... FROM books WHERE id */
+static sqlite3_stmt *g_st_set_downloaded; /* UPDATE books SET downloaded ... */
+static sqlite3_stmt *g_st_next_ids;      /* rowid-keyset id scan */
 
 /* Prepare `sql` into *slot once; returns the statement, or NULL when
  * the db is closed or the prepare failed (callers degrade exactly as
@@ -232,7 +235,7 @@ static int store_import_legacy(const char *legacy_path) {
         failed = 1;
         continue;
       }
-      if (parse_book_obj(it, &tmp) == 0 && store_upsert_book(&tmp) == 0)
+      if (parse_book_obj(it, &tmp, 1) == 0 && store_upsert_book(&tmp) == 0)
         count++;
       else
         failed = 1;
@@ -337,10 +340,16 @@ void store_close(void) {
   sqlite3_finalize(g_st_upsert);
   sqlite3_finalize(g_st_suggest_del);
   sqlite3_finalize(g_st_suggest_ins);
+  sqlite3_finalize(g_st_get_book);
+  sqlite3_finalize(g_st_set_downloaded);
+  sqlite3_finalize(g_st_next_ids);
   g_st_upsert_lookup = NULL;
   g_st_upsert = NULL;
   g_st_suggest_del = NULL;
   g_st_suggest_ins = NULL;
+  g_st_get_book = NULL;
+  g_st_set_downloaded = NULL;
+  g_st_next_ids = NULL;
   if (g_db != NULL) {
     sqlite3_close(g_db);
     g_db = NULL;
@@ -490,16 +499,17 @@ void store_set_downloaded(const char *id, int downloaded,
                           const char *local_path) {
   if (g_db == NULL)
     return;
-  sqlite3_stmt *st = NULL;
-  if (sqlite3_prepare_v2(
-          g_db, "UPDATE books SET downloaded=?2, local_path=?3 WHERE id=?1", -1,
-          &st, NULL) != SQLITE_OK)
+  sqlite3_stmt *st = st_prep_once(
+      &g_st_set_downloaded,
+      "UPDATE books SET downloaded=?2, local_path=?3 WHERE id=?1");
+  if (st == NULL)
     return;
+  sqlite3_reset(st);
+  sqlite3_clear_bindings(st);
   bind_text_trunc(st, 1, id);
   sqlite3_bind_int(st, 2, downloaded);
   bind_text_trunc(st, 3, local_path);
   sqlite3_step(st);
-  sqlite3_finalize(st);
 }
 
 static void fill_book_from_stmt(sqlite3_stmt *st, Book *b) {
@@ -543,16 +553,16 @@ static void fill_book_from_stmt(sqlite3_stmt *st, Book *b) {
 int store_get_book(const char *id, Book *out) {
   if (g_db == NULL)
     return 0;
-  sqlite3_stmt *st = NULL;
-  char sql[256];
-  snprintf(sql, sizeof sql, "SELECT " BOOK_COLS " FROM books WHERE id=?1");
-  if (sqlite3_prepare_v2(g_db, sql, -1, &st, NULL) != SQLITE_OK)
+  sqlite3_stmt *st = st_prep_once(
+      &g_st_get_book, "SELECT " BOOK_COLS " FROM books WHERE id=?1");
+  if (st == NULL)
     return 0;
+  sqlite3_reset(st);
+  sqlite3_clear_bindings(st);
   bind_text_trunc(st, 1, id);
   int found = sqlite3_step(st) == SQLITE_ROW;
   if (found)
     fill_book_from_stmt(st, out);
-  sqlite3_finalize(st);
   return found;
 }
 
@@ -628,28 +638,32 @@ int store_next_undownloaded(char ids[][MAX_ID_LEN], int cap) {
   return n;
 }
 
-/* Slice of every book id in a stable order (downloaded or not), for
- * the startup flag refresh.  Returns the number of ids written
- * (< cap = done). */
-int store_next_ids(char ids[][MAX_ID_LEN], int cap, int offset) {
-  if (g_db == NULL)
+/* Slice of every book id in rowid order (downloaded or not), for the
+ * startup flag refresh.  Rowid keyset pagination: the caller keeps the
+ * last rowid seen (*after_rowid, 0 to start), so each page is one
+ * b-tree scan of the rowid index with no OFFSET re-walk.  Results are
+ * copied into ids[] before the statement is reused.  Returns the number
+ * of ids written (< cap = done); *after_rowid advances to the last
+ * rowid read and stays unchanged when no rows are returned. */
+int store_next_ids(char ids[][MAX_ID_LEN], int cap, long long *after_rowid) {
+  if (g_db == NULL || after_rowid == NULL)
     return 0;
-  sqlite3_stmt *st = NULL;
-  if (sqlite3_prepare_v2(
-          g_db,
-          "SELECT id FROM books"
-          " ORDER BY title COLLATE NOCASE, id LIMIT ?1 OFFSET ?2",
-          -1, &st, NULL) != SQLITE_OK)
+  sqlite3_stmt *st = st_prep_once(
+      &g_st_next_ids,
+      "SELECT rowid, id FROM books WHERE rowid > ?1 ORDER BY rowid LIMIT ?2");
+  if (st == NULL)
     return 0;
-  sqlite3_bind_int(st, 1, cap);
-  sqlite3_bind_int(st, 2, offset);
+  sqlite3_reset(st);
+  sqlite3_clear_bindings(st);
+  sqlite3_bind_int64(st, 1, *after_rowid);
+  sqlite3_bind_int(st, 2, cap);
   int n = 0;
   while (n < cap && sqlite3_step(st) == SQLITE_ROW) {
-    const char *id = (const char *)sqlite3_column_text(st, 0);
+    const char *id = (const char *)sqlite3_column_text(st, 1);
     snprintf(ids[n], MAX_ID_LEN, "%s", id ? id : "");
+    *after_rowid = sqlite3_column_int64(st, 0);
     n++;
   }
-  sqlite3_finalize(st);
   return n;
 }
 
@@ -854,20 +868,34 @@ void store_suggest_set(const char *book_id,
   sqlite3_step(del);
   if (n <= 0 || terms == NULL)
     return;
-  sqlite3_stmt *ins = st_prep_once(
-      &g_st_suggest_ins,
-      "INSERT OR IGNORE INTO suggest(term, book_id) VALUES(?1,?2)");
-  if (ins == NULL)
-    return;
+  /* One multi-row statement instead of up to 96 single-row inserts: a
+   * sync round runs this per book, so statement count matters on a
+   * 300MHz core.  96 pairs fit comfortably in the stack buffer. */
+  char   sql[2048];
+  int    nterms = 0;
+  size_t len = snprintf(sql, sizeof sql,
+                        "INSERT OR IGNORE INTO suggest(term, book_id) VALUES");
   for (int i = 0; i < n; i++) {
     if (terms[i][0] == '\0')
       continue;
-    sqlite3_reset(ins);
-    sqlite3_clear_bindings(ins);
-    bind_text_trunc(ins, 1, terms[i]);
-    bind_text_trunc(ins, 2, book_id);
-    sqlite3_step(ins);
+    len += snprintf(sql + len, sizeof sql - len, "%s(?,?)",
+                    nterms == 0 ? " " : ",");
+    nterms++;
   }
+  if (nterms == 0)
+    return; /* all terms empty: the DELETE above was the whole job */
+  sqlite3_stmt *ins = NULL;
+  if (sqlite3_prepare_v2(g_db, sql, -1, &ins, NULL) != SQLITE_OK)
+    return;
+  int p = 1;
+  for (int i = 0; i < n; i++) {
+    if (terms[i][0] == '\0')
+      continue;
+    bind_text_trunc(ins, p++, terms[i]);
+    bind_text_trunc(ins, p++, book_id);
+  }
+  sqlite3_step(ins);
+  sqlite3_finalize(ins);
 }
 
 /* Prefix lookup over the term index, most-popular first (a term's
@@ -1106,6 +1134,11 @@ void view_rebuild(void) {
   g_lp_vi = -1;
   g_lp_armed = 0;
 
+  /* Keep the count the previous view had: the rollback paths below
+   * restore the old view rows, so the cached total must go back to
+   * that value instead of being recounted. */
+  int prev_total = g_view_total;
+
   if (sqlite3_exec(g_db, "BEGIN", NULL, NULL, NULL) != SQLITE_OK) {
     LOG("[bookshelf] view_rebuild: BEGIN failed: %s\n",
         sqlite3_errmsg(g_db));
@@ -1121,6 +1154,10 @@ void view_rebuild(void) {
 
   char sql[2048];
   int rc = SQLITE_OK;
+  /* Rows written to view by the INSERT below; becomes g_view_total
+   * after COMMIT (sqlite3_changes must be read before any DROP TABLE
+   * or the COMMIT — both reset the counter). */
+  int inserted = 0;
 
   if (g_drilled_series[0] != '\0') {
     /* Drill-down: the series' members under the active filter/sort. */
@@ -1138,6 +1175,7 @@ void view_rebuild(void) {
       bind_text_trunc(st, 1, g_drilled_series);
       view_bind_query(st, 2);
       rc = sqlite3_step(st);
+      inserted = sqlite3_changes(g_db);
       sqlite3_finalize(st);
     }
   } else if (g_state.group == GROUP_BY_SERIES || g_state.group == GROUP_ALL) {
@@ -1230,6 +1268,9 @@ void view_rebuild(void) {
           " SELECT kind, book_id, series_id, series_name, series_count"
           " FROM t_out ORDER BY fk, kind",
           NULL, NULL, NULL);
+      /* Read the insert count before the DROP TABLEs below (any
+       * non-SELECT statement resets sqlite3_changes). */
+      inserted = sqlite3_changes(g_db);
     }
     sqlite3_exec(g_db, "DROP TABLE IF EXISTS t_sorted", NULL, NULL, NULL);
     sqlite3_exec(g_db, "DROP TABLE IF EXISTS t_grp", NULL, NULL, NULL);
@@ -1248,6 +1289,7 @@ void view_rebuild(void) {
     if (rc == SQLITE_OK) {
       view_bind_query(st, 1);
       rc = sqlite3_step(st);
+      inserted = sqlite3_changes(g_db);
       sqlite3_finalize(st);
     }
   }
@@ -1255,20 +1297,25 @@ void view_rebuild(void) {
   if (rc != SQLITE_DONE && rc != SQLITE_OK) {
     LOG("[bookshelf] view_rebuild failed: %s\n", sqlite3_errmsg(g_db));
     sqlite3_exec(g_db, "ROLLBACK", NULL, NULL, NULL);
-    /* The rollback restores the previous view rows; resync the
-     * counter, which was zeroed above when the rebuild started. */
-    g_view_total = view_total();
+    /* The rollback restored the previous view rows; the cached total
+     * goes back to what it was before the rebuild started. */
+    g_view_total = prev_total;
     return; /* previous view and g_view_total stay intact */
   }
   if (sqlite3_exec(g_db, "COMMIT", NULL, NULL, NULL) != SQLITE_OK) {
     LOG("[bookshelf] view_rebuild: COMMIT failed: %s\n",
         sqlite3_errmsg(g_db));
     sqlite3_exec(g_db, "ROLLBACK", NULL, NULL, NULL);
-    g_view_total = view_total();
+    g_view_total = prev_total;
     return; /* previous view and g_view_total stay intact */
   }
 
-  g_view_total = view_total();
+  /* The view table is only written here, so the insert count is the
+   * authoritative total — no COUNT(*) per rebuild.  Record the source
+   * this view was projected for: finish_sync compares against it to
+   * catch source switches whose sync applies no rows. */
+  g_view_source = g_state.source;
+  g_view_total = inserted;
   LOG("[bookshelf] view_rebuild: view=%d sort=%d group=%d drill=%d\n",
       g_view_total, (int)g_state.sort, (int)g_state.group,
       g_drilled_series[0] != '\0');
@@ -1277,15 +1324,10 @@ void view_rebuild(void) {
 int view_total(void) {
   if (g_db == NULL)
     return 0;
-  sqlite3_stmt *st = NULL;
-  if (sqlite3_prepare_v2(g_db, "SELECT COUNT(*) FROM view", -1, &st, NULL) !=
-      SQLITE_OK)
-    return 0;
-  int n = 0;
-  if (sqlite3_step(st) == SQLITE_ROW)
-    n = sqlite3_column_int(st, 0);
-  sqlite3_finalize(st);
-  return n;
+  /* The view table is only ever written by view_rebuild, which keeps
+   * g_view_total current; a COUNT(*) here would be pure overhead on
+   * every page clamp and popup subline. */
+  return g_view_total;
 }
 
 /* Fill one TileRow from a joined view+books row.  BOOK_COLS_Q is 13

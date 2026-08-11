@@ -30,6 +30,18 @@ TileRow g_rows[MAX_ROWS * COLS];
 int     g_row_count = 0;
 int     g_view_total = 0;
 
+/* Dirty flag for the materialised view: set by any sync/local apply
+ * path that changed rows, cleared by finish_sync, which then rebuilds
+ * the view exactly once per changed sync instead of unconditionally. */
+int     g_sync_changed = 0;
+
+/* Source the materialised view was last projected for (set by
+ * view_rebuild).  finish_sync rebuilds on a source mismatch too: a
+ * source switch whose sync applies no rows must still re-project the
+ * view under the new source (the old projection would keep showing
+ * the previous source's books). */
+int     g_view_source = -1;
+
 State g_state;
 
 /* The library itself lives in SQLite (bs_store.c); there is no
@@ -324,7 +336,7 @@ js_epoch(const cJSON *obj, const char *key)
 }
 
 int
-parse_book_obj(const cJSON *obj, Book *b)
+parse_book_obj(const cJSON *obj, Book *b, int probe_fs)
 {
     memset(b, 0, sizeof *b);
     js_copy(obj, "id", b->id, sizeof b->id);
@@ -371,12 +383,19 @@ parse_book_obj(const cJSON *obj, Book *b)
     if (slash != NULL)
         memmove(b->filename, slash + 1, strlen(slash + 1) + 1);
 
-    /* Check if the file exists on local storage (resolved downloads dir). */
-    char path[MAX_PATH_LEN];
-    book_local_path(b, path, sizeof path);
-    if (access(path, F_OK) == 0) {
-        b->downloaded = 1;
-        snprintf(b->local_path, sizeof b->local_path, "%s", path);
+    /* Check if the file exists on local storage (resolved downloads
+     * dir).  Only the local-import path probes the filesystem
+     * (probe_fs): a per-book access() on the main thread would block
+     * every delta round.  The remote sync path passes probe_fs=0 and
+     * keeps an already-downloaded book's state via store_upsert_book's
+     * existing-row lookup. */
+    if (probe_fs) {
+        char path[MAX_PATH_LEN];
+        book_local_path(b, path, sizeof path);
+        if (access(path, F_OK) == 0) {
+            b->downloaded = 1;
+            snprintf(b->local_path, sizeof b->local_path, "%s", path);
+        }
     }
     return 0;
 }
@@ -407,12 +426,16 @@ typedef struct {
 /* Round job result (worker-allocated; done_cb frees it).  http_status
  * is the firmware HTTP outcome surfaced by http_post_timeout_status
  * (0 when unavailable); a non-200 status with a body is an error
- * response, not a transport failure. */
+ * response, not a transport failure.  The response body is parsed and
+ * shape-checked on the worker, so only the cJSON tree reaches the main
+ * thread — the raw bytes are freed in sync_fetch_round. */
 typedef struct {
-    char *resp;
-    int   rlen;
-    int   rc;
-    int   http_status;
+    cJSON *root;      /* parsed delta (worker); NULL when unusable */
+    int    parse_ok;  /* 1 = root holds a usable delta response */
+    char  *resp;      /* raw body — freed by the worker; always NULL */
+    int    rlen;
+    int    rc;
+    int    http_status;
 } SyncRoundResult;
 
 static long long g_sync_cursor; /* main thread only now */
@@ -446,8 +469,10 @@ static void sync_ui_popup_finish(void) { if (g_sync_ui.popup_finish) g_sync_ui.p
 static void sync_ui_popup_fail(void) { if (g_sync_ui.popup_fail) g_sync_ui.popup_fail(); }
 static void sync_ui_repaint(void) { if (g_sync_ui.repaint) g_sync_ui.repaint(); }
 
-/* Worker: fetch one delta batch (blocking HTTP).  The response is
- * owned by the job (freed by the done_cb on the main thread). */
+/* Worker: fetch one delta batch (blocking HTTP) and parse it, so the
+ * main thread never blocks on the cJSON_Parse of a large delta.  The
+ * parsed tree is owned by the job (freed by the done_cb on the main
+ * thread); the raw response bytes are freed here. */
 static void
 sync_fetch_round(BsJob *job)
 {
@@ -462,10 +487,50 @@ sync_fetch_round(BsJob *job)
         free(resp);
         job->rc = -1;
     } else {
-        r->resp = resp;
+        r->resp = NULL; /* raw bytes freed below; the tree survives */
         r->rlen = rlen;
         r->rc = rc;
         r->http_status = status;
+        r->root = NULL;
+        r->parse_ok = 0;
+        /* rc == 0 implies resp != NULL (http_post_timeout_status
+         * returns -1 when there is no body).  Parse + shape-check the
+         * exact shape sync_apply_round used to check on the main
+         * thread: object, no error/detail member, array added/removed,
+         * numeric nextCursor. */
+        if (rc == 0 && resp != NULL) {
+            r->root = cJSON_Parse(resp);
+            if (r->root == NULL) {
+                LOG("[bookshelf] sync: delta response not valid JSON "
+                    "(%.80s)\n",
+                    cJSON_GetErrorPtr() ? cJSON_GetErrorPtr() : "?");
+            } else if (!cJSON_IsObject(r->root) ||
+                       cJSON_GetObjectItemCaseSensitive(r->root, "error") !=
+                           NULL ||
+                       cJSON_GetObjectItemCaseSensitive(r->root, "detail") !=
+                           NULL) {
+                /* An error body (the server's {error,more} 503 reply,
+                 * or a proxy JSON error) must not be read as an empty
+                 * delta: without this the round "succeeds" with zero
+                 * books and the chain reports done. */
+                LOG("[bookshelf] sync: delta response is an error body\n");
+            } else {
+                const cJSON *added =
+                    cJSON_GetObjectItemCaseSensitive(r->root, "added");
+                const cJSON *rem =
+                    cJSON_GetObjectItemCaseSensitive(r->root, "removed");
+                const cJSON *nc =
+                    cJSON_GetObjectItemCaseSensitive(r->root, "nextCursor");
+                if (!cJSON_IsArray(added) || !cJSON_IsArray(rem) ||
+                    !cJSON_IsNumber(nc)) {
+                    LOG("[bookshelf] sync: delta response missing added/"
+                        "removed/nextCursor\n");
+                } else {
+                    r->parse_ok = 1;
+                }
+            }
+        }
+        free(resp);
         job->result = r;
         job->rc = rc;
     }
@@ -510,43 +575,25 @@ enum {
     SYNC_ROUND_STORE_FAIL = 2,
 };
 
-/* Apply one delta response on the main thread: the added/removed
- * parsing plus cursor/more, inside the batch transaction.  Returns a
+/* Apply one parsed delta response on the main thread: the added/removed
+ * arrays plus cursor/more, inside the batch transaction.  The response
+ * was parsed and shape-checked on the worker (sync_fetch_round), so the
+ * main thread never blocks on the cJSON_Parse of a large delta; root is
+ * owned by this function and freed before every return.  Returns a
  * SYNC_ROUND_* outcome; on failure the transaction is never opened (or
  * is rolled back), the cursor is left unchanged, and the caller aborts
  * the chain visibly instead of chaining the finish "done". */
 static int
-sync_apply_round(char *resp, long long cursor, long long *next_out,
+sync_apply_round(cJSON *root, long long cursor, long long *next_out,
                  int *more_out)
 {
     *next_out = cursor;
     *more_out = 0;
-    cJSON *root = cJSON_Parse(resp);
-    if (root == NULL) {
-        LOG("[bookshelf] sync: delta response not valid JSON (%.80s)\n",
-            cJSON_GetErrorPtr() ? cJSON_GetErrorPtr() : "?");
-        return SYNC_ROUND_BAD_RESP;
-    }
-    /* An error body (the server's {error,more} 503 reply, or a proxy
-     * JSON error) must not be read as an empty delta: without this the
-     * round "succeeds" with zero books and the chain reports done. */
-    if (!cJSON_IsObject(root) ||
-        cJSON_GetObjectItemCaseSensitive(root, "error") != NULL ||
-        cJSON_GetObjectItemCaseSensitive(root, "detail") != NULL) {
-        LOG("[bookshelf] sync: delta response is an error body\n");
-        cJSON_Delete(root);
-        return SYNC_ROUND_BAD_RESP;
-    }
+    /* root is a validated delta here: added/removed arrays, numeric
+     * nextCursor, no error/detail member (worker-checked). */
     const cJSON *added = cJSON_GetObjectItemCaseSensitive(root, "added");
     const cJSON *rem = cJSON_GetObjectItemCaseSensitive(root, "removed");
     const cJSON *nc = cJSON_GetObjectItemCaseSensitive(root, "nextCursor");
-    if (!cJSON_IsArray(added) || !cJSON_IsArray(rem) ||
-        !cJSON_IsNumber(nc)) {
-        LOG("[bookshelf] sync: delta response missing added/removed/"
-            "nextCursor\n");
-        cJSON_Delete(root);
-        return SYNC_ROUND_BAD_RESP;
-    }
     store_begin();
     if (cJSON_IsArray(added)) {
         Book tmp;
@@ -554,7 +601,7 @@ sync_apply_round(char *resp, long long cursor, long long *next_out,
         cJSON_ArrayForEach(it, added) {
             if (!cJSON_IsObject(it))
                 continue;
-            if (parse_book_obj(it, &tmp) == 0) {
+            if (parse_book_obj(it, &tmp, 0) == 0) {
                 if (store_upsert_book(&tmp) != 0) {
                     /* A failed upsert aborts the whole sync: roll
                      * back so the half-written batch is not persisted
@@ -570,6 +617,7 @@ sync_apply_round(char *resp, long long cursor, long long *next_out,
                     cJSON_Delete(root);
                     return SYNC_ROUND_STORE_FAIL;
                 }
+                g_sync_changed = 1; /* rows applied: rebuild at finish */
                 /* Suggestion terms for this book, straight from the
                  * DOM — no bounded-copy tricks needed. */
                 char terms[SUGGEST_MAX_TERMS][SUGGEST_TERM_MAX];
@@ -598,6 +646,7 @@ sync_apply_round(char *resp, long long cursor, long long *next_out,
                 it->valuestring[0] != '\0') {
                 store_delete_book(it->valuestring);
                 store_suggest_set(it->valuestring, NULL, 0);
+                g_sync_changed = 1; /* rows removed: rebuild at finish */
             }
         }
     }
@@ -621,7 +670,19 @@ static void
 finish_sync(void)
 {
     sync_ui_popup_finish();
-    view_rebuild();
+    /* The view only changes when rows were applied or the source
+     * filter changed; the dirty flag is set by the apply paths (sync
+     * rounds, local slices) and reset here.  A source switch whose
+     * sync applies nothing (empty local scan, or a delta the server
+     * considers already-synced) must still re-project the view under
+     * the new source, so the rebuild also runs when g_state.source
+     * differs from the source the current view was projected for
+     * (recorded by view_rebuild in g_view_source).  Skipping the
+     * rebuild keeps an unchanged re-sync from paying for a full view
+     * projection. */
+    if (g_sync_changed || g_state.source != g_view_source)
+        view_rebuild();
+    g_sync_changed = 0;
     if (g_state.page * view_pagesize() >= view_total())
         g_state.page = 0;
 
@@ -702,7 +763,7 @@ sync_round_done(BsJob *job)
     if (!g_state.sync_state || arg->gen != g_sync_gen) {
         SyncRoundResult *r = job->result;
         if (r != NULL) {
-            free(r->resp);
+            cJSON_Delete(r->root);
             free(r);
         }
         free(arg);
@@ -710,23 +771,24 @@ sync_round_done(BsJob *job)
     }
     SyncRoundResult *r = job->result;
     int   rc = (r != NULL) ? r->rc : job->rc;
-    char *resp = (r != NULL) ? r->resp : NULL;
     int   rlen = (r != NULL) ? r->rlen : 0;
 
-    if (rc != 0 || resp == NULL) {
-        LOG("[bookshelf] do_sync FAILED: url=%s body=%p\n",
-            g_state.url_delta, (void *)resp);
+    /* Transport failure.  rc != 0 is exactly the old "rc != 0 ||
+     * resp == NULL": http_post_timeout_status returns -1 whenever it
+     * produced no body (see bs_net.c), and the worker frees the raw
+     * body after parsing, so only rc reaches the main thread. */
+    if (rc != 0) {
+        LOG("[bookshelf] do_sync FAILED: url=%s rc=%d\n",
+            g_state.url_delta, rc);
         g_state.sync_state = 2;
         sync_ui_active(0);
-        if (resp)
-            free(resp);
         free(r);
         free(job->arg);
         sync_ui_popup_fail();
         return;
     }
-    LOG("[bookshelf] do_sync: body=%p retsize=%d cursor=%lld\n",
-        (void *)resp, rlen, g_sync_cursor);
+    LOG("[bookshelf] do_sync: retsize=%d cursor=%lld\n", rlen,
+        g_sync_cursor);
 
     long long next = g_sync_cursor;
     int       more = 0;
@@ -738,11 +800,15 @@ sync_round_done(BsJob *job)
          * response — abort the chain visibly, cursor un-advanced. */
         LOG("[bookshelf] sync: HTTP status %d with body; error response\n",
             r->http_status);
+        cJSON_Delete(r->root);
+        outcome = SYNC_ROUND_BAD_RESP;
+    } else if (r == NULL || !r->parse_ok) {
+        /* Bad JSON or a malformed delta, diagnosed on the worker. */
+        cJSON_Delete(r->root);
         outcome = SYNC_ROUND_BAD_RESP;
     } else {
-        outcome = sync_apply_round(resp, g_sync_cursor, &next, &more);
+        outcome = sync_apply_round(r->root, g_sync_cursor, &next, &more);
     }
-    free(resp);
     free(r);
     free(job->arg);
     if (outcome != SYNC_ROUND_OK) {

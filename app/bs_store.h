@@ -49,7 +49,7 @@ int store_count_undownloaded(void);
 
 int store_next_undownloaded(char ids[][MAX_ID_LEN], int cap);
 
-int store_next_ids(char ids[][MAX_ID_LEN], int cap, int offset);
+int store_next_ids(char ids[][MAX_ID_LEN], int cap, long long *after_rowid);
 
 void store_delete_book_file(const char *id);
 

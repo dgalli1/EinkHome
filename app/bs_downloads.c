@@ -120,9 +120,10 @@ refresh_downloaded_flags(void)
     sweep_stale_parts();
 
     char ids[64][MAX_ID_LEN];
-    int  off = 0, got, changed = 0;
+    int  got, changed = 0;
+    long long rowid = 0;
     store_begin();
-    while ((got = store_next_ids(ids, 64, off)) > 0) {
+    while ((got = store_next_ids(ids, 64, &rowid)) > 0) {
         for (int i = 0; i < got; i++) {
             Book b;
             if (!store_get_book(ids[i], &b))
@@ -142,7 +143,6 @@ refresh_downloaded_flags(void)
                 changed++;
             }
         }
-        off += got;
         if (got < 64)
             break;
     }

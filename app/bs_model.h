@@ -25,6 +25,10 @@ extern int g_row_count;                 /* rows on the page */
 
 extern int g_view_total;                /* tiles in the view */
 
+extern int g_sync_changed;              /* view dirty flag (finish_sync) */
+
+extern int g_view_source;               /* source the view was projected for */
+
 extern int g_dl_batch_active;           /* download-all batch mode */
 
 extern int g_dl_batch_total;
@@ -76,7 +80,7 @@ int save_config_file(void);
 
 ibitmap *load_image_scaled(const char *path);
 
-int parse_book_obj(const cJSON *obj, Book *b);
+int parse_book_obj(const cJSON *obj, Book *b, int probe_fs);
 
 void do_sync(void);
 

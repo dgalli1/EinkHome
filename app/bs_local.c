@@ -318,6 +318,9 @@ local_apply_slice(BsJob *job)
         store_upsert_book(&b);
     }
     store_commit();
+    /* Rows were applied (every slice writes at least one book): the
+     * finish path must rebuild the view. */
+    g_sync_changed = 1;
     a->offset = end;
     /* Live progress for the sync popup: repaint the counter once per
      * applied slice — a full repaint per book would dominate the
