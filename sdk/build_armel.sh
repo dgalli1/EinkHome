@@ -40,12 +40,16 @@ SDK="${REPO_ROOT}/sdk/pocketbook-sdk-b288"
 FIRMWARE="${PBEMU_FIRMWARE_DIR:-${REPO_ROOT}/U633_6.8.2817}"
 SYSROOT="${FIRMWARE}/rootfs"
 
+# The firmware's zlib soname varies across builds (1.2.11 vs 1.3.1);
+# resolve the versioned file instead of pinning one name.
+LIBZ_HOST=$(ls "${FIRMWARE}/ebrmain/cramfs/lib"/libz.so.1.* 2>/dev/null | head -n 1 || true)
+
 # Sanity checks up front so the failure mode is clear instead of buried in
 # the gcc error stream.
 for path in \
 	"${SDK}/include/inkview.h" \
 	"${SYSROOT}/lib/libc.so.6" \
-	"${FIRMWARE}/ebrmain/cramfs/lib/libz.so.1.2.11"; do
+	"${LIBZ_HOST}"; do
 	if [ ! -e "${path}" ]; then
 		echo "ERROR: required path missing: ${path}" >&2
 		echo "  Did you run './pbemu install' and 'sdk/install-sdk.sh'?" >&2
@@ -165,7 +169,7 @@ case "${OUT_REL}" in
 esac
 CONTAINER_SDK_INC="/work/sdk/pocketbook-sdk-b288/include"
 CONTAINER_SDK_LIB="/work/sdk/pocketbook-sdk-b288/lib"
-CONTAINER_FW_LIBZ="/work/U633_6.8.2817/ebrmain/cramfs/lib/libz.so.1.2.11"
+CONTAINER_FW_LIBZ="/work/U633_6.8.2817/ebrmain/cramfs/lib/$(basename "${LIBZ_HOST}")"
 CONTAINER_FW_LIBC="/work/U633_6.8.2817/rootfs/lib/libc.so.6"
 CONTAINER_FW_LM="/work/U633_6.8.2817/rootfs/lib/libm.so.6"
 CONTAINER_FW_SQLITE="/work/U633_6.8.2817/ebrmain/lib/libsqlite3.so.0.8.6"

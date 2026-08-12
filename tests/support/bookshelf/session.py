@@ -7,6 +7,7 @@ bookshelf log parsing.
 
 from __future__ import annotations
 
+import sys
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -23,6 +24,7 @@ from tests.support.ui_input import (
     type_text,
 )
 from tests.support.bookshelf.geometry import MORE_APPS, MORE_DOWNLOAD_ALL, MORE_SETTINGS
+from tests.support.bookshelf.snapshots import SnapshotRecorder
 
 if TYPE_CHECKING:
     from tests.support.bookshelf.geometry import BookshelfGeometry
@@ -89,6 +91,50 @@ class BookshelfSession:
         self._s = session
         self._g = geom
         self._firmware = firmware
+        # Screenshots land under <repo>/build/screenshots/<test>/.
+        self._snapshots = SnapshotRecorder(REPO_ROOT.parent / "build" / "screenshots")
+
+    # -- snapshot recording ----------------------------------------------
+
+    def begin_snapshots(self, test_name: str) -> None:
+        """Start a fresh screenshot sequence for one test."""
+        self._snapshots.begin(test_name)
+
+    def finish_snapshots(self) -> None:
+        """Write the per-test screenshot index."""
+        self._snapshots.write_index()
+
+    def snapshot(self, label: str) -> Path | None:
+        """Capture the current framebuffer as a PNG (best-effort)."""
+        rec = self._snapshots
+        if not rec.active:
+            return None
+        name = rec.peek_name(label)
+        guest = f"/workspace/firmware/.live/tmp/{name}.ppm"
+        try:
+            self.emulator.run_probe("frame_dump", "--ppm", guest, check=False)
+        except Exception:  # noqa: BLE001
+            pass
+        ppm = REPO_ROOT / self._firmware / ".live" / "tmp" / f"{name}.ppm"
+        return rec.finish_capture(name, label, ppm)
+
+    def _caller_label(self, default: str) -> str:
+        """Name of the outermost BookshelfSession method that invoked us.
+
+        Lets every tap helper label its own screenshots without each
+        helper passing a name (chained helpers resolve to the outermost,
+        e.g. ``tap_pager_next_and_verify``); direct test calls fall
+        back to *default*.
+        """
+        name: str | None = None
+        frame = sys._getframe(2)
+        while frame is not None:
+            caller_self = frame.f_locals.get("self")
+            if not isinstance(caller_self, BookshelfSession):
+                break
+            name = frame.f_code.co_name
+            frame = frame.f_back
+        return name or default
 
     @property
     def session(self) -> Session:
@@ -117,6 +163,10 @@ class BookshelfSession:
     def tap_at(self, x: int, y: int) -> None:
         """Send a tap at framebuffer coordinates (x, y)."""
         tap(self.emulator, x, y)
+        # Let the guest draw the result before the screenshot; the
+        # capture itself is best-effort.
+        time.sleep(0.3)
+        self.snapshot(self._caller_label("tap"))
 
     def tap_home(self) -> None:
         """Tap the Home button (top-left)."""
@@ -165,6 +215,8 @@ class BookshelfSession:
         pointer_down(self.emulator, x, y)
         time.sleep(hold)
         pointer_up(self.emulator, x, y)
+        time.sleep(0.3)
+        self.snapshot(self._caller_label("long_press"))
 
     def long_press_book(self, index: int, *, hold: float = 0.9) -> None:
         """Long-press book tile at grid *index* to open its context menu."""
@@ -199,6 +251,8 @@ class BookshelfSession:
     def send_back_key(self) -> None:
         """Send the Back key event."""
         press_key(self.emulator, IV_KEY_BACK)
+        time.sleep(0.3)
+        self.snapshot("back_key")
 
     def type_text(self, text: str, *, commit: bool = True) -> None:
         """Type *text* into the open on-screen keyboard, then commit.
@@ -218,6 +272,9 @@ class BookshelfSession:
             # string rather than a prefix.
             time.sleep(0.3)
             self.tap_at(*self._g.keyboard_return_center())
+        else:
+            time.sleep(0.3)
+            self.snapshot(f"typed_{text}")
 
     # -- settings helpers -------------------------------------------------
 
@@ -261,6 +318,8 @@ class BookshelfSession:
         for step in range(1, 6):
             pointer_move(self.emulator, cx, cy - step * 40)
         pointer_up(self.emulator, cx, cy - 200)
+        time.sleep(0.3)
+        self.snapshot("launcher_scroll")
 
     # -- tap + verify helpers ---------------------------------------------
 
@@ -366,6 +425,7 @@ class BookshelfSession:
         while time.monotonic() < deadline:
             if self.invocation_count() > before:
                 if ready_marker in latest_invocation_log(self._firmware):
+                    self.snapshot("respawned")
                     return self.invocation_count()
             time.sleep(0.3)
         raise TimeoutError(
@@ -410,5 +470,6 @@ class BookshelfSession:
                 h = new_h
                 stable_since = time.monotonic()
             elif time.monotonic() - stable_since >= 1.0:
+                self.snapshot("stable")
                 return h
         return h

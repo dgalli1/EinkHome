@@ -16,6 +16,10 @@
 # task is selected by that exact name (see README.md).
 
 PBEMU_DIR := $(abspath $(CURDIR)/pbemu)
+# Firmware rootfs the app links against.  Override on the command line
+# or via the environment to build against another staged firmware
+# (e.g. `make PBEMU_FIRMWARE_DIR=$(PWD)/pbemu/U634k3_6.10.2544`).
+PBEMU_FIRMWARE_DIR ?= $(PBEMU_DIR)/U633_6.8.2817
 BUILD_ARMEL := $(CURDIR)/sdk/build_armel.sh
 OUT := $(CURDIR)/build/bookshelf.app
 
@@ -54,7 +58,7 @@ test:
 
 $(OUT): $(SRC_PATHS) $(wildcard $(CURDIR)/app/*.h) $(BUILD_ARMEL)
 	mkdir -p $(CURDIR)/build
-	PBEMU_FIRMWARE_DIR="$(PBEMU_DIR)/U633_6.8.2817" \
+	PBEMU_FIRMWARE_DIR="$(PBEMU_FIRMWARE_DIR)" \
 	PBEMU_APP_INCLUDE_DIR=/work/app \
 	$(BUILD_ARMEL) $(SRC_PATHS) --output build/bookshelf.app
 

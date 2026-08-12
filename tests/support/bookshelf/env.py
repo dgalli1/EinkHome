@@ -36,7 +36,12 @@ from tests.support.runtime_common import REPO_ROOT
 EINKHOME_ROOT = Path(__file__).resolve().parents[3]
 PBEMU_ROOT = REPO_ROOT
 
-FIRMWARE = "U633_6.8.2817"
+# Staged firmware directory the suite boots (pbemu/<name>).  Override via
+# PB_TEST_FIRMWARE — the same env var pbemu's own harness honours — so CI
+# can run against a firmware other than the dev default.
+FIRMWARE = os.environ.get("PB_TEST_FIRMWARE") or "U633_6.8.2817"
+# Container runtime CLI.  Set PODMAN=docker to run the suite on docker.
+PODMAN = os.environ.get("PODMAN") or "podman"
 API_PORT = 18765
 API_TOKEN = "pbemu-dev-token"
 CONTAINER = "pb-pocketbook-ui"
@@ -234,7 +239,7 @@ def _stage_binary(binary: Path) -> None:
     if container_running():
         # 1. Copy binary from host into container /tmp
         subprocess.run(
-            ["podman", "cp", str(binary), f"{CONTAINER}:/tmp/bookshelf.app.new"],
+            [PODMAN, "cp", str(binary), f"{CONTAINER}:/tmp/bookshelf.app.new"],
             check=True,
             capture_output=True,
             timeout=10,
@@ -254,7 +259,7 @@ def _stage_binary(binary: Path) -> None:
         # 3. Copy config into container
         subprocess.run(
             [
-                "podman",
+                PODMAN,
                 "cp",
                 str(bin_dir / "bookshelf.cfg"),
                 f"{CONTAINER}:/mnt/ext1/system/bin/bookshelf.cfg",
@@ -266,7 +271,32 @@ def _stage_binary(binary: Path) -> None:
 
 
 def _start_emulator() -> Emulator:
-    """Stop any existing emulator and start a fresh one with --network=host."""
+    """Stop any existing emulator and start a fresh one with --network=host.
+
+    The guest boot is racy on hosted runners — the monitor can crash or
+    hang at a random init step (observed: shmget EINVAL on hosts with a
+    low kernel.shmmax, and hangs right after the safebox setup).  Each
+    attempt is a full stop/start cycle; give up only after several
+    tries so a flaky boot does not fail the whole suite.
+    """
+    last_exc: Exception | None = None
+    for _attempt in range(5):
+        try:
+            return _start_emulator_once()
+        except Exception as exc:  # noqa: BLE001
+            last_exc = exc
+            subprocess.run(
+                [sys.executable, "-m", "pbemu", "stop"],
+                cwd=REPO_ROOT,
+                env=_pbemu_env(),
+                check=False,
+            )
+            time.sleep(2.0)
+    raise RuntimeError(f"emulator did not boot after 5 attempts: {last_exc}")
+
+
+def _start_emulator_once() -> Emulator:
+    """One emulator start attempt: stop, start, wait for monitor+hwevent."""
     # Stop existing
     subprocess.run(
         [sys.executable, "-m", "pbemu", "stop"],
@@ -282,6 +312,13 @@ def _start_emulator() -> Emulator:
     env = _pbemu_env()
     env["PBEMU_NO_KEEPID"] = "1"
     env["PBEMU_PODMAN_ARGS"] = "--network=host"
+    # Hosted runners may lack /sys/class entries the emulator binds
+    # (e.g. leds on cloud kernels), which crun cannot create inside the
+    # read-only sysfs of a rootless container.  An in-container tmpfs
+    # over /sys gives crun writable mount targets.  Off by default so
+    # dev machines keep the real sysfs; CI sets PBEMU_SYS_TMPFS=1.
+    if os.environ.get("PBEMU_SYS_TMPFS") == "1":
+        env["PBEMU_PODMAN_ARGS"] += " --tmpfs /sys:rw,nodev,nosuid,mode=755,size=2m"
     env["SHIM_PBEMU_COLOR_FB"] = "1"
     subprocess.run(
         [
@@ -383,5 +420,7 @@ def _restart_bookshelf(emulator: Emulator, timeout: float = 30.0) -> None:
     _kill_guest_tasks()
     _wait_fresh_bookshelf(before, timeout=timeout)
     # Ensure the informer routes taps to the respawned foreground task.
-    _wait_bookshelf_active(emulator, timeout=10.0)
+    # Hosted runners can take a while for the informer to re-register
+    # the fresh task, so allow as long as the respawn wait itself.
+    _wait_bookshelf_active(emulator, timeout=timeout)
     time.sleep(1.0)

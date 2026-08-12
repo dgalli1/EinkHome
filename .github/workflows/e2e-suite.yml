@@ -1,0 +1,128 @@
+name: e2e-suite
+
+# Reusable e2e runner: full environment setup + one test suite.
+# Called by ci.yml twice per suite — the primary run and, only when it
+# fails, a retry that lands on a fresh runner (hosted-runner kernels
+# are intermittently unstable for the qemu guest: monitor shmget
+# crashes, boot hangs, informer deaths — a fresh VM usually recovers).
+
+on:
+  workflow_call:
+    inputs:
+      suite:
+        required: true
+        type: string
+        description: "bookshelf | scale"
+
+env:
+  FIRMWARE_URL: https://download.pocketbook-int.com/fw/Yitoa/634k3/user/20251201/sw_20251201_U634k3_6.10.2544_user.zip
+  FIRMWARE_ZIP: sw_20251201_U634k3_6.10.2544_user.zip
+  FIRMWARE_NAME: U634k3_6.10.2544
+
+jobs:
+  e2e:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: true
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install podman
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends podman catatonit slirp4netns fuse-overlayfs uidmap
+      - name: Set up pbemu venv
+        run: cd pbemu && ./setup-venv.sh
+      - name: Install PocketBook SDK
+        run: ./sdk/install-sdk.sh
+      - name: Build pbdev image
+        run: cd pbemu && .venv/bin/python -m pbemu image
+      - name: Download firmware
+        run: curl -fL --retry 3 --retry-delay 5 -o "${{ env.FIRMWARE_ZIP }}" "${{ env.FIRMWARE_URL }}"
+      - name: Stage firmware
+        run: |
+          cd pbemu
+          .venv/bin/python -m pbemu install "../${{ env.FIRMWARE_ZIP }}"
+          rm -f "../${{ env.FIRMWARE_ZIP }}"
+      - name: Build emulator artifacts
+        run: cd pbemu && .venv/bin/python -m pbemu build "${{ env.FIRMWARE_NAME }}"
+      - name: Raise SysV shm limits for the emulator
+        run: |
+          # The guest's framebuffer shared-memory segment is ~6MB;
+          # hosted-runner kernels vary in kernel.shmmax (some below
+          # that), which makes the monitor's shmget fail intermittently
+          # ("cannot get shared memory segment").  The container's IPC
+          # namespace copies the limit at creation, so raise it first.
+          sudo sysctl -w kernel.shmmax=67108864 kernel.shmall=16777216
+      - name: Boot emulator once (create live tree)
+        run: |
+          cd pbemu
+          # Same env the suite's own emulator start uses (env.py):
+          # keep-id needs host subuid mappings that hosted runners may
+          # lack, so the emulator runs with keep-id disabled, and the
+          # tmpfs over /sys gives crun writable bind targets (cloud
+          # kernels lack /sys/class/leds).
+          if ! PBEMU_NO_KEEPID=1 PBEMU_PODMAN_ARGS="--tmpfs /sys:rw,nodev,nosuid,mode=755,size=2m" .venv/bin/python -m pbemu start "${{ env.FIRMWARE_NAME }}" --no-viewer --no-audio 2>&1; then
+            echo "--- pbemu start failed; system.log tail ---"
+            tail -100 "${{ env.FIRMWARE_NAME }}/.live/var/log/system.log" 2>/dev/null || true
+            exit 1
+          fi
+          .venv/bin/python -m pbemu stop
+      - name: Stage mock books
+        run: ./scripts/stage-mock-books.sh "pbemu/${{ env.FIRMWARE_NAME }}"
+      - name: Build bookshelf.app
+        run: make PBEMU_FIRMWARE_DIR="$PWD/pbemu/${{ env.FIRMWARE_NAME }}"
+      - name: Run suite
+        env:
+          # Mock provider serves the staged live books dir (server runs
+          # with cwd=pbemu, so the path is firmware-relative).
+          PB_TEST_FIRMWARE: ${{ env.FIRMWARE_NAME }}
+          PBEMU_MOCK_BOOKS_DIR: ${{ env.FIRMWARE_NAME }}/.live/mnt/ext1/books
+          # Hosted runners lack /sys/class entries the emulator binds.
+          PBEMU_SYS_TMPFS: "1"
+        run: |
+          if [ "${{ inputs.suite }}" = "scale" ]; then
+            # The 100k scale suite does not need the Open Library
+            # corpus: the mock provider pads a missing corpus with its
+            # deterministic synthetic layer, which the suite's
+            # tile/paging/memory assertions are written against.
+            pbemu/.venv/bin/python -m pytest tests/test_bookshelf_scale.py -q
+          else
+            pbemu/.venv/bin/python -m pytest tests/test_bookshelf.py -q
+          fi
+      - name: Generate HTML report
+        # Playwright-style report (see docs/playwright-report-spec.md):
+        # per-action screenshots + steps + errors, rendered from
+        # build/report/results.json.  Best-effort: a generator failure
+        # must not fail the job that already ran the tests.
+        if: always()
+        run: |
+          pbemu/.venv/bin/python scripts/gen_report.py --firmware-dir "pbemu/${{ env.FIRMWARE_NAME }}" || true
+      - name: Upload HTML report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: e2e-${{ inputs.suite }}-report
+          path: build/report/
+          if-no-files-found: ignore
+          retention-days: 14
+      - name: Upload logs and screenshots
+        # Upload on every run (success included) so any run can be
+        # inspected: firmware-side logs, the API server log and the
+        # per-action framebuffer screenshots.
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: e2e-${{ inputs.suite }}-logs
+          path: |
+            pbemu/${{ env.FIRMWARE_NAME }}/.live/var/log/*.log*
+            pbemu/${{ env.FIRMWARE_NAME }}/.live/tmp/core*
+            pbemu/${{ env.FIRMWARE_NAME }}/.live/tmp/bookshelf.log
+            pbemu/${{ env.FIRMWARE_NAME }}/.live/mnt/ext1/system/bin/bookshelf.log
+            pbemu/${{ env.FIRMWARE_NAME }}/.live/mnt/ext1/Downloads/
+            build/
+          if-no-files-found: ignore
+          retention-days: 14

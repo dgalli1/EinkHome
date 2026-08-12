@@ -130,6 +130,12 @@ resolve_downloads_dir(void)
      * the /tmp fallback. */
     if (access(wanted, W_OK) != 0)
         mkdir(wanted, 0777);
+    /* mkdir's mode is masked by the process umask (0755 with the usual
+     * 022), which would leave the folder unwritable for other users.
+     * The downloads folder is meant to be world-writable — the emulator
+     * harness also cleans it from the host as a different uid — so
+     * force the intended mode explicitly. */
+    chmod(wanted, 0777);
     if (access(wanted, W_OK) == 0) {
         /* Bounded: book paths are <dir>/<id>.<ext> and must fit
          * MAX_PATH_LEN, so the folder is capped well under it.  A

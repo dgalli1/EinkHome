@@ -1,0 +1,66 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+# The e2e suites boot the PocketBook firmware in an emulator container,
+# so the firmware update zip is downloaded fresh on every run (we have
+# no rights to redistribute it) and staged via the pbemu submodule's
+# install.  Hosted-runner kernels are intermittently unstable for the
+# qemu guest, so each suite has a retry job that re-runs it on a fresh
+# runner when the primary run fails.
+jobs:
+  api-tests:
+    name: API unit tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: true
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Set up pbemu venv
+        run: cd pbemu && ./setup-venv.sh
+      - name: Run api unit tests
+        run: pbemu/.venv/bin/python -m pytest api/tests -q
+
+  e2e:
+    name: E2E (bookshelf suite)
+    uses: ./.github/workflows/e2e-suite.yml
+    with:
+      suite: bookshelf
+
+  e2e-scale:
+    name: E2E (100k scale suite)
+    uses: ./.github/workflows/e2e-suite.yml
+    with:
+      suite: scale
+
+
+  e2e-retry:
+    name: E2E (bookshelf suite, retry)
+    needs: e2e
+    if: failure()
+    uses: ./.github/workflows/e2e-suite.yml
+    with:
+      suite: bookshelf
+
+  e2e-scale-retry:
+    name: E2E (100k scale suite, retry)
+    needs: e2e-scale
+    if: failure()
+    uses: ./.github/workflows/e2e-suite.yml
+    with:
+      suite: scale

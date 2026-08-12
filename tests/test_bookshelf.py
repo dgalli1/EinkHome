@@ -39,6 +39,7 @@ from tests.support.bookshelf.env import (
     EINKHOME_ROOT,
     FIRMWARE,
     PBEMU_ROOT,
+    PODMAN,
     _OFFLINE_CFG,
     _OFFLINE_COVERS,
     _OFFLINE_DIR,
@@ -71,8 +72,8 @@ pytestmark = pytest.mark.bookshelf
 @pytest.fixture(scope="module")
 def bookshelf_env():
     """Full bookshelf e2e environment: API server + staged binary + emulator."""
-    if shutil.which("podman") is None:
-        pytest.skip("podman not available")
+    if shutil.which(PODMAN) is None:
+        pytest.skip(f"{PODMAN} not available")
 
     # Start from a clean guest store + cover cache.  The scale suite
     # leaves a ~100k-book synthetic store behind, which puts the app's
@@ -197,11 +198,21 @@ def bookshelf_env():
 
 
 @pytest.fixture(autouse=True)
-def fresh_bookshelf(bookshelf_env):
+def fresh_bookshelf(bookshelf_env, request):
     """Restart bookshelf before each test for a clean state."""
     bs, emulator = bookshelf_env
+    # Invocation ordinal range of this test in the accumulated
+    # bookshelf log: the per-test log slicer cuts exactly here (the
+    # restart below opens the test's own invocation).
+    request.node._bs_log_open_start = bs.invocation_count()  # type: ignore[attr-defined]
+    bs.begin_snapshots(request.node.name)
     _restart_bookshelf(emulator)
+    bs.snapshot("boot")
     yield bs
+    request.node._bs_log_open_end = bs.invocation_count()  # type: ignore[attr-defined]
+    report = getattr(request.node, "_bs_call_report", None)
+    bs.snapshot("FAILED" if report is not None and report.failed else "teardown")
+    bs.finish_snapshots()
     bs.assert_no_crash()
 
 
@@ -964,11 +975,28 @@ def _downloaded_files() -> list[Path]:
 
 
 def _clear_downloads() -> None:
-    for p in _downloaded_files():
-        try:
-            p.unlink()
-        except OSError:
-            pass
+    """Remove downloaded book files so the next test starts clean.
+
+    The guest may still be draining a batch when a test ends, so a file
+    can reappear right after the first unlink; retry a few times and
+    fail loudly (instead of the old silent OSError swallow) when files
+    persist — a leftover file makes the app treat a book as downloaded
+    and the download tests fail confusingly downstream.
+    """
+    for _attempt in range(5):
+        leftovers = []
+        for p in _downloaded_files():
+            try:
+                p.unlink()
+            except OSError as exc:
+                leftovers.append(f"{p.name}: {exc}")
+        if not leftovers and not _downloaded_files():
+            return
+        time.sleep(0.5)
+    still = [p.name for p in _downloaded_files()]
+    raise AssertionError(
+        f"downloads dir not clear after retries: {leftovers or still}"
+    )
 
 
 def _wait_log_count(bs: BookshelfSession, needle: str, count: int, *, timeout: float = 20.0) -> None:

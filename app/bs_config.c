@@ -9,6 +9,18 @@
 FILE       *g_log = NULL;
 static char g_log_path[300];
 
+/* Wall-clock prefix for every log line: `[HH:MM:SS] ` (local time). */
+static void
+stamp(FILE *f)
+{
+    time_t     t = time(NULL);
+    struct tm *ltm = localtime(&t);
+
+    if (ltm != NULL)
+        fprintf(f, "[%02d:%02d:%02d] ",
+                ltm->tm_hour, ltm->tm_min, ltm->tm_sec);
+}
+
 const char *
 log_path(void)
 {
@@ -44,6 +56,7 @@ log_open(const char *argv0)
     snprintf(g_log_path, sizeof g_log_path, "%s", path);
     if (g_log != NULL) {
         setvbuf(g_log, NULL, _IOLBF, 0);
+        stamp(g_log);
         fprintf(g_log, "--- bookshelf.app log opened (argv0=%s) ---\n", argv0 ? argv0 : "(null)");
     }
 }
@@ -62,10 +75,12 @@ LOG(const char *fmt, ...)
 {
     va_list ap;
     va_start(ap, fmt);
+    stamp(stderr);
     vfprintf(stderr, fmt, ap);
     va_end(ap);
     if (g_log != NULL) {
         va_start(ap, fmt);
+        stamp(g_log);
         vfprintf(g_log, fmt, ap);
         va_end(ap);
     }

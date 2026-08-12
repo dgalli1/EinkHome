@@ -12,9 +12,11 @@ last of several thousand pages.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -28,6 +30,7 @@ from tests.support.bookshelf.env import (
     EINKHOME_ROOT,
     FIRMWARE,
     PBEMU_ROOT,
+    PODMAN,
     _OFFLINE_DIR,
     _OFFLINE_STORE,
     _build_bookshelf,
@@ -102,10 +105,34 @@ def _start_scale_api() -> subprocess.Popen:  # type: ignore[type-arg]
                 f"http://127.0.0.1:{SCALE_PORT}/api/v1/healthz",
                 headers={"Authorization": f"Bearer {API_TOKEN}"},
             )
-            urllib.request.urlopen(req, timeout=2)
-            return proc
+            with urllib.request.urlopen(req, timeout=2) as resp:
+                body = json.loads(resp.read().decode("utf-8"))
         except Exception:  # noqa: BLE001
             time.sleep(0.3)
+            continue
+        # Same stale-listener guard as the main e2e fixture: a server
+        # left over from an interrupted run may still answer on the
+        # scale port while our fresh process never bound it.  Kill the
+        # stale one and fail loudly instead of testing dead code.
+        if body.get("pid") != proc.pid:
+            stale_pid = body.get("pid")
+            if isinstance(stale_pid, int) and stale_pid > 0:
+                try:
+                    os.kill(stale_pid, signal.SIGTERM)
+                    time.sleep(0.3)
+                    os.kill(stale_pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                except PermissionError:
+                    pass
+            proc.kill()
+            raise RuntimeError(
+                f"stale scale API server (pid {stale_pid}) answered on port "
+                f"{SCALE_PORT} instead of the freshly spawned server "
+                f"(pid {proc.pid}); killed the stale listener. Log:\n"
+                f"{log_path.read_text()}"
+            )
+        return proc
     proc.kill()
     raise RuntimeError(
         f"scale API server did not start within 15s. Log:\n{log_path.read_text()}"
@@ -125,7 +152,7 @@ def _stage_scale() -> None:
     if container_running():
         subprocess.run(
             [
-                "podman",
+                PODMAN,
                 "cp",
                 str(bin_dir / "bookshelf.cfg"),
                 f"{CONTAINER}:/mnt/ext1/system/bin/bookshelf.cfg",
@@ -177,10 +204,10 @@ def _pager_roundtrip(bs: BookshelfSession, view: int) -> None:
 
 
 @pytest.fixture(scope="module")
-def scale_env():
+def scale_env(request):
     """API (100k mock) + staged binary + emulator, store wiped."""
-    if shutil.which("podman") is None:
-        pytest.skip("podman not available")
+    if shutil.which(PODMAN) is None:
+        pytest.skip(f"{PODMAN} not available")
 
     # Snapshot the dev cfgs before staging rewrites them to the scale
     # port, so teardown can restore the state the main e2e fixture
@@ -207,8 +234,17 @@ def scale_env():
         panel_h=_parse_panel_h(FIRMWARE),
     )
     bs = BookshelfSession(Session(emulator), geom, FIRMWARE)
+    request.node._bs_log_open_start = bs.invocation_count()  # type: ignore[attr-defined]
+    bs.begin_snapshots(request.node.name)
+    bs.snapshot("boot")
 
     yield bs, emulator, api
+
+    request.node._bs_log_open_end = bs.invocation_count()  # type: ignore[attr-defined]
+
+    report = getattr(request.node, "_bs_call_report", None)
+    bs.snapshot("FAILED" if report is not None and report.failed else "teardown")
+    bs.finish_snapshots()
 
     # Restore the dev cfgs first (the running guest holds the stale
     # scale-port URL in memory; stopping the emulator before restoring
