@@ -67,6 +67,7 @@ from typing import Any  # noqa: E402
 from urllib.parse import parse_qs, unquote  # noqa: E402
 
 from providers.base import BookMeta  # noqa: E402
+from providers.kavita import CoverTransportError  # noqa: E402
 from storage.cover_cache import CoverCache  # noqa: E402
 from storage.ledger import SyncLedger  # noqa: E402
 from storage.placeholder import PLACEHOLDER_PNG  # noqa: E402
@@ -694,13 +695,23 @@ class PbemuAPIServer(http.server.BaseHTTPRequestHandler):
         limit = max(1, min(limit, 2000))
         max_age = getattr(self.app, "ledger_max_age", 30.0)
         started = False
+        # Only the FIRST sync waits for the initial walk: an empty
+        # ledger would otherwise hand the device an empty delta.  Once
+        # the ledger holds rows, serve the WAL-snapshot delta
+        # immediately instead of parking request threads behind an
+        # in-flight refresh.
+        ledger_empty = ledger.count() == 0
         try:
             started = ledger.refresh_async(self.app.provider, max_age_s=max_age)
         except Exception as exc:  # noqa: BLE001 — provider may be down
             sys.stderr.write(f"sync/delta: ledger refresh failed: {exc}\n")
-        # The walk runs on a background thread; the first sync waits for
-        # the initial walk so the device never sees an empty delta.
-        if started or ledger.walk_in_progress():
+        # Wait for a background walk only when THIS request just started
+        # it (the delta must reflect the refresh it triggered, e.g. a
+        # newly added book) or when the ledger is still empty (avoid
+        # handing the device an empty first delta).  A walk in progress
+        # from a prior request on a non-empty ledger is served from the
+        # committed WAL snapshot without parking this thread.
+        if started or (ledger_empty and ledger.walk_in_progress()):
             ev = ledger.walk_done_event()
             if ev is not None:
                 ev.wait(timeout=30.0)
@@ -864,9 +875,11 @@ class _AppState:
     ledger: SyncLedger | None
     ledger_max_age: float
     suggestions_enabled: bool = True
-    inflight: dict[str, threading.Event] = field(default_factory=dict)
-    """Per-book-id cover-processing events: serialises concurrent cold
+    inflight: dict[str, _CoverSlot] = field(default_factory=dict)
+    """Per-book-id cover-processing slots: serialises concurrent cold
     cover fetches so only one thread downloads/decodes per book."""
+    inflight_lock: threading.Lock = field(default_factory=threading.Lock)
+    """Guards ``inflight`` — the slot map and the single-flight claim."""
 
 
 def build_default_app(
@@ -942,6 +955,50 @@ class _ThreadingHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
     daemon_threads = True
     allow_reuse_address = True
 
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        # In-flight request threads, tracked so a graceful shutdown can
+        # drain them with a bound.  ThreadingMixIn._threads drops
+        # daemon threads (ours all are), so we track them ourselves.
+        self._request_threads: set[threading.Thread] = set()
+        self._request_threads_lock = threading.Lock()
+
+    def process_request(self, request: Any, client_address: Any) -> None:
+        """Spawn the per-request thread exactly as ThreadingMixIn does,
+        but also record it so :meth:`drain_requests` can join it."""
+        if self.block_on_close:
+            vars(self).setdefault("_threads", socketserver._Threads())
+        t = threading.Thread(
+            target=self.process_request_thread,
+            args=(request, client_address),
+        )
+        t.daemon = self.daemon_threads
+        self._threads.append(t)
+        with self._request_threads_lock:
+            self._request_threads.add(t)
+        t.start()
+
+    def drain_requests(self, timeout: float) -> None:
+        """Join in-flight request threads with a bounded timeout.
+
+        Returns after ``timeout`` seconds even if some requests are
+        still running (they are daemonic and will be reaped when the
+        process exits).  Idempotent: already-finished threads are
+        dropped from the tracking set.
+        """
+        deadline = time.monotonic() + timeout
+        with self._request_threads_lock:
+            threads = list(self._request_threads)
+        for t in threads:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            t.join(timeout=remaining)
+        with self._request_threads_lock:
+            self._request_threads = {
+                t for t in self._request_threads if t.is_alive()
+            }
+
 
 def _apply_runtime_overrides(cfg: dict[str, Any], args: Any) -> dict[str, Any]:
     """Layer CLI flag and env-var overrides on top of the loaded config.
@@ -1008,41 +1065,85 @@ def _coerce_env_value(raw: str) -> Any:
         return raw
 
 
+class _CoverSlot:
+    """Per-book single-flight holder for cover processing.
+
+    Two threads racing a cold cover both miss the cache and both find
+    (or create) a slot; ``claimed`` flips True exactly once under
+    ``app.inflight_lock``, electing the single thread that downloads
+    and decodes.  Everyone else waits on ``event`` (bounded) and then
+    re-reads the cache — they never re-enter as owners, so only one
+    thread per book ever touches the provider or Pillow.
+    """
+
+    __slots__ = ("event", "claimed")
+
+    def __init__(self) -> None:
+        self.event = threading.Event()
+        self.claimed = False
+
+
 def _cover_png(app: Any, book_id: str) -> bytes | None:
     """Fetch + process one cover, returning the cached PNG bytes.
 
     Single-flights per book id via ``app.inflight`` so concurrent cold
     fetches (request path and warm-up workers alike) share one
-    download/decode: the first thread registers an event, the rest wait
-    (bounded) and then serve from cache.  Returns None when the cover is
-    unavailable — provider miss or undecodable bytes — and negative-
-    caches the id so callers can skip repeat provider round-trips for a
-    while.  A provider's literal placeholder bytes are returned as-is
-    (served, not stored, not negative-cached).
+    download/decode: under ``app.inflight_lock`` the first thread to
+    (create and) claim a slot wins, the rest wait (bounded) on the
+    slot's event and then serve from cache.  A waiter that times out
+    returns whatever the cache holds — it never re-enters as owner.
+    Returns None when the cover is confirmed-absent (provider miss or
+    undecodable bytes) and negative-caches the id so callers can skip
+    repeat provider round-trips for a while; a transport error (provider
+    raised or returned a transport-error signal) is NOT negative-cached
+    so a transient blip doesn't placeholder a book for an hour.  A
+    provider's literal placeholder bytes are returned as-is (served, not
+    stored, not negative-cached).
     """
     cache = app.cover_cache
     png = cache.read_png(book_id)
     if png is not None:
         return png
     inflight = app.inflight
-    ev = inflight.get(book_id)
-    if ev is not None:
-        ev.wait(timeout=20.0)
-        png = cache.read_png(book_id)
-    if png is None:
-        # Owner of the slot, or the waiter timed out — process
-        # anyway (never deadlock on a slow owner).
-        ev = inflight.setdefault(book_id, threading.Event())
+    lock = app.inflight_lock
+    with lock:
+        slot = inflight.get(book_id)
+        if slot is None:
+            slot = _CoverSlot()
+            inflight[book_id] = slot
+        if not slot.claimed:
+            slot.claimed = True
+            owner = True
+        else:
+            owner = False
+    if not owner:
+        # Someone else owns the slot; wait bounded, then re-read the
+        # cache.  Never re-enter as owner on timeout.
+        slot.event.wait(timeout=20.0)
+        return cache.read_png(book_id)
+    # Owner of the slot: download + decode exactly once, then release.
+    try:
         try:
             raw = app.provider.get_cover(book_id)
-            if raw:
-                png = cache.process_and_store(book_id, raw)
-            if png is None:
-                cache.mark_missing(book_id)
-        finally:
+        except CoverTransportError:
+            # Provider transport error (URLError / timeout / 5xx) — do
+            # NOT negative-cache; a blip must not placeholder the book.
+            return None
+        except Exception:
+            # Any other provider failure is treated as a transport
+            # error too: never negative-cache on a transient error.
+            return None
+        if raw:
+            png = cache.process_and_store(book_id, raw)
+            return png
+        # Confirmed absence (provider returned None) — negative-cache
+        # so callers skip repeat provider round-trips for a while.
+        cache.mark_missing(book_id)
+        return None
+    finally:
+        with lock:
             inflight.pop(book_id, None)
-            ev.set()
-    return png
+        slot.event.set()
 
 
 def _warm_covers(app: Any) -> None:
@@ -1063,7 +1164,27 @@ def _warm_covers(app: Any) -> None:
     """
     cache = app.cover_cache
     provider = app.provider
+    ledger = app.ledger
     done = 0
+    # Gate on the FIRST catalogue walk completing before starting the
+    # warm-up.  The warm-up shares the provider's DTO caches, so
+    # starting after the initial sync's walk reuses its warmed cache
+    # instead of doubling the cold fetch (the first sync/delta's
+    # refresh_async and the warm-up otherwise walk the raw provider
+    # concurrently).  Bounded: if no walk is ever triggered (no device
+    # syncs), fall through after the bound and warm up anyway.
+    if ledger is not None:
+        deadline = time.monotonic() + 30.0
+        while True:
+            ev = ledger.walk_done_event()
+            if ev is not None and ev.is_set():
+                break
+            if time.monotonic() >= deadline:
+                break
+            if ev is None:
+                time.sleep(0.05)
+            else:
+                ev.wait(timeout=0.25)
     try:
         chunks = provider.walk_books(mode="all", chunk_size=500)
         first = next(chunks, None)
@@ -1154,7 +1275,21 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         pass
     finally:
+        # Graceful shutdown: stop accepting new connections, drain
+        # in-flight request threads with a bound, then close the
+        # ledger so an in-flight walk is not abandoned mid-transaction.
+        server.shutdown()
         server.server_close()
+        server.drain_requests(timeout=5.0)
+        ledger = app.ledger
+        if ledger is not None:
+            # Give an in-flight walk a bounded chance to commit before
+            # closing the DB file.
+            if ledger.walk_in_progress():
+                ev = ledger.walk_done_event()
+                if ev is not None:
+                    ev.wait(timeout=5.0)
+            ledger.close()
     return 0
 
 

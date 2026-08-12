@@ -50,6 +50,10 @@ _SYN_FMTS = ("epub", "epub", "epub", "pdf", "fb2")
 # Fixed epoch for synthetic timestamps so the whole library has a stable
 # added_at ordering (i-based) independent of the server's wall clock.
 _SYN_EPOCH = 1_700_000_000.0
+# TTL (seconds) for the cached books-dir scan used by health() and
+# list_libraries() — long enough to avoid a full os.listdir + per-file
+# os.stat on every request, short enough that dir changes surface fast.
+_SCAN_TTL = 1.5
 
 
 # The only record fields the mock provider reads (see _corpus_meta):
@@ -266,8 +270,16 @@ class MockProvider(Provider):
         # id -> corpus index, built on first random-access lookup
         # (get_book / open_file).  The delta walk never needs it.
         self._corpus_index: dict[str, int] | None = None
+        # (path, mtime-ns, size) key of the corpus file the id index was
+        # built against; an edit after first build invalidates the map so
+        # get_book / open_file never resolve stale ids -> wrong records.
+        # Mirrors _Corpus._fps_key.
+        self._corpus_index_key: tuple[str, int, int] | None = None
         # Stable in-memory book id cache
         self._id_cache: dict[str, str] = {}
+        # Short-TTL cache for _scan() (health, library counts)
+        self._scan_cache: list[dict[str, Any]] | None = None
+        self._scan_cache_ts: float = 0.0
 
     # --- helpers -----------------------------------------------------------
 
@@ -311,6 +323,23 @@ class MockProvider(Provider):
             )
         return out
 
+    def _scan_cached(self) -> list[dict[str, Any]]:
+        """self._scan() with a short TTL so per-request calls (health,
+        library counts) don't re-run a full os.listdir + per-file
+        os.stat on every hit.  The window is small enough that a
+        genuinely changed books dir is reflected within a second or
+        two."""
+        now = time.monotonic()
+        if (
+            self._scan_cache is not None
+            and now - self._scan_cache_ts < _SCAN_TTL
+        ):
+            return self._scan_cache
+        entries = self._scan()
+        self._scan_cache = entries
+        self._scan_cache_ts = now
+        return entries
+
     # --- synthetic books ----------------------------------------------------
 
     def _syn_id(self, i: int) -> str:
@@ -326,20 +355,41 @@ class MockProvider(Provider):
             return None
         return i if 0 <= i < self.synthetic_count else None
 
+    def _corpus_key(self) -> tuple[str, int, int] | None:
+        """(path, mtime-ns, size) of the corpus file, or None when it
+        cannot be stat'ted (empty path, file gone, …)."""
+        path = self.corpus._path
+        if not path:
+            return None
+        try:
+            st = os.stat(path)
+        except OSError:
+            return None
+        return (path, st.st_mtime_ns, st.st_size)
+
     def _corpus_id_index(self) -> dict[str, int]:
-        if self._corpus_index is None:
-            index = self.corpus.fps()
-            if index is not None:
-                # Build from the fingerprint index's ids (the build
-                # re-runs when the corpus file changed).
-                ids, _fps, _added_ats = index
-                self._corpus_index = {ids[i]: i for i in range(len(ids))}
-            else:
-                # Corpus file unreadable: fall back to a streaming pass
-                # (identical to the pre-cache behaviour).
-                self._corpus_index = {
-                    rec["id"]: i for i, rec in enumerate(self.corpus)
-                }
+        # Rebuild the index whenever the corpus file's (path, mtime-ns,
+        # size) key changed since the last build — the same key _Corpus
+        # uses for its fingerprint index — so an edit to the corpus file
+        # after the first get_book/open_file can't resolve stale ids to
+        # the wrong records.
+        if self._corpus_index is not None and (
+            self._corpus_key() == self._corpus_index_key
+        ):
+            return self._corpus_index
+        index = self.corpus.fps()
+        if index is not None:
+            # Build from the fingerprint index's ids (the build
+            # re-runs when the corpus file changed).
+            ids, _fps, _added_ats = index
+            self._corpus_index = {ids[i]: i for i in range(len(ids))}
+        else:
+            # Corpus file unreadable: fall back to a streaming pass
+            # (identical to the pre-cache behaviour).
+            self._corpus_index = {
+                rec["id"]: i for i, rec in enumerate(self.corpus)
+            }
+        self._corpus_index_key = self._corpus_key()
         return self._corpus_index
 
     def _corpus(self, i: int) -> BookMeta:
@@ -520,7 +570,7 @@ class MockProvider(Provider):
     # --- Provider interface -----------------------------------------------
 
     def health(self) -> dict[str, Any]:
-        total = len(self._scan()) + self.synthetic_count
+        total = len(self._scan_cached()) + self.synthetic_count
         layer = (
             f"{min(self.synthetic_count, len(self.corpus))} corpus"
             if self.corpus
@@ -536,7 +586,7 @@ class MockProvider(Provider):
             LibraryInfo(
                 id="mock_lib",
                 name=self.library_name,
-                book_count=len(self._scan()) + self.synthetic_count,
+                book_count=len(self._scan_cached()) + self.synthetic_count,
                 kind="library",
             )
         ]
@@ -570,6 +620,45 @@ class MockProvider(Provider):
         offset: int = 0,
         since: str | None = None,
     ) -> list[BookMeta]:
+        if mode == "all" and not series_id and not search and not since:
+            # Unfiltered: slice by index instead of re-streaming + re-
+            # json.loads-ing the whole corpus from line 0 for every page.
+            # Catalogue order = dir books, then corpus records, then
+            # synthetic padding (mirrors _all / walk_fingerprints), so
+            # the [offset:offset+limit] window maps onto the three layers
+            # via _scan(), _Corpus.__getitem__ random access, and pure
+            # synthetic arithmetic — no re-parse.
+            out: list[BookMeta] = []
+            scanned = self._scan()
+            n_dir = len(scanned)
+            n_corpus = (
+                min(self.synthetic_count, len(self.corpus))
+                if self.corpus
+                else 0
+            )
+            start = offset
+            end = offset + limit
+            # dir layer: [0, n_dir)
+            if start < n_dir:
+                for entry in scanned[start : min(end, n_dir)]:
+                    out.append(self._book_from_path(entry))
+            # corpus layer: [n_dir, n_dir + n_corpus)
+            c_start = n_dir
+            c_end = n_dir + n_corpus
+            if start < c_end:
+                lo = max(start - c_start, 0)
+                hi = min(end - c_start, n_corpus)
+                for i in range(lo, hi):
+                    out.append(self._corpus(i))
+            # synthetic padding layer: [n_dir + n_corpus, n_dir +
+            # synthetic_count)
+            s_start = n_dir + n_corpus
+            if end > s_start:
+                lo = max(start - s_start, 0)
+                hi = min(end - s_start, self.synthetic_count)
+                for i in range(lo, hi):
+                    out.append(self._synthetic(i))
+            return out
         out: list[BookMeta] = []
         skipped = 0
         for meta in self._all(series_id, search, since):

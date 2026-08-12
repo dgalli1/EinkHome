@@ -72,14 +72,20 @@ def suggest_terms(title: str, authors: Sequence[str], series: str | None) -> lis
     text, never on ordering semantics beyond "first is not special".
     """
     out: list[str] = []
+    seen: set[str] = set()
     for field in (title, *authors, series):
         if not field:
             continue
         for term in _field_terms(field):
-            if len(term) <= _TERM_MAX:
-                out.append(term)
-    deduped = list(dict.fromkeys(out))
-    return deduped[:_TERM_CAP]
+            if len(term) > _TERM_MAX:
+                continue
+            if term in seen:
+                continue
+            seen.add(term)
+            out.append(term)
+            if len(out) >= _TERM_CAP:
+                return out
+    return out
 
 
 def search_text(title: str, authors: Sequence[str], series: str | None) -> str:

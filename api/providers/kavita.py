@@ -19,10 +19,12 @@ Configuration (read from `config/server.json` → `providers.kavita`):
 from __future__ import annotations
 
 import contextlib
+import http.client
 import json
 import os
 import ssl
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -30,6 +32,7 @@ from collections import OrderedDict
 from collections.abc import Iterator
 from datetime import datetime, timezone
 from typing import Any
+from urllib.parse import urlsplit
 
 from .base import (
     AuthorInfo,
@@ -101,6 +104,19 @@ def _filename_from_content_disposition(cd: str) -> str | None:
     return None
 
 
+class CoverTransportError(Exception):
+    """A cover fetch failed for a transport reason (URL/network error,
+    timeout, HTTP 5xx / non-404 error), so the cover's absence is NOT
+    confirmed.
+
+    `KavitaProvider.get_cover` raises this (propagating from
+    `_KavitaClient.cover_bytes`) so callers like server.py's
+    ``_cover_png`` can distinguish a transient transport failure from a
+    confirmed-absent cover (HTTP 404 / no series) and avoid marking a
+    book's cover missing for the cache TTL on a blip.
+    """
+
+
 # ── low-level Kavita client (intentionally self-contained) ──────────────────
 
 # Hard cap on how many series a single library walk will fetch.  Real
@@ -121,10 +137,12 @@ _ID_CACHE_MAX = 16384
 _BOOK_CACHE_MAX = 16384
 
 # Default cap for _KavitaClient._resp_cache, the TTL-bounded cache of
-# raw upstream DTO responses (series pages, volumes, chapters).  Both
-# this and _CHAPTER_FILES_CACHE_MAX grow adaptively to the walked
-# catalogue size so a full catalogue fits without LRU thrashing
-# mid-walk (see KavitaProvider._iter_chapter_metas).
+# raw upstream DTO responses (series pages and volume DTOs — full
+# chapter DTOs are deliberately NOT cached there; see
+# KavitaProvider._chapter_files_cache).  Both this and
+# _CHAPTER_FILES_CACHE_MAX grow adaptively to the walked catalogue
+# size so a full catalogue fits without LRU thrashing mid-walk (see
+# KavitaProvider._iter_chapter_metas).
 _RESP_CACHE_MAX = 8192
 
 
@@ -155,6 +173,11 @@ class _KavitaClient:
         self.cache_ttl_s = cache_ttl_s
         self._jwt: str | None = None
         self._jwt_expiry: float = 0.0
+        # Serializes login so concurrent threads don't each fire a
+        # /api/Account/login (see ensure_auth).  The 401 re-auth path
+        # in _request re-enters ensure_auth; login never holds this
+        # lock while doing network I/O that could re-enter it.
+        self._auth_lock = threading.Lock()
         self._ssl = (
             ssl.create_default_context()
             if verify_tls
@@ -162,17 +185,32 @@ class _KavitaClient:
         )
         # TTL-bounded cache of raw upstream JSON responses.  Keyed by
         # (method, path, body-json-string); value is (fetch_time,
-        # status, parsed).  Series/volume/chapter DTOs are treated as
-        # immutable for cache_ttl_s seconds — a metadata change
-        # upstream propagates once the TTL expires (acceptable for a
-        # 30s-interval catalogue refresh).  Login (with_auth=False)
-        # and binary endpoints (_request / cover_bytes) bypass it.
-        # LRU-evicted; the cap adapts to the catalogue size (the
-        # provider raises _resp_cache_max after each walk).
+        # status, parsed).  Series/volume DTOs are treated as immutable
+        # for cache_ttl_s seconds — a metadata change upstream
+        # propagates once the TTL expires (acceptable for a 30s-interval
+        # catalogue refresh).  Login (with_auth=False), chapter DTOs
+        # (cacheable=False — the provider's files cache already holds
+        # what the walk needs) and binary endpoints (_request /
+        # cover_bytes) bypass it.  LRU-evicted; the cap adapts to the
+        # catalogue size (the provider raises _resp_cache_max after
+        # each walk).
         self._resp_cache: OrderedDict[
             tuple[str, str, str], tuple[float, int, Any]
         ] = OrderedDict()
         self._resp_cache_max = _RESP_CACHE_MAX
+
+        # Persistent HTTP(S) connection, reused across requests so a
+        # catalogue walk doesn't pay a fresh TLS handshake per chapter
+        # (100k+ handshakes on the first walk otherwise).  Guarded by
+        # _conn_lock: http.client connections are not thread-safe, and
+        # the API server can issue requests from multiple threads.
+        _parsed = urlsplit(self.base_url)
+        self._scheme = _parsed.scheme or "https"
+        self._host = _parsed.hostname or ""
+        self._port = _parsed.port
+        self._base_path = _parsed.path.rstrip("/")
+        self._conn: http.client.HTTPConnection | None = None
+        self._conn_lock = threading.Lock()
 
     def _url(self, path: str) -> str:
         if not path.startswith("/"):
@@ -185,6 +223,52 @@ class _KavitaClient:
             h["Authorization"] = f"Bearer {self._jwt}"
         return h
 
+    def _new_conn(self) -> http.client.HTTPConnection:
+        if self._scheme == "https":
+            return http.client.HTTPSConnection(
+                self._host, port=self._port, context=self._ssl, timeout=self.timeout
+            )
+        return http.client.HTTPConnection(
+            self._host, port=self._port, timeout=self.timeout
+        )
+
+    def _conn_path(self, path: str) -> str:
+        if not path.startswith("/"):
+            path = "/" + path
+        return self._base_path + path
+
+    def _conn_request(
+        self,
+        method: str,
+        path: str,
+        headers: dict[str, str],
+        data: bytes | None,
+    ) -> tuple[int, bytes, dict[str, str]]:
+        """Run one request on the persistent connection (thread-safe).
+
+        Returns ``(status, body, headers)``.  http.client surfaces
+        server responses (including 4xx/5xx) as normal responses, so
+        transport failures here are only socket/TLS/timeout errors.  On
+        any such failure the connection state is unknown — drop it so
+        the next attempt reconnects cleanly.
+        """
+        with self._conn_lock:
+            if self._conn is None:
+                self._conn = self._new_conn()
+            conn = self._conn
+            try:
+                conn.request(method, path, body=data, headers=headers)
+                resp = conn.getresponse()
+                status = resp.status
+                body_bytes = resp.read()
+                hdrs = dict(resp.getheaders())
+                return status, body_bytes, hdrs
+            except Exception:
+                with contextlib.suppress(Exception):
+                    conn.close()
+                self._conn = None
+                raise
+
     def _request(
         self,
         method: str,
@@ -192,7 +276,7 @@ class _KavitaClient:
         body: dict | None = None,
         with_auth: bool = True,
     ) -> tuple[int, bytes, dict[str, str]]:
-        url = self._url(path)
+        request_path = self._conn_path(path)
         retries = 0
         while True:
             data: bytes | None = None
@@ -200,45 +284,39 @@ class _KavitaClient:
             if body is not None:
                 data = json.dumps(body).encode("utf-8")
                 headers["Content-Type"] = "application/json"
-            req = urllib.request.Request(
-                url, data=data, method=method, headers=headers
-            )
             try:
-                resp_ctx = urllib.request.urlopen(
-                    req, timeout=self.timeout, context=self._ssl
+                status, body_bytes, hdrs = self._conn_request(
+                    method, request_path, headers, data
                 )
-                status = resp_ctx.status
-                body_bytes = resp_ctx.read()
-                hdrs = dict(resp_ctx.getheaders())
-                return status, body_bytes, hdrs
-            except urllib.error.HTTPError as exc:
-                status = exc.code
-                body_bytes = exc.read() if exc.fp else b""
-                hdrs = dict(exc.headers.items())
-                # The login call itself is never retried (with_auth=False):
-                # a failed login must surface immediately rather than
-                # re-entering ensure_auth.
-                if not with_auth:
-                    return status, body_bytes, hdrs
-                if status == 401 and self._jwt and retries == 0:
-                    # Server rejected the token — force one fresh login,
-                    # then retry exactly once with the new JWT.
-                    self._jwt_expiry = 0.0
-                    self.ensure_auth()
-                    retries += 1
-                    continue
-                if 500 <= status < 600 and retries < len(_RETRY_DELAYS):
-                    time.sleep(_RETRY_DELAYS[retries])
-                    retries += 1
-                    continue
-                return status, body_bytes, hdrs
             except (urllib.error.URLError, TimeoutError, OSError) as exc:
+                # URLError here is only URL-parse failures; transport
+                # errors surface as OSError/socket/TimeoutError via
+                # http.client.  drop the connection (done in
+                # _conn_request) and retry transient failures.
                 if not with_auth or retries >= len(_RETRY_DELAYS):
                     raise RuntimeError(
                         f"Kavita request {method} {path} failed: {exc}"
                     ) from exc
                 time.sleep(_RETRY_DELAYS[retries])
                 retries += 1
+                continue
+            # HTTP-level status handling.  The login call itself is
+            # never retried (with_auth=False): a failed login must
+            # surface immediately rather than re-entering ensure_auth.
+            if not with_auth:
+                return status, body_bytes, hdrs
+            if status == 401 and self._jwt and retries == 0:
+                # Server rejected the token — force one fresh login,
+                # then retry exactly once with the new JWT.
+                self._jwt_expiry = 0.0
+                self.ensure_auth()
+                retries += 1
+                continue
+            if 500 <= status < 600 and retries < len(_RETRY_DELAYS):
+                time.sleep(_RETRY_DELAYS[retries])
+                retries += 1
+                continue
+            return status, body_bytes, hdrs
 
     def _request_json(
         self,
@@ -246,11 +324,14 @@ class _KavitaClient:
         path: str,
         body: dict | None = None,
         with_auth: bool = True,
+        cacheable: bool = True,
     ) -> tuple[int, Any]:
-        # Response cache: skip entirely for login (with_auth=False) so
-        # credential state is never cached.
+        # Response cache: skip entirely for login (with_auth=False) —
+        # credential state is never cached — and for callers that pass
+        # cacheable=False (chapter DTOs, which duplicate the provider's
+        # files cache and would bloat _resp_cache to 2x the catalogue).
         cache_key: tuple[str, str, str] | None = None
-        if with_auth:
+        if with_auth and cacheable:
             cache_key = (method, path, json.dumps(body) if body is not None else "")
             now = time.time()
             hit = self._resp_cache.get(cache_key)
@@ -276,9 +357,20 @@ class _KavitaClient:
         return status, parsed
 
     def ensure_auth(self) -> None:
+        # Fast, lock-free path: a live token needs no login.
         if self._jwt and time.time() < self._jwt_expiry - 30:
             return
-        self._login()
+        # Two threads can pass the fast check simultaneously; take the
+        # lock so only one performs the login.  Re-check the expiry
+        # after acquiring — the first thread may have finished while we
+        # waited, so the rest reuse its fresh token instead of logging
+        # in again.  The 401 re-auth branch in _request re-enters this
+        # method from another thread; it simply blocks here until the
+        # in-flight login completes, then sees the fresh token.
+        with self._auth_lock:
+            if self._jwt and time.time() < self._jwt_expiry - 30:
+                return
+            self._login()
 
     def _login(self) -> None:
         # Kavita 0.8.x rejects an apiKey-only login with 400 unless
@@ -449,7 +541,13 @@ class _KavitaClient:
 
     def get_chapter(self, chapter_id: int) -> dict[str, Any] | None:
         self.ensure_auth()
-        status, body = self._request_json("GET", f"/api/Chapter?chapterId={chapter_id}")
+        # Full chapter DTOs are not _resp_cached: they carry the whole
+        # files array (multi-KB at 100k books) and the provider's
+        # files cache already holds what the walk needs.  Only the
+        # small series/volume DTOs are cached upstream.
+        status, body = self._request_json(
+            "GET", f"/api/Chapter?chapterId={chapter_id}", cacheable=False
+        )
         if status == 404:
             return None  # chapter gone — absent resource, not an error
         if status != 200:
@@ -472,7 +570,9 @@ class _KavitaClient:
         file paths, sizes, formats and extensions we need.
         """
         self.ensure_auth()
-        status, body = self._request_json("GET", f"/api/Chapter?chapterId={chapter_id}")
+        status, body = self._request_json(
+            "GET", f"/api/Chapter?chapterId={chapter_id}", cacheable=False
+        )
         if status == 404:
             return []  # chapter gone — absent resource, not an error
         if status != 200:
@@ -499,12 +599,16 @@ class _KavitaClient:
         vol_id = ch.get("volumeId")
         if vol_id is None:
             return None
-        status, body = self._request_json("GET", f"/api/Volume?volumeId={vol_id}")
+        return self.get_volume(vol_id)
+
+    def get_volume(self, volume_id: int) -> dict[str, Any] | None:
+        """Return the volume DTO for ``volume_id`` (or None if absent)."""
+        status, body = self._request_json("GET", f"/api/Volume?volumeId={volume_id}")
         if status == 404:
             return None  # volume gone — absent resource, not an error
         if status != 200:
             raise RuntimeError(
-                f"Kavita GET /api/Volume (volume {vol_id}) failed: HTTP {status}"
+                f"Kavita GET /api/Volume (volume {volume_id}) failed: HTTP {status}"
             )
         if not isinstance(body, dict):
             return None
@@ -532,9 +636,21 @@ class _KavitaClient:
         routes prefer ``apiKey=`` as a query parameter; when no
         api_key is configured we fall back to the JWT Authorization
         header so username/password-only setups still get covers.
+
+        Returns ``None`` ONLY when the cover is confirmed absent (every
+        candidate URL answered HTTP 404).  Raises
+        :class:`CoverTransportError` for any transport-level failure
+        (URLError/timeout/OSError, or a non-404 HTTP error) so callers
+        can avoid marking a book's cover missing on a transient blip.
         """
         if not self.api_key:
             self.ensure_auth()
+        # Track the first transport-level failure so we can still try
+        # the fallback URL, but only ever report "no cover" (return
+        # None) when EVERY candidate answered with a confirmed absent
+        # (HTTP 404).  A URLError/timeout/5xx on any candidate means
+        # absence is unconfirmed — raise CoverTransportError instead.
+        saw_error: Exception | None = None
         for base in (
             f"/api/Image/chapter-cover?chapterId={chapter_id}",
             f"/api/Image/series-cover?seriesId={series_id}",
@@ -552,8 +668,18 @@ class _KavitaClient:
                     req, timeout=self.timeout, context=self._ssl
                 )
                 return resp.headers.get("Content-Type", "image/jpeg"), resp.read()
-            except (urllib.error.URLError, urllib.error.HTTPError, OSError):
-                continue
+            except urllib.error.HTTPError as exc:
+                if exc.code == 404:
+                    continue  # confirmed absent for this candidate
+                if saw_error is None:
+                    saw_error = exc
+            except (urllib.error.URLError, TimeoutError, OSError) as exc:
+                if saw_error is None:
+                    saw_error = exc
+        if saw_error is not None:
+            raise CoverTransportError(
+                f"Kavita cover fetch failed for chapter {chapter_id}: {saw_error}"
+            ) from saw_error
         return None
 
 
@@ -592,10 +718,14 @@ class KavitaProvider(Provider):
         self._id_cache: OrderedDict[int, str] = OrderedDict()
         # book-id -> BookMeta for single-book lookups (LRU-capped).
         self._book_cache: OrderedDict[str, BookMeta] = OrderedDict()
-        # chapter_id -> (files, volume DTO) so catalogue-walk refreshes
+        # chapter_id -> (files, volume_id) so catalogue-walk refreshes
         # don't re-fetch every chapter's files over HTTP (LRU-capped).
+        # Only the file DTOs and the owning volume id are stored — never
+        # a copy of the volume DTO (one volume is shared by all its
+        # chapters; caching it once per chapter would duplicate it
+        # catalogue-wide at 100k books).
         self._chapter_files_cache: OrderedDict[
-            int, tuple[list[dict[str, Any]], dict[str, Any] | None]
+            int, tuple[list[dict[str, Any]], int | None]
         ] = OrderedDict()
         self._library_filter: set[int] = set()
         for x in cfg.get("library_ids") or ():
@@ -643,26 +773,42 @@ class KavitaProvider(Provider):
     def _chapter_files_and_volume(
         self,
         chapter_id: int,
+        *,
+        chapter: dict[str, Any] | None = None,
         volume: dict[str, Any] | None = None,
-    ) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
-        """Return ``(files, volume DTO)`` for a chapter, LRU-cached.
+    ) -> tuple[list[dict[str, Any]], int | None]:
+        """Return ``(files, volume_id)`` for a chapter, LRU-cached.
 
-        ``volume`` may be passed by callers that already hold it (the
-        catalogue walk) so a cold miss doesn't need an extra
-        ``/api/Volume`` round-trip; ``get_book``/``get_cover`` omit it
-        and the volume is resolved here.  Entries are evicted
-        LRU-style past ``self._chapter_files_cache_max`` (sized to the
-        catalogue after each walk) so a 30s-interval refresh doesn't
-        re-fetch every chapter's files.
+        Only the file DTOs and the owning volume id are stored — never
+        a copy of the volume DTO (one volume is shared by all its
+        chapters; caching it once per chapter would duplicate it
+        catalogue-wide).  ``chapter`` / ``volume`` may be passed by
+        callers that already hold them (the catalogue walk, get_book)
+        so a cold miss needs no extra round-trip.  Files are taken from
+        ``chapter["files"]`` when present so the walk stops issuing a
+        per-chapter GET entirely; ``get_chapter_files`` is only a
+        fallback for DTOs that omit the files array (`get_chapter_volume`
+        books whose volume id wasn't derivable).
         """
         cached = self._chapter_files_cache.get(chapter_id)
         if cached is not None:
             self._chapter_files_cache.move_to_end(chapter_id)
             return cached
-        files = self.client.get_chapter_files(chapter_id)
-        if volume is None:
-            volume = self.client.get_chapter_volume(chapter_id)
-        entry = (files, volume)
+        if chapter is not None:
+            files = list(chapter.get("files") or [])
+            volume_id = chapter.get("volumeId")
+        else:
+            files = []
+            volume_id = volume.get("id") if volume is not None else None
+        if not files:
+            files = self.client.get_chapter_files(chapter_id)
+        if volume_id is None:
+            # Rare: caller had neither the chapter nor the volume DTO.
+            # Resolve the owning volume id (the caller fetches the
+            # volume DTO itself if it needs fields off it).
+            vol = self.client.get_chapter_volume(chapter_id)
+            volume_id = vol.get("id") if vol else None
+        entry = (files, volume_id)
         self._chapter_files_cache[chapter_id] = entry
         if len(self._chapter_files_cache) > self._chapter_files_cache_max:
             self._chapter_files_cache.popitem(last=False)
@@ -677,7 +823,9 @@ class KavitaProvider(Provider):
         chapter_id = chapter.get("id")
         if not chapter_id:
             return None
-        files, _ = self._chapter_files_and_volume(chapter_id, volume)
+        files, _ = self._chapter_files_and_volume(
+            chapter_id, chapter=chapter, volume=volume
+        )
         if not files:
             return None
         chosen: dict[str, Any] | None = None
@@ -813,10 +961,15 @@ class KavitaProvider(Provider):
         When the walk ends (fully consumed or abandoned), the LRU caps
         are grown to fit the walked catalogue: at 100k books the
         default 8192-entry caps would thrash within a single walk and
-        re-fetch everything on the next refresh.  Sizing them to
-        ``2 * catalogue_size`` keeps every DTO cached between the
-        30s-interval refreshes; partial walks only ever grow the caps
-        (``max``), never shrink them.
+        re-fetch everything on the next refresh.  The chapter-files
+        cache is sized to ``2 * catalogue_size`` so every chapter's
+        small ``(files, volume_id)`` entry stays cached between the
+        30s-interval refreshes.  Full chapter DTOs are never held in
+        ``_resp_cache`` (they duplicate the files cache); it only
+        stores series pages and volume DTOs, so its cap is grown in
+        lockstep but its real size stays bounded by distinct series.
+        Partial walks only ever grow the caps (``max``), never shrink
+        them.
         """
         walked = 0
         try:
@@ -831,9 +984,14 @@ class KavitaProvider(Provider):
                             yield ch, s, vol
         finally:
             self._catalogue_size = max(self._catalogue_size, walked)
-            self._chapter_files_cache_max = self._resp_cache_max = max(
+            # The files cache is the one that must fit the whole
+            # catalogue (one (files, volume_id) per chapter).  The
+            # response cache cap is kept in lockstep for series/volume
+            # DTOs; chapter DTOs never enter it (cacheable=False).
+            self._chapter_files_cache_max = max(
                 8192, self._catalogue_size * 2
             )
+            self._resp_cache_max = max(8192, self._catalogue_size * 2)
             # The response cache lives on the client; keep its cap in
             # lockstep with the provider's.
             self.client._resp_cache_max = self._resp_cache_max
@@ -875,7 +1033,9 @@ class KavitaProvider(Provider):
         except ValueError:
             return []
         out: list[SeriesInfo] = []
-        for s in self.client.list_series(lid):
+        # client.list_series returns ONE page (50 default); walk every
+        # page so a library >50 series is fully listed.
+        for s in self._series_in_library(lid):
             sid = s.get("id")
             if sid is None:
                 continue
@@ -995,14 +1155,19 @@ class KavitaProvider(Provider):
         if not chapter:
             return None
         # Kavita's chapter DTO has volumeId but no seriesId; the
-        # volume carries seriesId.
-        _, volume = self._chapter_files_and_volume(chapter_id)
+        # volume carries seriesId.  The chapter cache now stores only
+        # (files, volume_id); fetch the small volume DTO on demand for
+        # its seriesId.
+        _, volume_id = self._chapter_files_and_volume(chapter_id, chapter=chapter)
+        volume = self.client.get_volume(volume_id) if volume_id else None
         series_id = volume.get("seriesId") if volume else None
         if not series_id:
             return None
         # Locate the matching series DTO for the metadata enrichment.
+        # Walk every series page (client.list_series alone returns only
+        # the first 50) so a book in a library >50 series is found.
         for lid in self._all_library_ids():
-            for s in self.client.list_series(lid):
+            for s in self._series_in_library(lid):
                 if s.get("id") == series_id:
                     meta = self._chapter_to_meta(chapter, s, volume)
                     if meta is not None:
@@ -1019,7 +1184,10 @@ class KavitaProvider(Provider):
             chapter_id = int(book_id[len("kavita_ch_") :], 16)
         except ValueError:
             return None
-        _, volume = self._chapter_files_and_volume(chapter_id)
+        # Only the owning volume (for its seriesId) is needed here — no
+        # files round-trip.  get_chapter_volume resolves chapter →
+        # volume DTO.
+        volume = self.client.get_chapter_volume(chapter_id)
         series_id = volume.get("seriesId") if volume else None
         if not series_id:
             return None

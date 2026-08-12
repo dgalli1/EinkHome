@@ -151,17 +151,17 @@ class CoverCache:
         # request handlers can race on the same key, and a shared fixed
         # name would let interleaved writes corrupt each other before
         # os.replace makes the final file atomic.  The tmp file is
-        # flushed and fsynced, then renamed into place; the parent-
-        # directory fsync is deliberately skipped — a lost rename after
-        # a crash only costs a re-fetch, and the startup sweep cleans up
-        # any leaked tmp, while the dir fsync cost would double on every
-        # write (100k covers).
+        # flushed but deliberately NOT fsynced, then renamed into place;
+        # os.replace already gives rename atomicity, and skipping the
+        # per-write fsync keeps 100k warm-up writes off slow flash.  A
+        # crash before the rename only loses a re-fetchable PNG, and the
+        # startup sweep cleans up any leaked tmp.  The parent-directory
+        # fsync is likewise skipped for the same reason.
         tmp = f"{path}.{os.getpid()}.{threading.get_ident()}.tmp"
         try:
             with open(tmp, "wb") as fh:
                 fh.write(data)
                 fh.flush()
-                os.fsync(fh.fileno())
             os.replace(tmp, path)
         except OSError as exc:
             sys.stderr.write(f"cover_cache: write failed {path}: {exc}\n")

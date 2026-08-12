@@ -234,21 +234,47 @@ class SyncLedger:
         which case this is a cheap no-op.  Returns True when a walk
         actually ran.
 
-        A provider error mid-walk rolls the whole pass back (sqlite3
-        leaves an implicit transaction open after DML) and re-raises,
-        so a failed walk can never tombstone or partially update the
-        ledger.  ``last_walk`` stays untouched, so the next refresh
-        retries immediately and the server can keep serving the stale
-        ledger."""
+        The writer lock is held only around each page's commit, not
+        for the whole walk: a long provider walk (Kavita can take
+        minutes) never blocks ``record_device``, tombstone compaction
+        or the search backfill.  Inserts/updates are committed page by
+        page; tombstones are still applied at the very end, so a
+        partial commit can never replay a removal out of order.
+
+        A provider error mid-walk rolls back the in-flight page
+        (sqlite3 leaves an implicit transaction open after DML) and
+        re-raises; pages already committed stay committed, which is
+        safe because a re-walk re-derives and re-applies them
+        idempotently.  ``last_walk`` is not stamped on failure, so the
+        next refresh retries immediately and the server can keep
+        serving the last committed ledger state.
+
+        Only one walk runs at a time (guarded by ``_walking``): a
+        second call while one is in flight returns False immediately
+        instead of queueing behind the whole pass."""
         with self._lock:
+            if self._walking:
+                return False
             last = self._state_get("last_walk")
             if time.time() - last < max_age_s:
                 return False
-            try:
-                self._walk(provider)
-            except Exception:
+            self._walking = True
+        return self._run_walk(provider)
+
+    def _run_walk(self, provider: Any) -> bool:
+        """Body of a catalogue walk: fold the provider in (committing
+        page by page) then stamp ``last_walk``.  Callers must have
+        already claimed the walk (``_walking`` set) and must NOT hold
+        ``self._lock``, which the walk re-acquires per page so
+        concurrent writers never block on the whole pass."""
+        try:
+            self._walk(provider)
+        except Exception:
+            with self._lock:
                 self.con.rollback()
-                raise
+                self._walking = False
+            raise
+        with self._lock:
             # Bulk removals leave a pile of tombstones behind; once it
             # grows past the threshold, drop the rows every device has
             # already consumed (rev below the minimum device cursor).
@@ -258,8 +284,9 @@ class SyncLedger:
             if int(row[0]) > TOMBSTONE_COMPACT_THRESHOLD:
                 self._compact_tombstones()
             self._state_set("last_walk", int(time.time()))
+            self._walking = False
             self.con.commit()
-            return True
+        return True
 
     def refresh_async(self, provider: Any, max_age_s: float = 30.0) -> bool:
         """Kick off a catalogue walk on a daemon thread if one is due
@@ -294,11 +321,14 @@ class SyncLedger:
         return True
 
     def _refresh_bg(self, provider: Any, max_age_s: float) -> None:
-        """Background runner for :meth:`refresh_async`.  A failed walk
-        still stamps ``last_walk`` so a down provider does not respawn
-        a walk on every request (cooldown); the error is logged."""
+        """Background runner for :meth:`refresh_async`.  The walk was
+        already claimed by :meth:`refresh_async` (``_walking`` set), so
+        run the walk body directly rather than re-enter
+        ``refresh``'s claim/freshness check.  A failed walk still
+        stamps ``last_walk`` so a down provider does not respawn a
+        walk on every request (cooldown); the error is logged."""
         try:
-            self.refresh(provider, max_age_s=max_age_s)
+            self._run_walk(provider)
         except Exception as exc:  # noqa: BLE001 — provider may be down
             sys.stderr.write(f"ledger: background walk failed: {exc}\n")
             try:
@@ -395,10 +425,11 @@ class SyncLedger:
         walk_books.  Steady-state walks then never parse the catalogue
         into metas at all.  Providers without the hook (and walkers
         that fail mid-flight) fall back to the plain walk_books pass."""
-        stored: dict[str, tuple[str, str | None]] = {
-            r[0]: (r[1], r[2])
-            for r in self.con.execute("SELECT id, fp, added_at FROM books")
-        }
+        with self._lock:
+            stored: dict[str, tuple[str, str | None]] = {
+                r[0]: (r[1], r[2])
+                for r in self.con.execute("SELECT id, fp, added_at FROM books")
+            }
         seen: set[str] = set()
         fp_walker = getattr(provider, "walk_fingerprints", None)
         if callable(fp_walker):
@@ -419,7 +450,12 @@ class SyncLedger:
             for bid, (_, added_at) in stored.items()
             if added_at is not None and bid not in seen
         ]
-        self._apply_tombstones(gone)
+        # Tombstones always land in their own commit after every page
+        # has been applied, so their revs sit above this walk's
+        # inserts/updates and are never replayed before them.
+        with self._lock:
+            self._apply_tombstones(gone)
+            self.con.commit()
 
     def _walk_books(
         self,
@@ -456,8 +492,10 @@ class SyncLedger:
                     # Metadata changed, or a tombstone resurrecting.
                     updates.append(meta)
                     stored[meta.id] = (fp, meta.added_at)
-            self._apply_inserts(inserts)
-            self._apply_updates(updates)
+            with self._lock:
+                self._apply_inserts(inserts)
+                self._apply_updates(updates)
+                self.con.commit()
         if first_page and stored and not self._ack_empty_catalogue:
             # walk_books yields no pages for an empty catalogue — the
             # same collapsed-provider refusal as an empty first page.
@@ -520,13 +558,17 @@ class SyncLedger:
                     # resurrecting a tombstone — always an update.
                     updates.append(meta)
                     stored[meta.id] = (fp, meta.added_at)
-            self._apply_inserts(inserts)
-            self._apply_updates(updates)
+            with self._lock:
+                self._apply_inserts(inserts)
+                self._apply_updates(updates)
+                self.con.commit()
             inserts = []
             updates = []
         if inserts or updates:
-            self._apply_inserts(inserts)
-            self._apply_updates(updates)
+            with self._lock:
+                self._apply_inserts(inserts)
+                self._apply_updates(updates)
+                self.con.commit()
 
     def _apply_inserts(self, metas: list[BookMeta]) -> None:
         if not metas:
@@ -548,6 +590,7 @@ class SyncLedger:
         if not metas:
             return
         next_rev = self._state_get("next_rev")
+        rows = []
         for meta in metas:
             names = list(meta.authors or [])
             if self._suggestions_enabled:
@@ -558,10 +601,7 @@ class SyncLedger:
                 )
             else:
                 suggest_json = None
-            self.con.execute(
-                "UPDATE books SET rev=?, added_at=?, title=?, authors=?, "
-                "series=?, series_id=?, series_idx=?, format=?, size=?, fp=?, "
-                "file_name=?, search_text=?, suggest=? WHERE id=?",
+            rows.append(
                 (
                     next_rev,
                     meta.added_at,
@@ -577,22 +617,27 @@ class SyncLedger:
                     _search_text(meta.title or "", names, meta.series),
                     suggest_json,
                     meta.id,
-                ),
+                )
             )
             next_rev += 1
+        self.con.executemany(
+            "UPDATE books SET rev=?, added_at=?, title=?, authors=?, "
+            "series=?, series_id=?, series_idx=?, format=?, size=?, fp=?, "
+            "file_name=?, search_text=?, suggest=? WHERE id=?",
+            rows,
+        )
         self._state_set("next_rev", next_rev)
 
     def _apply_tombstones(self, ids: list[str]) -> None:
         if not ids:
             return
         next_rev = self._state_get("next_rev")
-        for bid in ids:
-            self.con.execute(
-                "UPDATE books SET rev=?, added_at=NULL WHERE id=?",
-                (next_rev, bid),
-            )
-            next_rev += 1
-        self._state_set("next_rev", next_rev)
+        rows = [(next_rev + i, bid) for i, bid in enumerate(ids)]
+        self.con.executemany(
+            "UPDATE books SET rev=?, added_at=NULL WHERE id=?",
+            rows,
+        )
+        self._state_set("next_rev", next_rev + len(ids))
 
     def _meta_row(self, meta: BookMeta, rev: int) -> tuple[Any, ...]:
         names = list(meta.authors or [])

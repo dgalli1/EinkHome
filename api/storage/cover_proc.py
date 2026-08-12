@@ -16,6 +16,7 @@ it off the request path so a sync never blocks on 90+ image decodes.
 from __future__ import annotations
 
 import io
+import threading
 from typing import Optional
 
 # Cover PNG is sized for the device's portrait cover box (~2:3).  240x360
@@ -24,6 +25,13 @@ from typing import Optional
 # stays tiny (a few KB of PNG).
 COVER_W = 240
 COVER_H = 360
+
+# Bound concurrent heavy Pillow decodes.  A multi-megapixel source
+# transiently allocates ~3x its pixel count while decoding (a 20MP source
+# -> ~60MB); several warm-up workers could otherwise do this at once and
+# spike memory.  Only the decode+resize is gated, so callers still do the
+# (cheap, lazy) file I/O in parallel.
+DECODE_SEMAPHORE = threading.Semaphore(2)
 
 
 def process(raw: bytes) -> Optional[bytes]:
@@ -40,30 +48,36 @@ def process(raw: bytes) -> Optional[bytes]:
     # Backstop against decompression bombs: raising the ceiling to our
     # explicit limit makes PIL warn instead of aborting below it.  The
     # explicit check below rejects oversized images before any pixel
-    # work (no full decode of a 100MP source).
-    Image.MAX_IMAGE_PIXELS = 30_000_000
+    # work (no full decode of a 100MP source).  20MP is far above any
+    # legit cover (typically < 2MP) yet bounds the transient decode
+    # allocation to ~60MB.
+    Image.MAX_IMAGE_PIXELS = 20_000_000
 
     try:
         img = Image.open(io.BytesIO(raw))
-        if img.width * img.height > 30_000_000:
+        if img.width * img.height > 20_000_000:
             return None
-        img.load()
     except Exception:
         return None
 
-    rgb = img.convert("RGB")
+    # Heavy decode + resize + PNG encode, gated by a semaphore so
+    # concurrent warm-up workers don't spike memory.  The lazy Image.open
+    # and the cheap dims check above stay outside the gate.
+    with DECODE_SEMAPHORE:
+        try:
+            img.load()
+            rgb = img.convert("RGB")
 
-    # Resized cover PNG.  contain=True keeps the aspect ratio (letterbox)
-    # so a tall cover is never squashed; the letterbox bars are filled with
-    # the cover's own average colour so they read as part of the image on a
-    # 1-bit panel rather than as a hard white frame.
-    try:
-        cover = _fit(rgb, COVER_W, COVER_H)
-        buf = io.BytesIO()
-        cover.save(buf, format="PNG", optimize=True)
-        return buf.getvalue()
-    except Exception:
-        return None
+            # Resized cover PNG.  contain=True keeps the aspect ratio (letterbox)
+            # so a tall cover is never squashed; the letterbox bars are filled with
+            # the cover's own average colour so they read as part of the image on a
+            # 1-bit panel rather than as a hard white frame.
+            cover = _fit(rgb, COVER_W, COVER_H)
+            buf = io.BytesIO()
+            cover.save(buf, format="PNG", optimize=True)
+            return buf.getvalue()
+        except Exception:
+            return None
 
 
 def _fit(img, target_w: int, target_h: int):
