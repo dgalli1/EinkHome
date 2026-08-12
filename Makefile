@@ -5,8 +5,9 @@
 # delegate to `make`.  Compilation is done by sdk/build_armel.sh
 # (arm-linux-gnueabi-gcc inside the pbdev container, linked against
 # the firmware rootfs staged in the pbemu submodule — the wrapper
-# mounts it via PBEMU_FIRMWARE_DIR).  The include dir is exposed
-# through PBEMU_APP_INCLUDE_DIR; the ELF lands in build/.
+# mounts it via PBEMU_FIRMWARE_DIR).  The app headers live in the
+# app/{core,data,ui,action,vendor} subdirs, each exposed via -I; the
+# ELF lands in build/.
 #
 # Usage:
 #     make            # build build/bookshelf.app
@@ -24,28 +25,28 @@ BUILD_ARMEL := $(CURDIR)/sdk/build_armel.sh
 OUT := $(CURDIR)/build/bookshelf.app
 
 SOURCES := \
-	cJSON.c \
-	bs_browser.c \
-	bs_config.c \
-	bs_downloads.c \
-	bs_extract.c \
-	bs_grid.c \
-	bs_i18n.c \
-	bs_input.c \
-	bs_launcher.c \
-	bs_local.c \
-	bs_logview.c \
-	bs_main.c \
-	bs_model.c \
-	bs_net.c \
-	bs_overlays.c \
-	bs_popups.c \
-	bs_progress.c \
-	bs_screen.c \
-	bs_search.c \
-	bs_store.c \
-	bs_topbar.c \
-	bs_worker.c
+	core/bs_main.c \
+	core/bs_net.c \
+	core/bs_config.c \
+	core/bs_i18n.c \
+	core/bs_worker.c \
+	data/bs_store.c \
+	data/bs_model.c \
+	data/bs_local.c \
+	data/bs_extract.c \
+	data/bs_progress.c \
+	ui/bs_screen.c \
+	ui/bs_grid.c \
+	ui/bs_topbar.c \
+	ui/bs_search.c \
+	ui/bs_popups.c \
+	ui/bs_overlays.c \
+	ui/bs_logview.c \
+	ui/bs_browser.c \
+	action/bs_downloads.c \
+	action/bs_input.c \
+	action/bs_launcher.c \
+	vendor/cJSON.c
 
 SRC_PATHS := $(addprefix $(CURDIR)/app/,$(SOURCES))
 
@@ -56,11 +57,13 @@ all: $(OUT)
 test:
 	scripts/test.sh
 
-$(OUT): $(SRC_PATHS) $(wildcard $(CURDIR)/app/*.h) $(BUILD_ARMEL)
+$(OUT): $(SRC_PATHS) $(wildcard $(CURDIR)/app/*/*.h) $(BUILD_ARMEL)
 	mkdir -p $(CURDIR)/build
 	PBEMU_FIRMWARE_DIR="$(PBEMU_FIRMWARE_DIR)" \
-	PBEMU_APP_INCLUDE_DIR=/work/app \
-	$(BUILD_ARMEL) $(SRC_PATHS) --output build/bookshelf.app
+	$(BUILD_ARMEL) $(SRC_PATHS) \
+		-I/work/app/core -I/work/app/data -I/work/app/ui \
+		-I/work/app/action -I/work/app/vendor \
+		--output build/bookshelf.app
 
 clean:
 	rm -f $(OUT)

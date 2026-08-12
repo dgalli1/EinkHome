@@ -1,0 +1,153 @@
+/* bs_i18n.c — part of the bookshelf app (see bs_core.h) */
+
+#include "bs_core.h"
+#include "bs_i18n.h"
+
+/* ── i18n ────────────────────────────────────────────────────────────── */
+
+char bs_g_lang[8] = "en";
+
+/* Trivial i18n table.  Key = English string; value = translation.
+ * Add rows here for new languages.  Falls back to English on miss.
+ */
+
+const BsI18n bs_g_i18n[] = {
+    {"app.title", "EinkHome", "EinkHome", "EinkHome", "EinkHome"},
+    {"action.sync", "Sync", "Sync", "Sync", "Sync"},
+    {"action.more", "More", "Mehr", "Plus", "Altro"},
+    {"action.menu", "Menu", "Men\u00fc", "Menu", "Menu"},
+    {"search.ph", "search\u2026", "suchen\u2026", "rechercher\u2026", "cerca\u2026"},
+    {"search.empty",
+     "No recent searches",
+     "Keine letzten Suchen",
+     "Aucune recherche r\u00e9cente",
+     "Nessuna ricerca recente"},
+    {"sync.meta",
+     "Syncing metadata\u2026",
+     "Metadaten werden synchronisiert\u2026",
+     "Synchronisation des m\u00e9tadonn\u00e9es\u2026",
+     "Sincronizzazione metadati\u2026"},
+    {"sync.batch", "batch %d", "Batch %d", "lot %d", "lotto %d"},
+    {"sync.scan",
+     "Scanning library\u2026",
+     "Bibliothek wird gescannt\u2026",
+     "Analyse de la biblioth\u00e8que\u2026",
+     "Scansione libreria\u2026"},
+    {"sync.covers",
+     "Loading covers\u2026",
+     "Cover werden geladen\u2026",
+     "Chargement des couvertures\u2026",
+     "Caricamento copertine\u2026"},
+    {"sync.done", "Sync complete", "Sync abgeschlossen", "Sync termin\u00e9", "Sync completato"},
+    {"sync.books", "%d books", "%d B\u00fccher", "%d livres", "%d libri"},
+    {"status.fail", "Sync failed", "Sync fehlgeschlagen", "\u00c9chec du sync", "Sync fallito"},
+    {"group.all", "All books", "Alle B\u00fccher", "Tous les livres", "Tutti i libri"},
+    {"group.author", "By author", "Nach Autor", "Par auteur", "Per autore"},
+    {"group.series", "By series", "Nach Reihe", "Par s\u00e9rie", "Per serie"},
+    {"group.recent", "By recent", "Nach Neuheit", "Par date", "Per data"},
+    {"sort.title_az", "Title A\u2013Z", "Titel A\u2013Z", "Titre A\u2013Z", "Titolo A\u2013Z"},
+    {"sort.author", "By author", "Nach Autor", "Par auteur", "Per autore"},
+    {"sort.series", "By series", "Nach Reihe", "Par s\u00e9rie", "Per serie"},
+    {"sort.recent", "Recent", "Neuheiten", "R\u00e9cent", "Recenti"},
+    {"view.grid", "Grid", "Raster", "Grille", "Griglia"},
+    {"view.list", "List", "Liste", "Liste", "Elenco"},
+    {"pager.info", "%d / %d", "%d / %d", "%d / %d", "%d / %d"},
+    {"pager.prev", "<", "<", "<", "<"},
+    {"pager.next", ">", ">", ">", ">"},
+    {"pager.first", "<<", "<<", "<<", "<<"},
+    {"pager.last", ">>", ">>", ">>", ">>"},
+    {"action.settings", "Settings", "Einstellungen", "Param\u00e8tres", "Impostazioni"},
+    {"settings.title", "Settings", "Einstellungen", "Param\u00e8tres", "Impostazioni"},
+    {"settings.api_host", "API host", "API-Host", "H\u00f4te API", "Host API"},
+    {"settings.api_key", "API key", "API-Schl\u00fcssel", "Cl\u00e9 API", "Chiave API"},
+    {"settings.reader", "Reader app", "Lese-App", "Appli lecture", "App lettore"},
+    {"settings.reader_auto", "Auto (server)", "Auto (Server)", "Auto (serveur)", "Auto (server)"},
+    {"settings.dl_dir",
+     "Download folder",
+     "Download-Ordner",
+     "Dossier de t\u00e9l\u00e9chargement",
+     "Cartella download"},
+    {"folder.select", "Select", "Ausw\u00e4hlen", "S\u00e9lectionner", "Seleziona"},
+    {"folder.empty", "(empty)", "(leer)", "(vide)", "(vuota)"},
+    {"source.title",
+     "Library source",
+     "Bibliotheksquelle",
+     "Source de la biblioth\u00e8que",
+     "Origine libreria"},
+    {"source.kavita", "Kavita", "Kavita", "Kavita", "Kavita"},
+    {"source.local", "Local", "Lokal", "Local", "Locale"},
+    {"source.folder", "Folder", "Ordner", "Dossier", "Cartella"},
+    {"settings.save", "Save & apply", "Speichern", "Enregistrer", "Salva e applica"},
+    {"settings.logs", "Show logs", "Logs anzeigen", "Afficher les logs", "Mostra log"},
+    {"log.title", "Log", "Log", "Journal", "Log"},
+    {"log.back", "Back", "Zur\u00fcck", "Retour", "Indietro"},
+    {"log.empty", "No log file yet", "Noch keine Logdatei", "Aucun journal", "Nessun log"},
+    {"tab.search", "Search", "Suche", "Recherche", "Cerca"},
+    {"settings.back", "Back", "Zur\u00fcck", "Retour", "Indietro"},
+    {"settings.tap_edit", "tap to edit", "tippen", "toucher", "tocca"},
+    {"settings.installed", "installed", "installiert", "install\u00e9e", "installata"},
+    {"settings.not_installed", "not found", "nicht da", "absente", "assente"},
+    {"tab.library", "Library", "Bibliothek", "Biblioth\u00e8que", "Libreria"},
+    {"action.download_all",
+     "Download all",
+     "Alle laden",
+     "Tout t\u00e9l\u00e9charger",
+     "Scarica tutto"},
+    {"ctx.download", "Download", "Laden", "T\u00e9l\u00e9charger", "Scarica"},
+    {"ctx.open", "Open", "\u00d6ffnen", "Ouvrir", "Apri"},
+    {"ctx.download_all",
+     "Download all",
+     "Alle laden",
+     "Tout t\u00e9l\u00e9charger",
+     "Scarica tutto"},
+    {"ctx.delete", "Delete", "L\u00f6schen", "Supprimer", "Elimina"},
+    {"ctx.delete_series",
+     "Delete series",
+     "Reihe l\u00f6schen",
+     "Supprimer la s\u00e9rie",
+     "Elimina serie"},
+    {"dl.failed", "Failed", "Fehlgeschlagen", "\u00c9chou\u00e9", "Fallito"},
+    {"dl.in_progress",
+     "Downloading\u2026",
+     "L\u00e4dt\u2026",
+     "T\u00e9l\u00e9chargement\u2026",
+     "Download\u2026"},
+    {"dl.progress",
+     "Downloading %d / %d",
+     "Lade %d / %d",
+     "T\u00e9l\u00e9chargement %d / %d",
+     "Download %d / %d"},
+    {"dl.complete", "%d downloaded", "%d geladen", "%d t\u00e9l\u00e9charg\u00e9s", "%d scaricati"},
+    {"dl.failed_count", "%d failed", "%d fehlgeschlagen", "%d \u00e9chec(s)", "%d falliti"},
+    {"dl.title", "Download", "Download", "T\u00e9l\u00e9chargement", "Download"},
+    {"dl.tap_close",
+     "Tap to close",
+     "Tippen zum Schlie\u00dfen",
+     "Touchez pour fermer",
+     "Tocca per chiudere"},
+    {"action.apps", "Applications", "Anwendungen", "Applications", "Applicazioni"},
+    {"launcher.title", "Applications", "Anwendungen", "Applications", "Applicazioni"},
+    {"launcher.empty",
+     "No applications",
+     "Keine Anwendungen",
+     "Aucune application",
+     "Nessuna applicazione"},
+    {"launcher.back", "Back", "Zurück", "Retour", "Indietro"},
+    {NULL, NULL, NULL, NULL, NULL}};
+
+const char *
+bs_i18n(const char *key)
+{
+    for (const BsI18n *e = bs_g_i18n; e->key != NULL; e++) {
+        if (strcmp(e->key, key) == 0) {
+            if (strcmp(bs_g_lang, "de") == 0 && e->de)
+                return e->de;
+            if (strcmp(bs_g_lang, "fr") == 0 && e->fr)
+                return e->fr;
+            if (strcmp(bs_g_lang, "it") == 0 && e->it)
+                return e->it;
+            return e->en;
+        }
+    }
+    return key;
+}

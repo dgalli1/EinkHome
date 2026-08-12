@@ -583,7 +583,7 @@ def test_search_commit_filters_grid(fresh_bookshelf):
     filter the shelf.
 
     Regression for the "search never searches" bug: OpenKeyboard() wrote
-    the live keystrokes straight into g_state.query, and on commit the
+    the live keystrokes straight into bs_g_state.query, and on commit the
     handler's snprintf(query, ..., buffer) aliased that same buffer,
     wiping the query before apply_filter_and_sort() ran — so the grid
     never changed and the filter log showed an empty query.  The fix
@@ -858,7 +858,7 @@ def test_pager_prev_returns_page(fresh_bookshelf):
 
 # ── menu overlay (group) ──────────────────────────────────────────────
 # Note: The menu/group overlay (All books, By author, etc.) is currently
-# unreachable from the UI (g_state.menu_open is never set to 1 from any
+# unreachable from the UI (bs_g_state.menu_open is never set to 1 from any
 # tap handler). The hit_top_bar function returns 3 for the right button
 # which opens the More overlay, not the menu overlay. The menu overlay
 # code exists but is dead code. We skip testing it.

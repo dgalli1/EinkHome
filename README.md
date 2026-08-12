@@ -15,7 +15,12 @@ are not touched by this repository.
 
 ```
 Makefile            # the only source list; builds build/bookshelf.app
-app/                # the app sources (bs_*.c, bookshelf.h, sqlite3.h)
+app/                # the app sources, split by layer:
+  core/             #   boot/event loop, HTTP, config, i18n, worker, bs_core.h
+  data/             #   store (SQLite), model/sync, local scan, metadata, progress
+  ui/               #   drawing: grid, top bar, popups, overlays, browsers
+  action/           #   downloads/context menu, input hit-testing, app launcher
+  vendor/           #   cJSON, sqlite3.h
 scripts/            # run.sh / run-visible.sh (emulator), setup.sh (bootstrap),
                     # install-device.sh / install-koreader-device.sh (real device),
                     # install-koreader.sh (emulator KOReader), uninstall-device.sh,

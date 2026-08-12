@@ -29,7 +29,7 @@ import re
 import unicodedata
 from collections.abc import Sequence
 
-# Device constants this module must stay in sync with (app/bookshelf.h):
+# Device constants this module must stay in sync with (app/core/bs_core.h):
 #   MAX_QUERY_LEN  80  — a tapped term is copied into the query buffer
 #   SUGGEST_MAX_TERMS 96 — an upper bound the device accepts; the wire
 #                          and the device-side term index are far

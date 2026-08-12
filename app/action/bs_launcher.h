@@ -1,0 +1,69 @@
+#ifndef BS_LAUNCHER_H
+#define BS_LAUNCHER_H
+
+/* bs_launcher.h — App launcher + device-profile resolution (bs_launcher.c): the Apps
+ * overlay and the lc_* conditional-visibility helpers. */
+
+#include "bs_core.h"
+#include "cJSON.h"
+
+extern const BsLcProfile bs_g_lcprof;
+
+extern const char *const bs_lc_dims[];
+
+/* Number of profile dimensions (LC_NDIMS uses lc_dims, so it lives here). */
+#define BS_LC_NDIMS ((int)(sizeof bs_lc_dims / sizeof bs_lc_dims[0]))
+
+extern BsLauncherItem bs_g_launcher_items[BS_LAUNCHER_MAX_ITEMS];
+
+extern int bs_g_launcher_count;
+
+extern int bs_g_launcher_body_h; /* total laid-out body height */
+
+extern int bs_g_launcher_built;
+
+const char *bs_lc_prof_val(const char *dim);
+
+const char *bs_lc_pick_key(const cJSON *obj, const char *want);
+
+void bs_lc_resolve(const cJSON *v, const char *cur_dim, char *out, size_t cap);
+
+int bs_lc_resolve_bool(const cJSON *v);
+
+char *bs_read_text_file(const char *path);
+
+const char *bs_lc_token_en(const char *tok);
+
+void bs_lc_translate(const char *raw, char *out, size_t cap);
+
+void bs_launcher_layout(void);
+
+void bs_launcher_add_app(const cJSON *apps, const char *id);
+
+void bs_launcher_build(void);
+
+void bs_launcher_scan_ext1_apps(void);
+
+void bs_draw_launcher_icon(int cx, int cy, const char *icon_name,
+                        const char *title);
+
+void bs_launcher_icons_free(void);
+
+void bs_draw_overlay_launcher(void);
+
+/* Back-button rect in the launcher header (draw + hit-test share it). */
+void bs_launcher_back_rect(int *bx, int *by, int *bw, int *bh);
+
+void bs_launch_app(const BsLauncherItem *it);
+
+void bs_on_tap_overlay_launcher(int x, int y);
+
+void bs_launcher_open_set(void);
+
+void bs_launcher_close(void);
+
+void bs_drill_back(void);
+
+void bs_on_tap_thumbnail(int vi);
+
+#endif /* BS_LAUNCHER_H */

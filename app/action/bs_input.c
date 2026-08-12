@@ -1,0 +1,446 @@
+/* bs_input.c — part of the bookshelf app (see bs_core.h) */
+
+#include "bs_core.h"
+#include "bs_browser.h"
+#include "bs_downloads.h"
+#include "bs_input.h"
+#include "bs_launcher.h"
+#include "bs_model.h"
+#include "bs_net.h"
+#include "bs_store.h"
+#include "bs_ui.h"
+
+/* ── hit-testing ─────────────────────────────────────────────────────── */
+
+int
+bs_hit_top_bar(int x, int y)
+{
+    int bar_top = 0; /* top bar sits at the very top; the panel is at the bottom */
+    int bar_bot = bar_top + BS_TOP_BAR_H;
+    if (y < bar_top || y >= bar_bot)
+        return -1;
+    int w = ScreenWidth();
+    /* Left button — TOP_BTN_SIZE×TOP_BTN_SIZE region, padded
+     * TOP_BTN_PAD px on the left: a back arrow on the Search sub-view
+     * or a drilled series, a no-op otherwise (the home icon was
+     * removed). */
+    if (x >= BS_TOP_BTN_PAD && x < BS_TOP_BTN_PAD + BS_TOP_BTN_SIZE)
+        return 1;
+    /* The Search page has no right-side icons and no source button —
+     * its top bar is just the back arrow, so taps there fall through. */
+    if (bs_g_state.tab == BS_TAB_SEARCH)
+        return -1;
+    /* Source button — icon + label right of the house button. */
+    if (x >= BS_SOURCE_BTN_X && x < BS_SOURCE_BTN_X + BS_SOURCE_BTN_W)
+        return 6;
+    /* Right TOP_BTN_SIZE×TOP_BTN_SIZE region, padded TOP_BTN_PAD px on
+     * the right: the hamburger/More button. */
+    if (x >= w - BS_TOP_BTN_SIZE - BS_TOP_BTN_PAD && x < w - BS_TOP_BTN_PAD)
+        return 3;
+    /* Sync button — TOP_BTN_SIZE region left of the menu button; runs
+     * a library sync. */
+    if (x >= w - BS_TOP_BTN_PAD - 2 * BS_TOP_BTN_SIZE && x < w - BS_TOP_BTN_SIZE - BS_TOP_BTN_PAD)
+        return 2;
+    /* Search icon — TOP_BTN_SIZE region left of the sync button; opens
+     * the Search sub-page. */
+    if (x >= w - BS_TOP_BTN_PAD - 3 * BS_TOP_BTN_SIZE && x < w - BS_TOP_BTN_PAD - 2 * BS_TOP_BTN_SIZE)
+        return 5;
+    return -1;
+}
+
+/* 1 when (x, y) is inside the top-bar search icon (the hit region is
+ * tab-dependent — see hit_top_bar). */
+int
+bs_hit_search_icon(int x, int y)
+{
+    return bs_hit_top_bar(x, y) == 5;
+}
+
+/* 1 when (x, y) is inside the search input row on the Search page. */
+int
+bs_hit_search_input(int x, int y)
+{
+    int row_top = BS_TOP_BAR_H + BS_TOP_BAR_PAD;
+    int row_bot = row_top + BS_SEARCH_ROW_H;
+    if (y < row_top || y >= row_bot)
+        return -1;
+    int w = ScreenWidth();
+    int tx = 16, tw = w - 32; /* full-width bar (see draw_search_tab) */
+    int ty = row_top + 10;
+    int th = BS_SEARCH_ROW_H - 20;
+    if (x < tx || x >= tx + tw)
+        return -1;
+    if (y < ty || y >= ty + th)
+        return -1;
+    return 1;
+}
+
+/* 0-based index of the history term row tapped on the Search page, or
+ * -1 when the tap is outside the history list. */
+int
+bs_hit_history(int x, int y)
+{
+    (void)x;
+    int top, bot, cell_w, cell_h;
+    (void)cell_w;
+    (void)cell_h;
+    bs_grid_geom(&top, &bot, &cell_w, &cell_h);
+    int y0 = top + BS_SEARCH_ROW_H;
+    if (y < y0)
+        return -1;
+    int ps = bs_history_pagesize();
+    if (ps < 1)
+        ps = 1;
+    int rel = (y - y0) / BS_SEARCH_HISTORY_ROW_H;
+    if (rel >= ps)
+        return -1;
+    int idx = bs_g_state.page * ps + rel;
+    if (idx >= bs_store_search_count())
+        return -1;
+    return idx;
+}
+
+/* 0-based index of the suggestion row tapped, or -1.  Mirrors
+ * hit_history over the live band geometry; only rows that are
+ * actually drawn (fit above the keyboard) are hit-testable. */
+int
+bs_hit_suggestion(int x, int y)
+{
+    (void)x;
+    int y_top, y_bot;
+    bs_suggest_band(&y_top, &y_bot);
+    if (y < y_top || y >= y_bot)
+        return -1;
+    int drawn = (y_bot - y_top) / BS_SEARCH_HISTORY_ROW_H;
+    int rel = (y - y_top) / BS_SEARCH_HISTORY_ROW_H;
+    if (rel >= drawn || rel >= bs_g_nsuggest)
+        return -1;
+    return rel;
+}
+
+int
+bs_hit_thumbnail(int x, int y)
+{
+    int top, bot, cell_w, cell_h;
+    bs_grid_geom(&top, &bot, &cell_w, &cell_h);
+    int cols = bs_view_cols();
+    int rows = bs_view_rows();
+    int page_start = bs_g_state.page * bs_view_pagesize();
+    for (int row = 0; row < rows; row++) {
+        for (int col = 0; col < cols; col++) {
+            int idx = page_start + row * cols + col;
+            if (idx >= bs_g_view_total)
+                return -1;
+            int tx = 8 + col * cell_w;
+            int ty = top + 4 + row * cell_h;
+            int tw = cell_w - 8;
+            int th = cell_h - 6;
+            if (x >= tx && x < tx + tw && y >= ty && y < ty + th)
+                return idx;
+        }
+    }
+    return -1;
+}
+
+int
+bs_hit_pager(int x, int y)
+{
+    int y0 = bs_content_bottom() - BS_PAGER_H;
+    if (y < y0 || y >= y0 + BS_PAGER_H)
+        return 0;
+    int w = ScreenWidth();
+    int pages = bs_current_pages();
+    /* < prev — 96px wide starting at x=12 */
+    if (bs_g_state.page > 0 && x >= 12 && x < 12 + 96)
+        return -1;
+    /* << first page — next 96px slot */
+    if (bs_g_state.page > 0 && x >= 116 && x < 116 + 96)
+        return -3;
+    /* >> last page — 96px slot left of the next button */
+    if (bs_g_state.page + 1 < pages && x >= w - 212 && x < w - 116)
+        return -4;
+    /* > next — 96px wide ending at x=w-12 */
+    if (bs_g_state.page + 1 < pages && x >= w - 108 && x < w - 12)
+        return -2;
+    return 0;
+}
+
+/* ── tap handlers ────────────────────────────────────────────────────── */
+
+void
+bs_on_tap_overlay_menu(int x, int y)
+{
+    /* Row geometry is shared with the More overlay (same 96/88 values
+     * — one name, one layout). */
+    int y0 = BS_MORE_Y0, item_h = BS_MORE_ITEM_H;
+    int pw = ScreenWidth() * 3 / 4;
+    if (x < 0 || x >= pw) {
+        bs_g_state.overlay = BS_OV_NONE;
+        return;
+    }
+    for (int i = 0; i < 4; i++) {
+        if (y >= y0 + i * item_h && y < y0 + i * item_h + item_h) {
+            bs_g_state.group = (BsGroupMode)i;
+            bs_g_drilled_series[0] = '\0';
+            bs_g_state.overlay = BS_OV_NONE;
+            bs_view_rebuild();
+        }
+    }
+    bs_g_state.overlay = BS_OV_NONE;
+}
+
+/* Handle a tap while the More overlay is open.  Returns 1 when the
+ * action already repainted the screen itself (settings, launcher,
+ * download-all) — the caller must then skip its follow-up redraw or
+ * the whole content area flushes twice per tap. */
+int
+bs_on_tap_overlay_more(int x, int y)
+{
+    int pw = ScreenWidth() * 3 / 4;
+    int px = ScreenWidth() - pw;
+    if (x < px || x >= ScreenWidth()) {
+        bs_g_state.overlay = BS_OV_NONE;
+        return 0;
+    }
+    if (y >= BS_MORE_Y0 && y < BS_MORE_Y0 + BS_MORE_ITEM_H) {
+        bs_g_state.overlay = BS_OV_NONE;
+        bs_do_sync();
+        return 0;
+    }
+    /* Settings row opens the full-screen settings page. */
+    if (y >= BS_MORE_Y0 + BS_MORE_SETTINGS_IDX * BS_MORE_ITEM_H &&
+        y < BS_MORE_Y0 + (BS_MORE_SETTINGS_IDX + 1) * BS_MORE_ITEM_H) {
+        bs_g_state.overlay = BS_OV_SETTINGS;
+        bs_g_settings_edit = 0;
+        bs_draw_overlay_settings();
+        FullUpdate();
+        return 1;
+    }
+    /* Applications row opens the in-app launcher overlay. */
+    if (y >= BS_MORE_Y0 + BS_MORE_APPS_IDX * BS_MORE_ITEM_H &&
+        y < BS_MORE_Y0 + (BS_MORE_APPS_IDX + 1) * BS_MORE_ITEM_H) {
+        bs_g_state.overlay = BS_OV_NONE;
+        bs_launcher_open_set();
+        return 1;
+    }
+    /* Download-all row queues every book in the library and opens the
+     * download-progress popup so the user watches the queue drain. */
+    if (y >= BS_MORE_Y0 + BS_MORE_DLALL_IDX * BS_MORE_ITEM_H &&
+        y < BS_MORE_Y0 + (BS_MORE_DLALL_IDX + 1) * BS_MORE_ITEM_H) {
+        bs_g_state.overlay = BS_OV_NONE;
+        bs_download_all_start();
+        return 1;
+    }
+    for (int i = 1; i < BS_MORE_DLALL_IDX; i++) {
+        if (y >= BS_MORE_Y0 + i * BS_MORE_ITEM_H && y < BS_MORE_Y0 + i * BS_MORE_ITEM_H + BS_MORE_ITEM_H) {
+            bs_g_state.overlay = BS_OV_NONE;
+            if (i == BS_MORE_GRID_IDX) {
+                bs_g_state.view_mode = BS_VIEW_GRID;
+                bs_g_state.page = 0;
+            } else if (i == BS_MORE_LIST_IDX) {
+                bs_g_state.view_mode = BS_VIEW_LIST;
+                bs_g_state.page = 0;
+            } else {
+                /* i = 1..5 → the five sort modes (title↑/↓, author,
+                 * series, recent). */
+                bs_g_state.sort = (BsSortMode)(i - 1);
+                bs_view_rebuild();
+            }
+            return 0;
+        }
+    }
+    bs_g_state.overlay = BS_OV_NONE;
+    return 0;
+}
+
+/* Handle a tap on the source chooser.  Row 0/1 switch the library
+ * source directly (Kavita / scanner-local); row 2 opens the folder
+ * picker — the picked directory becomes the folder source.  A tap
+ * outside the sheet dismisses.  Returns 1 (the chooser owns the
+ * screen while open). */
+int
+bs_on_tap_source(int x, int y)
+{
+    int pw, ph, px, py;
+    bs_source_geom(&px, &py, &pw, &ph);
+    if (x < px || x >= px + pw || y < py || y >= py + ph) {
+        bs_g_state.overlay = BS_OV_NONE;
+        bs_redraw_shelf();
+        return 1;
+    }
+    int row = (y - (py + 80)) / 96;
+    if (row < 0 || row >= 3)
+        return 1;
+    bs_g_state.overlay = BS_OV_NONE;
+    /* Source switch: abort any in-flight sync chain BEFORE the source
+     * changes / config saves, so a stale round never fetches from the
+     * old endpoint or applies a response under the new source. */
+    bs_sync_abort();
+    if (row == 0) {
+        bs_g_state.source = BS_SOURCE_KAVITA;
+        bs_g_browse_open = 0;
+        bs_g_browser_drag = 0;
+        bs_save_config_file();
+        bs_do_sync();
+        bs_redraw_shelf();
+    } else if (row == 1) {
+        bs_g_state.source = BS_SOURCE_LOCAL;
+        bs_g_browse_open = 0;
+        bs_g_browser_drag = 0;
+        bs_save_config_file();
+        bs_do_sync();
+        bs_redraw_shelf();
+    } else {
+        /* Folder source: the browser is always rooted at /mnt/ext1 —
+         * the user only has this partition, so there is no base
+         * directory to choose. */
+        bs_g_state.source = BS_SOURCE_FOLDER;
+        bs_save_config_file();
+        bs_browse_start(BS_BROWSE_ROOT);
+    }
+    return 1;
+}
+
+/* Close the settings overlay and repaint the shelf beneath it.  A
+ * picked-but-unsaved download folder is discarded. */
+void
+bs_settings_close(void)
+{
+    bs_g_state.overlay = BS_OV_NONE;
+    bs_g_settings_edit = 0;
+    bs_g_settings_dl_dir[0] = '\0';
+    bs_redraw_shelf();
+}
+
+/* Persist settings, rebuild the endpoint URLs from the (possibly edited)
+ * api_base / api_token, re-apply the download folder, then re-sync so
+ * the shelf reflects the new server immediately. */
+void
+bs_settings_apply(void)
+{
+    /* Abort any in-flight sync chain BEFORE the endpoints are rebuilt
+     * from the edited api_base/api_token, so the chain never fetches
+     * the next round from the new URL with the old cursor. */
+    bs_sync_abort();
+    bs_save_config_file();
+    bs_build_endpoint_urls();
+    bs_resolve_downloads_dir();
+    bs_g_settings_dl_dir[0] = '\0';
+    bs_g_state.overlay = BS_OV_NONE;
+    bs_g_settings_edit = 0;
+    /* Re-sync with the new settings; show the progress sheet (unless
+     * the Folder source, which has nothing to sync). */
+    if (bs_g_state.source != BS_SOURCE_FOLDER)
+        bs_sync_popup_open();
+    bs_do_sync();
+    bs_redraw_shelf();
+}
+
+void
+bs_on_tap_overlay_settings(int x, int y)
+{
+    (void)x; /* rows span the full content width; only y matters */
+
+    int y_row1 = 112;
+    int y_row2 = y_row1 + BS_SETTINGS_ROW_H;
+    int y_row3 = y_row2 + BS_SETTINGS_ROW_H;
+    int y_row4 = y_row3 + BS_SETTINGS_ROW_H;
+    int y_save = y_row4 + BS_SETTINGS_ROW_H + 24;
+    int y_back = y_save + BS_SETTINGS_BTN_H;
+    int y_logs = y_back + BS_SETTINGS_BTN_H;
+
+    if (y >= y_row1 && y < y_row1 + BS_SETTINGS_ROW_H - 12) {
+        bs_g_settings_edit = 1;
+        snprintf(bs_g_settings_kb_buf, sizeof bs_g_settings_kb_buf, "%s", bs_g_state.api_base);
+        bs_draw_overlay_settings();
+        FullUpdate();
+        OpenKeyboard(bs_i18n("settings.api_host"),
+                     bs_g_settings_kb_buf,
+                     sizeof bs_g_settings_kb_buf - 1,
+                     0,
+                     bs_settings_keyboard_handler);
+        return;
+    }
+    if (y >= y_row2 && y < y_row2 + BS_SETTINGS_ROW_H - 12) {
+        bs_g_settings_edit = 2;
+        snprintf(bs_g_settings_kb_buf, sizeof bs_g_settings_kb_buf, "%s", bs_g_state.api_token);
+        bs_draw_overlay_settings();
+        FullUpdate();
+        OpenKeyboard(bs_i18n("settings.api_key"),
+                     bs_g_settings_kb_buf,
+                     sizeof bs_g_settings_kb_buf - 1,
+                     0,
+                     bs_settings_keyboard_handler);
+        return;
+    }
+    if (y >= y_row3 && y < y_row3 + BS_SETTINGS_ROW_H - 12) {
+        /* Cycle Auto → reader[0] → reader[1] → … → Auto. */
+        bs_g_state.reader_pref = (bs_g_state.reader_pref + 1) % (bs_g_reader_count + 1);
+        bs_draw_overlay_settings();
+        /* Only the reader row's value text changed; refresh just that
+         * row instead of a full-screen flash. */
+        PartialUpdate(32, y_row3, ScreenWidth() - 64, BS_SETTINGS_ROW_H - 12);
+        return;
+    }
+    if (y >= y_row4 && y < y_row4 + BS_SETTINGS_ROW_H - 12) {
+        /* Download-folder picker (confined to /mnt/ext1). */
+        bs_folder_open();
+        return;
+    }
+    if (y >= y_save && y < y_save + BS_SETTINGS_BTN_H - 12) {
+        bs_settings_apply();
+        return;
+    }
+    if (y >= y_back && y < y_back + BS_SETTINGS_BTN_H - 12) {
+        bs_settings_close();
+        return;
+    }
+    if (y >= y_logs && y < y_logs + BS_SETTINGS_BTN_H - 12) {
+        /* Show the app log directly (Settings → Show logs).  Settings
+         * is NOT restored when the log closes — the log's Back goes
+         * straight to the shelf (see on_tap_log_view). */
+        bs_g_settings_edit = 0;
+        bs_g_state.overlay = BS_OV_LOG;
+        bs_g_state.log_scroll = -1; /* start at the tail */
+        bs_draw_log_view();
+        FullUpdate();
+        return;
+    }
+}
+
+/* Taps on the full-screen log viewer: Back (top-left) or the corner
+ * scroll buttons (up = older, down = newer).  Taps elsewhere are
+ * ignored. */
+void
+bs_on_tap_log_view(int x, int y)
+{
+    if (x >= BS_LOG_BACK_X && x < BS_LOG_BACK_X + BS_LOG_BACK_W && y >= BS_LOG_BACK_Y &&
+        y < BS_LOG_BACK_Y + BS_LOG_BACK_H) {
+        bs_g_state.overlay = BS_OV_NONE;
+        bs_g_state.log_scroll = -1;
+        bs_redraw_shelf();
+        return;
+    }
+    int dir = bs_hit_scroll_button(x, y);
+    if (dir != 0) {
+        int h = bs_content_bottom();
+        int btn_y = h - 8 - BS_SCROLL_BTN_H;
+        int page = (btn_y - (BS_LOG_BACK_Y + BS_LOG_BACK_H + 16)) / BS_LOG_ROW_H;
+        if (page < 1)
+            page = 1;
+        /* Rows are ordered oldest → newest; up (dir -1) goes older. */
+        bs_g_state.log_scroll += dir * page;
+        if (bs_g_state.log_scroll < 0)
+            bs_g_state.log_scroll = 0;
+        bs_draw_log_view();
+        /* One page scroll shifts the log body (and the scroll-button
+         * state at the extremes); refresh just that region rather than
+         * the whole screen.  The header (back button/title/path) is
+         * unchanged on scroll. */
+        {
+            int h = bs_content_bottom();
+            int body_top = BS_LOG_BACK_Y + BS_LOG_BACK_H + 16;
+            PartialUpdate(0, body_top, ScreenWidth(), h - body_top);
+        }
+    }
+}
