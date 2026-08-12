@@ -312,6 +312,14 @@ class BookshelfSession:
         """Tap the Back button."""
         self.tap_at(*self._g.settings_back_center())
 
+    def tap_settings_logs(self) -> None:
+        """Tap the Show logs button (opens the full-screen log viewer)."""
+        self.tap_at(*self._g.settings_logs_center())
+
+    def tap_log_back(self) -> None:
+        """Tap the log viewer's Back button (returns to the shelf)."""
+        self.tap_at(*self._g.log_back_center())
+
     # -- launcher helpers ------------------------------------------------
 
     def open_launcher(self) -> None:

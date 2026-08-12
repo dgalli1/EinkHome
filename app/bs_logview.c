@@ -170,7 +170,10 @@ log_wrap_get(int maxw, int cap)
         log_wrap_cache_clear();
         return NULL;
     }
-    LogRow *rows = malloc((size_t)cap * sizeof(LogRow));
+    /* Zeroed rows: log_wrap_rows uses `.len == 0` as its empty-row
+     * sentinel and dereferences `.p` whenever `.len > 0`, so the
+     * array must NOT come from a plain malloc. */
+    LogRow *rows = calloc((size_t)cap, sizeof(LogRow));
     if (rows == NULL) {
         free(text);
         log_wrap_cache_clear();

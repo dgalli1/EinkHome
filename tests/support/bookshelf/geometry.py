@@ -251,6 +251,17 @@ class BookshelfGeometry:
         y = SETTINGS_ROW1_Y + 4 * SETTINGS_ROW_H + 24 + SETTINGS_BTN_H
         return (self.screen_w // 2, y + (SETTINGS_BTN_H - 12) // 2)
 
+    def settings_logs_center(self) -> tuple[int, int]:
+        """Centre of the Show logs button (below Back)."""
+        y = SETTINGS_ROW1_Y + 4 * SETTINGS_ROW_H + 24 + 2 * SETTINGS_BTN_H
+        return (self.screen_w // 2, y + (SETTINGS_BTN_H - 12) // 2)
+
+    # ── Log viewer (full-screen) ─────────────────────────────────────
+
+    def log_back_center(self) -> tuple[int, int]:
+        """Centre of the log viewer's Back button (top-left)."""
+        return (8 + 64, 10 + 36)
+
     def outside_menu_overlay(self) -> tuple[int, int]:
         """A point guaranteed to be right of the left-anchored Menu panel."""
         return (self.screen_w - 4, self.screen_h // 2)

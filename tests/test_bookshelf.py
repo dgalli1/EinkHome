@@ -459,6 +459,37 @@ def test_settings_back_returns_to_shelf(fresh_bookshelf):
     bs.wait_hash_change(before)
 
 
+def test_settings_show_logs_opens_log_viewer(fresh_bookshelf):
+    """Settings → Show logs draws the log viewer without crashing.
+
+    Regression: the cached-wrap perf batch allocated the wrap row array
+    with malloc instead of calloc, but log_wrap_rows uses `.len == 0`
+    as its empty-row sentinel (and dereferences `.p` when `.len > 0`).
+    The first wrap of a real log tail then read uninitialized heap and
+    segfaulted inside span_width; the watchdog respawned the app, so
+    the viewer never appeared.
+    """
+    bs = fresh_bookshelf
+    bs.open_settings()
+    time.sleep(0.5)
+    before_hash = bs.frame_hash()
+    before_invocations = bs.invocation_count()
+    bs.tap_settings_logs()
+    # The full-screen log page replaces the settings page...
+    bs.wait_hash_change(before_hash)
+    time.sleep(0.5)
+    # ...and the app must not have crashed + respawned (a crash would
+    # open a new invocation of the app).
+    assert bs.invocation_count() == before_invocations, (
+        "bookshelf respawned after the Show logs tap (crash)"
+    )
+    # Back leaves the viewer and returns to the shelf.
+    before_back = bs.frame_hash()
+    bs.tap_log_back()
+    bs.wait_hash_change(before_back)
+    assert bs.invocation_count() == before_invocations
+
+
 def test_settings_api_host_row_opens_keyboard(fresh_bookshelf):
     """Tap the API host row, verify the on-screen keyboard appears."""
     bs = fresh_bookshelf
