@@ -16,3 +16,4 @@ api/.cover-cache/
 sdk/pocketbook-sdk-b288/
 # Screenshots from scripts/click_first_book.py
 screenshots/
+firmwares/
