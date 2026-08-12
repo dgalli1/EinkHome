@@ -989,10 +989,26 @@ def _standalone_view_count() -> int:
 
 
 def _goto_view_tile(bs: BookshelfSession, view_idx: int) -> int:
-    """Page to *view_idx* and return its within-page position."""
+    """Page to *view_idx* and return its within-page position.
+
+    Navigates relative to the page the grid currently shows (parsed from
+    the last draw_grid marker): drill-back restores the pre-drill page,
+    so callers must not assume page 0 — and pager-next is a no-op on the
+    last page, so a forward-only walk could never reach a lower target.
+    """
     page = view_idx // _PAGESIZE
     pos = view_idx % _PAGESIZE
-    for target in range(1, page + 1):
+    m = re.findall(r"draw_grid view=\d+ page=(\d+)", bs.current_log())
+    cur = int(m[-1]) if m else 0
+    if cur == page:
+        return pos
+    if cur < page:
+        targets = range(cur + 1, page + 1)
+        tap = bs.tap_pager_next
+    else:
+        targets = range(cur - 1, page - 1, -1)
+        tap = bs.tap_pager_prev
+    for target in targets:
         # Poll the draw_grid page= marker per step so a swallowed pager
         # tap is retried instead of desyncing the page count (a desync
         # would make the delete-drill tests tap the WRONG tile).
@@ -1001,7 +1017,7 @@ def _goto_view_tile(bs: BookshelfSession, view_idx: int) -> int:
         while time.monotonic() < deadline:
             if f"page={target}" in bs.current_log()[len(snap):]:
                 break
-            bs.tap_pager_next()
+            tap()
             time.sleep(0.3)
         else:
             raise AssertionError(f"pager never reached page={target} (swallowed tap)")
