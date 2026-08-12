@@ -38,6 +38,7 @@ MORE_SETTINGS = 8
 MORE_APPS = 9
 
 # ── Settings overlay layout (full-screen page) ────────────────────────
+SETTINGS_HEADER_H = 104  # fixed header bar (Back button + title)
 SETTINGS_ROW_H = 120
 SETTINGS_BTN_H = 96
 SETTINGS_ROW1_Y = 112
@@ -90,6 +91,7 @@ __all__ = [
     "SEARCH_HISTORY_ROW_H",
     "TOP_BAR_H",
     "SETTINGS_BTN_H",
+    "SETTINGS_HEADER_H",
     "SETTINGS_ROW1_Y",
     "SETTINGS_ROW_H",
     "MORE_APPS",
@@ -247,13 +249,13 @@ class BookshelfGeometry:
         return (self.screen_w // 2, y + (SETTINGS_BTN_H - 12) // 2)
 
     def settings_back_center(self) -> tuple[int, int]:
-        """Centre of the Back button."""
-        y = SETTINGS_ROW1_Y + 4 * SETTINGS_ROW_H + 24 + SETTINGS_BTN_H
-        return (self.screen_w // 2, y + (SETTINGS_BTN_H - 12) // 2)
+        """Centre of the header Back button (top-left)."""
+        by = (SETTINGS_HEADER_H - 56) // 2
+        return (16 + 80, by + 28)
 
     def settings_logs_center(self) -> tuple[int, int]:
-        """Centre of the Show logs button (below Back)."""
-        y = SETTINGS_ROW1_Y + 4 * SETTINGS_ROW_H + 24 + 2 * SETTINGS_BTN_H
+        """Centre of the Show logs button (below Save)."""
+        y = SETTINGS_ROW1_Y + 4 * SETTINGS_ROW_H + 24 + SETTINGS_BTN_H
         return (self.screen_w // 2, y + (SETTINGS_BTN_H - 12) // 2)
 
     # ── Log viewer (full-screen) ─────────────────────────────────────

@@ -416,6 +416,14 @@ typedef struct {
 } BsReaderCandidate;
 #define BS_SETTINGS_ROW_H 120
 #define BS_SETTINGS_BTN_H 96
+/* Settings page header: a fixed bar with a Back button at the left and
+ * the centred title — the same shape as the launcher header (the
+ * draw path and the tap hit-test share the rect via
+ * bs_settings_back_rect()). */
+#define BS_SETTINGS_HEADER_H 104
+#define BS_SETTINGS_BACK_X 16
+#define BS_SETTINGS_BACK_W 160
+#define BS_SETTINGS_BACK_H 56
 /* Download-folder picker overlay (bs_browser.c): header with the current
  * path, a scrollable list of subdirectories, and Select/Back buttons.
  * Browsing is confined to /mnt/ext1 — the list has no ".." above the
