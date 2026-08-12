@@ -35,6 +35,7 @@ static BsJob *g_jobs; /* in-flight list, main thread only */
 static pthread_mutex_t g_mu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t  g_cv = PTHREAD_COND_INITIALIZER;
 static BsJob          *g_queue;
+static BsJob          *g_queue_tail;
 static _Atomic int     g_worker_started;
 
 /* One-shot 'wkr' timer callback. */
@@ -56,6 +57,8 @@ bs_worker_main(void *unused)
             pthread_cond_wait(&g_cv, &g_mu);
         BsJob *job = g_queue;
         g_queue = job->qnext;
+        if (g_queue == NULL)
+            g_queue_tail = NULL;
         pthread_mutex_unlock(&g_mu);
         job->fn(job); /* must store done=1 (release) as its last action */
     }
@@ -83,6 +86,7 @@ bs_worker_ensure(void)
                 job->rc = -1;
                 __atomic_store_n(&job->done, 1, __ATOMIC_RELEASE);
             }
+            g_queue_tail = NULL;
         }
     }
     pthread_mutex_unlock(&g_mu);
@@ -101,13 +105,17 @@ bs_worker_submit(bs_job_fn fn, bs_job_done done_cb, void *arg)
     g_jobs = job;
 
     pthread_mutex_lock(&g_mu);
-    job->qnext = g_queue;
-    g_queue = job;
+    job->qnext = NULL;
+    if (g_queue_tail)
+        g_queue_tail->qnext = job;
+    else
+        g_queue = job;
+    g_queue_tail = job;
     pthread_cond_signal(&g_cv);
     pthread_mutex_unlock(&g_mu);
 
     bs_worker_ensure();
-    SetWeakTimerEx("wkr", bs_worker_timer_cb, NULL, 100);
+    SetWeakTimerEx("wkr", bs_worker_timer_cb, NULL, 30);
     return job;
 }
 
@@ -146,5 +154,5 @@ bs_worker_tick(void)
         }
     }
     if (g_jobs != NULL)
-        SetWeakTimerEx("wkr", bs_worker_timer_cb, NULL, 100);
+        SetWeakTimerEx("wkr", bs_worker_timer_cb, NULL, 30);
 }

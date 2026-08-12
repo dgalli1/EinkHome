@@ -33,7 +33,7 @@ void store_set_downloaded(const char *id, int downloaded,
 
 int store_get_book(const char *id, Book *out);
 
-void store_begin(void);
+int store_begin(void);
 
 void store_set_meta(const char *key, const char *value);
 

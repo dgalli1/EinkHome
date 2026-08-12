@@ -263,15 +263,46 @@ draw_series_stack_back(int cx, int cy, int cw, int ch)
     DrawRect(cx - step, cy - step, cw, ch, BLACK);
 }
 
+/* Fonts a thumbnail pass needs, hoisted once per redraw instead of
+ * opened+closed per tile (each tile used to do 4 OpenFont/CloseFont
+ * pairs; a shelf redraw is ~15 tiles).  Sizes/faces match what the
+ * per-tile code opened before. */
+typedef struct {
+    ifont *grid_title;  /* DEFAULTFONTB 22 — grid caption */
+    ifont *grid_author; /* DEFAULTFONT 18 — grid author line */
+    ifont *list_title;  /* DEFAULTFONTB 30 — list row title */
+    ifont *list_author; /* DEFAULTFONT 24 — list row author */
+    ifont *badge;       /* DEFAULTFONTB 20 — series count badge */
+} GridFonts;
+
+static void
+grid_fonts_open(GridFonts *gf)
+{
+    gf->grid_title  = OpenFont(DEFAULTFONTB, 22, 0);
+    gf->grid_author = OpenFont(DEFAULTFONT, 18, 0);
+    gf->list_title  = OpenFont(DEFAULTFONTB, 30, 0);
+    gf->list_author = OpenFont(DEFAULTFONT, 24, 0);
+    gf->badge       = OpenFont(DEFAULTFONTB, 20, 0);
+}
+
+static void
+grid_fonts_close(const GridFonts *gf)
+{
+    if (gf->badge)       CloseFont(gf->badge);
+    if (gf->list_author) CloseFont(gf->list_author);
+    if (gf->list_title)  CloseFont(gf->list_title);
+    if (gf->grid_author) CloseFont(gf->grid_author);
+    if (gf->grid_title)  CloseFont(gf->grid_title);
+}
+
 void
-draw_series_stack_badge(int cx, int cy, int cw, int ch, int count)
+draw_series_stack_badge(int cx, int cy, int cw, int ch, int count, ifont *bf)
 {
     /* Outline the cover rect so it reads as the top book of the stack. */
     DrawRect(cx, cy, cw, ch, BLACK);
 
     char badge[8];
     snprintf(badge, sizeof badge, "%d", count);
-    ifont *bf = OpenFont(DEFAULTFONTB, 20, 0);
     if (bf != NULL) {
         SetFont(bf, WHITE);
         int bw = StringWidth(badge) + 12;
@@ -280,7 +311,6 @@ draw_series_stack_badge(int cx, int cy, int cw, int ch, int count)
         int by = cy + 2;
         FillArea(bx, by, bw, bh, BLACK);
         DrawString(bx + 6, by + 2, badge);
-        CloseFont(bf);
     }
 }
 
@@ -304,8 +334,9 @@ draw_progress_bar(int cx, int cy, int cw, int ch, int pct)
         FillArea(cx + 1, by + 1, fill - 2, bar_h - 2, BLACK);
 }
 
-void
-draw_thumbnail(int x, int y, int w, int h, const TileRow *tr, int vi)
+static void
+draw_thumbnail_fonts(int x, int y, int w, int h, const TileRow *tr, int vi,
+                     const GridFonts *gf)
 {
     (void)vi;
     const Book *b = &tr->book;
@@ -326,31 +357,29 @@ draw_thumbnail(int x, int y, int w, int h, const TileRow *tr, int vi)
             draw_series_stack_back(cx, cy, cww, chh);
         blit_cover(cx, cy, cww, chh, b);
         if (tr->is_series)
-            draw_series_stack_badge(cx, cy, cww, chh, tr->series_count);
+            draw_series_stack_badge(cx, cy, cww, chh, tr->series_count, gf->badge);
         draw_progress_bar(cx, cy, cww, chh, progress_percent(b->local_path));
         int tx0 = cx + cww + 16;
         int tw0 = (x + w - pad) - tx0;
         if (tw0 < 64)
             tw0 = 64;
         const char *label = tr->is_series ? tr->series_name : b->title;
-        ifont      *f = OpenFont(DEFAULTFONTB, 30, 0);
+        ifont      *f = gf->list_title;
         if (f != NULL) {
             SetFont(f, BLACK);
             char truncated[MAX_TITLE_LEN];
             snprintf(truncated, sizeof truncated, "%s", label);
             utf8_fit_width(truncated, sizeof truncated, tw0);
             DrawString(tx0, y + pad + 8, truncated);
-            CloseFont(f);
         }
         if (!tr->is_series && b->author[0] != '\0') {
-            ifont *af = OpenFont(DEFAULTFONT, 24, 0);
+            ifont *af = gf->list_author;
             if (af != NULL) {
                 SetFont(af, DGRAY);
                 char truncated[80];
                 snprintf(truncated, sizeof truncated, "%s", b->author);
                 utf8_fit_width(truncated, sizeof truncated, tw0);
                 DrawString(tx0, y + pad + 8 + 40, truncated);
-                CloseFont(af);
             }
         }
         return;
@@ -366,7 +395,7 @@ draw_thumbnail(int x, int y, int w, int h, const TileRow *tr, int vi)
 
     /* Series cards: badge + outline on top of the cover. */
     if (tr->is_series)
-        draw_series_stack_badge(cx, cy, cw, ch, tr->series_count);
+        draw_series_stack_badge(cx, cy, cw, ch, tr->series_count, gf->badge);
 
     /* Reading progress: a black bar at the cover's bottom edge. */
     draw_progress_bar(cx, cy, cw, ch, progress_percent(b->local_path));
@@ -374,28 +403,35 @@ draw_thumbnail(int x, int y, int w, int h, const TileRow *tr, int vi)
     /* Caption: series name for cards, title for books. */
     int         cap_y = cy + ch + 6;
     const char *label = tr->is_series ? tr->series_name : b->title;
-    ifont      *f = OpenFont(DEFAULTFONTB, 22, 0);
+    ifont      *f = gf->grid_title;
     if (f != NULL) {
         SetFont(f, BLACK);
         char truncated[MAX_TITLE_LEN];
         snprintf(truncated, sizeof truncated, "%s", label);
         utf8_fit_width(truncated, sizeof truncated, w - 8);
         DrawString(x + 4, cap_y, truncated);
-        CloseFont(f);
     }
 
     /* Second line: author for books, omitted for series cards. */
     if (!tr->is_series && b->author[0] != '\0') {
-        ifont *af = OpenFont(DEFAULTFONT, 18, 0);
+        ifont *af = gf->grid_author;
         if (af != NULL) {
             SetFont(af, DGRAY);
             char truncated[80];
             snprintf(truncated, sizeof truncated, "%s", b->author);
             utf8_fit_width(truncated, sizeof truncated, w - 8);
             DrawString(x + 4, cap_y + 24, truncated);
-            CloseFont(af);
         }
     }
+}
+
+void
+draw_thumbnail(int x, int y, int w, int h, const TileRow *tr, int vi)
+{
+    GridFonts gf;
+    grid_fonts_open(&gf);
+    draw_thumbnail_fonts(x, y, w, h, tr, vi, &gf);
+    grid_fonts_close(&gf);
 }
 
 void
@@ -424,6 +460,10 @@ draw_grid(void)
     int cols = view_cols();
     int rows = view_rows();
     int drawn = 0;
+    /* Open the tile fonts once for the whole page pass instead of once
+     * per tile (each draw_thumbnail used to open/close 4 fonts). */
+    GridFonts gf;
+    grid_fonts_open(&gf);
     for (int row = 0; row < rows; row++) {
         for (int col = 0; col < cols; col++) {
             if (drawn >= g_row_count)
@@ -432,11 +472,12 @@ draw_grid(void)
             int ty = top + 4 + row * cell_h;
             int tw = cell_w - 8;
             int th = cell_h - 6;
-            draw_thumbnail(tx, ty, tw, th, &g_rows[drawn], g_state.page * ps + drawn);
+            draw_thumbnail_fonts(tx, ty, tw, th, &g_rows[drawn], g_state.page * ps + drawn, &gf);
             drawn++;
         }
     }
 done:
+    grid_fonts_close(&gf);
     cover_schedule_next();
 }
 
@@ -576,6 +617,10 @@ void
 cover_tick(void *ctx)
 {
     (void)ctx;
+    /* Run any worker-flagged cover-cache sweep here, on the main
+     * thread, so the worker's unlink never races this tick's .raw
+     * extraction. */
+    cover_cache_sweep_if_pending();
     LOG("[bookshelf] cover_tick ENTER page=%d view=%d armed->0\n", g_state.page, g_view_total);
     g_cover_armed = 0;
 
@@ -739,18 +784,19 @@ draw_pager(void)
 
     /* Four 96x64 buttons: < prev, << first, >> last, > next.  Disabled
      * buttons render as faint grey text on white (draw_button's selected
-     * fill is skipped and label_color forces grey). */
+     * fill is skipped and label_color forces grey).  The buttons reuse
+     * the pass-level font `f` above instead of each opening its own. */
     int by = y + (PAGER_H - 64) / 2;
     int gray = LGRAY;
     /* < prev */
-    draw_button(12, by, 96, 64, 0, i18n("pager.prev"), 28, g_state.page > 0 ? 0 : gray);
+    draw_button_font(12, by, 96, 64, 0, i18n("pager.prev"), 28, f, g_state.page > 0 ? 0 : gray);
     /* << first page */
-    draw_button(116, by, 96, 64, 0, i18n("pager.first"), 28, g_state.page > 0 ? 0 : gray);
+    draw_button_font(116, by, 96, 64, 0, i18n("pager.first"), 28, f, g_state.page > 0 ? 0 : gray);
     /* >> last page */
-    draw_button(
-        w - 212, by, 96, 64, 0, i18n("pager.last"), 28, g_state.page + 1 < pages ? 0 : gray);
+    draw_button_font(
+        w - 212, by, 96, 64, 0, i18n("pager.last"), 28, f, g_state.page + 1 < pages ? 0 : gray);
     /* > next */
-    draw_button(
-        w - 108, by, 96, 64, 0, i18n("pager.next"), 28, g_state.page + 1 < pages ? 0 : gray);
+    draw_button_font(
+        w - 108, by, 96, 64, 0, i18n("pager.next"), 28, f, g_state.page + 1 < pages ? 0 : gray);
     CloseFont(f);
 }

@@ -31,6 +31,11 @@ void draw_text_centered(ifont *f, int cx, int cy, const char *text, int color);
 void draw_button(int x, int y, int w, int h, int selected, const char *label,
                  int label_size, int label_color);
 
+/* draw_button variant that reuses a pre-opened font (caller owns the
+ * OpenFont/CloseFont around the pass). */
+void draw_button_font(int x, int y, int w, int h, int selected, const char *label,
+                      int label_size, ifont *f, int label_color);
+
 /* Dim the content area with the LGRAY hatch (modal-sheet backing).  `y0`
  * is where the dim starts: popups keep the top bar undimmed (its icons —
  * the spinning sync glyph among them — stay fully visible), full-screen
@@ -78,7 +83,7 @@ void blit_cover(int cx, int cy, int cw, int ch, const Book *b);
 
 void draw_series_stack_back(int cx, int cy, int cw, int ch);
 
-void draw_series_stack_badge(int cx, int cy, int cw, int ch, int count);
+void draw_series_stack_badge(int cx, int cy, int cw, int ch, int count, ifont *bf);
 
 void draw_thumbnail(int x, int y, int w, int h, const TileRow *tr, int vi);
 
@@ -126,6 +131,11 @@ int hit_scroll_button_at(int x, int y, int y0);
 
 void redraw_shelf(void);
 
+/* Draw the shelf content without flushing, so a caller can follow with
+ * a single refresh of its choosing (the keyboard-commit path draws here
+ * then does one full-screen FullUpdate). */
+void draw_shelf_nofb(void);
+
 /* Lighter page-turn repaint: grid/list body + pager band partial
  * updates only (the top bar is untouched by a page flip). */
 void flip_page(void);
@@ -153,9 +163,9 @@ void settings_keyboard_handler(char *buffer);
 const char *settings_reader_label(void);
 
 void settings_draw_row(int y, const char *label, const char *value,
-                       int editing);
+                       int editing, ifont *lf, ifont *vf);
 
-void settings_draw_button(int y, const char *label, int filled);
+void settings_draw_button(int y, const char *label, int filled, ifont *f);
 
 void draw_overlay_settings(void);
 

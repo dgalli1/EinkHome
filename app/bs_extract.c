@@ -517,11 +517,20 @@ fb2_meta(const char *path, char *title, size_t title_cap, char *author, size_t a
     FILE *f = fopen(path, "rb");
     if (f == NULL)
         return -1;
-    unsigned char buf[262144];
-    size_t        got = fread(buf, 1, sizeof buf - 1, f);
-    fclose(f);
-    if (got == 0)
+    /* 256KB on the task stack overflows the device stack (a 32KB frame
+     * already crashed a boot loop on hardware); heap it like pdf_meta
+     * does. */
+    unsigned char *buf = malloc(262144);
+    if (buf == NULL) {
+        fclose(f);
         return -1;
+    }
+    size_t got = fread(buf, 1, 262144 - 1, f);
+    fclose(f);
+    if (got == 0) {
+        free(buf);
+        return -1;
+    }
     buf[got] = '\0';
     if (title != NULL)
         xml_tag_content((const char *)buf, "book-title", title, title_cap);

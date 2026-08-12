@@ -47,6 +47,18 @@ utf8_cap(char *s, size_t cap)
  * bounds the byte budget exactly like utf8_cap (NUL at cap-1).  Never
  * splits a multibyte UTF-8 sequence.  Moved from bs_browser.c and
  * shared by every title/term truncation in the app. */
+static int
+prefix_width(char *s, size_t b)
+{
+    /* Width of the prefix s[0..b), measured at the character boundary b
+     * by temporarily terminating there; the byte is restored after. */
+    char saved = s[b];
+    s[b] = '\0';
+    int w = StringWidth(s);
+    s[b] = saved;
+    return w;
+}
+
 void
 utf8_fit_width(char *s, size_t cap, int maxw)
 {
@@ -57,15 +69,49 @@ utf8_fit_width(char *s, size_t cap, int maxw)
         s[cap - 1] = '\0';
         len = cap - 1;
     }
-    while (StringWidth(s) > maxw && len > 4) {
-        /* Back up to the last character's lead byte, then cut there —
-         * a multibyte char is either kept intact or removed entirely. */
-        size_t i = len - 1;
-        while (i > 0 && ((unsigned char)s[i] & 0xC0) == 0x80)
-            i--;
-        s[i] = '\0';
-        len = i;
+    /* Trivial cases: already within the 4-char floor, or already fits. */
+    if (len <= 4 || StringWidth(s) <= maxw)
+        return;
+
+    /* A fixed-font StringWidth grows monotonically with the prefix, so
+     * the fit predicate is monotone and binary search finds the longest
+     * fitting character-aligned prefix in O(log n) width measurements
+     * instead of the old O(n²) chop-and-re-measure loop.  `lo` is a
+     * character boundary that fits, `hi` one that is too wide. */
+    size_t lo = 4;
+    while (lo < len && ((unsigned char)s[lo] & 0xC0) == 0x80)
+        lo++;                 /* lo = end of the 4th character */
+    size_t hi = len;          /* full string is too wide here */
+
+    if (prefix_width(s, lo) <= maxw) {
+        while (hi - lo > 1) {
+            size_t mid = lo + (hi - lo) / 2;
+            /* Snap mid to a character boundary: back up continuation
+             * bytes to the char's lead byte.  If that lands on `lo`
+             * (mid sits inside the char that starts at lo), step
+             * forward to that char's end instead.  Either way the byte
+             * cut lands exactly on a boundary, so a multibyte char is
+             * kept intact or dropped whole. */
+            size_t b = mid;
+            while (b > lo && ((unsigned char)s[b] & 0xC0) == 0x80)
+                b--;
+            if (b == lo) {
+                b = mid;
+                while (b < hi && ((unsigned char)s[b] & 0xC0) == 0x80)
+                    b++;
+                if (b >= hi)
+                    break;   /* no boundary strictly between lo and hi */
+            }
+            if (prefix_width(s, b) <= maxw)
+                lo = b;
+            else
+                hi = b;
+        }
     }
+    /* Else the 4-char floor itself is too wide: keep it, matching the
+     * old loop stopping at len == 4.  `lo` is the longest fitting
+     * boundary; truncate there. */
+    s[lo] = '\0';
 }
 
 /* ── drawing primitives ─────────────────────────────────────────────── */
@@ -80,19 +126,28 @@ draw_text_centered(ifont *f, int cx, int cy, const char *text, int color)
 }
 
 void
-draw_button(
-    int x, int y, int w, int h, int selected, const char *label, int label_size, int label_color)
+draw_button_font(
+    int x, int y, int w, int h, int selected, const char *label, int label_size,
+    ifont *f, int label_color)
 {
     DrawRect(x, y, w, h, BLACK);
     FillArea(x + 1, y + 1, w - 2, h - 2, selected ? BLACK : WHITE);
     if (label == NULL || label[0] == '\0')
         return;
-    ifont *f = OpenFont(DEFAULTFONTB, label_size, 0);
     if (f != NULL) {
         SetFont(f, label_color != 0 ? label_color : (selected ? WHITE : BLACK));
         DrawString(x + (w - StringWidth(label)) / 2, y + (h - label_size) / 2 - 2, label);
-        CloseFont(f);
     }
+}
+
+void
+draw_button(
+    int x, int y, int w, int h, int selected, const char *label, int label_size, int label_color)
+{
+    ifont *f = OpenFont(DEFAULTFONTB, label_size, 0);
+    draw_button_font(x, y, w, h, selected, label, label_size, f, label_color);
+    if (f != NULL)
+        CloseFont(f);
 }
 
 /* 1 = the firmware's panel painter never activated (PanelHeight()==0 at
@@ -253,11 +308,14 @@ show_hourglass(void)
     PartialUpdate(x - 12, y - 12, hg->width + 24, hg->height + 24);
 }
 
-/* Repaint the whole shelf (top bar, body, pager) in the current tab,
- * then the download popup on top when one is open.  Centralises the
- * sequence every state change needs. */
+/* Draw the shelf content (top bar, body, pager, popups) WITHOUT
+ * flushing, so a caller can follow with a single refresh of its
+ * choosing.  redraw_shelf() draws here then flushes the content area
+ * as a partial; the keyboard-commit path draws here and follows with
+ * one full-screen FullUpdate so the panel band the keyboard wiped is
+ * repainted in the same refresh instead of a second full cycle. */
 void
-redraw_shelf(void)
+draw_shelf_nofb(void)
 {
     /* Clamp the page before the body draws: a view change that shrank
      * the page count (list mode on a deep page, a tightening filter)
@@ -271,14 +329,6 @@ redraw_shelf(void)
 
     if (g_state.overlay == OV_LAUNCHER) {
         draw_overlay_launcher();
-        /* Only a finished launcher drag leaves unflushed ghost pixels
-         * in the framebuffer (the drag draws without flushing; the
-         * lift flushes).  A plain state change has nothing stale, so
-         * flush_content() avoids the full-screen flash. */
-        if (g_state.launcher_moved)
-            FullUpdate();
-        else
-            flush_content();
         return;
     }
     FillArea(0, 0, ScreenWidth(), content_bottom(), WHITE);
@@ -295,6 +345,26 @@ redraw_shelf(void)
         draw_dl_popup();
     if (g_state.sync_popup)
         draw_sync_popup();
+}
+
+/* Repaint the whole shelf (top bar, body, pager) in the current tab,
+ * then the download popup on top when one is open.  Centralises the
+ * sequence every state change needs. */
+void
+redraw_shelf(void)
+{
+    draw_shelf_nofb();
+    if (g_state.overlay == OV_LAUNCHER) {
+        /* Only a finished launcher drag leaves unflushed ghost pixels
+         * in the framebuffer (the drag draws without flushing; the
+         * lift flushes).  A plain state change has nothing stale, so
+         * flush_content() avoids the full-screen flash. */
+        if (g_state.launcher_moved)
+            FullUpdate();
+        else
+            flush_content();
+        return;
+    }
     flush_content();
 }
 

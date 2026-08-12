@@ -377,7 +377,9 @@ on_tap_overlay_settings(int x, int y)
         /* Cycle Auto → reader[0] → reader[1] → … → Auto. */
         g_state.reader_pref = (g_state.reader_pref + 1) % (g_reader_count + 1);
         draw_overlay_settings();
-        FullUpdate();
+        /* Only the reader row's value text changed; refresh just that
+         * row instead of a full-screen flash. */
+        PartialUpdate(32, y_row3, ScreenWidth() - 64, SETTINGS_ROW_H - 12);
         return;
     }
     if (y >= y_row4 && y < y_row4 + SETTINGS_ROW_H - 12) {
@@ -431,6 +433,14 @@ on_tap_log_view(int x, int y)
         if (g_state.log_scroll < 0)
             g_state.log_scroll = 0;
         draw_log_view();
-        FullUpdate();
+        /* One page scroll shifts the log body (and the scroll-button
+         * state at the extremes); refresh just that region rather than
+         * the whole screen.  The header (back button/title/path) is
+         * unchanged on scroll. */
+        {
+            int h = content_bottom();
+            int body_top = LOG_BACK_Y + LOG_BACK_H + 16;
+            PartialUpdate(0, body_top, ScreenWidth(), h - body_top);
+        }
     }
 }

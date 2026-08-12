@@ -73,6 +73,29 @@ static void init_sync_tick(void *ctx) {
   redraw_shelf();
 }
 
+/* Deferred boot init sliced across event-loop frames (see EVT_INIT).
+ * refresh_downloaded_flags() pages the whole books b-tree and
+ * view_rebuild() projects the whole view — together tens of seconds of
+ * synchronous work before the first frame at 100k books.  Instead of
+ * running them to completion inline, the "bootslice" weak timer runs
+ * the download-flag probe in bounded slices across frames, then
+ * rebuilds the view once and paints the shelf.  The grid already
+ * painted early in EVT_INIT; this pass completes the flags and view
+ * and repaints.  Disarms itself when done. */
+static void bootslice_tick(void *ctx) {
+  (void)ctx;
+  if (refresh_downloaded_flags_boot_step()) {
+    /* Probe finished: rebuild the view once and paint the shelf. */
+    view_rebuild();
+    draw_top_bar();
+    draw_grid();
+    draw_pager();
+    FullUpdate();
+    return; /* done: do not re-arm */
+  }
+  SetWeakTimerEx("bootslice", bootslice_tick, NULL, 16);
+}
+
 /* ── live search suggestions (see plan: suggest-completion) ─────────── */
 
 /* Last buffer the tick acted on; a keystroke batch only re-queries the
@@ -270,8 +293,17 @@ int on_event(int type, int par1, int par2) {
     resolve_downloads_dir();
     resolve_covers_dir();
     store_open();
-    refresh_downloaded_flags(); /* files may have changed while we were away */
-    progress_reload();          /* reader progress from the explorer DB */
+    /* The download-flag probe and the view rebuild are deferred to the
+     * "bootslice" weak timer below (see bootslice_tick): they walk the
+     * whole books b-tree / project the whole view — tens of seconds of
+     * synchronous work before the first frame at 100k books.  Both now
+     * run in bounded slices across event-loop frames so the grid paints
+     * early and completes incrementally. */
+    SetWeakTimerEx("bootslice", bootslice_tick, NULL, 16);
+    /* Reader progress from the explorer DB.  The snapshot copy runs on
+     * the worker thread (see bs_progress.c); the map is published when
+     * the copy+read settle. */
+    progress_reload();
     /* A local source renders from the on-device library directly;
      * the Local source imports it, the Folder source opens a file
      * browser (drawn on EVT_SHOW). */
@@ -284,7 +316,6 @@ int on_event(int type, int par1, int par2) {
       store_delete_source("folder");
       browse_start(BROWSE_ROOT);
     }
-    view_rebuild(); /* render from the local db even if sync fails */
     LOG("[bookshelf] config_path=%s\n", g_config_path);
     g_state.reader_pref = reader_pref_from_path(g_cfg_reader);
     /* Colour display?  The PB Color reports a nonzero colormask
@@ -477,6 +508,7 @@ int on_event(int type, int par1, int par2) {
       if (dx * dx + dy * dy > LONGPRESS_SLOP * LONGPRESS_SLOP) {
         g_lp_armed = 0;
         g_lp_vi = -1;
+        ClearTimerByName("blp");
       }
     }
     return 0;
@@ -488,6 +520,7 @@ int on_event(int type, int par1, int par2) {
         (int)g_state.overlay, (int)g_state.tab);
     g_lp_armed = 0;
     g_lp_vi = -1;
+    ClearTimerByName("blp");
     /* Drop the release that opened the context menu (see longpress_tick). */
     if (g_ctx_suppress_up) {
       g_ctx_suppress_up = 0;
@@ -968,6 +1001,7 @@ int on_event(int type, int par1, int par2) {
      * it. */
     bs_worker_cancel_all();
     store_close();
+    launcher_icons_free();
     if (g_log != NULL)
         fflush(g_log);
     return 1;
@@ -995,21 +1029,23 @@ void keyboard_handler(char *buffer) {
     g_state.search_kb = 0;
     g_state.tab = TAB_LIBRARY;
     g_state.page = 0;
-    view_rebuild();
-    /* The on-screen keyboard draws full-screen and wipes the bottom
-     * status strip; re-stamp it before redraw_shelf() flushes so the
-     * panel survives the commit redraw.  redraw_shelf() only flushes
-     * the content area, so follow with a full-screen flush to repaint
-     * the panel band the keyboard wiped. */
-    stamp_panel();
-    redraw_shelf();
-    FullUpdate();
-  } else {
-    g_state.search_kb = 0;
-    stamp_panel();
-    redraw_shelf();
-    FullUpdate();
-  }
+      view_rebuild();
+      /* The on-screen keyboard draws full-screen and wipes the bottom
+       * status strip; re-stamp it before the draw so the panel survives
+       * the commit repaint.  Draw the shelf WITHOUT flushing, then a
+       * single full-screen FullUpdate repaints the content area and the
+       * panel band the keyboard wiped in one refresh — redraw_shelf()
+       * would have flushed the content area as a PartialUpdate first,
+       * giving two full refresh cycles per commit. */
+      stamp_panel();
+      draw_shelf_nofb();
+      FullUpdate();
+    } else {
+      g_state.search_kb = 0;
+      stamp_panel();
+      draw_shelf_nofb();
+      FullUpdate();
+    }
 }
 
 int main(int argc, char **argv) {

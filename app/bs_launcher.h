@@ -47,6 +47,8 @@ void launcher_scan_ext1_apps(void);
 void draw_launcher_icon(int cx, int cy, const char *icon_name,
                         const char *title);
 
+void launcher_icons_free(void);
+
 void draw_overlay_launcher(void);
 
 /* Back-button rect in the launcher header (draw + hit-test share it). */

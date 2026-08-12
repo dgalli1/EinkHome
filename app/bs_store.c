@@ -50,6 +50,23 @@ static sqlite3_stmt *g_st_suggest_ins;   /* INSERT OR IGNORE INTO suggest */
 static sqlite3_stmt *g_st_get_book;      /* SELECT ... FROM books WHERE id */
 static sqlite3_stmt *g_st_set_downloaded; /* UPDATE books SET downloaded ... */
 static sqlite3_stmt *g_st_next_dl_probes;      /* rowid-keyset id scan */
+static sqlite3_stmt *g_st_suggest_rank_refresh; /* recompute one term's rank */
+static sqlite3_stmt *g_st_suggest_rank_zero;    /* drop zero-count rank rows */
+static sqlite3_stmt *g_st_fts_rowid;  /* SELECT rowid FROM books WHERE id */
+static sqlite3_stmt *g_st_fts_del;    /* DELETE FROM search_fts WHERE rowid */
+static sqlite3_stmt *g_st_fts_ins;    /* INSERT INTO search_fts(...) */
+/* 1 when the firmware SQLite lacks the FTS5 module; routes committed
+ * search to the LIKE fallback and makes every FTS write a no-op. */
+static int g_no_fts;
+/* Lazily probed: 1 once suggest_rank holds any term (see
+ * suggest_rank_ready). */
+static int g_rank_ready = -1;
+/* Committed-search decision cache (see search_fts_decide): the query
+ * the decision was made for, the FTS MATCH string to bind, and whether
+ * the FTS index or the LIKE scan serves it. */
+static char g_search_q_cache[MAX_QUERY_LEN];
+static char g_fts_query[MAX_QUERY_LEN * 4 + 16];
+static int g_search_use_fts;
 
 /* Prepare `sql` into *slot once; returns the statement, or NULL when
  * the db is closed or the prepare failed (callers degrade exactly as
@@ -85,7 +102,7 @@ static const char *const SCHEMA_SQL =
     "CREATE INDEX IF NOT EXISTS idx_books_author"
     " ON books(author COLLATE NOCASE, title COLLATE NOCASE, id);"
     "CREATE INDEX IF NOT EXISTS idx_books_series"
-    " ON books(series_id, series_idx, id);"
+    " ON books(series_id, series_idx, title COLLATE NOCASE, id);"
     "CREATE INDEX IF NOT EXISTS idx_books_added"
     " ON books(added_at DESC, title COLLATE NOCASE, id);"
     "CREATE INDEX IF NOT EXISTS idx_books_dl"
@@ -100,7 +117,19 @@ static const char *const SCHEMA_SQL =
     "CREATE TABLE IF NOT EXISTS suggest("
     " term TEXT NOT NULL, book_id TEXT NOT NULL,"
     " PRIMARY KEY(term, book_id)) WITHOUT ROWID;"
-    "CREATE INDEX IF NOT EXISTS idx_suggest_book ON suggest(book_id);";
+    "CREATE INDEX IF NOT EXISTS idx_suggest_book ON suggest(book_id);"
+    /* Aggregated suggestion-rank table: one row per term holding how
+     * many books contain it.  store_suggest_set recomputes the rows
+     * for a book's affected terms straight from the `suggest` edge
+     * table, so store_suggest_list is a pure ordered range scan (no
+     * per-keystroke GROUP BY over the whole prefix).  WITHOUT ROWID
+     * makes the b-tree the prefix-lookup index.  No schema_version
+     * bump: an older DB has edges but no rank yet, and
+     * store_suggest_list falls back to the edge-table GROUP BY until
+     * the next sync populates it. */
+    "CREATE TABLE IF NOT EXISTS suggest_rank("
+    " term TEXT PRIMARY KEY, cnt INTEGER NOT NULL DEFAULT 0)"
+    " WITHOUT ROWID;";
 
 /* Build the absolute store path next to the config file. */
 static void store_path(char *out, size_t cap) {
@@ -290,6 +319,27 @@ void store_open(void) {
         store_migrate_columns();
       store_set_meta("schema_version", "2");
     }
+    /* v3: rebuild the series index as a covering index
+     * (series_id, series_idx, title COLLATE NOCASE, id) so that
+     * store_series_ids' ORDER BY ... title is served by the index
+     * instead of a temp sort of the whole matching set.  v2 stores
+     * carry the old non-covering index and CREATE INDEX IF NOT EXISTS
+     * would no-op on them, so drop + recreate explicitly.  Fresh
+     * stores get the new shape straight from SCHEMA_SQL, so on a
+     * brand-new db (no books table yet, SCHEMA_SQL runs next) this
+     * is just a marker stamp. */
+    if (store_meta_value("schema_version", ver, sizeof ver) != 1 ||
+        strcmp(ver, "3") != 0) {
+      if (store_has_column("books", "id") == 1) {
+        sqlite3_exec(g_db, "DROP INDEX IF EXISTS idx_books_series", NULL,
+                     NULL, NULL);
+        sqlite3_exec(g_db, "CREATE INDEX IF NOT EXISTS idx_books_series"
+                           " ON books(series_id, series_idx,"
+                           " title COLLATE NOCASE, id)",
+                     NULL, NULL, NULL);
+      }
+      store_set_meta("schema_version", "3");
+    }
     /* Column-driven backstop: builds that stamped the v2 marker
      * before filename/source joined the migration list would
      * otherwise skip them forever (the marker check above is
@@ -310,6 +360,24 @@ void store_open(void) {
       g_db = NULL;
       return;
     }
+  }
+
+  /* Committed-search index.  FTS5 may be absent from the firmware
+   * build; when it is, CREATE VIRTUAL TABLE errors and g_no_fts routes
+   * search to the byte-identical LIKE path (view_where) and skips every
+   * FTS write.  External content: the index stores only rowid + tokens,
+   * the source text lives in `books`, so the two never drift unless a
+   * book write is missed (store_upsert_book / view_rebuild keep it in
+   * step). */
+  g_no_fts = 0;
+  if (sqlite3_exec(g_db,
+                   "CREATE VIRTUAL TABLE IF NOT EXISTS search_fts USING fts5("
+                   "title, author, series, search_text,"
+                   " content='books', content_rowid=rowid)",
+                   NULL, NULL, NULL) != SQLITE_OK) {
+    g_no_fts = 1;
+    LOG("[bookshelf] store: FTS5 unavailable (%s); search falls back to LIKE\n",
+        sqlite3_errmsg(g_db));
   }
 
   /* One-time legacy JSON import. */
@@ -343,6 +411,11 @@ void store_close(void) {
   sqlite3_finalize(g_st_get_book);
   sqlite3_finalize(g_st_set_downloaded);
   sqlite3_finalize(g_st_next_dl_probes);
+  sqlite3_finalize(g_st_suggest_rank_refresh);
+  sqlite3_finalize(g_st_suggest_rank_zero);
+  sqlite3_finalize(g_st_fts_rowid);
+  sqlite3_finalize(g_st_fts_del);
+  sqlite3_finalize(g_st_fts_ins);
   g_st_upsert_lookup = NULL;
   g_st_upsert = NULL;
   g_st_suggest_del = NULL;
@@ -350,6 +423,17 @@ void store_close(void) {
   g_st_get_book = NULL;
   g_st_set_downloaded = NULL;
   g_st_next_dl_probes = NULL;
+  g_st_suggest_rank_refresh = NULL;
+  g_st_suggest_rank_zero = NULL;
+  g_st_fts_rowid = NULL;
+  g_st_fts_del = NULL;
+  g_st_fts_ins = NULL;
+  /* A close/reopen re-probes FTS availability and re-decides the
+   * search cache from scratch. */
+  g_no_fts = 0;
+  g_rank_ready = -1;
+  g_search_q_cache[0] = '\0';
+  g_search_use_fts = 0;
   if (g_db != NULL) {
     sqlite3_close(g_db);
     g_db = NULL;
@@ -360,6 +444,77 @@ void store_close(void) {
 
 static int bind_text_trunc(sqlite3_stmt *st, int i, const char *s) {
   return sqlite3_bind_text(st, i, s ? s : "", -1, SQLITE_TRANSIENT);
+}
+
+/* Keep the FTS index in step with one book row: drop any index entry
+ * left at the book's previous rowid (INSERT OR REPLACE renumbers the
+ * row), then index the fresh row at its new rowid.  The title/author/
+ * series columns are always indexed, so a NULL search_text (local
+ * import) stays searchable.  No-op when FTS is unavailable. */
+static void store_fts_sync_row(const Book *b, long long old_rowid) {
+  if (g_no_fts || g_db == NULL)
+    return;
+  sqlite3_stmt *rid = st_prep_once(&g_st_fts_rowid,
+                                   "SELECT rowid FROM books WHERE id=?1");
+  if (rid == NULL)
+    return;
+  sqlite3_reset(rid);
+  sqlite3_clear_bindings(rid);
+  bind_text_trunc(rid, 1, b->id);
+  long long new_rowid = 0;
+  if (sqlite3_step(rid) == SQLITE_ROW)
+    new_rowid = sqlite3_column_int64(rid, 0);
+  sqlite3_reset(rid);
+  if (new_rowid == 0)
+    return;
+  if (old_rowid != 0) {
+    sqlite3_stmt *d = st_prep_once(&g_st_fts_del,
+                                   "DELETE FROM search_fts WHERE rowid=?1");
+    if (d != NULL) {
+      sqlite3_reset(d);
+      sqlite3_clear_bindings(d);
+      sqlite3_bind_int64(d, 1, old_rowid);
+      sqlite3_step(d);
+    }
+  }
+  sqlite3_stmt *ins = st_prep_once(
+      &g_st_fts_ins,
+      "INSERT INTO search_fts(rowid, title, author, series, search_text)"
+      " VALUES(?1,?2,?3,?4,?5)");
+  if (ins != NULL) {
+    sqlite3_reset(ins);
+    sqlite3_clear_bindings(ins);
+    sqlite3_bind_int64(ins, 1, new_rowid);
+    bind_text_trunc(ins, 2, b->title);
+    bind_text_trunc(ins, 3, b->author);
+    bind_text_trunc(ins, 4, b->series);
+    bind_text_trunc(ins, 5, b->search_text);
+    sqlite3_step(ins);
+  }
+}
+
+/* Populate the FTS index from books when it is empty but books exist
+ * (an upgraded store predating the index).  Cheap no-op once the index
+ * holds any row. */
+static void store_fts_backfill_if_empty(void) {
+  if (g_no_fts || g_db == NULL)
+    return;
+  int fts_empty = 1;
+  sqlite3_stmt *ck = NULL;
+  if (sqlite3_prepare_v2(g_db, "SELECT 1 FROM search_fts LIMIT 1", -1, &ck,
+                         NULL) == SQLITE_OK) {
+    fts_empty = sqlite3_step(ck) != SQLITE_ROW;
+    sqlite3_finalize(ck);
+  }
+  if (!fts_empty)
+    return;
+  if (sqlite3_exec(g_db,
+                   "INSERT INTO search_fts(rowid, title, author, series,"
+                   " search_text)"
+                   " SELECT rowid, title, author, series,"
+                   "        COALESCE(search_text,'') FROM books",
+                   NULL, NULL, NULL) != SQLITE_OK)
+    LOG("[bookshelf] store: FTS backfill failed: %s\n", sqlite3_errmsg(g_db));
 }
 
 /* Insert or update one book row.  An existing row keeps its
@@ -377,15 +532,17 @@ int store_upsert_book(const Book *b) {
    * below.  Default to the caller's path so fresh rows (and rows
    * whose downloaded flag is 0) keep the exact pre-fix semantics. */
   char lp[MAX_PATH_LEN];
+  long long old_rowid = 0; /* the row's pre-OR-REPLACE rowid (0 = fresh) */
   snprintf(lp, sizeof lp, "%s", b->local_path);
   sqlite3_stmt *q = st_prep_once(
       &g_st_upsert_lookup,
-      "SELECT downloaded, local_path FROM books WHERE id=?1");
+      "SELECT downloaded, local_path, rowid FROM books WHERE id=?1");
   if (q != NULL) {
     sqlite3_reset(q);
     sqlite3_clear_bindings(q);
     bind_text_trunc(q, 1, b->id);
     if (sqlite3_step(q) == SQLITE_ROW) {
+      old_rowid = sqlite3_column_int64(q, 2);
       if (sqlite3_column_int(q, 0) == 1) {
         downloaded = 1;
         const char *t = (const char *)sqlite3_column_text(q, 1);
@@ -427,12 +584,27 @@ int store_upsert_book(const Book *b) {
   if (rc != SQLITE_DONE)
     LOG("[bookshelf] upsert FAILED id=%s rc=%d: %s\n", b->id, rc,
         sqlite3_errmsg(g_db));
+  else
+    store_fts_sync_row(b, old_rowid);
   return rc == SQLITE_DONE ? 0 : -1;
 }
 
 void store_delete_book(const char *id) {
   if (g_db == NULL)
     return;
+  /* Drop the FTS entry first, while the books row still exists to
+   * resolve its rowid. */
+  if (!g_no_fts) {
+    sqlite3_stmt *f = NULL;
+    if (sqlite3_prepare_v2(g_db,
+                           "DELETE FROM search_fts WHERE rowid IN"
+                           " (SELECT rowid FROM books WHERE id=?1)",
+                           -1, &f, NULL) == SQLITE_OK) {
+      bind_text_trunc(f, 1, id);
+      sqlite3_step(f);
+      sqlite3_finalize(f);
+    }
+  }
   sqlite3_stmt *st = NULL;
   if (sqlite3_prepare_v2(g_db, "DELETE FROM books WHERE id=?1", -1, &st,
                          NULL) != SQLITE_OK)
@@ -447,6 +619,17 @@ void store_delete_book(const char *id) {
 void store_delete_source(const char *source) {
   if (g_db == NULL)
     return;
+  if (!g_no_fts) {
+    sqlite3_stmt *f = NULL;
+    if (sqlite3_prepare_v2(g_db,
+                           "DELETE FROM search_fts WHERE rowid IN"
+                           " (SELECT rowid FROM books WHERE source=?1)",
+                           -1, &f, NULL) == SQLITE_OK) {
+      bind_text_trunc(f, 1, source);
+      sqlite3_step(f);
+      sqlite3_finalize(f);
+    }
+  }
   sqlite3_stmt *st = NULL;
   if (sqlite3_prepare_v2(g_db, "DELETE FROM books WHERE source=?1", -1, &st,
                          NULL) != SQLITE_OK)
@@ -884,6 +1067,27 @@ void store_suggest_set(const char *book_id,
                        const char terms[][SUGGEST_TERM_MAX], int n) {
   if (g_db == NULL || book_id == NULL)
     return;
+  /* Snapshot the book's current edge terms before the delete so the
+   * rank refresh below can correct both the removed and the added
+   * sides of this book's change.  The server caps terms per book at
+   * SUGGEST_MAX_TERMS, so a fixed buffer is safe; a store whose edges
+   * exceed it self-heals on the next sync of those books. */
+  char old[SUGGEST_MAX_TERMS][SUGGEST_TERM_MAX];
+  int n_old = 0;
+  {
+    sqlite3_stmt *q = NULL;
+    if (sqlite3_prepare_v2(g_db, "SELECT term FROM suggest WHERE book_id=?1",
+                           -1, &q, NULL) == SQLITE_OK) {
+      bind_text_trunc(q, 1, book_id);
+      while (n_old < SUGGEST_MAX_TERMS && sqlite3_step(q) == SQLITE_ROW) {
+        const char *t = (const char *)sqlite3_column_text(q, 0);
+        snprintf(old[n_old], SUGGEST_TERM_MAX, "%s", t ? t : "");
+        n_old++;
+      }
+      sqlite3_finalize(q);
+    }
+  }
+
   sqlite3_stmt *del = st_prep_once(&g_st_suggest_del,
                                    "DELETE FROM suggest WHERE book_id=?1");
   if (del == NULL)
@@ -892,36 +1096,85 @@ void store_suggest_set(const char *book_id,
   sqlite3_clear_bindings(del);
   bind_text_trunc(del, 1, book_id);
   sqlite3_step(del);
-  if (n <= 0 || terms == NULL)
-    return;
-  /* One multi-row statement instead of up to 96 single-row inserts: a
-   * sync round runs this per book, so statement count matters on a
-   * 300MHz core.  96 pairs fit comfortably in the stack buffer. */
-  char   sql[2048];
-  int    nterms = 0;
-  size_t len = snprintf(sql, sizeof sql,
-                        "INSERT OR IGNORE INTO suggest(term, book_id) VALUES");
-  for (int i = 0; i < n; i++) {
-    if (terms[i][0] == '\0')
-      continue;
-    len += snprintf(sql + len, sizeof sql - len, "%s(?,?)",
-                    nterms == 0 ? " " : ",");
-    nterms++;
+  if (n > 0 && terms != NULL) {
+    /* One cached single-row statement, bound once per term: a sync
+     * round runs this per book, and a fresh prepare per term would cost
+     * ~100k prepares on a full sync.  The slot is prepared on first use
+     * and finalized in store_close. */
+    sqlite3_stmt *ins = st_prep_once(
+        &g_st_suggest_ins,
+        "INSERT OR IGNORE INTO suggest(term, book_id) VALUES(?1, ?2)");
+    if (ins != NULL) {
+      for (int i = 0; i < n; i++) {
+        if (terms[i][0] == '\0')
+          continue; /* skip empty terms exactly as before */
+        sqlite3_reset(ins);
+        sqlite3_clear_bindings(ins);
+        bind_text_trunc(ins, 1, terms[i]);
+        bind_text_trunc(ins, 2, book_id);
+        sqlite3_step(ins);
+      }
+    }
   }
-  if (nterms == 0)
-    return; /* all terms empty: the DELETE above was the whole job */
-  sqlite3_stmt *ins = NULL;
-  if (sqlite3_prepare_v2(g_db, sql, -1, &ins, NULL) != SQLITE_OK)
-    return;
-  int p = 1;
-  for (int i = 0; i < n; i++) {
-    if (terms[i][0] == '\0')
-      continue;
-    bind_text_trunc(ins, p++, terms[i]);
-    bind_text_trunc(ins, p++, book_id);
+  /* Recompute the rank count for every term this book touches (old
+   * edges + new terms) straight from the edge table, so adds and
+   * removes both settle in one pass; then drop any rank term that now
+   * has no edges at all. */
+  sqlite3_stmt *rf = st_prep_once(
+      &g_st_suggest_rank_refresh,
+      "INSERT INTO suggest_rank(term, cnt) VALUES(?1,"
+      " (SELECT COUNT(*) FROM suggest WHERE term=?1))"
+      " ON CONFLICT(term) DO UPDATE SET cnt=excluded.cnt");
+  if (rf != NULL) {
+    for (int i = 0; i < n_old; i++) {
+      sqlite3_reset(rf);
+      sqlite3_clear_bindings(rf);
+      bind_text_trunc(rf, 1, old[i]);
+      sqlite3_step(rf);
+    }
+    for (int i = 0; i < n; i++) {
+      if (terms[i][0] == '\0')
+        continue;
+      int dup = 0;
+      for (int j = 0; j < n_old; j++)
+        if (strcmp(terms[i], old[j]) == 0) {
+          dup = 1;
+          break;
+        }
+      if (dup)
+        continue;
+      sqlite3_reset(rf);
+      sqlite3_clear_bindings(rf);
+      bind_text_trunc(rf, 1, terms[i]);
+      sqlite3_step(rf);
+    }
   }
-  sqlite3_step(ins);
-  sqlite3_finalize(ins);
+  sqlite3_stmt *z = st_prep_once(&g_st_suggest_rank_zero,
+                                 "DELETE FROM suggest_rank WHERE cnt=0");
+  if (z != NULL) {
+    sqlite3_reset(z);
+    sqlite3_clear_bindings(z);
+    sqlite3_step(z);
+  }
+}
+
+/* Lazily probe whether the rank table holds any term.  Once it does,
+ * sync keeps it populated, so the result is cached; while it is still
+ * empty (an older DB upgraded in place), the caller falls back to the
+ * edge-table GROUP BY until the next sync fills it. */
+static int suggest_rank_ready(void) {
+  if (g_rank_ready == 1)
+    return 1;
+  int has = 0;
+  sqlite3_stmt *st = NULL;
+  if (sqlite3_prepare_v2(g_db, "SELECT 1 FROM suggest_rank LIMIT 1", -1, &st,
+                         NULL) == SQLITE_OK) {
+    has = sqlite3_step(st) == SQLITE_ROW;
+    sqlite3_finalize(st);
+  }
+  if (has)
+    g_rank_ready = 1;
+  return has;
 }
 
 /* Prefix lookup over the term index, most-popular first (a term's
@@ -945,12 +1198,27 @@ int store_suggest_list(const char *prefix, char out[][SUGGEST_TERM_MAX],
   char bound[SUGGEST_TERM_MAX + 4];
   int has_bound = suggest_upper_bound(norm, len, bound, sizeof bound);
 
-  const char *sql =
-      has_bound
-          ? "SELECT term FROM suggest WHERE term >= ?1 AND term < ?2"
-            " GROUP BY term ORDER BY COUNT(*) DESC, term ASC LIMIT ?3"
-          : "SELECT term FROM suggest WHERE term >= ?1"
-            " GROUP BY term ORDER BY COUNT(*) DESC, term ASC LIMIT ?3";
+  const char *sql;
+  if (suggest_rank_ready()) {
+    /* Rank path: a pure ordered range scan over the aggregated table
+     * (cnt is the b-tree key after term) — no per-keystroke GROUP BY
+     * over the whole prefix range. */
+    sql = has_bound
+              ? "SELECT term FROM suggest_rank WHERE term >= ?1 AND term < ?2"
+                " ORDER BY cnt DESC, term ASC LIMIT ?3"
+              : "SELECT term FROM suggest_rank WHERE term >= ?1"
+                " ORDER BY cnt DESC, term ASC LIMIT ?3";
+  } else {
+    /* Upgrade fallback: rank table empty but edges may exist; the
+     * grouped edge scan still yields correct suggestions until the
+     * next sync fills the rank table (and if there are no edges at
+     * all, it naturally returns nothing). */
+    sql = has_bound
+              ? "SELECT term FROM suggest WHERE term >= ?1 AND term < ?2"
+                " GROUP BY term ORDER BY COUNT(*) DESC, term ASC LIMIT ?3"
+              : "SELECT term FROM suggest WHERE term >= ?1"
+                " GROUP BY term ORDER BY COUNT(*) DESC, term ASC LIMIT ?3";
+  }
   sqlite3_stmt *st = NULL;
   if (sqlite3_prepare_v2(g_db, sql, -1, &st, NULL) != SQLITE_OK)
     return 0;
@@ -1002,16 +1270,18 @@ void store_set_cursor(long long cursor) {
   sqlite3_finalize(st);
 }
 
-void store_begin(void) {
-  if (g_db != NULL) {
-    char *msg = NULL;
-    if (sqlite3_exec(g_db, "BEGIN", NULL, NULL, &msg) != SQLITE_OK) {
-      LOG("[bookshelf] store_begin FAILED: %s\n",
-          msg ? msg : sqlite3_errmsg(g_db));
-      if (msg)
-        sqlite3_free(msg);
-    }
+int store_begin(void) {
+  if (g_db == NULL)
+    return -1;
+  char *msg = NULL;
+  if (sqlite3_exec(g_db, "BEGIN", NULL, NULL, &msg) != SQLITE_OK) {
+    LOG("[bookshelf] store_begin FAILED: %s\n",
+        msg ? msg : sqlite3_errmsg(g_db));
+    if (msg)
+      sqlite3_free(msg);
+    return -1;
   }
+  return 0;
 }
 
 void store_commit(void) {
@@ -1088,6 +1358,101 @@ static void like_escape(const char *in, char *out, size_t cap) {
   out[o] = '\0';
 }
 
+/* The active source's storage value; views (view_where) and the FTS
+ * probe (search_fts_decide) both filter on it. */
+static const char *view_source(void) {
+  return g_state.source == SOURCE_LOCAL    ? "local"
+         : g_state.source == SOURCE_FOLDER ? "folder"
+                                           : "kavita";
+}
+
+/* Build a safe FTS5 MATCH query from the raw user query: emit the
+ * whole query as one quoted phrase with a prefix marker ("w1 w2" *),
+ * doubling any embedded quotes.  A phrase requires the words to appear
+ * adjacent, the closest analogue of LIKE's %substring% semantics, and
+ * quoting neutralises operators/punctuation so the query can't change
+ * FTS query shape.  Returns the query length, or 0 when nothing usable
+ * remains (caller falls back to LIKE). */
+static int fts_query_from(const char *raw, char *out, size_t cap) {
+  if (raw == NULL || cap < 4)
+    return 0;
+  size_t o = 0;
+  const char *p = raw;
+  int any = 0;
+  out[o++] = '"';
+  while (*p != '\0') {
+    while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r')
+      p++;
+    if (*p == '\0')
+      break;
+    if (any) { /* one space between words */
+      if (o + 1 >= cap)
+        return 0;
+      out[o++] = ' ';
+    }
+    while (*p != '\0' && *p != ' ' && *p != '\t' && *p != '\n' && *p != '\r') {
+      char c = *p++;
+      if (c == '"') { /* double the quote to escape it inside a phrase */
+        if (o + 2 >= cap)
+          return 0;
+        out[o++] = '"';
+        out[o++] = '"';
+      } else {
+        if (o + 1 >= cap)
+          return 0;
+        out[o++] = c;
+      }
+    }
+    any = 1;
+  }
+  if (!any)
+    return 0;
+  if (o + 3 >= cap)
+    return 0;
+  out[o++] = '"';
+  out[o++] = ' '; /* FTS5 phrase-prefix form: "w1 w2" * */
+  out[o++] = '*';
+  out[o] = '\0';
+  return (int)o;
+}
+
+/* Decide (and cache) the search strategy for the current query.  Uses
+ * the FTS index only when all of: the module is available, the MATCH
+ * query parses, and the index demonstrably matches at least one book
+ * in the active source.  Anything else — module absent, parse error,
+ * or a substring FTS can't match (probe finds no row) — keeps the
+ * byte-identical LIKE %query% path, so search never goes wrong or
+ * empty.  Re-decided whenever g_state.query changes. */
+static void search_fts_decide(void) {
+  if (strcmp(g_search_q_cache, g_state.query) == 0)
+    return;
+  snprintf(g_search_q_cache, sizeof g_search_q_cache, "%s", g_state.query);
+  g_search_use_fts = 0;
+  g_fts_query[0] = '\0';
+  if (g_no_fts || g_state.query[0] == '\0' || g_db == NULL)
+    return;
+  if (fts_query_from(g_state.query, g_fts_query, sizeof g_fts_query) <= 0)
+    return;
+  /* Probe: does the MATCH serve at least one row in the active
+   * source?  A clean prepare proves the query parses; a hit proves
+   * FTS can answer it (a substring FTS can't match yields no row and
+   * falls back to LIKE).  The source filter mirrors view_where so the
+   * decision matches the real scoping. */
+  sqlite3_stmt *st = NULL;
+  if (sqlite3_prepare_v2(
+          g_db,
+          "SELECT 1 FROM search_fts f JOIN books b ON b.rowid=f.rowid"
+          " WHERE search_fts MATCH ?1 AND COALESCE(b.source,'kavita')=?2"
+          " LIMIT 1",
+          -1, &st, NULL) != SQLITE_OK)
+    return; /* MATCH parse failed: keep LIKE */
+  bind_text_trunc(st, 1, g_fts_query);
+  bind_text_trunc(st, 2, view_source());
+  if (sqlite3_step(st) == SQLITE_ROW)
+    g_search_use_fts = 1;
+  sqlite3_finalize(st);
+}
+
 /* Append the active filter/query WHERE clause (AND-joined) to sql.
  * qbind is the parameter index the query pattern will be bound at
  * (0 = no query parameter). */
@@ -1096,26 +1461,35 @@ static void view_where(char *sql, size_t cap, int qbind) {
    * "WHERE" + this clause, so a constant true keeps the pattern. */
   snprintf(sql + strlen(sql), cap - strlen(sql), " 1=1");
   if (qbind > 0 && g_state.query[0] != '\0') {
-    /* One bound pattern serves all LIKEs (same ?qbind index).  The
-     * folded search_text column joins the raw fields so folded
-     * suggestions (e.g. "songgong" from "sŏnggong") and diacritic
-     * queries actually find books; it is NULL for local imports,
-     * where the raw fields still match.  Series joined so series-word
-     * suggestions produce results. */
-    snprintf(sql + strlen(sql), cap - strlen(sql),
-             " AND (title LIKE ?%d ESCAPE '\\' OR author LIKE ?%d ESCAPE '\\'"
-             " OR series LIKE ?%d ESCAPE '\\'"
-             " OR search_text LIKE ?%d ESCAPE '\\')",
-             qbind, qbind, qbind, qbind);
+    search_fts_decide();
+    if (g_search_use_fts) {
+      /* FTS index path: restrict to rows the index matches; the
+       * source filter below still applies.  `rowid` is books.rowid
+       * in every view_where caller (all are FROM books). */
+      snprintf(sql + strlen(sql), cap - strlen(sql),
+               " AND rowid IN (SELECT rowid FROM search_fts"
+               " WHERE search_fts MATCH ?%d)",
+               qbind);
+    } else {
+      /* LIKE fallback — byte-identical to the pre-FTS behaviour.  One
+       * bound pattern serves all LIKEs (same ?qbind index).  The
+       * folded search_text column joins the raw fields so folded
+       * suggestions (e.g. "songgong" from "sŏnggong") and diacritic
+       * queries actually find books; it is NULL for local imports,
+       * where the raw fields still match.  Series joined so
+       * series-word suggestions produce results. */
+      snprintf(sql + strlen(sql), cap - strlen(sql),
+               " AND (title LIKE ?%d ESCAPE '\\' OR author LIKE ?%d ESCAPE '\\'"
+               " OR series LIKE ?%d ESCAPE '\\'"
+               " OR search_text LIKE ?%d ESCAPE '\\')",
+               qbind, qbind, qbind, qbind);
+    }
   }
   /* Only the active source's books are visible; rows written before
    * the source column existed are kavita books.  The value comes from
    * a fixed enum, so no quoting concerns. */
-  const char *src = g_state.source == SOURCE_LOCAL    ? "local"
-                    : g_state.source == SOURCE_FOLDER ? "folder"
-                                                      : "kavita";
   snprintf(sql + strlen(sql), cap - strlen(sql),
-           " AND COALESCE(source,'kavita')='%s'", src);
+           " AND COALESCE(source,'kavita')='%s'", view_source());
 }
 
 static const char *view_order(void) {
@@ -1136,6 +1510,11 @@ static const char *view_order(void) {
 static void view_bind_query(sqlite3_stmt *st, int qbind) {
   if (qbind <= 0 || g_state.query[0] == '\0')
     return;
+  search_fts_decide();
+  if (g_search_use_fts) {
+    bind_text_trunc(st, qbind, g_fts_query);
+    return;
+  }
   char pat[MAX_QUERY_LEN * 2 + 4];
   char esc[MAX_QUERY_LEN * 2];
   like_escape(g_state.query, esc, sizeof esc);
@@ -1159,6 +1538,11 @@ void view_rebuild(void) {
    * same book (or is out of range). */
   g_lp_vi = -1;
   g_lp_armed = 0;
+
+  /* One-time backfill: an upgraded store has books but no index yet
+   * (FTS was just created).  Fill it once so search runs on FTS; a
+   * populated index makes this a cheap no-op thereafter. */
+  store_fts_backfill_if_empty();
 
   /* Keep the count the previous view had: the rollback paths below
    * restore the old view rows, so the cached total must go back to

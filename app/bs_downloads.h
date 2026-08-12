@@ -25,6 +25,13 @@ void refresh_downloaded(Book *b);
 
 void refresh_downloaded_flags(void);
 
+/* Sliced boot variant of the flag probe (driven by bs_main's
+ * "bootslice" weak timer so the full books b-tree walk never stalls
+ * the first frame): arm the scan once, then step it in bounded slices
+ * across event-loop frames until it returns 1 (finished). */
+void refresh_downloaded_flags_boot_start(void);
+int refresh_downloaded_flags_boot_step(void);
+
 DownloadItem *find_download(const char *id);
 
 void enqueue_download(const Book *b);

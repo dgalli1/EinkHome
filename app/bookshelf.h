@@ -486,4 +486,9 @@ void LOG(const char *fmt, ...);
 int on_event(int type, int par1, int par2);
 void keyboard_handler(char *buffer);
 
+/* Run the bounded cover-cache sweep if the worker flagged it due.  Must
+ * be called on the main thread (from the periodic cover_tick) so all
+ * covers-directory mutation stays off the worker thread. */
+void cover_cache_sweep_if_pending(void);
+
 #endif /* BOOKSHELF_H */

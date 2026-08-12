@@ -545,6 +545,52 @@ launcher_build(void)
 
 /* -- launcher draw ------------------------------------------------------ */
 
+/* Decoded-icon cache.  A launcher drag repaints ~15 icons per
+ * POINTERMOVE; decoding each PNG/GetResource from flash every frame is
+ * the dominant cost.  Cache the decoded ibitmap keyed by icon name in a
+ * small fixed-size LRU (same shape as the cover slots) so each icon is
+ * decoded at most once per session.  Like the cover slots, the decoded
+ * bitmaps are never explicitly freed — the SDK exposes no bitmap free
+ * API and libinkview bitmaps are reclaimed at process exit, so the
+ * cache just drops references on eviction. */
+#define LAUNCHER_ICON_CACHE 16
+
+typedef struct {
+    char      name[64]; /* LauncherItem.icon (max 63 chars + NUL) */
+    ibitmap  *bm;
+    int       age; /* monotonically increasing LRU stamp */
+} LauncherIconSlot;
+
+static LauncherIconSlot g_icon_cache[LAUNCHER_ICON_CACHE];
+static int              g_icon_cache_age;
+
+static ibitmap *
+launcher_icon_get(const char *name)
+{
+    ibitmap *bm = NULL;
+    if (name != NULL && name[0] != '\0') {
+        if (name[0] != '/')
+            bm = GetResource(name, NULL);
+        if (bm == NULL && name[0] == '/')
+            bm = LoadPNG(name, 0);
+    }
+    return bm;
+}
+
+/* Clear the cache at teardown/exit.  The SDK has no bitmap free API, so
+ * this only drops the references (the libinkview bitmaps are reclaimed
+ * by process exit, exactly like the cover slots). */
+void
+launcher_icons_free(void)
+{
+    for (int i = 0; i < LAUNCHER_ICON_CACHE; i++) {
+        g_icon_cache[i].bm = NULL;
+        g_icon_cache[i].name[0] = '\0';
+        g_icon_cache[i].age = 0;
+    }
+    g_icon_cache_age = 0;
+}
+
 void
 draw_launcher_icon(int cx, int cy, const char *icon_name, const char *title)
 {
@@ -552,10 +598,37 @@ draw_launcher_icon(int cx, int cy, const char *icon_name, const char *title)
     int      x0 = cx - sz / 2;
     int      y0 = cy - sz / 2;
     ibitmap *bm = NULL;
-    if (icon_name && icon_name[0] && icon_name[0] != '/')
-        bm = GetResource(icon_name, NULL);
-    if (!bm && icon_name && icon_name[0] == '/')
-        bm = LoadPNG(icon_name, 0);
+    if (icon_name && icon_name[0]) {
+        /* LRU hit: reuse the cached decode, bump its stamp. */
+        for (int i = 0; i < LAUNCHER_ICON_CACHE; i++) {
+            if (g_icon_cache[i].bm != NULL &&
+                strcmp(g_icon_cache[i].name, icon_name) == 0) {
+                g_icon_cache[i].age = ++g_icon_cache_age;
+                bm = g_icon_cache[i].bm;
+                break;
+            }
+        }
+        if (bm == NULL) {
+            bm = launcher_icon_get(icon_name);
+            if (bm != NULL) {
+                /* Evict the least-recently-used slot (lowest age). */
+                int slot = 0;
+                for (int i = 1; i < LAUNCHER_ICON_CACHE; i++) {
+                    if (g_icon_cache[i].bm == NULL) {
+                        slot = i;
+                        break;
+                    }
+                    if (g_icon_cache[slot].bm == NULL ||
+                        g_icon_cache[i].age < g_icon_cache[slot].age)
+                        slot = i;
+                }
+                snprintf(g_icon_cache[slot].name, sizeof g_icon_cache[slot].name,
+                         "%s", icon_name);
+                g_icon_cache[slot].bm = bm;
+                g_icon_cache[slot].age = ++g_icon_cache_age;
+            }
+        }
+    }
     if (bm) {
         /* Center the bitmap inside the icon box.  The firmware icon
          * resources come in various native sizes; anchoring them at the

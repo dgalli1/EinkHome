@@ -114,11 +114,11 @@ dl_name_cmp(const void *a, const void *b)
     return strcmp(*(const char *const *)a, *(const char *const *)b);
 }
 
-/* Re-probe every book's on-device file and resync its downloaded flag
- * (bounded slices, one transaction).  Files can vanish or appear while
- * the app is not running (tests clear the downloads dir, the reader or
- * the user deletes files), so the flag must be reconciled at startup
- * before anything counts "undownloaded" books.
+/* Re-probe every book's on-device file and resync its downloaded flag.
+ * Files can vanish or appear while the app is not running (tests clear
+ * the downloads dir, the reader or the user deletes files), so the flag
+ * must be reconciled at startup before anything counts "undownloaded"
+ * books.
  *
  * The probe answers "does <downloads dir>/<sanitized filename> exist"
  * (book_local_path is a flat name in g_downloads_dir), so instead of
@@ -126,59 +126,118 @@ dl_name_cmp(const void *a, const void *b)
  * at 100k books — the dir is listed ONCE and membership is answered
  * from the sorted listing.  The per-book stored-path fallback (a moved
  * downloads folder) still access()es, but only for books whose file is
- * not in the current dir. */
-void
-refresh_downloaded_flags(void)
-{
-    /* A crashed fetch can leave a "<path>.part" fragment behind
-     * (dl_fetch renames only on success); sweep them at startup. */
-    sweep_stale_parts();
+ * not in the current dir.
+ *
+ * The scan is sliced: it pages the whole books b-tree
+ * (store_next_dl_probes), which would otherwise stall the first frame
+ * for tens of seconds at 100k books.  bs_main runs it in bounded
+ * slices across event-loop frames via the "bootslice" weak timer
+ * (refresh_downloaded_flags_boot_start / _boot_step); the synchronous
+ * refresh_downloaded_flags() drives the same scan to completion for
+ * callers that need it inline. */
+#define DL_FLAG_PAGES_PER_TICK 8 /* probe pages (64 books each) per slice */
 
-    char **names = NULL;
-    int    n_names = 0, cap_names = 0;
+typedef struct {
+    char **names;      /* sorted downloads-dir listing, or NULL */
+    int    n_names;
+    long long rowid;   /* keyset cursor into books (0 = start) */
+    int    changed;    /* flags flipped so far */
+    /* The probe array lives in the heap-allocated scan: 64 x
+     * DownloadProbe is ~32KB, and the device's task stack overflows
+     * with it on the frame (boot crashed in an endless respawn loop
+     * on hardware while the emulator's bigger stack stayed green). */
+    DownloadProbe probes[64];
+} DlFlagScan;
+
+static DlFlagScan *g_dl_flag_scan = NULL;
+
+/* Arm the resumable scan (idempotent): sweep stale .part fragments and
+ * snapshot the downloads dir ONCE.  The probe answers membership from
+ * this sorted listing, so the per-book test is a bsearch, not an
+ * access() per book. */
+static void
+dl_flag_arm(void)
+{
+    if (g_dl_flag_scan != NULL)
+        return;
+    sweep_stale_parts();
+    DlFlagScan *s = calloc(1, sizeof *s);
+    if (s == NULL) {
+        LOG("[bookshelf] refresh_downloaded_flags: scan alloc failed\n");
+        return; /* stale flags are better than a crash */
+    }
     DIR *d = opendir(g_downloads_dir);
     if (d != NULL) {
         struct dirent *e;
+        int cap = 0;
         while ((e = readdir(d)) != NULL) {
             if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0)
                 continue;
-            if (n_names == cap_names) {
-                int nc = cap_names ? cap_names * 2 : 256;
-                char **nn = realloc(names, sizeof *nn * (size_t)nc);
+            if (s->n_names == cap) {
+                int nc = cap ? cap * 2 : 256;
+                char **nn = realloc(s->names, sizeof *nn * (size_t)nc);
                 if (nn == NULL)
                     break; /* keep what we have; membership still exact */
-                names = nn;
-                cap_names = nc;
+                s->names = nn;
+                cap = nc;
             }
             char *dup = strdup(e->d_name);
             if (dup == NULL)
                 break;
-            names[n_names++] = dup;
+            s->names[s->n_names++] = dup;
         }
         closedir(d);
-        if (n_names > 1)
-            qsort(names, (size_t)n_names, sizeof *names, dl_name_cmp);
+        if (s->n_names > 1)
+            qsort(s->names, (size_t)s->n_names, sizeof *s->names, dl_name_cmp);
     }
+    g_dl_flag_scan = s;
+}
 
-    /* The probe array must live on the heap: 64 x DownloadProbe is
-     * ~32KB, and the device's task stack overflows with that on the
-     * frame (boot crashed in an endless respawn loop on hardware
-     * while the emulator's bigger stack stayed green). */
-    DownloadProbe *probes = malloc(sizeof *probes * 64);
-    if (probes == NULL) {
-        LOG("[bookshelf] refresh_downloaded_flags: probe alloc failed\n");
-        for (int i = 0; i < n_names; i++)
-            free(names[i]);
-        free(names);
-        return; /* stale flags are better than a crash */
-    }
+/* Free the scan state and log the tally. */
+static void
+dl_flag_finish(void)
+{
+    DlFlagScan *s = g_dl_flag_scan;
+    if (s == NULL)
+        return;
+    int changed = s->changed;
+    for (int i = 0; i < s->n_names; i++)
+        free(s->names[i]);
+    free(s->names);
+    free(s);
+    g_dl_flag_scan = NULL;
+    LOG("[bookshelf] refresh_downloaded_flags: changed=%d\n", changed);
+}
 
-    int  got, changed = 0;
-    long long rowid = 0;
-    store_begin();
-    while ((got = store_next_dl_probes(probes, 64, &rowid)) > 0) {
+/* Arm the boot flag scan (called by bs_main's bootslice timer). */
+void
+refresh_downloaded_flags_boot_start(void)
+{
+    dl_flag_arm();
+}
+
+/* Re-probe one bounded slice of books (DL_FLAG_PAGES_PER_TICK paged
+ * queries, each in its own transaction) and publish any flag changes.
+ * Returns 1 when the scan is finished (state freed and logged), 0 to
+ * run again.  Per-slice transactions keep a long-lived transaction
+ * from being held open across event-loop frames (bs_main's initsync
+ * timer may write the store mid-scan). */
+int
+refresh_downloaded_flags_boot_step(void)
+{
+    dl_flag_arm(); /* auto-arm on the first step */
+    DlFlagScan *s = g_dl_flag_scan;
+    if (s == NULL)
+        return 1; /* couldn't arm: treat as done */
+    for (int page = 0; page < DL_FLAG_PAGES_PER_TICK; page++) {
+        int got = store_next_dl_probes(s->probes, 64, &s->rowid);
+        if (got <= 0) {
+            dl_flag_finish();
+            return 1;
+        }
+        store_begin();
         for (int i = 0; i < got; i++) {
-            DownloadProbe *p = &probes[i];
+            DownloadProbe *p = &s->probes[i];
             Book b;
             memset(&b, 0, sizeof b);
             snprintf(b.id, sizeof b.id, "%s", p->id);
@@ -193,9 +252,9 @@ refresh_downloaded_flags(void)
              * dereferences it; passing base read the first four bytes
              * of the filename as a pointer and SIGSEGV'd on any
              * non-empty downloads dir). */
-            int dl = names != NULL &&
-                     bsearch(&base, names, (size_t)n_names, sizeof *names,
-                             dl_name_cmp) != NULL;
+            int dl = s->names != NULL &&
+                     bsearch(&base, s->names, (size_t)s->n_names,
+                             sizeof *s->names, dl_name_cmp) != NULL;
             if (!dl && p->local_path[0] != '\0' &&
                 access(p->local_path, F_OK) == 0) {
                 /* File still at its stored location although the
@@ -206,18 +265,29 @@ refresh_downloaded_flags(void)
             }
             if (dl != p->downloaded) {
                 store_set_downloaded(p->id, dl, dl ? path : "");
-                changed++;
+                s->changed++;
             }
         }
-        if (got < 64)
-            break;
+        store_commit();
+        if (got < 64) {
+            dl_flag_finish();
+            return 1;
+        }
     }
-    store_commit();
-    free(probes);
-    for (int i = 0; i < n_names; i++)
-        free(names[i]);
-    free(names);
-    LOG("[bookshelf] refresh_downloaded_flags: changed=%d\n", changed);
+    return 0;
+}
+
+/* Re-probe every book's on-device file and resync its downloaded flag,
+ * synchronously to completion.  The boot path uses the sliced
+ * refresh_downloaded_flags_boot_start/_boot_step pair instead (see
+ * bs_main's bootslice timer); this runs the same scan inline for
+ * callers that need it done before returning. */
+void
+refresh_downloaded_flags(void)
+{
+    dl_flag_arm();
+    while (!refresh_downloaded_flags_boot_step())
+        ;
 }
 
 /* Find a download-queue entry by id (NULL if absent). */
@@ -488,17 +558,27 @@ static char *g_dl_batch_failed_ids; /* NULL until the first failure */
 static int   g_dl_batch_failed_count = 0;
 static int   g_dl_batch_failed_cap = 0;
 
+/* Comparator for the sorted failed-id set: elements are fixed
+ * MAX_ID_LEN byte strings stored contiguously, so a pointer to an
+ * element is just a char*. */
+static int
+batch_failed_cmp(const void *a, const void *b)
+{
+    return strcmp((const char *)a, (const char *)b);
+}
+
 /* True when the current batch already attempted *id* and it failed.
  * Failed books keep their downloaded flag at 0, so without this guard
  * the next slice would re-enqueue them and the batch would loop over
- * the failing books forever. */
+ * the failing books forever.  The set is kept sorted ascending (see
+ * batch_note_failed), so the probe is a binary search: O(log n) rather
+ * than the O(n) linear scan that dominated a flaky mass download. */
 static int
 batch_failed_id(const char *id)
 {
-    for (int i = 0; i < g_dl_batch_failed_count; i++)
-        if (strcmp(g_dl_batch_failed_ids + (size_t)i * MAX_ID_LEN, id) == 0)
-            return 1;
-    return 0;
+    return bsearch(id, g_dl_batch_failed_ids,
+                   (size_t)g_dl_batch_failed_count, MAX_ID_LEN,
+                   batch_failed_cmp) != NULL;
 }
 
 static void
@@ -512,8 +592,25 @@ batch_note_failed(const char *id)
         g_dl_batch_failed_ids = nids;
         g_dl_batch_failed_cap = newcap;
     }
-    snprintf(g_dl_batch_failed_ids + (size_t)g_dl_batch_failed_count * MAX_ID_LEN,
-             MAX_ID_LEN, "%s", id);
+    /* Insert at the sorted position so the set stays ascending and
+     * batch_failed_id can stay a binary search.  Each id is noted at
+     * most once per batch (batch_failed_id skips already-failed books
+     * before they are ever re-enqueued), so no dedup is needed here.
+     * Ids are fixed MAX_ID_LEN byte strings, so shifting the tail is a
+     * cheap memmove. */
+    int lo = 0, hi = g_dl_batch_failed_count; /* first slot >= id */
+    while (lo < hi) {
+        int mid = (lo + hi) / 2;
+        if (strcmp(g_dl_batch_failed_ids + (size_t)mid * MAX_ID_LEN, id) < 0)
+            lo = mid + 1;
+        else
+            hi = mid;
+    }
+    char *dst = g_dl_batch_failed_ids + (size_t)lo * MAX_ID_LEN;
+    size_t tail = (size_t)(g_dl_batch_failed_count - lo) * MAX_ID_LEN;
+    if (tail > 0)
+        memmove(dst + MAX_ID_LEN, dst, tail);
+    snprintf(dst, MAX_ID_LEN, "%s", id);
     g_dl_batch_failed_count++;
 }
 

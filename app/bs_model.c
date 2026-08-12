@@ -652,7 +652,14 @@ sync_apply_round(cJSON *root, long long cursor, long long *next_out,
     const cJSON *added = cJSON_GetObjectItemCaseSensitive(root, "added");
     const cJSON *rem = cJSON_GetObjectItemCaseSensitive(root, "removed");
     const cJSON *nc = cJSON_GetObjectItemCaseSensitive(root, "nextCursor");
-    store_begin();
+    if (store_begin() != 0) {
+        /* BEGIN failed: no transaction was opened, so there is nothing
+         * to roll back — treat it as a store failure and abort the
+         * whole chain visibly with the cursor un-advanced (the caller
+         * handles the SYNC_ROUND_STORE_FAIL outcome). */
+        cJSON_Delete(root);
+        return SYNC_ROUND_STORE_FAIL;
+    }
     if (cJSON_IsArray(added)) {
         /* Sort the round's added entries by id before applying.  The
          * server streams the catalogue in its own order, but the
@@ -789,8 +796,9 @@ finish_sync(void)
 /* ── finish job: report the final state back to the server ───────────── */
 
 typedef struct {
-    char url[MAX_URL_LEN + 16];
-    char body[160];
+    char         url[MAX_URL_LEN + 16];
+    char         body[160];
+    unsigned int gen; /* chain generation this finish belongs to */
 } SyncFinishArg;
 
 /* Worker: POST the final state (best-effort). */
@@ -807,11 +815,19 @@ sync_finish_post(BsJob *job)
     __atomic_store_n(&job->done, 1, __ATOMIC_RELEASE);
 }
 
-/* done_cb for the finish job: the terminal bookkeeping. */
+/* done_cb for the finish job: the terminal bookkeeping.  A stale
+ * finish (from an aborted-and-restarted chain, where sync_state is
+ * already 1 again but the job belongs to the old generation) must not
+ * close a newer chain's UI — same guard as sync_round_done. */
 static void
 sync_finish_done(BsJob *job)
 {
-    free(job->arg);
+    SyncFinishArg *a = job->arg;
+    if (!g_state.sync_state || a->gen != (unsigned int)g_sync_gen) {
+        free(a);
+        return;
+    }
+    free(a);
     finish_sync();
 }
 
@@ -827,6 +843,7 @@ sync_submit_finish(void)
         finish_sync(); /* best-effort: skip the report POST */
         return;
     }
+    a->gen = g_sync_gen;
     snprintf(a->url, sizeof a->url, "%s", g_state.url_state);
     snprintf(a->body, sizeof a->body,
              "{\"device\":\"pbemu\",\"cursor\":%lld,\"books\":%d}",
@@ -1130,7 +1147,13 @@ cover_mtime_cmp(const void *a, const void *b)
     return (ca->mtime > cb->mtime) - (ca->mtime < cb->mtime);
 }
 
-static int g_cover_saves; /* saves since the last sweep decision */
+static int g_cover_saves; /* saves since the last sweep decision (worker thread only) */
+/* Set by the worker when a sweep is due, consumed on the main thread by
+ * cover_cache_sweep_if_pending.  Atomic so the worker's flag write and
+ * the main thread's exchange never race, keeping all directory mutation
+ * (unlink in cover_cache_sweep vs the .raw extraction in bs_grid.c's
+ * cover_tick) on the main thread. */
+static _Atomic int g_cover_sweep_pending;
 
 static void
 cover_cache_sweep(void)
@@ -1195,9 +1218,28 @@ cover_cache_save(const char *id, const char *png_data, int len)
         LOG("[bookshelf] cover_cache_save: cannot write %s\n", path);
         return;
     }
-    fwrite(png_data, 1, (size_t)len, f);
-    fclose(f);
-    /* Bounded cache: check the directory size every 64th save. */
+    size_t wr = fwrite(png_data, 1, (size_t)len, f);
+    if (wr != (size_t)len || fclose(f) != 0) {
+        /* A truncated or corrupt PNG must never linger in the cache:
+         * it would fail to decode on every later view.  Drop it. */
+        unlink(path);
+        LOG("[bookshelf] cover_cache_save: write failed for %s\n", path);
+        return;
+    }
+    /* Bounded cache: flag a sweep every 64th save.  The sweep itself
+     * runs on the main thread (cover_cache_sweep_if_pending) to keep
+     * directory mutation off the worker — the worker's unlink here
+     * would otherwise race cover_tick's .raw extraction. */
     if ((++g_cover_saves % COVER_SWEEP_EVERY) == 0)
+        __atomic_store_n(&g_cover_sweep_pending, 1, __ATOMIC_RELEASE);
+}
+
+/* Main-thread sweep hook: run the bounded cover-cache sweep when the
+ * worker flagged it due.  Called from the periodic cover_tick so the
+ * sweep happens on the main thread, never the worker. */
+void
+cover_cache_sweep_if_pending(void)
+{
+    if (__atomic_exchange_n(&g_cover_sweep_pending, 0, __ATOMIC_ACQ_REL))
         cover_cache_sweep();
 }

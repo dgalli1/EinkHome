@@ -118,6 +118,76 @@ done:
     return count;
 }
 
+/* Cached wrap of the log tail.  Each scroll tap used to re-read up to
+ * 160 KB from flash and re-wrap the whole buffer (a per-word memcpy +
+ * StringWidth per word).  The last wrapped pass is cached and keyed by
+ * the log file's (size, mtime); it is only rebuilt when the file
+ * changed (i.e. the log grew).  Rows point into the owned `text`
+ * buffer, so the text must outlive the rows — both live in the cache. */
+typedef struct {
+    long    size;
+    long    mtime;
+    int     maxw; /* wrap width the rows were laid out with */
+    int     cap;  /* rows array capacity */
+    char   *text; /* owned copy (160 KB tail); rows point into it */
+    LogRow *rows;
+    int     nrows;
+} LogWrapCache;
+
+static LogWrapCache g_log_wrap;
+
+static void
+log_wrap_cache_clear(void)
+{
+    free(g_log_wrap.text);
+    free(g_log_wrap.rows);
+    g_log_wrap.text = NULL;
+    g_log_wrap.rows = NULL;
+    g_log_wrap.nrows = 0;
+    g_log_wrap.size = -1;
+    g_log_wrap.mtime = -1;
+}
+
+/* Return a valid cached wrap for the current log tail, rebuilding it
+ * only when the file (size, mtime) changed or a different width/cap is
+ * needed.  NULL when the log does not exist. */
+static const LogWrapCache *
+log_wrap_get(int maxw, int cap)
+{
+    struct stat st;
+    if (iv_stat(log_path(), &st) != 0) {
+        log_wrap_cache_clear();
+        return NULL;
+    }
+    if (g_log_wrap.text != NULL && g_log_wrap.size == st.st_size &&
+        g_log_wrap.mtime == st.st_mtime && g_log_wrap.maxw == maxw &&
+        g_log_wrap.cap >= cap)
+        return &g_log_wrap;
+
+    /* Rebuild: read the tail and wrap it once. */
+    char *text = log_tail_read(160 * 1024);
+    if (text == NULL) {
+        log_wrap_cache_clear();
+        return NULL;
+    }
+    LogRow *rows = malloc((size_t)cap * sizeof(LogRow));
+    if (rows == NULL) {
+        free(text);
+        log_wrap_cache_clear();
+        return NULL;
+    }
+    int nrows = log_wrap_rows(text, maxw, rows, cap);
+    log_wrap_cache_clear();
+    g_log_wrap.text = text;
+    g_log_wrap.rows = rows;
+    g_log_wrap.nrows = nrows;
+    g_log_wrap.size = st.st_size;
+    g_log_wrap.mtime = st.st_mtime;
+    g_log_wrap.maxw = maxw;
+    g_log_wrap.cap = cap;
+    return &g_log_wrap;
+}
+
 /* Full-screen log viewer: the app log tail, line-wrapped, page-scrolled
  * with the two bottom buttons; Back returns to the shelf. */
 void
@@ -165,8 +235,8 @@ draw_log_view(void)
 
     int   first = 0;
     int   max_first = 0;
-    char *text = log_tail_read(160 * 1024);
-    if (text == NULL) {
+    const LogWrapCache *wc = log_wrap_get(w - 48, rows_vis * 8);
+    if (wc == NULL) {
         ifont *ef = OpenFont(DEFAULTFONT, 26, 0);
         if (ef != NULL) {
             SetFont(ef, DGRAY);
@@ -174,11 +244,8 @@ draw_log_view(void)
             CloseFont(ef);
         }
     } else {
-        LogRow *rows = calloc((size_t)rows_vis * 8, sizeof(LogRow));
-        int     nrows = 0;
-        if (rows != NULL) {
-            nrows = log_wrap_rows(text, w - 48, rows, rows_vis * 8);
-        }
+        const LogRow *rows = wc->rows;
+        int           nrows = wc->nrows;
         int maxf = nrows - rows_vis;
         if (maxf < 0)
             maxf = 0;
@@ -206,9 +273,7 @@ draw_log_view(void)
             }
             CloseFont(lf);
         }
-        free(rows);
     }
-    free(text);
 
     /* Stock corner scroll buttons: older = up, newer = down. */
     draw_scroll_buttons(first > 0, first < max_first);

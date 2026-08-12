@@ -45,6 +45,7 @@ draw_search_tab(void)
     DrawLine(gx + 10, gy + 9, gx + 23, gy + 22, col);
 
     ifont *f = OpenFont(DEFAULTFONT, 28, 0);
+    ifont *hf = OpenFont(DEFAULTFONTB, 28, 0); /* history rows, hoisted */
     if (f != NULL) {
         int tx = bx + 68;
         SetFont(f, col);
@@ -58,19 +59,20 @@ draw_search_tab(void)
             int cursor_x = tx + StringWidth(g_state.query) + 1;
             DrawLine(cursor_x, by + 6, cursor_x, by + bh - 6, WHITE);
         }
-        CloseFont(f);
     }
 
     /* ── previously searched terms ── */
     int n = store_search_count();
     if (n == 0) {
-        ifont *ef = OpenFont(DEFAULTFONT, 28, 0);
-        if (ef != NULL) {
-            SetFont(ef, DGRAY);
+        if (f != NULL) {
+            SetFont(f, DGRAY);
             const char *msg = i18n("search.empty");
             DrawString((w - StringWidth(msg)) / 2, top + SEARCH_ROW_H + 60, msg);
-            CloseFont(ef);
         }
+        if (hf != NULL)
+            CloseFont(hf);
+        if (f != NULL)
+            CloseFont(f);
         return;
     }
     int ps = history_pagesize();
@@ -85,19 +87,21 @@ draw_search_tab(void)
     int  got = store_search_list(terms, SEARCH_HISTORY_MAX, g_state.page * ps);
     int  y = top + SEARCH_ROW_H;
     for (int i = 0; i < got && y + SEARCH_HISTORY_ROW_H <= bot; i++) {
-        ifont *tf = OpenFont(DEFAULTFONTB, 28, 0);
-        if (tf != NULL) {
-            SetFont(tf, BLACK);
+        if (hf != NULL) {
+            SetFont(hf, BLACK);
             char trunc[MAX_QUERY_LEN];
             strncpy(trunc, terms[i], sizeof trunc - 1);
             trunc[sizeof trunc - 1] = '\0';
             utf8_fit_width(trunc, sizeof trunc, w - 80);
             DrawString(24, y + (SEARCH_HISTORY_ROW_H - 28) / 2 - 2, trunc);
-            CloseFont(tf);
         }
         DrawLine(20, y + SEARCH_HISTORY_ROW_H - 1, w - 20, y + SEARCH_HISTORY_ROW_H - 1, LGRAY);
         y += SEARCH_HISTORY_ROW_H;
     }
+    if (hf != NULL)
+        CloseFont(hf);
+    if (f != NULL)
+        CloseFont(f);
 }
 
 /* Screen rect of the live suggestion band: below the search input
@@ -133,8 +137,8 @@ draw_suggestions(int y_top, int y_bot)
     int w = ScreenWidth();
     FillArea(0, y_top, w, y_bot - y_top, WHITE);
     int y = y_top;
+    ifont *tf = OpenFont(DEFAULTFONTB, 28, 0);
     for (int i = 0; i < g_nsuggest && y + SEARCH_HISTORY_ROW_H <= y_bot; i++) {
-        ifont *tf = OpenFont(DEFAULTFONTB, 28, 0);
         if (tf != NULL) {
             SetFont(tf, BLACK);
             char trunc[SUGGEST_TERM_MAX];
@@ -144,12 +148,13 @@ draw_suggestions(int y_top, int y_bot)
             trunc[sizeof trunc - 1] = '\0';
             utf8_fit_width(trunc, sizeof trunc, w - 80);
             DrawString(24, y + (SEARCH_HISTORY_ROW_H - 28) / 2 - 2, trunc);
-            CloseFont(tf);
         }
         DrawLine(20, y + SEARCH_HISTORY_ROW_H - 1, w - 20,
                  y + SEARCH_HISTORY_ROW_H - 1, LGRAY);
         y += SEARCH_HISTORY_ROW_H;
     }
+    if (tf != NULL)
+        CloseFont(tf);
 }
 
 /* History-term rows that fit below the input row on the Search page. */

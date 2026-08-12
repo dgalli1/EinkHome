@@ -255,6 +255,22 @@ local_apply_nop(BsJob *job)
 
 static void local_apply_slice(BsJob *job);
 
+/* Abort a failed local import the way the remote path aborts a failed
+ * round: free the apply chain and surface the error to the UI
+ * (sync_state=2, spinner off, popup fail) — the import is not "done",
+ * so there is no success finish.  Main thread only. */
+static void
+local_apply_fail(LocalApplyArg *a)
+{
+    LocalScanResult *res = a->res;
+    free(res->books);
+    free(res);
+    free(a);
+    g_state.sync_state = 2;
+    sync_set_active(0);
+    sync_popup_fail();
+}
+
 /* done_cb of the walk: hand the collected result to the apply chain. */
 static void
 local_scan_start_apply(BsJob *job)
@@ -309,13 +325,29 @@ local_apply_slice(BsJob *job)
     int end = a->offset + SYNC_BATCH;
     if (end > res->count)
         end = res->count;
-    store_begin();
+    if (store_begin() != 0) {
+        /* Store failure: do not apply the slice; abort the import as
+         * a store failure (the transaction never opened, so there is
+         * nothing to roll back). */
+        LOG("[bookshelf] local: store_begin failed; aborting import\n");
+        local_apply_fail(a);
+        return;
+    }
     if (a->offset == 0)
         store_delete_source(res->src);
     for (int i = a->offset; i < end; i++) {
         Book b;
         local_file_to_book(&res->books[i], &b);
-        store_upsert_book(&b);
+        if (store_upsert_book(&b) != 0) {
+            /* Store write failed (e.g. disk full): roll back the slice
+             * so the partially-applied batch is never committed, and
+             * abort the import instead of silently truncating it. */
+            LOG("[bookshelf] local: upsert failed id=%s; "
+                "rolling back slice and aborting import\n", b.id);
+            store_rollback();
+            local_apply_fail(a);
+            return;
+        }
     }
     store_commit();
     /* A full local import is also a long main-thread job: keep the

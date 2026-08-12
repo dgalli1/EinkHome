@@ -144,7 +144,28 @@ browser_clamp_scroll(void)
 
 /* Fill g_browse_* with the current directory's entries.  The picker
  * lists subdirectories only; the browser lists ".." (when below the
- * root), then subdirectories, then book files. */
+* the root), then subdirectories, then book files. */
+
+/* qsort comparator over row indices: directories before files, then
+ * alphabetical; ties broken by original index so the sort is stable
+ * (preserving the order the previous insertion sort produced for
+ * equal names).  Index comparisons keep qsort cheap — no 220-byte
+ * memcpy per compare. */
+static int
+browser_row_cmp(const void *a, const void *b)
+{
+    int ia = *(const int *)a;
+    int ib = *(const int *)b;
+    int da = g_browse_is_dir[ia];
+    int db = g_browse_is_dir[ib];
+    if (da != db)
+        return db - da; /* directories first (is_dir is 0 or 1) */
+    int c = strcmp(g_browse_names[ia], g_browse_names[ib]);
+    if (c != 0)
+        return c;
+    return ia - ib; /* stable tie-break */
+}
+
 static void
 browser_load(void)
 {
@@ -224,26 +245,40 @@ browser_load(void)
     }
     closedir(d);
 
-    /* Stable insertion sort on the shared key: directories before
-     * files, alphabetical within each group.  The picker's list is all
+    /* Stable sort on the shared key: directories before files,
+     * alphabetical within each group.  qsort over an index array
+     * keeps comparisons cheap (no 220-byte memcpy per compare) and
+     * the (name, original_index) tie-break preserves the insertion
+     * sort's stability for equal names.  The picker's list is all
      * directories, so the dirs-first key reduces to the plain
      * alphabetical order the old picker produced. */
-    for (int i = 1; i < g_browse_count; i++) {
+    int order[BROWSE_MAX_ENTRIES];
+    for (int i = 0; i < g_browse_count; i++)
+        order[i] = i;
+    qsort(order, (size_t)g_browse_count, sizeof order[0], browser_row_cmp);
+    /* Write the rows into place once, following each sort cycle in
+     * place: every row is moved exactly once (O(n) memcpys total). */
+    for (int i = 0; i < g_browse_count; i++) {
+        if (order[i] == i)
+            continue;
         char name[MAX_PATH_LEN];
         memcpy(name, g_browse_names[i], MAX_PATH_LEN);
         int is_dir = g_browse_is_dir[i];
-        int j = i - 1;
-        while (j >= 0) {
-            int jd = g_browse_is_dir[j];
-            int j_before = (is_dir != jd) ? is_dir : (strcmp(name, g_browse_names[j]) < 0);
-            if (!j_before)
+        int src = i;
+        for (;;) {
+            int dst = order[src];
+            if (dst == i) {
+                memcpy(g_browse_names[src], name, MAX_PATH_LEN);
+                g_browse_is_dir[src] = (char)is_dir;
+            } else {
+                memcpy(g_browse_names[src], g_browse_names[dst], MAX_PATH_LEN);
+                g_browse_is_dir[src] = g_browse_is_dir[dst];
+            }
+            order[src] = src; /* this slot is now placed */
+            if (dst == i)
                 break;
-            memcpy(g_browse_names[j + 1], g_browse_names[j], MAX_PATH_LEN);
-            g_browse_is_dir[j + 1] = g_browse_is_dir[j];
-            j--;
+            src = dst;
         }
-        memcpy(g_browse_names[j + 1], name, MAX_PATH_LEN);
-        g_browse_is_dir[j + 1] = (char)is_dir;
     }
     LOG("[bookshelf] browser: %s -> %d entries\n", g_browse_path, g_browse_count);
 }
@@ -252,21 +287,19 @@ browser_load(void)
  * line under it, and the entry name in bold with a trailing "/" for
  * directories.  name == NULL paints the bare row (off-list slot). */
 static void
-browser_draw_row(int row_y, const char *name, int is_dir)
+browser_draw_row(int row_y, const char *name, int is_dir, ifont *f)
 {
     int w = ScreenWidth();
     FillArea(0, row_y, w, FOLDER_ROW_H, WHITE);
     DrawLine(0, row_y + FOLDER_ROW_H, w, row_y + FOLDER_ROW_H, LGRAY);
     if (name == NULL)
         return;
-    ifont *f = OpenFont(DEFAULTFONTB, 28, 0);
     if (f != NULL) {
         SetFont(f, BLACK);
         char trunc[MAX_PATH_LEN + 4];
         snprintf(trunc, sizeof trunc, "%s%s", name, is_dir ? "/" : "");
         utf8_fit_width(trunc, sizeof trunc, w - 64);
         DrawString(32, row_y + (FOLDER_ROW_H - 28) / 2 - 2, trunc);
-        CloseFont(f);
     }
 }
 
@@ -403,12 +436,17 @@ draw_browse(void)
      * (TOP_BAR_PAD gap), so it leaves the border intact. */
     FillArea(0, top, w, bottom - top, WHITE);
 
+    /* Row font opened once for the whole listing pass instead of once
+     * per row. */
+    ifont *rf = OpenFont(DEFAULTFONTB, 28, 0);
     for (int i = 0; i < rows; i++) {
         int idx = g_browse_scroll + i;
         int row_y = top + 8 + i * FOLDER_ROW_H;
         const char *name = (idx >= 0 && idx < g_browse_count) ? g_browse_names[idx] : NULL;
-        browser_draw_row(row_y, name, name ? g_browse_is_dir[idx] : 0);
+        browser_draw_row(row_y, name, name ? g_browse_is_dir[idx] : 0, rf);
     }
+    if (rf != NULL)
+        CloseFont(rf);
     if (g_browse_count == 0) {
         ifont *f = OpenFont(DEFAULTFONT, 26, 0);
         if (f != NULL) {
@@ -537,7 +575,8 @@ draw_overlay_folder(void)
     DrawLine(0, FOLDER_LIST_TOP - 12, w, FOLDER_LIST_TOP - 12, BLACK);
 
     /* Directory rows; a ".." row leads up whenever we are below the
-     * /mnt/ext1 root. */
+     * /mnt/ext1 root.  Row font opened once for the pass. */
+    ifont *rf = OpenFont(DEFAULTFONTB, 28, 0);
     int shown = 0;
     for (int i = 0; i < rows; i++) {
         int row_y = FOLDER_LIST_TOP + i * FOLDER_ROW_H;
@@ -549,10 +588,12 @@ draw_overlay_folder(void)
             if (idx >= 0 && idx < g_browse_count)
                 name = g_browse_names[idx];
         }
-        browser_draw_row(row_y, name, 1); /* picker rows are all dirs */
+        browser_draw_row(row_y, name, 1, rf); /* picker rows are all dirs */
         if (name != NULL)
             shown++;
     }
+    if (rf != NULL)
+        CloseFont(rf);
     if (shown == 0) {
         ifont *f = OpenFont(DEFAULTFONT, 26, 0);
         if (f != NULL) {
@@ -562,7 +603,7 @@ draw_overlay_folder(void)
         }
     }
 
-    /* Select / Back. */
+    /* Select / Back.  Button font opened once for both. */
     int sx, sy, sw, sh;
     folder_buttons(&sx, &sy, &sw, &sh);
     FillArea(sx, sy, sw, sh - 12, BLACK);
@@ -572,12 +613,10 @@ draw_overlay_folder(void)
         SetFont(f, WHITE);
         int tw = StringWidth(i18n("folder.select"));
         DrawString(sx + (sw - tw) / 2, sy + (sh - 12 - 32) / 2, i18n("folder.select"));
-        CloseFont(f);
     }
     int bx = sx + sw + 16;
     FillArea(bx, sy, sw, sh - 12, WHITE);
     DrawRect(bx, sy, sw, sh - 12, BLACK);
-    f = OpenFont(DEFAULTFONTB, 32, 0);
     if (f != NULL) {
         SetFont(f, BLACK);
         int tw = StringWidth(i18n("settings.back"));

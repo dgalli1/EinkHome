@@ -32,16 +32,17 @@ draw_overlay_menu(void)
      * 96/88 values — one name, one layout). */
     int y0 = MORE_Y0;
     int item_h = MORE_ITEM_H;
+    ifont *tf = OpenFont(DEFAULTFONTB, 28, 0);
     for (int i = 0; i < n; i++) {
         int sel = (i == (int)g_state.group);
         FillArea(12, y0 + i * item_h, pw - 24, item_h - 12, sel ? BLACK : WHITE);
-        ifont *tf = OpenFont(DEFAULTFONTB, 28, 0);
         if (tf != NULL) {
             SetFont(tf, sel ? WHITE : BLACK);
             DrawString(32, y0 + i * item_h + (item_h - 28) / 2 - 2, i18n(labels[i]));
-            CloseFont(tf);
         }
     }
+    if (tf != NULL)
+        CloseFont(tf);
 }
 
 void
@@ -74,6 +75,7 @@ draw_overlay_more(void)
     };
     int n = (int)(sizeof labels / sizeof labels[0]);
     int y0 = MORE_Y0;
+    ifont *tf = OpenFont(DEFAULTFONTB, 28, 0);
     for (int i = 0; i < n; i++) {
         int sel = 0;
         if (i == 0 && g_state.sync_state == 1)
@@ -85,13 +87,13 @@ draw_overlay_more(void)
         if (i == MORE_LIST_IDX && g_state.view_mode == VIEW_LIST)
             sel = 1;
         FillArea(px + 12, y0 + i * MORE_ITEM_H, pw - 24, MORE_ITEM_H - 12, sel ? BLACK : WHITE);
-        ifont *tf = OpenFont(DEFAULTFONTB, 28, 0);
         if (tf != NULL) {
             SetFont(tf, sel ? WHITE : BLACK);
             DrawString(px + 32, y0 + i * MORE_ITEM_H + (MORE_ITEM_H - 28) / 2 - 2, i18n(labels[i]));
-            CloseFont(tf);
         }
     }
+    if (tf != NULL)
+        CloseFont(tf);
 }
 
 /* ── source chooser ──────────────────────────────────────────────────── */
@@ -134,17 +136,18 @@ draw_overlay_source(void)
         i18n("source.folder"),
     };
     int y0 = py + 80;
+    ifont *f = OpenFont(DEFAULTFONTB, 28, 0);
     for (int i = 0; i < 3; i++) {
         int sel = (g_state.source == i);
         FillArea(px + 12, y0 + i * 96, pw - 24, 96 - 12, sel ? BLACK : WHITE);
         DrawRect(px + 12, y0 + i * 96, pw - 24, 96 - 12, sel ? BLACK : WHITE);
-        ifont *f = OpenFont(DEFAULTFONTB, 28, 0);
         if (f != NULL) {
             SetFont(f, sel ? WHITE : BLACK);
             DrawString(px + 32, y0 + i * 96 + (96 - 28) / 2 - 2, labels[i]);
-            CloseFont(f);
         }
     }
+    if (f != NULL)
+        CloseFont(f);
 }
 
 /* ── settings overlay ────────────────────────────────────────────────── */
@@ -181,12 +184,14 @@ settings_keyboard_handler(char *buffer)
         snprintf(g_state.api_token, sizeof g_state.api_token, "%s", val);
     }
     g_settings_edit = 0;
-    draw_overlay_settings();
     /* The on-screen keyboard draws full-screen and wipes the bottom
-     * status strip; re-stamp it before the flush so the panel survives
-     * the commit redraw (same sequence as bs_main.c's
-     * keyboard_handler). */
+     * status strip; re-stamp it BEFORE the draw so the panel survives
+     * the commit repaint.  Draw the settings page without flushing,
+     * then a single full-screen FullUpdate repaints the content and the
+     * panel band in one refresh — the same pattern as bs_main.c's
+     * keyboard_handler (draw no-flush → one FullUpdate). */
     stamp_panel();
+    draw_overlay_settings();
     FullUpdate();
 }
 
@@ -204,7 +209,8 @@ settings_reader_label(void)
 }
 
 void
-settings_draw_row(int y, const char *label, const char *value, int editing)
+settings_draw_row(int y, const char *label, const char *value, int editing,
+                  ifont *lf, ifont *vf)
 {
     int w = ScreenWidth();
     int mx = 32; /* left/right margin */
@@ -213,33 +219,27 @@ settings_draw_row(int y, const char *label, const char *value, int editing)
     if (editing)
         FillArea(mx + 2, y + 2, w - 2 * mx - 4, SETTINGS_ROW_H - 16, BLACK);
 
-    ifont *lf = OpenFont(DEFAULTFONTB, 26, 0);
     if (lf != NULL) {
         SetFont(lf, editing ? WHITE : BLACK);
         DrawString(mx + 16, y + 12, label);
-        CloseFont(lf);
     }
-    ifont *vf = OpenFont(DEFAULTFONT, 30, 0);
     if (vf != NULL) {
         SetFont(vf, editing ? WHITE : BLACK);
         DrawString(mx + 16, y + 52, value);
-        CloseFont(vf);
     }
 }
 
 void
-settings_draw_button(int y, const char *label, int filled)
+settings_draw_button(int y, const char *label, int filled, ifont *f)
 {
     int w = ScreenWidth();
     int mx = 32;
     FillArea(mx, y, w - 2 * mx, SETTINGS_BTN_H - 12, filled ? BLACK : WHITE);
     DrawRect(mx, y, w - 2 * mx, SETTINGS_BTN_H - 12, BLACK);
-    ifont *f = OpenFont(DEFAULTFONTB, 32, 0);
     if (f != NULL) {
         SetFont(f, filled ? WHITE : BLACK);
         int tw = StringWidth(label);
         DrawString((w - tw) / 2, y + (SETTINGS_BTN_H - 12 - 32) / 2, label);
-        CloseFont(f);
     }
 }
 
@@ -265,17 +265,27 @@ draw_overlay_settings(void)
     utf8_fit_width(dl_shown, sizeof dl_shown, w - 2 * 32 - 16);
 
     int y = 112;
-    settings_draw_row(y, i18n("settings.api_host"), g_state.api_base, g_settings_edit == 1);
+    /* Row/button fonts opened once for the whole settings pass. */
+    ifont *lf = OpenFont(DEFAULTFONTB, 26, 0);
+    ifont *vf = OpenFont(DEFAULTFONT, 30, 0);
+    ifont *bf = OpenFont(DEFAULTFONTB, 32, 0);
+    settings_draw_row(y, i18n("settings.api_host"), g_state.api_base, g_settings_edit == 1, lf, vf);
     y += SETTINGS_ROW_H;
-    settings_draw_row(y, i18n("settings.api_key"), g_state.api_token, g_settings_edit == 2);
+    settings_draw_row(y, i18n("settings.api_key"), g_state.api_token, g_settings_edit == 2, lf, vf);
     y += SETTINGS_ROW_H;
-    settings_draw_row(y, i18n("settings.reader"), settings_reader_label(), 0);
+    settings_draw_row(y, i18n("settings.reader"), settings_reader_label(), 0, lf, vf);
     y += SETTINGS_ROW_H;
-    settings_draw_row(y, i18n("settings.dl_dir"), dl_shown, 0);
+    settings_draw_row(y, i18n("settings.dl_dir"), dl_shown, 0, lf, vf);
     y += SETTINGS_ROW_H + 24;
-    settings_draw_button(y, i18n("settings.save"), 1);
+    settings_draw_button(y, i18n("settings.save"), 1, bf);
     y += SETTINGS_BTN_H;
-    settings_draw_button(y, i18n("settings.back"), 0);
+    settings_draw_button(y, i18n("settings.back"), 0, bf);
     y += SETTINGS_BTN_H;
-    settings_draw_button(y, i18n("settings.logs"), 0);
+    settings_draw_button(y, i18n("settings.logs"), 0, bf);
+    if (bf != NULL)
+        CloseFont(bf);
+    if (vf != NULL)
+        CloseFont(vf);
+    if (lf != NULL)
+        CloseFont(lf);
 }
