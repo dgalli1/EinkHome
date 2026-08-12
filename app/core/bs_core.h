@@ -139,7 +139,7 @@ extern void GetKeyboardRect(irect *rect) __attribute__((weak));
 #define BS_COLS 3
 #define BS_ROWS 2
 #define BS_PAGESIZE (BS_COLS * BS_ROWS)
-#define BS_CELL_MAX_H 600
+#define BS_CELL_MAX_H 780
 #define BS_CELL_MAX_W 420
 #define BS_CELL_MIN_H 280
 #define BS_CELL_MIN_W 280

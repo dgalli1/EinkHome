@@ -55,7 +55,12 @@ int bs_g_display_color = 0;
 int
 bs_view_cols(void)
 {
-    return bs_g_state.view_mode == BS_VIEW_LIST ? 1 : BS_COLS;
+    if (bs_g_state.view_mode == BS_VIEW_LIST)
+        return 1;
+    /* Narrow panels cannot fit three BS_CELL_MIN_W covers: 2 columns
+     * of ~370px (758/825-wide screens) instead of clipped 280px ones. */
+    int avail_w = ScreenWidth() - 16;
+    return avail_w >= 3 * BS_CELL_MIN_W ? BS_COLS : 2;
 }
 
 int
@@ -98,8 +103,8 @@ bs_grid_geom(int *top, int *bot, int *cell_w, int *cell_h)
         cw = avail_w;
         ch = BS_LIST_ROW_H;
     } else {
-        cw = avail_w / BS_COLS;
-        ch = avail_h / BS_ROWS;
+        cw = avail_w / bs_view_cols();
+        ch = avail_h / bs_view_rows();
         if (ch > BS_CELL_MAX_H)
             ch = BS_CELL_MAX_H;
         if (cw > BS_CELL_MAX_W)
@@ -113,6 +118,22 @@ bs_grid_geom(int *top, int *bot, int *cell_w, int *cell_h)
     *bot = b;
     *cell_w = cw;
     *cell_h = ch;
+}
+
+/* Left origin of the cover grid: 8px margin, plus half the leftover
+ * width when the cells clamp (BS_CELL_MAX_W) so the grid stays centred
+ * on wide panels instead of hugging the left edge. */
+int
+bs_grid_x0(void)
+{
+    if (bs_g_state.view_mode == BS_VIEW_LIST)
+        return 8;
+    int cols = bs_view_cols();
+    int cw;
+    int top, bot, cell_h;
+    bs_grid_geom(&top, &bot, &cw, &cell_h);
+    int avail_w = ScreenWidth() - 16;
+    return 8 + (avail_w - cols * cw) / 2;
 }
 
 /* Screen rect of tile `idx`, or 0 when it isn't on the current page. */
@@ -130,7 +151,7 @@ bs_tile_rect_for_index(int idx, int *x, int *y, int *w, int *h)
         return 0;
     int row = rel / cols;
     int col = rel % cols;
-    *x = 8 + col * cell_w;
+    *x = bs_grid_x0() + col * cell_w;
     *y = top + 4 + row * cell_h;
     *w = cell_w - 8;
     *h = cell_h - 6;
@@ -468,7 +489,7 @@ bs_draw_grid(void)
         for (int col = 0; col < cols; col++) {
             if (drawn >= bs_g_row_count)
                 goto done;
-            int tx = 8 + col * cell_w;
+            int tx = bs_grid_x0() + col * cell_w;
             int ty = top + 4 + row * cell_h;
             int tw = cell_w - 8;
             int th = cell_h - 6;

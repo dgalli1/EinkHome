@@ -48,7 +48,7 @@ from tests.support.bookshelf.env import (
     _api_env,
     _build_bookshelf,
     _kill_guest_tasks,
-    _parse_panel_h,
+    _parse_app_geometry,
     _pbemu_env,
     _restart_bookshelf,
     _restore_cfg_file,
@@ -153,10 +153,19 @@ def bookshelf_env():
 
         # 9. Build geometry + session
         snapshot = emulator.wait_for_informer_snapshot(timeout=10)
-        panel_h = _parse_panel_h(FIRMWARE)
+        app_geom = _parse_app_geometry(FIRMWARE)
+        if app_geom is not None and app_geom[0] > 0:
+            # The app's logical screen (portrait devices rotate the
+            # framebuffer, so the informer's fb dims would transpose
+            # every tap coordinate).
+            screen_w, screen_h, panel_h = app_geom
+        else:
+            screen_w = snapshot.width or 1072
+            screen_h = snapshot.height or 1448
+            panel_h = app_geom[2] if app_geom is not None else 0
         geom = BookshelfGeometry(
-            screen_w=snapshot.width or 1072,
-            screen_h=snapshot.height or 1448,
+            screen_w=screen_w,
+            screen_h=screen_h,
             panel_h=panel_h,
         )
         session = Session(emulator)

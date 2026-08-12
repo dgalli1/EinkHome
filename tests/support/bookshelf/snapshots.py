@@ -73,6 +73,47 @@ def ppm_to_png(ppm: bytes) -> bytes:
     )
 
 
+def pgm_to_png(pgm: bytes) -> bytes:
+    """Convert a P5 PGM (8-bit grayscale) blob to RGB PNG bytes.
+
+    Grayscale devices (depth=8 framebuffer) dump PGM; the result is
+    expanded to the same RGB PNG shape the report pipeline expects.
+    """
+    if not pgm.startswith(b"P5"):
+        raise ValueError("not a P5 PGM")
+    pos = 2
+    tokens: list[int] = []
+    while len(tokens) < 3:
+        while pos < len(pgm) and pgm[pos:pos + 1].isspace():
+            pos += 1
+        start = pos
+        while pos < len(pgm) and not pgm[pos:pos + 1].isspace():
+            pos += 1
+        if pos == start:
+            raise ValueError("malformed PGM header")
+        tokens.append(int(pgm[start:pos]))
+    width, height, _maxval = tokens[:3]
+    pos += 1  # single whitespace between maxval and the pixel data
+    pixels = pgm[pos:]
+    row_size = width
+    if len(pixels) < row_size * height:
+        raise ValueError("truncated PGM pixel data")
+
+    raw = bytearray()
+    for y in range(height):
+        raw.append(0)  # filter: none
+        for x in range(width):
+            g = pixels[y * row_size + x]
+            raw += bytes((g, g, g))
+    ihdr = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+    return (
+        _PNG_SIGNATURE
+        + _png_chunk(b"IHDR", ihdr)
+        + _png_chunk(b"IDAT", zlib.compress(bytes(raw), 6))
+        + _png_chunk(b"IEND", b"")
+    )
+
+
 class SnapshotRecorder:
     """Per-test screenshot collector bound to an emulator."""
 
@@ -107,8 +148,8 @@ class SnapshotRecorder:
         ) or "frame"
         return f"{self._seq:03d}-{safe}"
 
-    def finish_capture(self, name: str, label: str, ppm: Path) -> Path | None:
-        """Convert the probe's PPM at *ppm* into the named PNG.
+    def finish_capture(self, name: str, label: str, raw: Path) -> Path | None:
+        """Convert the probe's PPM/PGM dump at *raw* into the named PNG.
 
         Never raises: capture problems are recorded in the index and
         the suite continues.
@@ -117,11 +158,16 @@ class SnapshotRecorder:
             return None
         self._seq += 1
         try:
-            if not ppm.exists():
-                raise FileNotFoundError(f"probe output missing: {ppm}")
+            if not raw.exists():
+                raise FileNotFoundError(f"probe output missing: {raw}")
+            data = raw.read_bytes()
+            if data.startswith(b"P5"):
+                png = pgm_to_png(data)
+            else:
+                png = ppm_to_png(data)
             out = self._dir / f"{name}.png"
-            out.write_bytes(ppm_to_png(ppm.read_bytes()))
-            ppm.unlink(missing_ok=True)
+            out.write_bytes(png)
+            raw.unlink(missing_ok=True)
             self._index.append(f"{name}.png  {label}")
             self._entries.append(
                 {

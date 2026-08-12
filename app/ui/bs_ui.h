@@ -69,6 +69,7 @@ int bs_view_rows(void);
 int bs_view_pagesize(void);
 
 void bs_grid_geom(int *top, int *bot, int *cell_w, int *cell_h);
+int bs_grid_x0(void);
 
 int bs_tile_rect_for_index(int idx, int *x, int *y, int *w, int *h);
 

@@ -277,11 +277,17 @@ bs_current_pages(void)
  * paint (EVT_INIT), task foreground / external repaint (EVT_SHOW etc.,
  * where the framebuffer may hold another app's content), the
  * on-screen-keyboard commits (the keyboard wipes the panel band too),
- * and the launcher drag-end (ghost clear after an unflushed drag). */
+ * and the launcher drag-end (ghost clear after an unflushed drag).
+ * The pager band [content_bottom()-PAGER_H, content_bottom()) is a
+ * separate update region on the firmware (flip_page commits it
+ * explicitly), so surfaces that draw into it (launcher scroll buttons)
+ * must commit it with its own partial update — a plain content partial
+ * leaves it stale. */
 void
 bs_flush_content(void)
 {
     PartialUpdate(0, 0, ScreenWidth(), bs_content_bottom());
+    PartialUpdate(0, bs_content_bottom() - BS_PAGER_H, ScreenWidth(), BS_PAGER_H);
 }
 
 /* Show the theme's hourglass centered on the screen and leave it up

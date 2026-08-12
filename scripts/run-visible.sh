@@ -196,6 +196,18 @@ fi
 mkdir -p "${PBEMU_DIR}/${FIRMWARE}/.live/mnt/ext1/system/bin"
 install -m 0755 "build/bookshelf.app" \
 	"${PBEMU_DIR}/${FIRMWARE}/.live/mnt/ext1/system/bin/bookshelf.app"
+# The app's RUNPATH is its own directory: stage the SDK's libinkview /
+# libhwconfig next to it so older firmwares (whose own libs land taps at
+# wrong coordinates) run the same libs as the harness.  Only when the
+# firmware can satisfy the SDK lib's legacy deps (libssl 1.0) — newer
+# firmwares keep their own libs.  A real device has no such files here
+# and uses its own firmware libs.
+if [ -e "${PBEMU_DIR}/${FIRMWARE}/.live/ebrmain/lib/libssl.so.1.0.0" ]; then
+	install -m 0644 "sdk/pocketbook-sdk-b288/lib/libinkview.so" \
+		"${PBEMU_DIR}/${FIRMWARE}/.live/mnt/ext1/system/bin/libinkview.so"
+	install -m 0644 "sdk/pocketbook-sdk-b288/lib/libhwconfig.so" \
+		"${PBEMU_DIR}/${FIRMWARE}/.live/mnt/ext1/system/bin/libhwconfig.so"
+fi
 echo "  staged $(wc -c <build/bookshelf.app) bytes to .live/mnt/ext1/system/bin/bookshelf.app"
 # Point the app at the host API server. With --network=host the container
 # shares the host netns, so 127.0.0.1 reaches the server started above.

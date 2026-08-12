@@ -105,6 +105,7 @@ class BookshelfSession:
         self._firmware = firmware
         # Screenshots land under <repo>/build/screenshots/<test>/.
         self._snapshots = SnapshotRecorder(REPO_ROOT.parent / "build" / "screenshots")
+        self._fb_depth: int | None = None
 
     # -- snapshot recording ----------------------------------------------
 
@@ -122,13 +123,26 @@ class BookshelfSession:
         if not rec.active:
             return None
         name = rec.peek_name(label)
-        guest = f"/workspace/firmware/.live/tmp/{name}.ppm"
+        # Color devices expose a 24-bit framebuffer (--ppm); grayscale
+        # ones expose 8-bit (--pgm).  Probe the depth once and pick the
+        # matching dump mode so every device can be captured.
+        if self._fb_depth is None:
+            try:
+                out = self.emulator.run_probe("frame_dump", "--hash", check=False)
+                for token in (out.stdout or "").split():
+                    if token.startswith("depth="):
+                        self._fb_depth = int(token.split("=", 1)[1])
+                        break
+            except Exception:  # noqa: BLE001
+                pass
+        ext, flag = (".ppm", "--ppm") if self._fb_depth == 24 else (".pgm", "--pgm")
+        guest = f"/workspace/firmware/.live/tmp/{name}{ext}"
         try:
-            self.emulator.run_probe("frame_dump", "--ppm", guest, check=False)
+            self.emulator.run_probe("frame_dump", flag, guest, check=False)
         except Exception:  # noqa: BLE001
             pass
-        ppm = REPO_ROOT / self._firmware / ".live" / "tmp" / f"{name}.ppm"
-        return rec.finish_capture(name, label, ppm)
+        raw = REPO_ROOT / self._firmware / ".live" / "tmp" / f"{name}{ext}"
+        return rec.finish_capture(name, label, raw)
 
     def _caller_label(self, default: str) -> str:
         """Name of the outermost BookshelfSession method that invoked us.

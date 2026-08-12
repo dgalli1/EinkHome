@@ -42,9 +42,12 @@ PBEMU_ROOT = REPO_ROOT
 FIRMWARE = os.environ.get("PB_TEST_FIRMWARE") or "U633_6.8.2817"
 # Container runtime CLI.  Set PODMAN=docker to run the suite on docker.
 PODMAN = os.environ.get("PODMAN") or "podman"
-API_PORT = 18765
+# Parallel runs (visual captures on multiple firmwares at once) use
+# distinct container names + API ports per worker; pbemu honours the
+# same PB_SYSTEM_CONTAINER override.
+CONTAINER = os.environ.get("PB_SYSTEM_CONTAINER") or "pb-pocketbook-ui"
+API_PORT = int(os.environ.get("PBEMU_TEST_API_PORT") or 18765)
 API_TOKEN = "pbemu-dev-token"
-CONTAINER = "pb-pocketbook-ui"
 BOOKSHELF_APP = "bookshelf.app"
 
 # The guest resolves its config to /mnt/ext1/system/bin (writable since
@@ -171,6 +174,14 @@ def _stop_api_server(proc: subprocess.Popen) -> None:  # type: ignore[type-arg]
 def _build_bookshelf() -> Path:
     """Build the bookshelf binary. Returns path to the built ELF."""
     out = EINKHOME_ROOT / "build" / "bookshelf.app"
+    # PBEMU_APP_BINARY overrides the binary without rebuilding — used for
+    # armhf devices (InkPad One) whose ABI differs from the shared armel
+    # build.
+    override = os.environ.get("PBEMU_APP_BINARY")
+    if override:
+        path = Path(override)
+        assert path.is_file(), f"PBEMU_APP_BINARY not found: {path}"
+        return path
     # The source list lives in bookshelf/Makefile; build_armel.sh does
     # the cross-compile.
     try:
@@ -223,6 +234,20 @@ def _stage_binary(binary: Path) -> None:
     live = PBEMU_ROOT / FIRMWARE / ".live"
     bin_dir = live / "mnt/ext1/system/bin"
     bin_dir.mkdir(parents=True, exist_ok=True)
+
+    # The app is linked with RUNPATH=/mnt/ext1/system/bin, so it picks
+    # up these SDK copies instead of the firmware's libinkview/libhwconfig
+    # — older firmwares ship libs with different touch/event behavior
+    # (taps land at degenerate coordinates).  The SDK libinkview needs
+    # legacy deps (libssl 1.0, libpng12, libicu58); only firmwares that
+    # carry them can run it — the newer ones keep their own libs, whose
+    # touch handling already matches the harness.  A real device has no
+    # such files here and falls back to its own firmware libs.
+    sdk_lib = EINKHOME_ROOT / "sdk" / "pocketbook-sdk-b288" / "lib"
+    fw_lib = live / "ebrmain" / "lib"
+    if (fw_lib / "libssl.so.1.0.0").exists():
+        for so in ("libinkview.so", "libhwconfig.so"):
+            shutil.copy2(sdk_lib / so, bin_dir / so)
 
     # Copy binary to host-side .live (volume-mounted into container)
     shutil.copy2(binary, bin_dir / "bookshelf.app")
@@ -352,13 +377,27 @@ def _wait_bookshelf_active(emulator: Emulator, timeout: float = 30.0) -> None:
 
 
 def _parse_panel_h(firmware: str) -> int:
-    """Parse panel_h from the bookshelf log."""
+    """Parse panel_h from the bookshelf log (fallback: 0)."""
+    geom = _parse_app_geometry(firmware)
+    return geom[2] if geom is not None else 0
+
+
+def _parse_app_geometry(firmware: str) -> tuple[int, int, int] | None:
+    """Parse (sw, sh, panel_h) from the app's EVT_INIT line.
+
+    The informer reports the emulator framebuffer, which can be rotated
+    relative to the app's logical screen on portrait devices (e.g. the
+    Basic Lux 3 framebuffer is 1024x758 while the app runs 758x1024);
+    tap coordinates must live in the app's space.
+    """
     log = read_bookshelf_log(firmware)
+    m = re.search(r"EVT_INIT panel_h=(\d+) sw=(\d+) sh=(\d+)", log)
+    if m:
+        return int(m.group(2)), int(m.group(3)), int(m.group(1))
     m = re.search(r"EVT_INIT panel_h=(\d+)", log)
     if m:
-        return int(m.group(1))
-    # Default for 6-inch panel
-    return 0
+        return 0, 0, int(m.group(1))
+    return None
 
 
 # ``killall bookshelf.app`` cannot work: the guest runs under qemu-arm, so its

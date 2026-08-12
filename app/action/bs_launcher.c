@@ -678,13 +678,28 @@ bs_launcher_back_rect(int *bx, int *by, int *bw, int *bh)
     *bh = 56;
 }
 
+/* Scrollable body height: when the column overflows, reserve the corner
+ * scroll-button band so the last row never sits underneath the buttons
+ * (the log viewer reserves the same band).  A column that fits keeps
+ * the full height and draws no buttons. */
+static int
+launcher_body_h(void)
+{
+    int body_h = bs_content_bottom() - BS_LAUNCHER_HEADER_H;
+    if (bs_g_launcher_body_h - body_h > 0)
+        body_h -= BS_SCROLL_BTN_H;
+    if (body_h < 0)
+        body_h = 0;
+    return body_h;
+}
+
 void
 bs_draw_overlay_launcher(void)
 {
     int w = ScreenWidth();
     int h = bs_content_bottom();
     int body_top = BS_LAUNCHER_HEADER_H;
-    int body_h = bs_content_bottom() - body_top;
+    int body_h = launcher_body_h();
 
     /* Clamp the scroll offset: the column's last row stops at the bottom
      * edge; a column shorter than the window never scrolls. */
@@ -731,10 +746,15 @@ bs_draw_overlay_launcher(void)
 
     ifont *hf = OpenFont(DEFAULTFONTB, 28, 0);
     ifont *af = OpenFont(DEFAULTFONT, 24, 0);
+    /* SetClip is not reliable on every SDK/emulator path, so rows must
+     * fit the visible body outright: a row whose bottom would spill
+     * past the reserved scroll-button band is skipped until it scrolls
+     * into view (page scrolls align rows to the body). */
+    int body_bottom = body_top + body_h;
     for (int i = 0; i < bs_g_launcher_count; i++) {
         const BsLauncherItem *it = &bs_g_launcher_items[i];
         int                 sy = it->y - scroll + body_top;
-        if (sy + it->h <= body_top || sy >= h)
+        if (sy + it->h <= body_top || sy + it->h > body_bottom)
             continue;
         if (it->kind == 0) {
             FillArea(it->x, sy, it->w, it->h, WHITE);
@@ -777,13 +797,15 @@ bs_draw_overlay_launcher(void)
             }
         }
     }
-    /* Stock corner scroll buttons while the column overflows. */
+    SetClip(0, 0, w, h);
+    /* Stock corner scroll buttons while the column overflows.  Drawn
+     * after the clip reset: the body clip (SetClip above) would
+     * otherwise cut them — the button band sits below the body. */
     bs_draw_scroll_buttons(scroll > 0, scroll < max_scroll);
     if (hf)
         CloseFont(hf);
     if (af)
         CloseFont(af);
-    SetClip(0, 0, w, h);
 }
 
 /* -- launcher hit-test + actions ---------------------------------------- */
@@ -844,7 +866,7 @@ bs_on_tap_overlay_launcher(int x, int y)
     /* Corner scroll buttons: page up/down the column. */
     int dir = bs_hit_scroll_button(x, y);
     if (dir != 0) {
-        int body_h = bs_content_bottom() - body_top;
+        int body_h = launcher_body_h();
         int max_scroll = bs_g_launcher_body_h - body_h;
         if (max_scroll < 0)
             max_scroll = 0;

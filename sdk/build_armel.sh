@@ -208,7 +208,7 @@ podman run --rm \
 	"-I${PBEMU_APP_INCLUDE_DIR:-/work/bookshelf}" \
 	"-I/usr/include" \
 	"-L${CONTAINER_SYSROOT}/lib" \
-	"-Wl,-rpath,${CONTAINER_SDK_LIB}" \
+	"-Wl,-rpath,/mnt/ext1/system/bin" \
 	"--sysroot=${CONTAINER_SYSROOT}" \
 	-nostartfiles \
 	"${CRT1}" \
