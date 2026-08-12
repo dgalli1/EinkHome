@@ -167,6 +167,11 @@ void bs_settings_draw_row(int y, const char *label, const char *value,
 
 void bs_settings_draw_button(int y, const char *label, int filled, ifont *f);
 
+/* Back-button rect in the settings header: shared by the draw path
+ * (bs_overlays.c) and the tap hit-test (bs_input.c) so the tappable
+ * region always matches the painted button. */
+void bs_settings_back_rect(int *bx, int *by, int *bw, int *bh);
+
 void bs_draw_overlay_settings(void);
 
 void bs_draw_sync_icon(void);

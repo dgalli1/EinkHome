@@ -195,11 +195,13 @@ bs_settings_keyboard_handler(char *buffer)
     FullUpdate();
 }
 
-/* Full-screen settings page.  Three editable rows (API host, API key,
- * reader app) plus Save and Back buttons.  The API host / key rows open
- * the on-screen keyboard; the reader row cycles through Auto plus every
- * detected reader.  Generous row heights keep the targets comfortable on
- * the 300 DPI e-ink panel. */
+/* Full-screen settings page.  A header bar with a Back button and the
+ * centred title (same shape as the launcher header), then four editable
+ * rows (API host, API key, reader app, download folder) plus Save and
+ * Show logs buttons.  The API host / key rows open the on-screen
+ * keyboard; the reader row cycles through Auto plus every detected
+ * reader.  Generous row heights keep the targets comfortable on the
+ * 300 DPI e-ink panel. */
 const char *
 bs_settings_reader_label(void)
 {
@@ -243,19 +245,46 @@ bs_settings_draw_button(int y, const char *label, int filled, ifont *f)
     }
 }
 
+/* Back-button rect in the settings header: shared by the draw path
+ * here and the tap hit-test in bs_input.c so the tappable region
+ * always matches the painted button. */
+void
+bs_settings_back_rect(int *bx, int *by, int *bw, int *bh)
+{
+    *bx = BS_SETTINGS_BACK_X;
+    *by = (BS_SETTINGS_HEADER_H - BS_SETTINGS_BACK_H) / 2;
+    *bw = BS_SETTINGS_BACK_W;
+    *bh = BS_SETTINGS_BACK_H;
+}
+
 void
 bs_draw_overlay_settings(void)
 {
     int w = ScreenWidth();
     FillArea(0, 0, w, bs_content_bottom(), WHITE);
 
-    ifont *tf = OpenFont(DEFAULTFONTB, 40, 0);
+    /* Fixed header: title + Back button. */
+    FillArea(0, 0, w, BS_SETTINGS_HEADER_H, WHITE);
+    DrawLine(0, BS_SETTINGS_HEADER_H - 1, w, BS_SETTINGS_HEADER_H - 1, BLACK);
+    ifont *tf = OpenFont(DEFAULTFONTB, 36, 0);
     if (tf != NULL) {
         SetFont(tf, BLACK);
-        DrawString(32, 28, bs_i18n("settings.title"));
+        const char *title = bs_i18n("settings.title");
+        int         tw = StringWidth(title);
+        DrawString((w - tw) / 2, (BS_SETTINGS_HEADER_H - 36) / 2, title);
         CloseFont(tf);
     }
-    DrawLine(0, 92, w, 92, BLACK);
+    {
+        int bx, by, bw, bh;
+        bs_settings_back_rect(&bx, &by, &bw, &bh);
+        DrawRect(bx, by, bw, bh, BLACK);
+        ifont *bf = OpenFont(DEFAULTFONTB, 28, 0);
+        if (bf != NULL) {
+            SetFont(bf, BLACK);
+            DrawString(bx + 16, by + (bh - 28) / 2 - 2, bs_i18n("settings.back"));
+            CloseFont(bf);
+        }
+    }
 
     /* Downloads folder: the pending picker choice, else the resolved
      * effective directory — shown relative to /mnt/ext1. */
@@ -278,8 +307,6 @@ bs_draw_overlay_settings(void)
     bs_settings_draw_row(y, bs_i18n("settings.dl_dir"), dl_shown, 0, lf, vf);
     y += BS_SETTINGS_ROW_H + 24;
     bs_settings_draw_button(y, bs_i18n("settings.save"), 1, bf);
-    y += BS_SETTINGS_BTN_H;
-    bs_settings_draw_button(y, bs_i18n("settings.back"), 0, bf);
     y += BS_SETTINGS_BTN_H;
     bs_settings_draw_button(y, bs_i18n("settings.logs"), 0, bf);
     if (bf != NULL)

@@ -339,15 +339,21 @@ bs_settings_apply(void)
 void
 bs_on_tap_overlay_settings(int x, int y)
 {
-    (void)x; /* rows span the full content width; only y matters */
+    /* Header Back button (rows span the full content width; only the
+     * button rect uses x). */
+    int bx, by, bw, bh;
+    bs_settings_back_rect(&bx, &by, &bw, &bh);
+    if (x >= bx && x < bx + bw && y >= by && y < by + bh) {
+        bs_settings_close();
+        return;
+    }
 
     int y_row1 = 112;
     int y_row2 = y_row1 + BS_SETTINGS_ROW_H;
     int y_row3 = y_row2 + BS_SETTINGS_ROW_H;
     int y_row4 = y_row3 + BS_SETTINGS_ROW_H;
     int y_save = y_row4 + BS_SETTINGS_ROW_H + 24;
-    int y_back = y_save + BS_SETTINGS_BTN_H;
-    int y_logs = y_back + BS_SETTINGS_BTN_H;
+    int y_logs = y_save + BS_SETTINGS_BTN_H;
 
     if (y >= y_row1 && y < y_row1 + BS_SETTINGS_ROW_H - 12) {
         bs_g_settings_edit = 1;
@@ -389,10 +395,6 @@ bs_on_tap_overlay_settings(int x, int y)
     }
     if (y >= y_save && y < y_save + BS_SETTINGS_BTN_H - 12) {
         bs_settings_apply();
-        return;
-    }
-    if (y >= y_back && y < y_back + BS_SETTINGS_BTN_H - 12) {
-        bs_settings_close();
         return;
     }
     if (y >= y_logs && y < y_logs + BS_SETTINGS_BTN_H - 12) {
