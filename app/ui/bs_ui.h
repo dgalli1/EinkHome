@@ -167,9 +167,14 @@ void bs_settings_draw_row(int y, const char *label, const char *value,
 
 void bs_settings_draw_button(int y, const char *label, int filled, ifont *f);
 
-/* Back-button rect in the settings header: shared by the draw path
- * (bs_overlays.c) and the tap hit-test (bs_input.c) so the tappable
- * region always matches the painted button. */
+/* Left-pointing chevron back arrow, centred at (cx, cy) — the same
+ * icon the top bar shows on the Search page.  Shared by the top bar,
+ * the settings header and the launcher header. */
+void bs_draw_back_icon(int cx, int cy, int col);
+
+/* Touch box for the header back icon on the settings page: shared by
+ * the draw path (bs_overlays.c) and the tap hit-test (bs_input.c) so
+ * the tappable region always matches the painted icon. */
 void bs_settings_back_rect(int *bx, int *by, int *bw, int *bh);
 
 void bs_draw_overlay_settings(void);

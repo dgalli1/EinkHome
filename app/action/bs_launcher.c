@@ -665,9 +665,10 @@ bs_draw_launcher_icon(int cx, int cy, const char *icon_name, const char *title)
     }
 }
 
-/* Back-button rect in the launcher header: shared by the draw path
- * and the tap hit-test so the tappable region always matches the
- * painted button. */
+/* Touch box for the header back icon on the launcher: shared by the
+ * draw path and the tap hit-test so the tappable region always matches
+ * the painted icon.  The box is larger than the chevron on purpose —
+ * a generous e-ink tap target. */
 void
 bs_launcher_back_rect(int *bx, int *by, int *bw, int *bh)
 {
@@ -712,13 +713,7 @@ bs_draw_overlay_launcher(void)
     {
         int bx, by, bw, bh;
         bs_launcher_back_rect(&bx, &by, &bw, &bh);
-        DrawRect(bx, by, bw, bh, BLACK);
-        ifont *bf = OpenFont(DEFAULTFONTB, 28, 0);
-        if (bf) {
-            SetFont(bf, BLACK);
-            DrawString(bx + 16, by + (bh - 28) / 2 - 2, bs_i18n("launcher.back"));
-            CloseFont(bf);
-        }
+        bs_draw_back_icon(bx + bw / 2, by + bh / 2, BLACK);
     }
 
     /* Scrollable body, clipped so rows never bleed into the header. */

@@ -245,9 +245,10 @@ bs_settings_draw_button(int y, const char *label, int filled, ifont *f)
     }
 }
 
-/* Back-button rect in the settings header: shared by the draw path
- * here and the tap hit-test in bs_input.c so the tappable region
- * always matches the painted button. */
+/* Touch box for the header back icon on the settings page: shared by
+ * the draw path here and the tap hit-test in bs_input.c so the
+ * tappable region always matches the painted icon.  The box is larger
+ * than the chevron on purpose — a generous e-ink tap target. */
 void
 bs_settings_back_rect(int *bx, int *by, int *bw, int *bh)
 {
@@ -277,13 +278,7 @@ bs_draw_overlay_settings(void)
     {
         int bx, by, bw, bh;
         bs_settings_back_rect(&bx, &by, &bw, &bh);
-        DrawRect(bx, by, bw, bh, BLACK);
-        ifont *bf = OpenFont(DEFAULTFONTB, 28, 0);
-        if (bf != NULL) {
-            SetFont(bf, BLACK);
-            DrawString(bx + 16, by + (bh - 28) / 2 - 2, bs_i18n("settings.back"));
-            CloseFont(bf);
-        }
+        bs_draw_back_icon(bx + bw / 2, by + bh / 2, BLACK);
     }
 
     /* Downloads folder: the pending picker choice, else the resolved

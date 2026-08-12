@@ -416,10 +416,11 @@ typedef struct {
 } BsReaderCandidate;
 #define BS_SETTINGS_ROW_H 120
 #define BS_SETTINGS_BTN_H 96
-/* Settings page header: a fixed bar with a Back button at the left and
- * the centred title — the same shape as the launcher header (the
- * draw path and the tap hit-test share the rect via
- * bs_settings_back_rect()). */
+/* Settings page header: a fixed bar with the back chevron icon at the
+ * left and the centred title — the same shape as the launcher header.
+ * BS_SETTINGS_BACK_* size the icon's touch box (larger than the icon
+ * itself); the draw path and the tap hit-test share it via
+ * bs_settings_back_rect(). */
 #define BS_SETTINGS_HEADER_H 104
 #define BS_SETTINGS_BACK_X 16
 #define BS_SETTINGS_BACK_W 160

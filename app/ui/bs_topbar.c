@@ -8,6 +8,20 @@
 
 /* ── top bar ─────────────────────────────────────────────────────────── */
 
+/* Left-pointing chevron back arrow, centred at (cx, cy).  Used by the
+ * top bar (Search page / drilled series), the settings header and the
+ * launcher header, so every back affordance shares one icon. */
+void
+bs_draw_back_icon(int cx, int cy, int col)
+{
+    int ax = cx - 8;
+    int ay = cy;
+    DrawLine(ax, ay, ax + 26, ay - 26, col);
+    DrawLine(ax, ay, ax + 26, ay + 26, col);
+    DrawLine(ax + 4, ay, ax + 30, ay - 26, col);
+    DrawLine(ax + 4, ay, ax + 30, ay + 26, col);
+}
+
 /* Line-art globe (Kavita / online): circle, equator, meridian.  Drawn
  * in the common TOP_ICON_SIZE x TOP_ICON_SIZE icon box. */
 static void
@@ -147,13 +161,7 @@ bs_draw_top_bar(void)
     int hcx = home_x + home_w / 2;
     int hcy = home_y + home_w / 2;
     if (bs_g_drilled_series[0] != '\0' || bs_g_state.tab == BS_TAB_SEARCH) {
-        /* Left-pointing chevron arrow. */
-        int ax = hcx - 8;
-        int ay = hcy;
-        DrawLine(ax, ay, ax + 26, ay - 26, col);
-        DrawLine(ax, ay, ax + 26, ay + 26, col);
-        DrawLine(ax + 4, ay, ax + 30, ay - 26, col);
-        DrawLine(ax + 4, ay, ax + 30, ay + 26, col);
+        bs_draw_back_icon(hcx, hcy, col);
     } else {
         /* house outline (pentagon + floor break for door), scaled to
          * the icon box */

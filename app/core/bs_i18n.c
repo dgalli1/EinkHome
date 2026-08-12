@@ -132,7 +132,6 @@ const BsI18n bs_g_i18n[] = {
      "Keine Anwendungen",
      "Aucune application",
      "Nessuna applicazione"},
-    {"launcher.back", "Back", "Zurück", "Retour", "Indietro"},
     {NULL, NULL, NULL, NULL, NULL}};
 
 const char *
