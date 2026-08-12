@@ -219,26 +219,43 @@ def scale_env(request):
     saved_bin_cfg = _snapshot_cfg(bin_cfg)
     saved_tmp_cfg = _snapshot_cfg(tmp_cfg)
 
-    api = _start_scale_api()
-    _stage_scale()
-    emulator = _start_emulator()
-    _stage_scale()  # container-side copies now that it is running
-    container_sh("killall bookshelf.app 2>/dev/null || true", check=False, timeout=5)
-    _wait_bookshelf_active(emulator, timeout=60)
-    time.sleep(2.0)
+    api = None
+    emulator = None
+    try:
+        api = _start_scale_api()
+        _stage_scale()
+        emulator = _start_emulator()
+        _stage_scale()  # container-side copies now that it is running
+        container_sh(
+            "killall bookshelf.app 2>/dev/null || true", check=False, timeout=5
+        )
+        _wait_bookshelf_active(emulator, timeout=60)
 
-    snapshot = emulator.wait_for_informer_snapshot(timeout=10)
-    geom = BookshelfGeometry(
-        screen_w=snapshot.width or 1072,
-        screen_h=snapshot.height or 1448,
-        panel_h=_parse_panel_h(FIRMWARE),
-    )
-    bs = BookshelfSession(Session(emulator), geom, FIRMWARE)
-    request.node._bs_log_open_start = bs.invocation_count()  # type: ignore[attr-defined]
-    bs.begin_snapshots(request.node.name)
-    bs.snapshot("boot")
+        snapshot = emulator.wait_for_informer_snapshot(timeout=10)
+        geom = BookshelfGeometry(
+            screen_w=snapshot.width or 1072,
+            screen_h=snapshot.height or 1448,
+            panel_h=_parse_panel_h(FIRMWARE),
+        )
+        bs = BookshelfSession(Session(emulator), geom, FIRMWARE)
+        request.node._bs_log_open_start = bs.invocation_count()  # type: ignore[attr-defined]
+        bs.begin_snapshots(request.node.name)
+        bs.snapshot("boot")
 
-    yield bs, emulator, api
+        yield bs, emulator, api
+    except BaseException:
+        # A setup step failed part-way: stop whatever already started so
+        # no stale listener leaks on the scale port (an emulator-start
+        # failure would otherwise leave the API server bound to 18766
+        # for a later run to adopt), and restore the dev cfgs the
+        # staging rewrote, before propagating.
+        if emulator is not None:
+            emulator.stop(force=True)
+        if api is not None:
+            _stop_api_server(api)
+        _restore_cfg_file(bin_cfg, saved_bin_cfg)
+        _restore_cfg_file(tmp_cfg, saved_tmp_cfg, mode=0o666)
+        raise
 
     request.node._bs_log_open_end = bs.invocation_count()  # type: ignore[attr-defined]
 

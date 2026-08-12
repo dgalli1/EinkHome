@@ -14,6 +14,7 @@
 # Exit status: 0 when every selected suite passed, 1 otherwise.
 
 set -eu
+set -o pipefail
 
 HERE=$(
 	unset CDPATH
@@ -72,11 +73,10 @@ rc=0
 
 if [ "${RUN_API}" = 1 ]; then
 	echo "==> api unit tests (api/tests)"
-	if [ "${RUN_API_ONLY}" = 1 ]; then
-		(cd "${REPO_ROOT}" && "${PY}" -m pytest api/tests -q "${args[@]}") || rc=1
-	else
-		(cd "${REPO_ROOT}" && "${PY}" -m pytest api/tests -q) || rc=1
-	fi
+	# Forwarded pytest args apply uniformly: in the default run they reach
+	# both the api and e2e suites; in --api-only mode they reach the api
+	# suite alone.
+	(cd "${REPO_ROOT}" && "${PY}" -m pytest api/tests -q "${args[@]}") || rc=1
 fi
 
 if [ "${RUN_E2E}" = 1 ]; then

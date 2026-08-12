@@ -142,6 +142,7 @@ def _start_api_server() -> subprocess.Popen:  # type: ignore[type-arg]
                 except PermissionError:
                     pass
             proc.kill()  # our spawn lost the port race; reap it
+            proc.wait()
             raise RuntimeError(
                 f"stale API server (pid {stale_pid}) answered on port "
                 f"{API_PORT} instead of the freshly spawned server "
@@ -150,6 +151,7 @@ def _start_api_server() -> subprocess.Popen:  # type: ignore[type-arg]
             )
         return proc
     proc.kill()
+    proc.wait()
     raise RuntimeError(
         f"API server did not start within 10s. Log:\n{log_path.read_text()}"
     )

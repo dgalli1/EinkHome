@@ -63,9 +63,17 @@ fi
 echo "==> 4/6  firmware ${FIRMWARE}"
 if [ ! -f "${FW_ZIP}" ]; then
 	echo "    downloading ${FIRMWARE_URL}"
-	curl -fL --max-time 1800 -o "${FW_ZIP}" "${FIRMWARE_URL}"
+	curl -fL --max-time 1800 --retry 3 --retry-all-errors -o "${FW_ZIP}" "${FIRMWARE_URL}"
 fi
 echo "    zip: $(wc -c <"${FW_ZIP}") bytes"
+# Guard against a truncated/corrupt download before staging: a partial
+# zip would otherwise fail obscurely mid-install.  Retried above, but a
+# corrupt file is not retried by curl and must be surfaced here.
+if ! unzip -t "${FW_ZIP}" >/dev/null 2>&1; then
+	echo "ERROR: firmware zip failed integrity check (${FW_ZIP})" >&2
+	echo "       delete it and re-run to re-download, or check the mirror" >&2
+	exit 1
+fi
 # "Already staged" must mean a usable tree: the firmware dir alone (or
 # an empty/absent .live) would pass the old [ -d ] check on a broken
 # tree, so verify .live exists and is non-empty too.

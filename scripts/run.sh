@@ -137,10 +137,20 @@ PYTHONPATH="${REPO_ROOT}:${REPO_ROOT}/api" \
 	--host 0.0.0.0 --port "${API_PORT}" \
 	>"${API_LOGFILE}" 2>&1 &
 echo $! >"${API_PIDFILE}"
-sleep 1
-# Verify the server is up.
-if ! curl -sf --max-time 2 "http://127.0.0.1:${API_PORT}/api/v1/healthz" -H "Authorization: Bearer pbemu-dev-token" >/dev/null; then
-	echo "ERROR: api server did not start; see ${API_LOGFILE}" >&2
+# Poll the healthz endpoint until it answers — a cold python import +
+# sqlite init can exceed a fixed sleep — bounded by a retry budget.
+_API_READY=0
+_i=0
+while [ "${_i}" -lt 60 ]; do
+	if curl -sf --max-time 2 "http://127.0.0.1:${API_PORT}/api/v1/healthz" -H "Authorization: Bearer pbemu-dev-token" >/dev/null 2>&1; then
+		_API_READY=1
+		break
+	fi
+	_i=$((_i + 1))
+	sleep 0.5
+done
+if [ "${_API_READY}" -ne 1 ]; then
+	echo "ERROR: api server did not start within 30s; see ${API_LOGFILE}" >&2
 	cat "${API_LOGFILE}" >&2
 	exit 1
 fi
@@ -205,7 +215,23 @@ fi
 
 echo "==> 5/7  starting container"
 PBEMU_NO_KEEPID=1 PBEMU_PODMAN_ARGS="--network=host" "${PBEMU_DIR}/pbemu" start "${FIRMWARE}" --no-viewer --no-audio --no-build
-sleep 3
+# "pbemu start" returns once the container is created, but it may still
+# be initializing.  Poll until it reports running (bounded retry budget)
+# so the podman cp/exec below fail loudly only on a real failure.
+_CONTAINER_READY=0
+_i=0
+while [ "${_i}" -lt 60 ]; do
+	if podman container inspect -f '{{.State.Running}}' "${CONTAINER}" 2>/dev/null | grep -qx true; then
+		_CONTAINER_READY=1
+		break
+	fi
+	_i=$((_i + 1))
+	sleep 0.5
+done
+if [ "${_CONTAINER_READY}" -ne 1 ]; then
+	echo "ERROR: container ${CONTAINER} not running within 30s of 'pbemu start'" >&2
+	exit 1
+fi
 
 echo "==> 6/7  staging built binary into running container"
 # "pbemu start" rebuilt .live/ebrmain from the stock firmware tree, so the
@@ -230,7 +256,28 @@ podman exec "${CONTAINER}" /usr/bin/chmod +x \
 # killall failing (app not running) is fine — monitor.app relaunches it
 # either way, so this stays optional.
 podman exec "${CONTAINER}" /usr/bin/killall bookshelf.app 2>/dev/null || true
-sleep 5
+# Wait for monitor.app to respawn bookshelf.app and for it to resume
+# talking to the API (a fresh /sync/delta request in the server log after
+# our kill) — the condition the screenshot needs.  Poll instead of sleeping.
+_APP_LOG_OFFSET=0
+if [ -f "${API_LOGFILE}" ]; then
+	_APP_LOG_OFFSET=$(wc -c <"${API_LOGFILE}")
+fi
+_APP_RESTARTED=0
+_i=0
+while [ "${_i}" -lt 60 ]; do
+	if [ -f "${API_LOGFILE}" ] && \
+		tail -c +$((_APP_LOG_OFFSET + 1)) "${API_LOGFILE}" 2>/dev/null | grep -q 'POST /api/v1/sync/delta'; then
+		_APP_RESTARTED=1
+		break
+	fi
+	_i=$((_i + 1))
+	sleep 0.5
+done
+if [ "${_APP_RESTARTED}" -ne 1 ]; then
+	# Screenshot is best-effort (--force below); warn rather than fail.
+	echo "WARN: bookshelf.app did not re-report to the API within 30s after restart; screenshot may be stale" >&2
+fi
 
 echo "==> 7/7  screenshot + state + API confirmation"
 "${PBEMU_DIR}/pbemu" screenshot /tmp/pbemu_bookshelf.png --force

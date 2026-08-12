@@ -26,7 +26,6 @@ ignores — that's the only thing our schema exposes as a write).
 
 # pylint: disable=missing-function-docstring,redefined-outer-name
 import os
-import socket
 import sys
 
 import pytest
@@ -58,20 +57,14 @@ SKIP_NO_AUTH = pytest.mark.skipif(
 )
 
 
-def _reachable() -> bool:
-    if not KAVITA_URL:
-        return False
-    host = KAVITA_URL.split("//", 1)[-1].split(":", 1)[0]
-    try:
-        with socket.create_connection((host, 443), timeout=3):
-            return True
-    except OSError:
-        return False
-
-
+# Reachability is deliberately NOT probed at collection time: a transient
+# network blip at import used to silently skip the whole live suite (green
+# CI, zero coverage).  Env presence is the only thing we evaluate here; the
+# actual reachability/auth check happens lazily in the module fixtures, where
+# a configured-but-unreachable host fails loudly instead of skipping.
 SKIP_UNREACHABLE = pytest.mark.skipif(
-    not _reachable(),
-    reason=f"Kavita host {KAVITA_URL!r} is not reachable from this runner",
+    not KAVITA_URL,
+    reason="KAVITA_E2E_URL is not set; skipping live Kavita tests",
 )
 
 

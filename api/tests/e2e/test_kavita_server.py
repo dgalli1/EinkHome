@@ -45,17 +45,6 @@ from .conftest import (  # noqa: E402
 API_TOKEN = "pbemu-e2e-token"
 
 
-def _free_port() -> int:
-    """Return an unused TCP port on localhost."""
-    s = socket = __import__("socket").socket(
-        __import__("socket").AF_INET, __import__("socket").SOCK_STREAM
-    )
-    socket.bind(("127.0.0.1", 0))
-    port = socket.getsockname()[1]
-    socket.close()
-    return port
-
-
 def _http_get(url, headers=None, timeout=30):
     try:
         req = request.Request(url, headers=headers or {})
@@ -114,10 +103,15 @@ def live_server():
     }
     app = build_default_app(cfg)
 
-    # Smoke-test connectivity so we skip rather than hang.
+    # Verify connectivity/auth lazily at runtime so a transient blip fails
+    # the suite loudly (env vars are configured by now) instead of silently
+    # skipping all coverage.
     h = app.provider.health()
     if not h.get("ok"):
-        pytest.skip(f"Kavita auth failed: {h.get('detail')}")
+        pytest.fail(
+            f"Kavita host {KAVITA_URL!r} is configured (KAVITA_E2E_URL set) "
+            f"but not usable: {h.get('detail')}"
+        )
 
     RequestHandler = type("RequestHandler", (PbemuAPIServer,), {"app": app})
     httpd = socketserver.ThreadingTCPServer(("127.0.0.1", 0), RequestHandler)

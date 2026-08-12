@@ -248,8 +248,12 @@ def test_home_button_noop_on_shelf(fresh_bookshelf):
     bs = fresh_bookshelf
     before = bs.invocation_count()
     bs.tap_home()
-    time.sleep(1.5)
-    assert bs.invocation_count() == before, "home on home must not respawn the app"
+    # Poll briefly that the app did not respawn (a single sleep would
+    # sample the count only once and could miss a late respawn).
+    deadline = time.monotonic() + 1.5
+    while time.monotonic() < deadline:
+        assert bs.invocation_count() == before, "home on home must not respawn the app"
+        time.sleep(0.1)
     bs.assert_no_crash()
 
 
@@ -285,19 +289,17 @@ def test_menu_button_opens_more_overlay(fresh_bookshelf):
 def test_more_overlay_sync(fresh_bookshelf):
     """Open More, tap Sync, verify framebuffer changes (re-sync)."""
     bs = fresh_bookshelf
-    bs.tap_menu()
-    time.sleep(0.5)
+    bs.tap_menu_and_verify()
+    before = bs.current_log()
     bs.tap_more_item_and_verify(MORE_SYNC)
-    # After sync, log should show do_sync
-    time.sleep(2.0)
-    bs.assert_log_contains("do_sync")
+    # After sync, log should show do_sync from this tap (not the boot one).
+    _wait_log_slice(bs, before, "do_sync", timeout=20.0)
 
 
 def test_more_overlay_sort_title_az(fresh_bookshelf):
     """Open More, tap Title A-Z, verify framebuffer changes."""
     bs = fresh_bookshelf
-    bs.tap_menu()
-    time.sleep(0.5)
+    bs.tap_menu_and_verify()
     bs.tap_more_item_and_verify(MORE_TITLE_AZ)
 
 
@@ -306,56 +308,49 @@ def test_more_overlay_sort_title_az(fresh_bookshelf):
 def test_more_overlay_sort_author(fresh_bookshelf):
     """Open More, tap By author, verify framebuffer changes."""
     bs = fresh_bookshelf
-    bs.tap_menu()
-    time.sleep(0.5)
+    bs.tap_menu_and_verify()
     bs.tap_more_item_and_verify(MORE_AUTHOR)
 
 
 def test_more_overlay_sort_series(fresh_bookshelf):
     """Open More, tap By series, verify framebuffer changes."""
     bs = fresh_bookshelf
-    bs.tap_menu()
-    time.sleep(0.5)
+    bs.tap_menu_and_verify()
     bs.tap_more_item_and_verify(MORE_SERIES)
 
 
 def test_more_overlay_sort_recent(fresh_bookshelf):
     """Open More, tap Recent, verify framebuffer changes."""
     bs = fresh_bookshelf
-    bs.tap_menu()
-    time.sleep(0.5)
+    bs.tap_menu_and_verify()
     bs.tap_more_item_and_verify(MORE_RECENT)
 
 
 def test_more_overlay_grid_button(fresh_bookshelf):
     """Open More, tap Grid, verify framebuffer changes."""
     bs = fresh_bookshelf
-    bs.tap_menu()
-    time.sleep(0.5)
+    bs.tap_menu_and_verify()
     bs.tap_more_item_and_verify(MORE_GRID)
 
 
 def test_more_overlay_list_button(fresh_bookshelf):
     """Open More, tap List, verify framebuffer changes."""
     bs = fresh_bookshelf
-    bs.tap_menu()
-    time.sleep(0.5)
+    bs.tap_menu_and_verify()
     bs.tap_more_item_and_verify(MORE_LIST)
 
 
 def test_more_overlay_dismiss_outside_tap(fresh_bookshelf):
     """Open More, tap outside, verify overlay dismisses."""
     bs = fresh_bookshelf
-    bs.tap_menu()
-    time.sleep(0.5)
+    bs.tap_menu_and_verify()
     bs.tap_outside_and_verify()
 
 
 def test_more_overlay_dismiss_back_key(fresh_bookshelf):
     """Open More, press Back, verify overlay dismisses."""
     bs = fresh_bookshelf
-    bs.tap_menu()
-    time.sleep(0.5)
+    bs.tap_menu_and_verify()
     bs.send_back_and_verify()
 
 # ── settings overlay ───────────────────────────────────────────────────
@@ -387,11 +382,23 @@ def _clear_guest_cfg() -> None:
     _GUEST_CFG_HOST.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def _restore_guest_cfg(saved: str) -> None:
+    """Restore the guest bin cfg to its pre-test state (remove if absent).
+
+    The settings save tests write reader=N into the shared bin cfg; if
+    left there the next test boots with that reader preference.  Restore
+    the pre-test text (or remove the file) so the preference does not
+    leak across runs."""
+    if saved:
+        _GUEST_CFG_HOST.write_text(saved, encoding="utf-8")
+    else:
+        _GUEST_CFG_HOST.unlink(missing_ok=True)
+
+
 def test_more_overlay_settings_opens_page(fresh_bookshelf):
     """Open More, tap Settings, verify the settings page is drawn."""
     bs = fresh_bookshelf
-    bs.tap_menu()
-    time.sleep(0.5)
+    bs.tap_menu_and_verify()
     before = bs.frame_hash()
     bs.tap_more_item(MORE_SETTINGS)
     bs.wait_hash_change(before)
@@ -400,37 +407,46 @@ def test_more_overlay_settings_opens_page(fresh_bookshelf):
 def test_settings_reader_cycle_and_save(fresh_bookshelf):
     """Cycle the reader row to Standard, Save, verify config + log."""
     bs = fresh_bookshelf
-    _clear_guest_cfg()
-    _restart_bookshelf(bs.emulator)
-    bs.open_settings()
-    time.sleep(0.5)
-    # Auto -> Standard (first detected reader).
-    bs.tap_settings_row(2)
-    time.sleep(0.5)
-    bs.tap_settings_save()
-    time.sleep(1.0)
-    # Save path logged the new preference and re-synced.
-    bs.assert_log_contains("reader_pref=1")
-    bs.assert_log_contains("settings: saved")
-    # Config file on disk now pins the standard reader path.
-    cfg = _read_guest_cfg()
-    assert "reader=/ebrmain/bin/eink-reader.app" in cfg, f"cfg was:\n{cfg}"
+    saved_guest_cfg = _read_guest_cfg()
+    try:
+        _clear_guest_cfg()
+        _restart_bookshelf(bs.emulator)
+        bs.open_settings()
+        time.sleep(0.5)
+        # Auto -> Standard (first detected reader).
+        bs.tap_settings_row(2)
+        time.sleep(0.5)
+        before = bs.current_log()
+        bs.tap_settings_save()
+        # Save path logged the new preference and re-synced.
+        _wait_log_slice(bs, before, "settings: saved")
+        bs.assert_log_contains("reader_pref=1")
+        # Config file on disk now pins the standard reader path.
+        cfg = _read_guest_cfg()
+        assert "reader=/ebrmain/bin/eink-reader.app" in cfg, f"cfg was:\n{cfg}"
+    finally:
+        _restore_guest_cfg(saved_guest_cfg)
 
 
 def test_settings_reader_pref_persists_across_restart(fresh_bookshelf):
     """A saved reader preference is reloaded on the next launch."""
     bs = fresh_bookshelf
-    _clear_guest_cfg()
-    _restart_bookshelf(bs.emulator)
-    bs.open_settings()
-    time.sleep(0.5)
-    bs.tap_settings_row(2)
-    time.sleep(0.5)
-    bs.tap_settings_save()
-    time.sleep(1.0)
-    # Restart bookshelf; the fresh process must load reader_pref=1.
-    _restart_bookshelf(bs.emulator)
-    bs.assert_log_contains("reader_pref=1 (cfg `/ebrmain/bin/eink-reader.app`)")
+    saved_guest_cfg = _read_guest_cfg()
+    try:
+        _clear_guest_cfg()
+        _restart_bookshelf(bs.emulator)
+        bs.open_settings()
+        time.sleep(0.5)
+        bs.tap_settings_row(2)
+        time.sleep(0.5)
+        before = bs.current_log()
+        bs.tap_settings_save()
+        _wait_log_slice(bs, before, "settings: saved")
+        # Restart bookshelf; the fresh process must load reader_pref=1.
+        _restart_bookshelf(bs.emulator)
+        bs.assert_log_contains("reader_pref=1 (cfg `/ebrmain/bin/eink-reader.app`)")
+    finally:
+        _restore_guest_cfg(saved_guest_cfg)
 
 
 def test_settings_back_returns_to_shelf(fresh_bookshelf):
@@ -461,8 +477,7 @@ def test_settings_api_host_row_opens_keyboard(fresh_bookshelf):
 def test_more_overlay_apps_opens_launcher(fresh_bookshelf):
     """Open More, tap Applications, verify the launcher overlay draws."""
     bs = fresh_bookshelf
-    bs.tap_menu()
-    time.sleep(0.5)
+    bs.tap_menu_and_verify()
     before = bs.frame_hash()
     bs.tap_more_item(MORE_APPS)
     bs.wait_hash_change(before)
@@ -472,8 +487,9 @@ def test_more_overlay_apps_opens_launcher(fresh_bookshelf):
 def test_launcher_back_returns_to_shelf(fresh_bookshelf):
     """Open launcher, tap Back, verify the shelf is redrawn."""
     bs = fresh_bookshelf
+    before_log = bs.current_log()
     bs.open_launcher()
-    time.sleep(0.5)
+    _wait_log_slice(bs, before_log, "launcher built")
     before = bs.frame_hash()
     bs.tap_launcher_back()
     bs.wait_hash_change(before)
@@ -482,8 +498,9 @@ def test_launcher_back_returns_to_shelf(fresh_bookshelf):
 def test_launcher_back_key_returns_to_shelf(fresh_bookshelf):
     """Open launcher, press Back key, verify the shelf is redrawn."""
     bs = fresh_bookshelf
+    before_log = bs.current_log()
     bs.open_launcher()
-    time.sleep(0.5)
+    _wait_log_slice(bs, before_log, "launcher built")
     before = bs.frame_hash()
     bs.send_back_key()
     bs.wait_hash_change(before)
@@ -522,8 +539,9 @@ def test_search_tap_opens_keyboard(fresh_bookshelf):
 def test_launcher_drag_scrolls_body(fresh_bookshelf):
     """Dragging the launcher body vertically scrolls the app column."""
     bs = fresh_bookshelf
+    before_log = bs.current_log()
     bs.open_launcher()
-    time.sleep(0.5)
+    _wait_log_slice(bs, before_log, "launcher built")
     before = bs.frame_hash()
     bs.scroll_launcher_down()
     bs.wait_hash_change(before)
@@ -567,9 +585,9 @@ def test_search_history_persists_and_reruns(fresh_bookshelf):
     bs.tap_search()
     bs.wait_hash_change(before)
     time.sleep(0.5)
+    before = bs.current_log()
     bs.tap_history_term(0)
-    time.sleep(0.5)
-    bs.assert_log_contains("search history tap: query=`alpha`")
+    _wait_log_slice(bs, before, "search history tap: query=`alpha`")
 
 
 # ── search page top bar (source button hidden) ────────────────────────
@@ -586,6 +604,24 @@ def _dump_frame(emulator: Emulator, name: str) -> bytes:
     guest = f"/workspace/firmware/.live/tmp/{name}.ppm"
     emulator.run_probe("frame_dump", "--ppm", guest)
     return (PBEMU_ROOT / FIRMWARE / ".live" / "tmp" / f"{name}.ppm").read_bytes()
+
+
+def _settled_dump(emulator: Emulator, name: str, *, timeout: float = 5.0) -> bytes:
+    """Dump the framebuffer, retrying until two consecutive dumps are
+    byte-identical (the frame settled), then return the settled bytes.
+
+    Pixel assertions race a slow renderer: a single dump can catch a
+    half-drawn frame.  Retry until the frame stops changing so the
+    region checks read a settled image instead of a mid-redraw one."""
+    deadline = time.monotonic() + timeout
+    prev: bytes | None = None
+    while time.monotonic() < deadline:
+        cur = _dump_frame(emulator, name)
+        if prev is not None and cur == prev:
+            return cur
+        prev = cur
+        time.sleep(0.3)
+    raise AssertionError(f"framebuffer never settled within {timeout}s for {name!r}")
 
 
 def _ppm_region_white(ppm: bytes, x0: int, y0: int, x1: int, y1: int) -> bool:
@@ -623,7 +659,7 @@ def test_search_page_hides_source_button(fresh_bookshelf):
     mx0, my0, mx1, my1 = w - 104, panel + 48, w - 8, panel + 84
 
     # Shelf: both spots are drawn (non-white).
-    shelf = _dump_frame(bs.emulator, "bs_source_shelf")
+    shelf = _settled_dump(bs.emulator, "bs_source_shelf")
     assert not _ppm_region_white(shelf, sx0, sy0, sx1, sy1), "source button not drawn on the shelf"
     assert not _ppm_region_white(shelf, mx0, my0, mx1, my1), "menu icon not drawn on the shelf"
 
@@ -632,7 +668,7 @@ def test_search_page_hides_source_button(fresh_bookshelf):
     bs.wait_for_stable()
 
     # Both spots are now plain white — the buttons are gone.
-    search = _dump_frame(bs.emulator, "bs_source_search")
+    search = _settled_dump(bs.emulator, "bs_source_search")
     assert _ppm_region_white(search, sx0, sy0, sx1, sy1), "source button still drawn on Search page"
     assert _ppm_region_white(search, mx0, my0, mx1, my1), "right icons still drawn on Search page"
 
@@ -640,8 +676,13 @@ def test_search_page_hides_source_button(fresh_bookshelf):
     # source chooser: no overlay, framebuffer unchanged.
     before = bs.frame_hash()
     bs.tap_at(112 + 176 // 2, 64)
-    time.sleep(0.4)
-    assert bs.frame_hash() == before, "source chooser opened from the Search page"
+    # Poll briefly: the tap must not change the frame (the source
+    # button's old spot is dead on the Search page).  A single fixed
+    # sleep would race the negative assertion against a slow redraw.
+    deadline = time.monotonic() + 1.0
+    while time.monotonic() < deadline:
+        assert bs.frame_hash() == before, "source chooser opened from the Search page"
+        time.sleep(0.1)
 
 
 def _ppm_ink_xs(ppm: bytes, x0: int, y0: int, x1: int, y1: int) -> list[int]:
@@ -663,6 +704,26 @@ def _ppm_ink_xs(ppm: bytes, x0: int, y0: int, x1: int, y1: int) -> list[int]:
     return xs
 
 
+def _dump_suggestion_in_band(bs: BookshelfSession, name: str, *, timeout: float = 8.0) -> bytes:
+    """Poll frame dumps until the live suggestion band shows ink, then
+    return that dump.
+
+    The suggestion band (left of x=300, above the on-screen keyboard)
+    is redrawn by the debounce tick ~200 ms after the last keystroke.
+    A fixed sleep before the pixel assertion races a slow guest; instead
+    poll the actual condition (ink in the band) until the row is drawn.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        ppm = _dump_frame(bs.emulator, name)
+        if _ppm_ink_xs(
+            ppm, 24, bs.geom.panel_h + 228, 300, bs.geom.panel_h + 430
+        ):
+            return ppm
+        time.sleep(0.2)
+    raise AssertionError(f"suggestion row never drawn in the band (dump {name!r})")
+
+
 def test_search_page_layout_centered(fresh_bookshelf):
     """The Search page top bar centres its title on the whole screen
     width (no flanking buttons to narrow the band), and the search input
@@ -673,7 +734,7 @@ def test_search_page_layout_centered(fresh_bookshelf):
     panel = bs.geom.panel_h
     bs.tap_search_and_verify()
     bs.wait_for_stable()
-    ppm = _dump_frame(bs.emulator, "bs_search_layout")
+    ppm = _settled_dump(bs.emulator, "bs_search_layout")
 
     # Title: the only ink in the top-bar band between the back button
     # and the right edge is the title text; its extent must be centred
@@ -723,10 +784,10 @@ def test_book_tap_triggers_open_with(fresh_bookshelf):
     """Tap a book tile, verify it downloads (if needed) then launches."""
     bs = fresh_bookshelf
     _clear_downloads()
+    before = bs.current_log()
     bs.tap_book(0)
-    time.sleep(3.0)
     # A book press resolves the reader and launches it (OpenBook path).
-    bs.assert_log_contains("launching reader")
+    _wait_log_slice(bs, before, "launching reader", timeout=20.0)
     _kill_guest_tasks()
     _clear_downloads()
 
@@ -735,13 +796,13 @@ def test_book_tap_launches_reader(fresh_bookshelf):
     """Tap a book tile, verify download + launch sequence end to end."""
     bs = fresh_bookshelf
     _clear_downloads()
+    before = bs.current_log()
     bs.tap_book(0)
-    time.sleep(5.0)
     # The mock provider serves tiny fake epubs that the real reader
     # cannot open, so the reader may crash/return immediately.
     # Verify the bookshelf side did its job: download + launch.
-    bs.assert_log_contains("download_book_file OK")
-    bs.assert_log_contains("launching reader")
+    _wait_log_slice(bs, before, "download_book_file OK", timeout=20.0)
+    _wait_log_slice(bs, before, "launching reader", timeout=20.0)
     _kill_guest_tasks()
     _clear_downloads()
 
@@ -761,7 +822,6 @@ def test_pager_prev_returns_page(fresh_bookshelf):
     bs = fresh_bookshelf
     # Must verify next actually advanced before testing prev.
     bs.tap_pager_next_and_verify()
-    time.sleep(0.5)
     bs.tap_pager_prev_and_verify()
 
 
@@ -786,8 +846,11 @@ def test_back_key_noop_on_shelf(fresh_bookshelf):
     bs = fresh_bookshelf
     before = bs.invocation_count()
     bs.send_back_key()
-    time.sleep(1.5)
-    assert bs.invocation_count() == before, "back on home must not respawn the app"
+    # Poll briefly that the app did not respawn.
+    deadline = time.monotonic() + 1.5
+    while time.monotonic() < deadline:
+        assert bs.invocation_count() == before, "back on home must not respawn the app"
+        time.sleep(0.1)
     bs.assert_no_crash()
 
 
@@ -798,8 +861,7 @@ def test_no_crash_after_all_interactions(fresh_bookshelf):
     """Exercise all interactive elements, verify no crash markers in log."""
     bs = fresh_bookshelf
     # Tap menu, tap each More item
-    bs.tap_menu()
-    time.sleep(0.5)
+    bs.tap_menu_and_verify()
     for item_idx in range(8):
         bs.tap_more_item(item_idx)
         time.sleep(0.3)
@@ -899,9 +961,19 @@ def _goto_view_tile(bs: BookshelfSession, view_idx: int) -> int:
     """Page to *view_idx* and return its within-page position."""
     page = view_idx // _PAGESIZE
     pos = view_idx % _PAGESIZE
-    for _ in range(page):
-        bs.tap_pager_next()
-        time.sleep(0.5)
+    for target in range(1, page + 1):
+        # Poll the draw_grid page= marker per step so a swallowed pager
+        # tap is retried instead of desyncing the page count (a desync
+        # would make the delete-drill tests tap the WRONG tile).
+        snap = bs.current_log()
+        deadline = time.monotonic() + 8.0
+        while time.monotonic() < deadline:
+            if f"page={target}" in bs.current_log()[len(snap):]:
+                break
+            bs.tap_pager_next()
+            time.sleep(0.3)
+        else:
+            raise AssertionError(f"pager never reached page={target} (swallowed tap)")
     return pos
 
 
@@ -915,7 +987,6 @@ def test_series_card_drill_in_and_back(fresh_bookshelf):
     injected = _inject_series()
     try:
         _restart_bookshelf(bs.emulator)
-        time.sleep(2.0)
         bs.wait_for_stable()
 
         standalone = _standalone_view_count()
@@ -937,10 +1008,13 @@ def test_series_card_drill_in_and_back(fresh_bookshelf):
         bs.tap_home()
         bs.wait_hash_change(before2)
         bs.assert_log_contains("drilled back to top level")
-        time.sleep(2.0)
-        assert bs.invocation_count() == inv_before, (
-            "drill-back must not trigger CloseApp/respawn"
-        )
+        # Poll briefly that the drill-back did not CloseApp/respawn.
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            assert bs.invocation_count() == inv_before, (
+                "drill-back must not trigger CloseApp/respawn"
+            )
+            time.sleep(0.1)
 
         # BACK key also pops the drill.
         pos = _goto_view_tile(bs, series_idx)
@@ -1112,7 +1186,6 @@ def test_download_keeps_ui_responsive(fresh_bookshelf):
             encoding="utf-8",
         )
         _restart_bookshelf(bs.emulator)
-        time.sleep(2.0)
         bs.wait_for_stable()
 
         before = bs.current_log()
@@ -1164,7 +1237,6 @@ def test_book_press_downloads_and_launches_reader(fresh_bookshelf):
     bs = fresh_bookshelf
     _clear_downloads()
     _restart_bookshelf(bs.emulator)
-    time.sleep(2.0)
     bs.wait_for_stable()
     before = bs.current_log()
     bs.tap_book(0)
@@ -1181,7 +1253,6 @@ def test_download_all_opens_popup_and_drains(fresh_bookshelf):
     bs = fresh_bookshelf
     _clear_downloads()
     _restart_bookshelf(bs.emulator)
-    time.sleep(2.0)
     bs.wait_for_stable()
     before = bs.current_log()
     bs.tap_download_all()
@@ -1208,7 +1279,6 @@ def test_download_all_drains_beyond_first_slice(fresh_bookshelf):
     try:
         _clear_downloads()
         _restart_bookshelf(bs.emulator)
-        time.sleep(2.0)
         bs.wait_for_stable()
         before = bs.current_log()
         bs.tap_download_all()
@@ -1268,7 +1338,6 @@ def test_book_longpress_open(fresh_bookshelf):
     bs = fresh_bookshelf
     _clear_downloads()
     _restart_bookshelf(bs.emulator)
-    time.sleep(2.0)
     bs.wait_for_stable()
     before = bs.frame_hash()
     bs.long_press_book(0)
@@ -1289,7 +1358,6 @@ def test_book_longpress_download(fresh_bookshelf):
     bs = fresh_bookshelf
     _clear_downloads()
     _restart_bookshelf(bs.emulator)
-    time.sleep(2.0)
     bs.wait_for_stable()
     before = bs.frame_hash()
     bs.long_press_book(0)
@@ -1308,10 +1376,10 @@ def test_book_longpress_delete(fresh_bookshelf):
     bs = fresh_bookshelf
     _clear_downloads()
     _restart_bookshelf(bs.emulator)
-    time.sleep(2.0)
     # First download the book so there is something to delete.
+    before = bs.current_log()
     bs.long_press_book(0)
-    time.sleep(1.0)
+    _wait_log_slice(bs, before, "context menu open series=0")
     bs.tap_context_item(1)  # Download (0 is Open)
     _wait_log_count(bs, "download_book_file OK", 1)
     assert len(_downloaded_files()) >= 1, "setup download failed"
@@ -1319,11 +1387,11 @@ def test_book_longpress_delete(fresh_bookshelf):
     # context menu.
     bs.tap_at(*bs.geom.book_tile_center(0))
     time.sleep(0.5)
+    before = bs.current_log()
     bs.long_press_book(0)
-    time.sleep(1.0)
+    _wait_log_slice(bs, before, "context menu open series=0")
     bs.tap_context_item(2)  # Delete
-    time.sleep(2.0)
-    bs.assert_log_contains("delete_book_file removed")
+    _wait_log_slice(bs, before, "delete_book_file removed")
     assert len(_downloaded_files()) == 0, "delete did not remove the file"
 
 
@@ -1334,7 +1402,6 @@ def test_series_longpress_download_all(fresh_bookshelf):
     try:
         _clear_downloads()
         _restart_bookshelf(bs.emulator)
-        time.sleep(2.0)
         bs.wait_for_stable()
         standalone = _standalone_view_count()
         series_idx = standalone
@@ -1361,14 +1428,14 @@ def test_series_longpress_delete(fresh_bookshelf):
     try:
         _clear_downloads()
         _restart_bookshelf(bs.emulator)
-        time.sleep(2.0)
         bs.wait_for_stable()
         standalone = _standalone_view_count()
         series_idx = standalone
         pos = _goto_view_tile(bs, series_idx)
         # Download the series first so delete has files to remove.
+        before = bs.current_log()
         bs.long_press_book(pos)
-        time.sleep(1.0)
+        _wait_log_slice(bs, before, "context menu open series=1")
         bs.tap_context_item(0, n_items=2)  # Download all
         _wait_log_count(bs, "download_book_file OK", 2)
         removed_before = bs.current_log().count("delete_book_file removed")
@@ -1376,11 +1443,11 @@ def test_series_longpress_delete(fresh_bookshelf):
         # whole series.
         bs.tap_at(*bs.geom.book_tile_center(pos))
         time.sleep(0.5)
+        before = bs.current_log()
         bs.long_press_book(pos)
-        time.sleep(1.0)
+        _wait_log_slice(bs, before, "context menu open series=1")
         bs.tap_context_item(1, n_items=2)  # Delete series
-        time.sleep(2.0)
-        bs.assert_log_contains("delete_series")
+        _wait_log_slice(bs, before, "delete_series")
         removed_after = bs.current_log().count("delete_book_file removed")
         assert removed_after - removed_before == 2, (
             f"delete-series removed {removed_after - removed_before} files, expected 2"
@@ -1560,7 +1627,6 @@ def _seed_online_series(bs, emulator) -> str:
     injected = _inject_series()
     try:
         _restart_bookshelf(emulator)
-        time.sleep(2.0)
         bs.wait_for_stable()
         _ensure_offline_assets(emulator)
         series_books = _wait_store_series(_SERIES_STEM.replace("_", " "))
@@ -1615,7 +1681,6 @@ def test_download_all_failures_finish_not_loop(fresh_bookshelf):
     saved = _set_dead_cfg()
     try:
         _restart_bookshelf(bs.emulator)
-        time.sleep(2.0)
         bs.wait_for_stable()
         before = bs.current_log()
         bs.tap_download_all()
@@ -1771,20 +1836,21 @@ def test_search_suggestions_live_and_commit(fresh_bookshelf):
         bs.tap_search_input_and_verify()  # opens the keyboard
         time.sleep(0.5)
         bs.type_text("pott", commit=False)
-        time.sleep(0.9)  # debounce tick (200 ms) + draw
+        # Poll until the debounce tick has drawn the suggestion row (a
+        # fixed sleep races the pixel assertion against a slow guest).
+        ppm = _dump_suggestion_in_band(bs, "bs_suggest_pott")
         # Visual check: a left-aligned suggestion row is drawn in the
         # band above the keyboard (the centered "No recent searches"
         # placeholder does not reach x<300, so ink there is the row).
-        ppm = _dump_frame(bs.emulator, "bs_suggest_pott")
         xs = _ppm_ink_xs(
             ppm, 24, bs.geom.panel_h + 228, 300, bs.geom.panel_h + 430
         )
         assert xs, "no suggestion row ink in the band"
         # Tap the suggestion row; the term commits through the keyboard
         # handler and filters the grid to exactly the Potter book.
+        before = bs.current_log()
         bs.tap_at(*bs.geom.suggestion_row_center(0))
-        time.sleep(0.8)
-        bs.assert_log_contains("suggest tap: term=`potter`")
+        _wait_log_slice(bs, before, "suggest tap: term=`potter`")
         # The tapped term committed (app-side, history-tap sequence)
         # and the grid filtered to exactly the Potter book.
         view, _ = _last_draw_grid(bs.current_log())
@@ -1802,10 +1868,10 @@ def test_search_suggestions_live_and_commit(fresh_bookshelf):
             time.sleep(0.1)
         time.sleep(0.4)
         bs.type_text("harry po", commit=False)
-        time.sleep(0.9)
+        _dump_suggestion_in_band(bs, "bs_suggest_harrypo")
+        before = bs.current_log()
         bs.tap_at(*bs.geom.suggestion_row_center(0))
-        time.sleep(0.8)
-        bs.assert_log_contains("suggest tap: term=`harry potter`")
+        _wait_log_slice(bs, before, "suggest tap: term=`harry potter`")
         view, _ = _last_draw_grid(bs.current_log())
         assert view == 1, f"phrase search not filtered: view={view}"
     finally:
@@ -1840,10 +1906,10 @@ def test_search_folded_suggestion_finds_diacritic_title(fresh_bookshelf):
         bs.tap_search_input_and_verify()
         time.sleep(0.5)
         bs.type_text("songgong", commit=False)
-        time.sleep(0.9)
+        _dump_suggestion_in_band(bs, "bs_suggest_songgong")
+        before = bs.current_log()
         bs.tap_at(*bs.geom.suggestion_row_center(0))
-        time.sleep(0.8)
-        bs.assert_log_contains("suggest tap: term=`songgong`")
+        _wait_log_slice(bs, before, "suggest tap: term=`songgong`")
         view, _ = _last_draw_grid(bs.current_log())
         assert view == 1, f"folded search found no book: view={view}"
     finally:

@@ -50,10 +50,22 @@ def _bookshelf_log_candidates(firmware: str) -> list[Path]:
 
 def _bookshelf_log_path(firmware: str) -> Path:
     """Return the host path the guest is *actually* appending its log to."""
-    existing = [p for p in _bookshelf_log_candidates(firmware) if p.exists()]
+    candidates = _bookshelf_log_candidates(firmware)
+    existing = [p for p in candidates if p.exists()]
     if not existing:
-        return _bookshelf_log_candidates(firmware)[1]
-    return max(existing, key=lambda p: p.stat().st_mtime)
+        return candidates[1]
+    if len(existing) == 1:
+        return existing[0]
+    # Both candidates exist.  The guest appends to /tmp/bookshelf.log (the
+    # canonical /mnt/ext1/system/bin dir is not writable guest-side), so
+    # prefer that candidate unless the canonical-dir leftover is strictly
+    # newer by more than a second.  A plain max-by-mtime would pick the
+    # canonical-dir file on an mtime tie (e.g. a freshly touched stale
+    # leftover sharing the live log's timestamp), shadowing the real log.
+    tmp_candidate, canonical_candidate = existing[0], existing[1]
+    if canonical_candidate.stat().st_mtime - tmp_candidate.stat().st_mtime > 1.0:
+        return canonical_candidate
+    return tmp_candidate
 
 
 def read_bookshelf_log(firmware: str) -> str:
@@ -267,10 +279,15 @@ class BookshelfSession:
         """
         type_text(self.emulator, text)
         if commit:
-            # Let the guest drain the character stream into the edit
-            # buffer before the commit tap, so the handler sees the full
-            # string rather than a prefix.
-            time.sleep(0.3)
+            # Drain the character stream into the edit buffer before the
+            # commit tap, so the handler sees the full string rather than
+            # a prefix.  The guest consumes the EVT_EXT_KB events from the
+            # hwevent queue at its own pace and re-renders the on-screen
+            # keyboard as characters land (the app logs no pre-commit echo
+            # of the buffer, so the keyboard's re-render is the observable
+            # drain signal).  A fixed sleep is racy on slow guests; wait
+            # for the framebuffer to quiesce instead.
+            self.wait_for_stable(timeout=8.0)
             self.tap_at(*self._g.keyboard_return_center())
         else:
             time.sleep(0.3)
@@ -299,8 +316,9 @@ class BookshelfSession:
 
     def open_launcher(self) -> None:
         """Open the More overlay and tap the Applications item."""
-        self.tap_menu()
-        time.sleep(0.5)
+        # Wait for the overlay to draw (framebuffer hash change) so the
+        # Applications item tap lands on the rendered overlay, not before it.
+        self.tap_menu_and_verify()
         self.tap_at(*self._g.more_item_center(MORE_APPS))
 
     def tap_launcher_back(self) -> None:

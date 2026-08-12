@@ -146,8 +146,19 @@ PYTHONPATH="${REPO_ROOT}:${REPO_ROOT}/api" \
 	--host 0.0.0.0 --port "${API_PORT}" \
 	>"${API_LOGFILE}" 2>&1 &
 echo $! >"${API_PIDFILE}"
-sleep 1
-if ! curl -sf --max-time 2 "http://127.0.0.1:${API_PORT}/api/v1/healthz" -H "Authorization: Bearer pbemu-dev-token" >/dev/null; then
+# Poll the healthz endpoint until it answers — a cold python import +
+# sqlite init can exceed a fixed sleep — bounded by a retry budget.
+_API_READY=0
+_i=0
+while [ "${_i}" -lt 60 ]; do
+	if curl -sf --max-time 2 "http://127.0.0.1:${API_PORT}/api/v1/healthz" -H "Authorization: Bearer pbemu-dev-token" >/dev/null 2>&1; then
+		_API_READY=1
+		break
+	fi
+	_i=$((_i + 1))
+	sleep 0.5
+done
+if [ "${_API_READY}" -ne 1 ]; then
 	echo "ERROR: api server failed to start; see ${API_LOGFILE}" >&2
 	tail -20 "${API_LOGFILE}" >&2 || true
 	exit 1
@@ -217,7 +228,23 @@ echo "==> 5/6  starting emulator WITH viewer"
 # (shim/informer/viewer) on first run, then reuses them.
 PBEMU_NO_KEEPID=1 PBEMU_PODMAN_ARGS="--network=host" \
 	"${PBEMU_DIR}/pbemu" start "${FIRMWARE}"
-sleep 3
+# "pbemu start" returns once the container is created, but it may still
+# be initializing.  Poll until it reports running (bounded retry budget)
+# so the podman cp/exec below fail loudly only on a real failure.
+_CONTAINER_READY=0
+_i=0
+while [ "${_i}" -lt 60 ]; do
+	if podman container inspect -f '{{.State.Running}}' "${CONTAINER}" 2>/dev/null | grep -qx true; then
+		_CONTAINER_READY=1
+		break
+	fi
+	_i=$((_i + 1))
+	sleep 0.5
+done
+if [ "${_CONTAINER_READY}" -ne 1 ]; then
+	echo "ERROR: container ${CONTAINER} not running within 30s of 'pbemu start'" >&2
+	exit 1
+fi
 
 echo "==> 6/6  staging built binary into running container"
 # "pbemu start" rebuilt .live/ebrmain from the stock firmware tree, so the

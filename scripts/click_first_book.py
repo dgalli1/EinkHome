@@ -35,7 +35,6 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
-import time
 from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -97,7 +96,6 @@ def main() -> int:
         for page_idx in range(2, 11):
             turn = rs.turn_page(state, timeout=10.0)
             print(f"turned to page {page_idx}: hash changed={turn.after_hash != turn.before_hash}")
-            time.sleep(0.5)
 
         # 6. Screenshot of page 10.
         page10 = save_screenshot("03-book-page10.png")
