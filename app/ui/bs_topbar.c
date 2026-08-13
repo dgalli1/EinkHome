@@ -110,6 +110,18 @@ source_short_label(void)
     }
 }
 
+/* Width of the source button.  On the 6-inch (758px) panels the
+ * button grows to fill the whole band up to the right icon stack (the
+ * empty space would otherwise dwarf the label); everywhere else it
+ * keeps the fixed width, with the divider staying at its edge. */
+int
+bs_source_btn_w(void)
+{
+    if (ScreenWidth() <= 758)
+        return (ScreenWidth() - (BS_TOP_BTN_PAD + 4 * BS_TOP_BTN_SIZE)) - BS_SOURCE_BTN_X;
+    return BS_SOURCE_BTN_W;
+}
+
 /* The source button: the active library source's icon + label.  The
  * chooser opens on tap (hit_top_bar → 6). */
 static void
@@ -117,7 +129,8 @@ draw_source_button(void)
 {
     int col = BLACK;
     int x0 = BS_SOURCE_BTN_X;
-    FillArea(x0, 0, BS_SOURCE_BTN_W, BS_TOP_BAR_H, WHITE);
+    int w_btn = bs_source_btn_w();
+    FillArea(x0, 0, w_btn, BS_TOP_BAR_H, WHITE);
     int cy = BS_TOP_BAR_H / 2;
     /* Icon in the common TOP_ICON_SIZE box, bottom-aligned with the
      * house icon next to it; label at a larger font beside it. */
@@ -230,8 +243,8 @@ bs_draw_top_bar(void)
                  * screen width lets a long series name run under the
                  * right icons: the trim budget must be the band width,
                  * not w - 420, and the draw origin the band, not 0. */
-                int left_w = BS_TOP_BTN_PAD + BS_TOP_BTN_SIZE + BS_TOP_BTN_PAD + BS_SOURCE_BTN_W;
-                int right_w = BS_TOP_BTN_PAD + 3 * BS_TOP_BTN_SIZE;
+                int left_w = BS_TOP_BTN_PAD + BS_TOP_BTN_SIZE + BS_TOP_BTN_PAD + bs_source_btn_w();
+                int right_w = BS_TOP_BTN_PAD + 4 * BS_TOP_BTN_SIZE;
                 int band_w = w - left_w - right_w;
                 if (band_w < 64)
                     band_w = 64;
@@ -250,6 +263,7 @@ bs_draw_top_bar(void)
         return;
     }
     bs_draw_search_icon();
+    bs_draw_layout_icon();
     bs_draw_sync_icon();
 
     /* Right "menu" button — three black hamburger lines on the white
@@ -269,7 +283,8 @@ bs_draw_top_bar(void)
     /* Vertical separators between the buttons, top to bottom border.
      * Drawn last so no button's white fill covers them. */
     DrawLine(BS_TOP_BTN_PAD + BS_TOP_BTN_SIZE + 4, y0, BS_TOP_BTN_PAD + BS_TOP_BTN_SIZE + 4, y0 + BS_TOP_BAR_H, col);
-    DrawLine(BS_SOURCE_BTN_X + BS_SOURCE_BTN_W, y0, BS_SOURCE_BTN_X + BS_SOURCE_BTN_W, y0 + BS_TOP_BAR_H, col);
+    DrawLine(BS_SOURCE_BTN_X + bs_source_btn_w(), y0, BS_SOURCE_BTN_X + bs_source_btn_w(), y0 + BS_TOP_BAR_H, col);
+    DrawLine(w - (BS_TOP_BTN_PAD + 4 * BS_TOP_BTN_SIZE), y0, w - (BS_TOP_BTN_PAD + 4 * BS_TOP_BTN_SIZE), y0 + BS_TOP_BAR_H, col);
     DrawLine(w - (BS_TOP_BTN_PAD + 3 * BS_TOP_BTN_SIZE), y0, w - (BS_TOP_BTN_PAD + 3 * BS_TOP_BTN_SIZE), y0 + BS_TOP_BAR_H, col);
     DrawLine(w - (BS_TOP_BTN_PAD + 2 * BS_TOP_BTN_SIZE), y0, w - (BS_TOP_BTN_PAD + 2 * BS_TOP_BTN_SIZE), y0 + BS_TOP_BAR_H, col);
     DrawLine(w - (BS_TOP_BTN_PAD + BS_TOP_BTN_SIZE), y0, w - (BS_TOP_BTN_PAD + BS_TOP_BTN_SIZE), y0 + BS_TOP_BAR_H, col);
@@ -374,6 +389,39 @@ bs_draw_sync_icon(void)
  * search row: tapping it opens the Search sub-page (see on_event).
  * Line-art style matching home/sync.  Position: left of the sync
  * button. */
+/* Layout-switch button, between the search and sync icons: toggles
+ * the cover grid / list view.  The glyph reflects the CURRENT layout —
+ * a 2x2 grid of cells in grid mode, three rows with leading squares
+ * in list mode — so it visibly changes on every toggle. */
+void
+bs_draw_layout_icon(void)
+{
+    int w = ScreenWidth();
+    int y0 = 0;
+    int col = BLACK;
+    int ic_w = BS_TOP_BTN_SIZE;
+    int ic_x = w - ic_w - BS_TOP_BTN_PAD - 2 * ic_w; /* left of the sync button */
+    int ic_y = y0 + (BS_TOP_BAR_H - ic_w) / 2;
+    FillArea(ic_x, ic_y, ic_w, ic_w, WHITE);
+    int cx = ic_x + ic_w / 2;
+    int cy = ic_y + ic_w / 2;
+    if (bs_g_state.view_mode == BS_VIEW_LIST) {
+        /* List glyph: three rows, each a leading square + a line. */
+        for (int i = 0; i < 3; i++) {
+            int ry = cy - 26 + i * 26;
+            DrawRect(cx - 30, ry - 8, 18, 16, col);
+            DrawLine(cx - 4, ry, cx + 30, ry, col);
+        }
+    } else {
+        /* Grid glyph: 2x2 cells. */
+        for (int r = 0; r < 2; r++) {
+            for (int c = 0; c < 2; c++) {
+                DrawRect(cx - 36 + c * 36, cy - 36 + r * 36, 28, 28, col);
+            }
+        }
+    }
+}
+
 void
 bs_draw_search_icon(void)
 {
@@ -382,7 +430,7 @@ bs_draw_search_icon(void)
     int col = BLACK;
     int ic_w = BS_TOP_BTN_SIZE;
     int menu_x = w - BS_TOP_BTN_SIZE - BS_TOP_BTN_PAD;
-    int ic_x = menu_x - 2 * ic_w;
+    int ic_x = menu_x - 3 * ic_w; /* left of the layout + sync buttons */
     int ic_y = y0 + (BS_TOP_BAR_H - ic_w) / 2;
     int cx = ic_x + ic_w / 2 - 5; /* ring centre, offset for the handle */
     int cy = ic_y + ic_w / 2 - 5;

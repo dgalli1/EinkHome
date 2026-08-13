@@ -46,6 +46,8 @@ void bs_dim_content(int y0);
 void bs_draw_top_bar(void);
 
 void bs_draw_search_icon(void);
+void bs_draw_layout_icon(void);
+int bs_source_btn_w(void);
 
 void bs_draw_search_tab(void);
 

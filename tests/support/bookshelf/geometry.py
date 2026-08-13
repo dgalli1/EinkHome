@@ -135,7 +135,15 @@ class BookshelfGeometry:
 
     def search_icon_center(self) -> tuple[int, int]:
         """Centre of the 96×96 magnifying-glass icon in the top bar,
-        left of the downloads icon."""
+        left of the layout-switch icon."""
+        if self.screen_w == 0:
+            return (0, 0)
+        x = self.screen_w - 8 - 96 - 3 * 96 + 48
+        return (x, TOP_BAR_H // 2)
+
+    def layout_icon_center(self) -> tuple[int, int]:
+        """Centre of the 96×96 layout-switch icon (grid/list), between
+        the search and sync icons."""
         if self.screen_w == 0:
             return (0, 0)
         x = self.screen_w - 8 - 96 - 2 * 96 + 48

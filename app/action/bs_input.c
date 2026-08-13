@@ -30,8 +30,9 @@ bs_hit_top_bar(int x, int y)
      * its top bar is just the back arrow, so taps there fall through. */
     if (bs_g_state.tab == BS_TAB_SEARCH)
         return -1;
-    /* Source button — icon + label right of the house button. */
-    if (x >= BS_SOURCE_BTN_X && x < BS_SOURCE_BTN_X + BS_SOURCE_BTN_W)
+    /* Source button — icon + label right of the house button (grows
+     * to fill the band on the 758px panels). */
+    if (x >= BS_SOURCE_BTN_X && x < BS_SOURCE_BTN_X + bs_source_btn_w())
         return 6;
     /* Right TOP_BTN_SIZE×TOP_BTN_SIZE region, padded TOP_BTN_PAD px on
      * the right: the hamburger/More button. */
@@ -41,9 +42,13 @@ bs_hit_top_bar(int x, int y)
      * a library sync. */
     if (x >= w - BS_TOP_BTN_PAD - 2 * BS_TOP_BTN_SIZE && x < w - BS_TOP_BTN_SIZE - BS_TOP_BTN_PAD)
         return 2;
-    /* Search icon — TOP_BTN_SIZE region left of the sync button; opens
-     * the Search sub-page. */
+    /* Layout-switch button — TOP_BTN_SIZE region left of the sync
+     * button; toggles grid / list view. */
     if (x >= w - BS_TOP_BTN_PAD - 3 * BS_TOP_BTN_SIZE && x < w - BS_TOP_BTN_PAD - 2 * BS_TOP_BTN_SIZE)
+        return 7;
+    /* Search icon — TOP_BTN_SIZE region left of the layout button;
+     * opens the Search sub-page. */
+    if (x >= w - BS_TOP_BTN_PAD - 4 * BS_TOP_BTN_SIZE && x < w - BS_TOP_BTN_PAD - 3 * BS_TOP_BTN_SIZE)
         return 5;
     return -1;
 }

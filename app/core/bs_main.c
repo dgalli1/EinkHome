@@ -685,6 +685,15 @@ int bs_on_event(int type, int par1, int par2) {
       bs_redraw_shelf();
       return 1;
     }
+    if (which == 7) {
+      /* Layout switch: toggle grid / list.  The top-bar glyph reflects
+       * the new layout on the redraw below. */
+      bs_g_state.view_mode =
+          (bs_g_state.view_mode == BS_VIEW_GRID) ? BS_VIEW_LIST : BS_VIEW_GRID;
+      bs_g_state.page = 0;
+      bs_redraw_shelf();
+      return 1;
+    }
     if (which == 6) {
       /* Source chooser (Kavita / Local / Folder). */
       bs_g_state.overlay = BS_OV_SOURCE;
