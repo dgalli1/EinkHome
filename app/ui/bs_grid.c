@@ -57,25 +57,36 @@ bs_view_cols(void)
 {
     if (bs_g_state.view_mode == BS_VIEW_LIST)
         return 1;
-    /* Narrow panels cannot fit three BS_CELL_MIN_W covers: 2 columns
-     * of ~370px (758/825-wide screens) instead of clipped 280px ones. */
+    /* Column count adapts to the panel: 4 on the 1404px class (cells
+     * stay ~347px, matching the cover aspect), 3 on standard panels,
+     * 2 on narrow ones that cannot fit three BS_CELL_MIN_W covers
+     * (758/825-wide screens). */
     int avail_w = ScreenWidth() - 16;
+    if (avail_w >= 4 * BS_CELL_MIN_W + 240)
+        return 4;
     return avail_w >= 3 * BS_CELL_MIN_W ? BS_COLS : 2;
 }
 
 int
 bs_view_rows(void)
 {
-    if (bs_g_state.view_mode != BS_VIEW_LIST)
-        return BS_ROWS;
+    if (bs_g_state.view_mode == BS_VIEW_LIST) {
+        int t = BS_TOP_BAR_H + BS_TOP_BAR_PAD;
+        int b = bs_content_bottom() - BS_PAGER_H;
+        if (bs_g_state.overlay == BS_OV_MENU || bs_g_state.overlay == BS_OV_MORE)
+            b = bs_content_bottom();
+        int rows = (b - t - 8) / BS_LIST_ROW_H;
+        if (rows < 1)
+            rows = 1;
+        return rows;
+    }
+    /* Three rows on the very tall (1872px) class: the two-row layout
+     * leaves ~500px-tall cells with most of the screen unused. */
     int t = BS_TOP_BAR_H + BS_TOP_BAR_PAD;
-    int b = bs_content_bottom() - BS_PAGER_H;
-    if (bs_g_state.overlay == BS_OV_MENU || bs_g_state.overlay == BS_OV_MORE)
-        b = bs_content_bottom();
-    int rows = (b - t - 8) / BS_LIST_ROW_H;
-    if (rows < 1)
-        rows = 1;
-    return rows;
+    int avail_h = (bs_content_bottom() - BS_PAGER_H) - t - 8;
+    if (avail_h >= 3 * BS_CELL_MIN_H + 560)
+        return 3;
+    return BS_ROWS;
 }
 
 int
