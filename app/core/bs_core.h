@@ -228,8 +228,10 @@ extern void GetKeyboardRect(irect *rect) __attribute__((weak));
  * white bar with the Back chevron in the same touch box as the search
  * page's top-bar back button, and the centred title.  Every overlay
  * draws through bs_draw_overlay_header() with these shared values so
- * the geometry can never drift between pages. */
-#define BS_OVERLAY_HEADER_H 104
+ * the geometry can never drift between pages — and the bar height is
+ * the top bar's own (BS_TOP_BAR_H), so the overlays sit at exactly
+ * the same height as the search and home pages. */
+#define BS_OVERLAY_HEADER_H BS_TOP_BAR_H
 #define BS_OVERLAY_BACK_X BS_TOP_BTN_PAD
 #define BS_OVERLAY_BACK_W BS_TOP_BTN_SIZE
 #define BS_OVERLAY_BACK_H 56

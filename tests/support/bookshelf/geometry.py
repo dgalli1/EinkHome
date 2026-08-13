@@ -38,7 +38,7 @@ MORE_SETTINGS = 8
 MORE_APPS = 9
 
 # ── Settings overlay layout (full-screen page) ────────────────────────
-OVERLAY_HEADER_H = 104  # shared full-screen overlay header (Back chevron + title)
+OVERLAY_HEADER_H = TOP_BAR_H  # overlay header == top bar height (Back chevron + title)
 SETTINGS_ROW_H = 120
 SETTINGS_BTN_H = 96
 SETTINGS_ROW1_Y = 112
@@ -255,9 +255,8 @@ class BookshelfGeometry:
         return (self.screen_w // 2, y + (SETTINGS_BTN_H - 12) // 2)
 
     def settings_back_center(self) -> tuple[int, int]:
-        """Centre of the header Back chevron (shared overlay header)."""
-        by = (OVERLAY_HEADER_H - 56) // 2
-        return (8 + 48, by + 28)
+        """Centre of the header Back chevron (same as the search page's)."""
+        return (8 + 48, TOP_BAR_H // 2)
 
     def settings_logs_center(self) -> tuple[int, int]:
         """Centre of the Show logs button (below Save)."""
@@ -267,10 +266,9 @@ class BookshelfGeometry:
     # ── Log viewer (full-screen) ─────────────────────────────────────
 
     def log_back_center(self) -> tuple[int, int]:
-        """Centre of the log viewer's Back chevron (shared overlay
-        header)."""
-        by = (OVERLAY_HEADER_H - 56) // 2
-        return (8 + 48, by + 28)
+        """Centre of the log viewer's Back chevron (same as the search
+        page's)."""
+        return (8 + 48, TOP_BAR_H // 2)
 
     def outside_menu_overlay(self) -> tuple[int, int]:
         """A point guaranteed to be right of the left-anchored Menu panel."""
@@ -311,9 +309,9 @@ class BookshelfGeometry:
     # ── launcher overlay ──────────────────────────────────────────────
 
     def launcher_back_center(self) -> tuple[int, int]:
-        """Centre of the launcher Back chevron (shared overlay header)."""
-        by = (OVERLAY_HEADER_H - 56) // 2
-        return (8 + 48, by + 28)
+        """Centre of the launcher Back chevron (same as the search
+        page's)."""
+        return (8 + 48, TOP_BAR_H // 2)
 
     def launcher_app_center(self, index: int) -> tuple[int, int]:
         """Centre of launcher app cell *index* (0-based, row-major) at
