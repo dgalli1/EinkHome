@@ -344,10 +344,10 @@ bs_settings_apply(void)
 void
 bs_on_tap_overlay_settings(int x, int y)
 {
-    /* Header Back button (rows span the full content width; only the
+    /* Header Back chevron (rows span the full content width; only the
      * button rect uses x). */
     int bx, by, bw, bh;
-    bs_settings_back_rect(&bx, &by, &bw, &bh);
+    bs_overlay_back_rect(&bx, &by, &bw, &bh);
     if (x >= bx && x < bx + bw && y >= by && y < by + bh) {
         bs_settings_close();
         return;
@@ -421,8 +421,9 @@ bs_on_tap_overlay_settings(int x, int y)
 void
 bs_on_tap_log_view(int x, int y)
 {
-    if (x >= BS_LOG_BACK_X && x < BS_LOG_BACK_X + BS_LOG_BACK_W && y >= BS_LOG_BACK_Y &&
-        y < BS_LOG_BACK_Y + BS_LOG_BACK_H) {
+    int bx, by, bw, bh;
+    bs_overlay_back_rect(&bx, &by, &bw, &bh);
+    if (x >= bx && x < bx + bw && y >= by && y < by + bh) {
         bs_g_state.overlay = BS_OV_NONE;
         bs_g_state.log_scroll = -1;
         bs_redraw_shelf();
@@ -432,7 +433,7 @@ bs_on_tap_log_view(int x, int y)
     if (dir != 0) {
         int h = bs_content_bottom();
         int btn_y = h - 8 - BS_SCROLL_BTN_H;
-        int page = (btn_y - (BS_LOG_BACK_Y + BS_LOG_BACK_H + 16)) / BS_LOG_ROW_H;
+        int page = (btn_y - BS_LOG_BODY_TOP) / BS_LOG_ROW_H;
         if (page < 1)
             page = 1;
         /* Rows are ordered oldest → newest; up (dir -1) goes older. */
@@ -446,7 +447,7 @@ bs_on_tap_log_view(int x, int y)
          * unchanged on scroll. */
         {
             int h = bs_content_bottom();
-            int body_top = BS_LOG_BACK_Y + BS_LOG_BACK_H + 16;
+            int body_top = BS_LOG_BODY_TOP;
             PartialUpdate(0, body_top, ScreenWidth(), h - body_top);
         }
     }

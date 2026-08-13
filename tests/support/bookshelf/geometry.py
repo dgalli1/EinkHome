@@ -38,7 +38,7 @@ MORE_SETTINGS = 8
 MORE_APPS = 9
 
 # ── Settings overlay layout (full-screen page) ────────────────────────
-SETTINGS_HEADER_H = 104  # fixed header bar (Back button + title)
+OVERLAY_HEADER_H = 104  # shared full-screen overlay header (Back chevron + title)
 SETTINGS_ROW_H = 120
 SETTINGS_BTN_H = 96
 SETTINGS_ROW1_Y = 112
@@ -54,7 +54,6 @@ CTX_ITEM_H = 96
 CTX_TITLE_H = 72
 CTX_PAD = 24
 # ── Launcher overlay layout (must match bookshelf.c) ─────────────────
-LAUNCHER_HEADER_H = 104
 LAUNCHER_COLS = 3
 LAUNCHER_GROUP_H = 64
 LAUNCHER_CELL_H = 232
@@ -91,11 +90,10 @@ __all__ = [
     "SEARCH_HISTORY_ROW_H",
     "TOP_BAR_H",
     "SETTINGS_BTN_H",
-    "SETTINGS_HEADER_H",
     "SETTINGS_ROW1_Y",
     "SETTINGS_ROW_H",
     "MORE_APPS",
-    "LAUNCHER_HEADER_H",
+    "OVERLAY_HEADER_H",
     "LAUNCHER_COLS",
     "LAUNCHER_GROUP_H",
     "LAUNCHER_CELL_H",
@@ -257,9 +255,8 @@ class BookshelfGeometry:
         return (self.screen_w // 2, y + (SETTINGS_BTN_H - 12) // 2)
 
     def settings_back_center(self) -> tuple[int, int]:
-        """Centre of the header Back chevron (same offset and size as
-        the search page's back button)."""
-        by = (SETTINGS_HEADER_H - 56) // 2
+        """Centre of the header Back chevron (shared overlay header)."""
+        by = (OVERLAY_HEADER_H - 56) // 2
         return (8 + 48, by + 28)
 
     def settings_logs_center(self) -> tuple[int, int]:
@@ -270,8 +267,10 @@ class BookshelfGeometry:
     # ── Log viewer (full-screen) ─────────────────────────────────────
 
     def log_back_center(self) -> tuple[int, int]:
-        """Centre of the log viewer's Back button (top-left)."""
-        return (8 + 64, 10 + 36)
+        """Centre of the log viewer's Back chevron (shared overlay
+        header)."""
+        by = (OVERLAY_HEADER_H - 56) // 2
+        return (8 + 48, by + 28)
 
     def outside_menu_overlay(self) -> tuple[int, int]:
         """A point guaranteed to be right of the left-anchored Menu panel."""
@@ -312,9 +311,8 @@ class BookshelfGeometry:
     # ── launcher overlay ──────────────────────────────────────────────
 
     def launcher_back_center(self) -> tuple[int, int]:
-        """Centre of the launcher Back chevron (same offset and size as
-        the search page's back button)."""
-        by = (LAUNCHER_HEADER_H - 56) // 2
+        """Centre of the launcher Back chevron (shared overlay header)."""
+        by = (OVERLAY_HEADER_H - 56) // 2
         return (8 + 48, by + 28)
 
     def launcher_app_center(self, index: int) -> tuple[int, int]:
@@ -325,7 +323,7 @@ class BookshelfGeometry:
         col = index % LAUNCHER_COLS
         row = index // LAUNCHER_COLS
         x = LAUNCHER_MARGIN + col * cell_w + cell_w // 2
-        y = LAUNCHER_HEADER_H + LAUNCHER_GROUP_H + row * LAUNCHER_CELL_H
+        y = OVERLAY_HEADER_H + LAUNCHER_GROUP_H + row * LAUNCHER_CELL_H
         return (x, y + LAUNCHER_CELL_H // 2)
 
     def launcher_first_app_center(self) -> tuple[int, int]:
@@ -334,5 +332,5 @@ class BookshelfGeometry:
 
     def launcher_body_center(self) -> tuple[int, int]:
         """A point in the middle of the launcher's scrollable body."""
-        body_top = LAUNCHER_HEADER_H
+        body_top = OVERLAY_HEADER_H
         return (self.screen_w // 2, (body_top + self.content_bottom()) // 2)

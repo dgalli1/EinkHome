@@ -80,7 +80,6 @@ const BsI18n bs_g_i18n[] = {
     {"settings.save", "Save & apply", "Speichern", "Enregistrer", "Salva e applica"},
     {"settings.logs", "Show logs", "Logs anzeigen", "Afficher les logs", "Mostra log"},
     {"log.title", "Log", "Log", "Journal", "Log"},
-    {"log.back", "Back", "Zur\u00fcck", "Retour", "Indietro"},
     {"log.empty", "No log file yet", "Noch keine Logdatei", "Aucun journal", "Nessun log"},
     {"tab.search", "Search", "Suche", "Recherche", "Cerca"},
     {"settings.back", "Back", "Zur\u00fcck", "Retour", "Indietro"},

@@ -460,3 +460,44 @@ bs_hit_scroll_button(int x, int y)
 {
     return bs_hit_scroll_button_at(x, y, bs_content_bottom() - BS_SCROLL_BTN_H);
 }
+
+/* ── full-screen overlay header ─────────────────────────────────────── */
+
+/* Back-button touch box in the shared overlay header: used by the draw
+ * path (bs_draw_overlay_header) and every overlay's tap hit-test so
+ * the tappable region always matches the painted chevron. */
+void
+bs_overlay_back_rect(int *bx, int *by, int *bw, int *bh)
+{
+    *bx = BS_OVERLAY_BACK_X;
+    *by = BS_OVERLAY_BACK_Y;
+    *bw = BS_OVERLAY_BACK_W;
+    *bh = BS_OVERLAY_BACK_H;
+}
+
+/* The one header every full-screen overlay (launcher, settings, log
+ * viewer) draws: a fixed white bar with the Back chevron in the shared
+ * touch box — same offset and size as the search page's top-bar back
+ * button — and the title centred on the bar.  Sharing this (plus
+ * BS_OVERLAY_* in bs_core.h) keeps the three headers pixel-identical;
+ * before the share, the settings and log headers had drifted to
+ * different heights and offsets. */
+void
+bs_draw_overlay_header(const char *title)
+{
+    int w = ScreenWidth();
+    FillArea(0, 0, w, BS_OVERLAY_HEADER_H, WHITE);
+    DrawLine(0, BS_OVERLAY_HEADER_H - 1, w, BS_OVERLAY_HEADER_H - 1, BLACK);
+
+    int bx, by, bw, bh;
+    bs_overlay_back_rect(&bx, &by, &bw, &bh);
+    bs_draw_back_icon(bx + bw / 2, by + bh / 2, BLACK);
+
+    ifont *tf = OpenFont(DEFAULTFONTB, 36, 0);
+    if (tf != NULL) {
+        SetFont(tf, BLACK);
+        int tw = StringWidth(title);
+        DrawString((w - tw) / 2, (BS_OVERLAY_HEADER_H - 36) / 2, title);
+        CloseFont(tf);
+    }
+}

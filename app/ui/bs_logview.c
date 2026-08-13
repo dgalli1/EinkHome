@@ -200,36 +200,22 @@ bs_draw_log_view(void)
     int h = bs_content_bottom();
     FillArea(0, 0, w, h, WHITE);
 
-    /* Header: back button + title + file path. */
-    FillArea(BS_LOG_BACK_X, BS_LOG_BACK_Y, BS_LOG_BACK_W, BS_LOG_BACK_H, WHITE);
-    DrawRect(BS_LOG_BACK_X, BS_LOG_BACK_Y, BS_LOG_BACK_W, BS_LOG_BACK_H, BLACK);
-    ifont *bf = OpenFont(DEFAULTFONTB, 26, 0);
-    if (bf != NULL) {
-        SetFont(bf, BLACK);
-        int tw = StringWidth(bs_i18n("log.back"));
-        DrawString(BS_LOG_BACK_X + (BS_LOG_BACK_W - tw) / 2,
-                   BS_LOG_BACK_Y + (BS_LOG_BACK_H - 26) / 2,
-                   bs_i18n("log.back"));
-        CloseFont(bf);
-    }
-    ifont *tf = OpenFont(DEFAULTFONTB, 34, 0);
-    if (tf != NULL) {
-        SetFont(tf, BLACK);
-        DrawString(BS_LOG_BACK_X + BS_LOG_BACK_W + 16, BS_LOG_BACK_Y + 8, bs_i18n("log.title"));
-        CloseFont(tf);
-    }
+    /* Shared overlay header: Back chevron + centred title.  The log
+     * file path rides along as a small grey line in its own band just
+     * below the header border (inside the header it would collide with
+     * the centred title). */
+    bs_draw_overlay_header(bs_i18n("log.title"));
     ifont *pf = OpenFont(DEFAULTFONT, 20, 0);
     if (pf != NULL) {
         SetFont(pf, DGRAY);
         char shown[200];
         snprintf(shown, sizeof shown, "%s", bs_log_path());
-        bs_utf8_fit_width(shown, sizeof shown, w - BS_LOG_BACK_X - BS_LOG_BACK_W - 32);
-        DrawString(BS_LOG_BACK_X + BS_LOG_BACK_W + 16, BS_LOG_BACK_Y + 46, shown);
+        bs_utf8_fit_width(shown, sizeof shown, w - 2 * 32);
+        DrawString((w - StringWidth(shown)) / 2, BS_OVERLAY_HEADER_H + 10, shown);
         CloseFont(pf);
     }
-    DrawLine(0, BS_LOG_BACK_Y + BS_LOG_BACK_H + 8, w, BS_LOG_BACK_Y + BS_LOG_BACK_H + 8, BLACK);
 
-    int body_top = BS_LOG_BACK_Y + BS_LOG_BACK_H + 16;
+    int body_top = BS_LOG_BODY_TOP;
     int btn_y = h - 8 - BS_SCROLL_BTN_H;
     int body_h = btn_y - body_top - 8;
     if (body_h < BS_LOG_ROW_H)
