@@ -668,13 +668,15 @@ bs_draw_launcher_icon(int cx, int cy, const char *icon_name, const char *title)
 /* Touch box for the header back icon on the launcher: shared by the
  * draw path and the tap hit-test so the tappable region always matches
  * the painted icon.  The box is larger than the chevron on purpose —
- * a generous e-ink tap target. */
+ * a generous e-ink tap target — and matches the search page's top-bar
+ * back button (BS_TOP_BTN_PAD/BS_TOP_BTN_SIZE) so both chevrons sit at
+ * the same offset from the screen border. */
 void
 bs_launcher_back_rect(int *bx, int *by, int *bw, int *bh)
 {
-    *bx = 16;
+    *bx = BS_TOP_BTN_PAD;
     *by = (BS_LAUNCHER_HEADER_H - 56) / 2;
-    *bw = 160;
+    *bw = BS_TOP_BTN_SIZE;
     *bh = 56;
 }
 

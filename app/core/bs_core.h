@@ -420,10 +420,12 @@ typedef struct {
  * left and the centred title — the same shape as the launcher header.
  * BS_SETTINGS_BACK_* size the icon's touch box (larger than the icon
  * itself); the draw path and the tap hit-test share it via
- * bs_settings_back_rect(). */
+ * bs_settings_back_rect().  The box matches the search page's top-bar
+ * back button (BS_TOP_BTN_PAD/BS_TOP_BTN_SIZE) so both chevrons sit at
+ * the same offset from the screen border. */
 #define BS_SETTINGS_HEADER_H 104
-#define BS_SETTINGS_BACK_X 16
-#define BS_SETTINGS_BACK_W 160
+#define BS_SETTINGS_BACK_X BS_TOP_BTN_PAD
+#define BS_SETTINGS_BACK_W BS_TOP_BTN_SIZE
 #define BS_SETTINGS_BACK_H 56
 /* Download-folder picker overlay (bs_browser.c): header with the current
  * path, a scrollable list of subdirectories, and Select/Back buttons.

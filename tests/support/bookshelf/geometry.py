@@ -257,9 +257,10 @@ class BookshelfGeometry:
         return (self.screen_w // 2, y + (SETTINGS_BTN_H - 12) // 2)
 
     def settings_back_center(self) -> tuple[int, int]:
-        """Centre of the header Back button (top-left)."""
+        """Centre of the header Back chevron (same offset and size as
+        the search page's back button)."""
         by = (SETTINGS_HEADER_H - 56) // 2
-        return (16 + 80, by + 28)
+        return (8 + 48, by + 28)
 
     def settings_logs_center(self) -> tuple[int, int]:
         """Centre of the Show logs button (below Save)."""
@@ -311,9 +312,10 @@ class BookshelfGeometry:
     # ── launcher overlay ──────────────────────────────────────────────
 
     def launcher_back_center(self) -> tuple[int, int]:
-        """Centre of the launcher Back button."""
+        """Centre of the launcher Back chevron (same offset and size as
+        the search page's back button)."""
         by = (LAUNCHER_HEADER_H - 56) // 2
-        return (16 + 80, by + 28)
+        return (8 + 48, by + 28)
 
     def launcher_app_center(self, index: int) -> tuple[int, int]:
         """Centre of launcher app cell *index* (0-based, row-major) at
