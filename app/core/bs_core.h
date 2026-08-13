@@ -224,13 +224,25 @@ extern void GetKeyboardRect(irect *rect) __attribute__((weak));
 #define BS_SYNC_STAGE_DONE 4   /* finished */
 #define BS_SYNC_STAGE_FAIL 5   /* the sync failed */
 
-/* Log viewer (Settings → Show logs) geometry. */
-#define BS_LOG_BACK_X 8
-#define BS_LOG_BACK_Y 10
-#define BS_LOG_BACK_W 128
-#define BS_LOG_BACK_H 72
+/* Full-screen overlay header (launcher, settings, log viewer): a fixed
+ * white bar with the Back chevron in the same touch box as the search
+ * page's top-bar back button, and the centred title.  Every overlay
+ * draws through bs_draw_overlay_header() with these shared values so
+ * the geometry can never drift between pages — and the bar height is
+ * the top bar's own (BS_TOP_BAR_H), so the overlays sit at exactly
+ * the same height as the search and home pages. */
+#define BS_OVERLAY_HEADER_H BS_TOP_BAR_H
+#define BS_OVERLAY_BACK_X BS_TOP_BTN_PAD
+#define BS_OVERLAY_BACK_W BS_TOP_BTN_SIZE
+#define BS_OVERLAY_BACK_H 56
+#define BS_OVERLAY_BACK_Y ((BS_OVERLAY_HEADER_H - BS_OVERLAY_BACK_H) / 2)
+
+/* Log viewer (Settings → Show logs) geometry.  The header itself is
+ * the shared overlay header; the log file path rides in a band just
+ * below the header border, then the rows start. */
 #define BS_LOG_ROW_H 26
 #define BS_LOG_FONT_PX 20
+#define BS_LOG_BODY_TOP (BS_OVERLAY_HEADER_H + 42)
 
 /* Stock up/down scroll buttons (the pattern firmware apps use, e.g.
  * the coloring app): an up chevron at the bottom-left corner, a down
@@ -416,15 +428,6 @@ typedef struct {
 } BsReaderCandidate;
 #define BS_SETTINGS_ROW_H 120
 #define BS_SETTINGS_BTN_H 96
-/* Settings page header: a fixed bar with the back chevron icon at the
- * left and the centred title — the same shape as the launcher header.
- * BS_SETTINGS_BACK_* size the icon's touch box (larger than the icon
- * itself); the draw path and the tap hit-test share it via
- * bs_settings_back_rect(). */
-#define BS_SETTINGS_HEADER_H 104
-#define BS_SETTINGS_BACK_X 16
-#define BS_SETTINGS_BACK_W 160
-#define BS_SETTINGS_BACK_H 56
 /* Download-folder picker overlay (bs_browser.c): header with the current
  * path, a scrollable list of subdirectories, and Select/Back buttons.
  * Browsing is confined to /mnt/ext1 — the list has no ".." above the
@@ -461,7 +464,6 @@ typedef struct {
   int nparams;
   int x, y, w, h;
 } BsLauncherItem;
-#define BS_LAUNCHER_HEADER_H 104
 #define BS_LAUNCHER_COLS 3
 #define BS_LAUNCHER_GROUP_H 64
 #define BS_LAUNCHER_CELL_H 232

@@ -175,10 +175,13 @@ void bs_settings_draw_button(int y, const char *label, int filled, ifont *f);
  * the settings header and the launcher header. */
 void bs_draw_back_icon(int cx, int cy, int col);
 
-/* Touch box for the header back icon on the settings page: shared by
- * the draw path (bs_overlays.c) and the tap hit-test (bs_input.c) so
- * the tappable region always matches the painted icon. */
-void bs_settings_back_rect(int *bx, int *by, int *bw, int *bh);
+/* Shared full-screen overlay header (launcher, settings, log viewer):
+ * Back chevron + centred title, drawn identically on every page (see
+ * BS_OVERLAY_* in bs_core.h).  bs_overlay_back_rect is the shared
+ * tap hit-test. */
+void bs_draw_overlay_header(const char *title);
+
+void bs_overlay_back_rect(int *bx, int *by, int *bw, int *bh);
 
 void bs_draw_overlay_settings(void);
 

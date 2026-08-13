@@ -51,9 +51,6 @@ void bs_launcher_icons_free(void);
 
 void bs_draw_overlay_launcher(void);
 
-/* Back-button rect in the launcher header (draw + hit-test share it). */
-void bs_launcher_back_rect(int *bx, int *by, int *bw, int *bh);
-
 void bs_launch_app(const BsLauncherItem *it);
 
 void bs_on_tap_overlay_launcher(int x, int y);

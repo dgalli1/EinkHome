@@ -665,19 +665,6 @@ bs_draw_launcher_icon(int cx, int cy, const char *icon_name, const char *title)
     }
 }
 
-/* Touch box for the header back icon on the launcher: shared by the
- * draw path and the tap hit-test so the tappable region always matches
- * the painted icon.  The box is larger than the chevron on purpose —
- * a generous e-ink tap target. */
-void
-bs_launcher_back_rect(int *bx, int *by, int *bw, int *bh)
-{
-    *bx = 16;
-    *by = (BS_LAUNCHER_HEADER_H - 56) / 2;
-    *bw = 160;
-    *bh = 56;
-}
-
 /* Scrollable body height: when the column overflows, reserve the corner
  * scroll-button band so the last row never sits underneath the buttons
  * (the log viewer reserves the same band).  A column that fits keeps
@@ -685,7 +672,7 @@ bs_launcher_back_rect(int *bx, int *by, int *bw, int *bh)
 static int
 launcher_body_h(void)
 {
-    int body_h = bs_content_bottom() - BS_LAUNCHER_HEADER_H;
+    int body_h = bs_content_bottom() - BS_OVERLAY_HEADER_H;
     if (bs_g_launcher_body_h - body_h > 0)
         body_h -= BS_SCROLL_BTN_H;
     if (body_h < 0)
@@ -698,7 +685,7 @@ bs_draw_overlay_launcher(void)
 {
     int w = ScreenWidth();
     int h = bs_content_bottom();
-    int body_top = BS_LAUNCHER_HEADER_H;
+    int body_top = BS_OVERLAY_HEADER_H;
     int body_h = launcher_body_h();
 
     /* Clamp the scroll offset: the column's last row stops at the bottom
@@ -714,22 +701,8 @@ bs_draw_overlay_launcher(void)
 
     FillArea(0, 0, w, bs_content_bottom(), WHITE);
 
-    /* Fixed header: title + Back button. */
-    FillArea(0, 0, w, BS_LAUNCHER_HEADER_H, WHITE);
-    DrawLine(0, BS_LAUNCHER_HEADER_H - 1, w, BS_LAUNCHER_HEADER_H - 1, BLACK);
-    ifont *tf = OpenFont(DEFAULTFONTB, 36, 0);
-    if (tf) {
-        SetFont(tf, BLACK);
-        const char *title = bs_i18n("launcher.title");
-        int         tw = StringWidth(title);
-        DrawString((w - tw) / 2, (BS_LAUNCHER_HEADER_H - 36) / 2, title);
-        CloseFont(tf);
-    }
-    {
-        int bx, by, bw, bh;
-        bs_launcher_back_rect(&bx, &by, &bw, &bh);
-        bs_draw_back_icon(bx + bw / 2, by + bh / 2, BLACK);
-    }
+    /* Shared overlay header: Back chevron + centred title. */
+    bs_draw_overlay_header(bs_i18n("launcher.title"));
 
     /* Scrollable body, clipped so rows never bleed into the header. */
     SetClip(0, body_top, w, body_h);
@@ -856,9 +829,9 @@ bs_launch_app(const BsLauncherItem *it)
 void
 bs_on_tap_overlay_launcher(int x, int y)
 {
-    int body_top = BS_LAUNCHER_HEADER_H;
+    int body_top = BS_OVERLAY_HEADER_H;
     int rx, ry, rw, rh;
-    bs_launcher_back_rect(&rx, &ry, &rw, &rh);
+    bs_overlay_back_rect(&rx, &ry, &rw, &rh);
     if (x >= rx && x < rx + rw && y >= ry && y < ry + rh) {
         bs_launcher_close();
         return;

@@ -1256,10 +1256,19 @@ def test_download_keeps_ui_responsive(fresh_bookshelf):
         bs.tap_at(*bs.geom.book_tile_center(0))
         time.sleep(0.4)
 
-        # The sync glyph spins while the fetch runs: the frame must
-        # change well before the 3 s fetch completes, proving the event
+        # The frame must change while the fetch runs, proving the event
         # loop is alive (the old code froze it for the whole transfer).
-        bs.wait_hash_change(before, timeout=2.0)
+        # The change observed is the popup's own flush or the
+        # completion repaint — the sync glyph repaint is suppressed
+        # while the popup is open, and the mock server sends no bytes
+        # during the 3 s delay, so the screen is static mid-fetch.  The
+        # emulator's framebuffer flush lands asynchronously after the
+        # draw (FullUpdate cycle), so the window must clear the worst
+        # flush latency under runner load: 2 s raced it and failed
+        # ~3/4 CI runs (change arrived at ~2.2 s), 8 s covers the 3 s
+        # fetch + flush on a slow guest.  A frozen event loop still
+        # times out: nothing ever repaints.
+        bs.wait_hash_change(before, timeout=8.0)
 
         # The download completes and the single-book press auto-opens
         # the reader.
