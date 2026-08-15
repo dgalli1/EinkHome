@@ -10,6 +10,8 @@ so the scale suite does not have to import the (large) main test module.
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import json
 import os
 import re
@@ -84,9 +86,22 @@ def _api_env() -> dict[str, str]:
     return env
 
 
-def _start_api_server() -> subprocess.Popen:  # type: ignore[type-arg]
-    """Start the mock API server on the test port. Returns the Popen."""
-    log_path = EINKHOME_ROOT / "build" / "pbemu-api-test.log"
+def _start_api_server(
+    port: int | None = None,
+    log_path: Path | str | None = None,
+) -> subprocess.Popen:  # type: ignore[type-arg]
+    """Start the mock API server on the test port. Returns the Popen.
+
+    *port* defaults to the module-wide API_PORT.  Parallel backends
+    (SDL/xdist workers) pass a per-process port so concurrent servers
+    don't fight over one listener, and *log_path* so each server's log
+    (dumped on failure) isn't clobbered by the next worker.
+    """
+    port = API_PORT if port is None else port
+    log_path = Path(
+        log_path if log_path is not None
+        else (EINKHOME_ROOT / "build" / "pbemu-api-test.log")
+    )
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log_fh = open(log_path, "w", encoding="utf-8")  # noqa: SIM115
     proc = subprocess.Popen(
@@ -97,7 +112,7 @@ def _start_api_server() -> subprocess.Popen:  # type: ignore[type-arg]
             "--host",
             "0.0.0.0",
             "--port",
-            str(API_PORT),
+            str(port),
             "--provider",
             "mock",
             "--config",
@@ -118,7 +133,7 @@ def _start_api_server() -> subprocess.Popen:  # type: ignore[type-arg]
             import urllib.request
 
             req = urllib.request.Request(
-                f"http://127.0.0.1:{API_PORT}/api/v1/healthz",
+                f"http://127.0.0.1:{port}/api/v1/healthz",
                 headers={"Authorization": f"Bearer {API_TOKEN}"},
             )
             with urllib.request.urlopen(req, timeout=2) as resp:
@@ -148,7 +163,7 @@ def _start_api_server() -> subprocess.Popen:  # type: ignore[type-arg]
             proc.wait()
             raise RuntimeError(
                 f"stale API server (pid {stale_pid}) answered on port "
-                f"{API_PORT} instead of the freshly spawned server "
+                f"{port} instead of the freshly spawned server "
                 f"(pid {proc.pid}); killed the stale listener. Log:\n"
                 f"{log_path.read_text()}"
             )
@@ -202,6 +217,70 @@ def _build_bookshelf() -> Path:
         raise
     assert out.is_file(), f"build output missing: {out}"
     return out
+
+
+def _newest_src_mtime() -> float:
+    """Newest mtime across the app sources + build scripts (for the SDL
+    test binary freshness check)."""
+    newest = 0.0
+    for base in (
+        EINKHOME_ROOT / "app",
+        EINKHOME_ROOT / "sdk",
+        EINKHOME_ROOT / "Makefile",
+    ):
+        if base.is_file():
+            newest = max(newest, base.stat().st_mtime)
+        elif base.is_dir():
+            for p in base.rglob("*"):
+                if p.is_file():
+                    newest = max(newest, p.stat().st_mtime)
+    return newest
+
+
+_SDL_TEST_OUT = EINKHOME_ROOT / "build" / "bookshelf.test"
+_SDL_TEST_LOCK = EINKHOME_ROOT / "build" / ".sdl-bookshelf.test.lock"
+
+
+def _ensure_sdl_test_binary() -> Path:
+    """Build (once) the SDL test binary with the IPC control socket.
+
+    Every parallel worker needs the same binary; the build is guarded by
+    an fcntl lock so concurrent first-runs compile exactly once, and an
+    mtime check skips rebuilding when build/bookshelf.test is already
+    fresher than the app sources.  Returns the binary path.
+    """
+    with contextlib.suppress(OSError):
+        if _SDL_TEST_OUT.is_file() and (
+            _SDL_TEST_OUT.stat().st_mtime >= _newest_src_mtime()
+        ):
+            return _SDL_TEST_OUT
+    _SDL_TEST_OUT.parent.mkdir(parents=True, exist_ok=True)
+    lock_fh = open(_SDL_TEST_LOCK, "w", encoding="utf-8")  # noqa: SIM115
+    fcntl.flock(lock_fh, fcntl.LOCK_EX)
+    try:
+        # Re-check under the lock: another worker may have built it while
+        # we waited.
+        if _SDL_TEST_OUT.is_file() and (
+            _SDL_TEST_OUT.stat().st_mtime >= _newest_src_mtime()
+        ):
+            return _SDL_TEST_OUT
+        env = os.environ.copy()
+        env["BS_ENABLE_TEST_IPC"] = "1"
+        proc = subprocess.run(
+            ["bash", "sdk/build_pc.sh", "--output", "build/bookshelf.test"],
+            cwd=EINKHOME_ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+        if proc.returncode != 0:
+            sys.stderr.write(proc.stderr or "")
+            proc.check_returncode()
+    finally:
+        fcntl.flock(lock_fh, fcntl.LOCK_UN)
+        lock_fh.close()
+    return _SDL_TEST_OUT
 
 
 def _snapshot_cfg(path: Path) -> str | None:

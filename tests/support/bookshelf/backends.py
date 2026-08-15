@@ -262,12 +262,16 @@ class SdlBackend:
 
     def __init__(self, sock_path: str, log_path: str, *,
                  api_url: str = "http://127.0.0.1:8765",
+                 run_dir: str | Path | None = None,
                  relaunch=None) -> None:
         from tests.support.bookshelf.ipc_sdl import IpcBookshelf
 
         self._sock_path = sock_path
         self._log = _ProcessLog(log_path)
         self._api_url = api_url
+        # Per-instance data dir.  Parallel workers point this at their own
+        # build/bs-<pid> dir so config/covers/store never collide.
+        self._run_dir = Path(run_dir) if run_dir is not None else REPO_ROOT / "build"
         self._relaunch = relaunch  # callable() -> Popen; owned by the fixture
         self._ipc: IpcBookshelf | None = None
 
@@ -343,26 +347,27 @@ class SdlBackend:
         except (ConnectionError, OSError):
             return False
 
-    # data dirs — the SDL app runs with cwd=repo root; config/covers/store
-    # live in build/, downloads fall back to /tmp (like the emulator guest).
+    # data dirs — the SDL app resolves config/covers/store next to its
+    # binary; a per-instance run_dir keeps parallel workers isolated.
+    # downloads fall back to /tmp (like the emulator guest).
     @property
     def books_dir(self):
-        return REPO_ROOT / "build"
+        return self._run_dir
     @property
     def downloads_dir(self):
-        return REPO_ROOT / "build" / "downloads"
+        return self._run_dir / "downloads"
     @property
     def config_path(self):
-        return REPO_ROOT / "build" / "bookshelf.cfg"
+        return self._run_dir / "bookshelf.cfg"
     @property
     def store_path(self):
-        return REPO_ROOT / "build" / "bookshelf_lib.db"
+        return self._run_dir / "bookshelf_lib.db"
     @property
     def covers_dir(self):
-        return REPO_ROOT / "build" / "covers"
+        return self._run_dir / "covers"
     @property
     def tmp_dir(self):
-        return REPO_ROOT / "build"
+        return self._run_dir
     @property
     def screen_size(self):
         return 1072, 1448

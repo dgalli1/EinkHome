@@ -48,6 +48,7 @@ from tests.support.bookshelf.env import (
     _OFFLINE_STORE,
     _api_env,
     _build_bookshelf,
+    _ensure_sdl_test_binary,
     _kill_guest_tasks,
     _parse_app_geometry,
     _pbemu_env,
@@ -70,52 +71,73 @@ pytestmark = pytest.mark.bookshelf
 
 # ── fixtures ───────────────────────────────────────────────────────────
 
+# Uniquifies each _sdl_env() instance (pid alone collides when two
+# modules in one worker each bring up their own environment).
+import itertools as _it
+_sdl_env_seq = _it.count()
+
 
 def _sdl_env():
     """Headless SDL (native PC) environment: API server + bookshelf.pc
-    driven over the IPC socket.  Fast, no emulator, parallel-safe."""
+    driven over the IPC socket.  Fast, no emulator, parallel-safe: the
+    binary is built once (lock-guarded, shared), and each instance runs
+    from its own build/bs-<uniq> dir with its own API port, socket, cfg,
+    covers and store — so xdist workers (and distinct modules inside one
+    worker) never collide."""
+    import socket as _sock
+
     from tests.support.bookshelf.backends import SdlBackend
 
     root = EINKHOME_ROOT
-    # 1. Build a dedicated test binary with the IPC control socket enabled.
-    #    The plain `make pc` production build has no control socket; this
-    #    uses a distinct output (build/bookshelf.test) so the two never
-    #    clobber each other.
-    _ipc_env = os.environ.copy()
-    _ipc_env["BS_ENABLE_TEST_IPC"] = "1"
-    subprocess.run(
-        ["bash", "sdk/build_pc.sh", "--output", "build/bookshelf.test"],
-        cwd=root, check=True, capture_output=True, env=_ipc_env)
-    # 2. Start the mock API server.
-    api_proc = _start_api_server()
-    sock = f"/tmp/bs-{os.getpid()}.sock"
-    logdir = root / "build" / f"bs-{os.getpid()}"
-    logdir.mkdir(parents=True, exist_ok=True)
-    logpath = logdir / "bookshelf.log"
+    # 1. Build (once, lock-guarded) the test binary with the IPC control
+    #    socket enabled.  Reused by every parallel worker.
+    binary = _ensure_sdl_test_binary()
+
+    # 2. Per-instance run dir: the app resolves config/covers/store next
+    #    to its binary, so launching from here isolates it from other
+    #    parallel instances.  Unique per instance (pid alone collides
+    #    when two modules in one worker each bring up an environment).
+    uniq = f"{os.getpid()}-{next(_sdl_env_seq)}"
+    run_dir = root / "build" / f"bs-{uniq}"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    app_exe = run_dir / "bookshelf.test"
+    if not app_exe.exists():
+        try:
+            app_exe.symlink_to(binary)
+        except OSError:
+            shutil.copyfile(binary, app_exe)
+
+    # 3. A free API port per instance (parallel servers must not share one).
+    with _sock.socket(_sock.AF_INET, _sock.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    api_proc = _start_api_server(port=port, log_path=run_dir / "api.log")
+
+    (run_dir / "bookshelf.cfg").write_text(
+        f"api_url=http://127.0.0.1:{port}\napi_token=pbemu-dev-token\n",
+        encoding="utf-8")
+    sock = f"/tmp/bs-{uniq}.sock"
+    logpath = run_dir / "bookshelf.log"
     env = os.environ.copy()
     env["BS_SOCKET"] = sock
     env["SDL_VIDEODRIVER"] = "dummy"
-    env["PBEMU_LOG_DIR"] = str(logdir)
-    (root / "build").mkdir(parents=True, exist_ok=True)
-    (root / "build" / "bookshelf.cfg").write_text(
-        f"api_url=http://127.0.0.1:{API_PORT}\napi_token=pbemu-dev-token\n",
-        encoding="utf-8")
+    env["PBEMU_LOG_DIR"] = str(run_dir)
     _held = {"proc": None}
 
     def _launch():
         p = subprocess.Popen(
-            [str(root / "build" / "bookshelf.test")],
-            cwd=root, env=env, stdout=subprocess.DEVNULL,
+            [str(app_exe)],
+            cwd=run_dir, env=env, stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL)
         _held["proc"] = p
         return p
 
     proc = _launch()
     backend = SdlBackend(
-        sock, str(logpath), api_url=f"http://127.0.0.1:{API_PORT}",
-        relaunch=_launch)
+        sock, str(logpath), api_url=f"http://127.0.0.1:{port}",
+        run_dir=run_dir, relaunch=_launch)
 
-    # 3. Build geometry (the SDL build is 1072x1448, no panel).
+    # 4. Build geometry (the SDL build is 1072x1448, no panel).
     geom = BookshelfGeometry(screen_w=1072, screen_h=1448, panel_h=0)
     # Wait for the app to boot + sync a bit.
     deadline = time.monotonic() + 15

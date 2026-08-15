@@ -7,6 +7,10 @@
 #   scripts/test.sh --pbemu        # ... plus the pbemu submodule's own suite
 #   scripts/test.sh -- -k offline  # pass pytest args through to the e2e suite
 #
+# Run the e2e suite against the native PC (SDL) build, parallelised (needs
+# pytest-xdist in the venv):
+#   BS_TEST_BACKEND=sdl scripts/test.sh -- -n auto
+#
 # Requirements: the pbemu submodule venv (cd pbemu && ./setup-venv.sh),
 # podman, the staged firmware (pbemu/pbemu install) and staged books in
 # pbemu/U633_6.8.2817/.live/mnt/ext1/books/.
@@ -60,10 +64,16 @@ if ! "${PY}" -m pytest --version >/dev/null 2>&1; then
 	die "pytest not installed in the venv — run: (cd pbemu && ./setup-venv.sh)"
 fi
 
-if [ "${RUN_E2E}" = 1 ] || [ "${RUN_PBEMU}" = 1 ]; then
+# The emulator backend needs podman + a staged firmware + books; the SDL
+# backend (BS_TEST_BACKEND=sdl) runs the native PC build and needs none
+# of those, so its prechecks are relaxed.
+BACKEND="${BS_TEST_BACKEND:-emulator}"
+
+if [ "${RUN_PBEMU}" = 1 ]; then
 	command -v podman >/dev/null 2>&1 || die "podman not found"
 fi
-if [ "${RUN_E2E}" = 1 ]; then
+if [ "${RUN_E2E}" = 1 ] && [ "${BACKEND}" != "sdl" ]; then
+	command -v podman >/dev/null 2>&1 || die "podman not found"
 	[ -d "${FIRMWARE_DIR}" ] || die "firmware not staged — run: pbemu/pbemu install"
 	[ -d "${BOOKS_DIR}" ] && [ -n "$(ls -A "${BOOKS_DIR}" 2>/dev/null)" ] \
 		|| die "no books staged in ${BOOKS_DIR} — the e2e suite needs a populated library"

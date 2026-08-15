@@ -64,7 +64,7 @@ def pytest_sessionfinish(session, exitstatus) -> None:
     """
     try:
         if _ran_any:
-            _write_results()
+            _write_results(session)
     except Exception:  # noqa: BLE001
         pass
 
@@ -202,7 +202,7 @@ def _harvest_steps(test_name: str) -> list[dict]:
     ]
 
 
-def _write_results() -> None:
+def _write_results(session) -> None:
     _REPORT_DIR.mkdir(parents=True, exist_ok=True)
     payload = {
         "generated_at": datetime.now(timezone.utc)
@@ -213,10 +213,23 @@ def _write_results() -> None:
         "commit": _git_commit(),
         "tests": _records,
     }
-    (_REPORT_DIR / "results.json").write_text(
+    # Each xdist worker writes its own slice; a suffix keeps them from
+    # clobbering build/report/results.json (serial runs keep the plain
+    # name for the existing report consumer).
+    (_REPORT_DIR / f"results{_worker_suffix(session)}.json").write_text(
         json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
         encoding="utf-8",
     )
+
+
+def _worker_suffix(session) -> str:
+    """'.gw0'/'gw1'/... when running as an xdist worker, else ''."""
+    workerinput = getattr(getattr(session, "config", None), "workerinput", None)
+    if workerinput is not None:
+        wid = workerinput.get("workerid")
+        if wid and wid != "master":
+            return f".{wid}"
+    return ""
 
 
 def _git_commit() -> str:

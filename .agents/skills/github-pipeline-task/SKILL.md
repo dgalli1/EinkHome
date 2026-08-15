@@ -46,8 +46,8 @@ The SDK is NOT part of pbemu — install it in the worktree (small):
 ```
 
 Caveats:
-- The worktree shares the main checkout's pbemu `.live` state; test runs
-  mutate it, but the suite restores configs — sequential runs are fine.
+- Local runs are SDL-only (`BS_TEST_BACKEND=sdl`), which never touches
+  the shared pbemu `.live` state — so parallel local runs share it safely.
 - Never `git add pbemu`; the skip-worktree entry is excluded from
   `git status`, so commit explicit paths and check `git status` before
   committing.
@@ -56,11 +56,25 @@ Caveats:
 
 ## 2. Do the task
 
-Work normally in the worktree. Verify with scoped tests in the
-worktree (e.g. `pbemu/.venv/bin/python -m pytest tests/test_bookshelf.py
--q -k "<scope>"` with `PB_TEST_FIRMWARE=U634k3_6.10.2544` and
-`PBEMU_MOCK_BOOKS_DIR=U634k3_6.10.2544/.live/mnt/ext1/books` set) —
-never the full suite unprompted (see the scoped-tests-first rule).
+Work normally in the worktree. Verify with scoped tests in the worktree
+using the parallel local SDL build — fast, no podman/firmware needed:
+
+```bash
+BS_TEST_BACKEND=sdl pbemu/.venv/bin/python -m pytest \
+  tests/test_bookshelf.py -n auto -q -k "<scope>"
+```
+
+Local verification uses ONLY the SDL backend (`BS_TEST_BACKEND=sdl`) via
+pytest-xdist (`-n auto`). Never run the emulator-backed suites locally —
+the real pipeline (bookshelf emulator suite + 100k scale suite, both of
+which download the firmware and boot qemu) runs only on GitHub Actions.
+Scoped tests only, never the full suite unprompted (see the
+scoped-tests-first rule).
+
+The SDL suite skips the storage-tier tests (downloads, reader launch,
+offline boot, search keyboard, settings persistence) — those are exactly
+the ones the GitHub Actions e2e run covers, so don't treat an SDL-local
+green as proof of the storage tier.
 
 ## 3. Commit and push for the pipeline
 
@@ -73,32 +87,42 @@ gh pr create --fill                # or update the existing PR for the branch
 ```
 
 The GitHub Actions pipeline (`ci.yml` + reusable `e2e-suite.yml`) runs
-API tests, the bookshelf e2e suite and the 100k scale suite; e2e jobs
-have automatic fresh-runner retries for flaky hosts. Runs are heavy
-(firmware is re-downloaded every time) — expect several minutes.
+API tests, the emulator bookshelf suite and the 100k scale suite
+(emulator-backed; firmware is re-downloaded every run, so expect several
+minutes), with automatic fresh-runner retries for flaky hosts. It only
+runs on GitHub Actions — never locally.
 
-## 4. Wait for the pipeline — use the helper, never hand-rolled loops
+## 4. Trigger the pipeline — run it in the background, don't block
 
-Never write `for i in …; do sleep …; done` polling loops (they get
-cancelled, overshoot, or miss completion — a user rule bans them). Use
-the project helper:
+The push above already starts the run. Do NOT sit and wait on it: kick
+the watcher off in the background so you (or the model) can keep working
+and pick up the result when it lands:
 
 ```bash
 # find the run for your push (the pull_request run for the head commit)
 RUN_ID=$(gh run list --commit "$(git rev-parse HEAD)" --json databaseId,event \
          --jq '.[] | select(.event=="pull_request") | .databaseId' | head -1)
-/usr/local/bin/github-wait-for.sh "$RUN_ID"
+nohup /usr/local/bin/github-wait-for.sh "$RUN_ID" \
+  > build/pipeline-wait.log 2>&1 &
 ```
 
-Exit codes: `0` success · `1` failed (prints the failed step logs) ·
-`2` cancelled · `3` timeout (default timeout 3600 s, interval 30 s —
-override as positional args). If the helper is unavailable, use
-`gh run watch <id>` once instead of a custom loop.
+The run continues in the background; check it when it finishes:
+
+```bash
+tail -40 build/pipeline-wait.log   # the wait helper's exit + failed-step logs
+```
+
+Never write hand-rolled `for i in …; do sleep …; done` polling loops (a
+user rule bans them). Exit codes from the helper: `0` success · `1`
+failed (prints the failed step logs) · `2` cancelled · `3` timeout
+(default timeout 3600 s, interval 30 s — override as positional args).
+If the helper is unavailable, use `gh run watch <id>` in the background
+once instead of a custom loop.
 
 If the run failed (exit 1): read the failing job logs
 (`gh run view "$RUN_ID" --log-failed`), fix the root cause, commit and
-push again — each push starts a fresh run for the new HEAD. Repeat until
-the run for the latest HEAD is green. Check the run conclusion once with
+push again — each push starts a fresh run for the new HEAD. Check the
+run conclusion once with
 `gh api repos/dgalli1/EinkHome/actions/runs/<id> --jq '{status, conclusion}'`.
 
 ## 5. Report back
