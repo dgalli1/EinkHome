@@ -7,7 +7,7 @@
 #include "bs_core.h"
 #include "cJSON.h"
 
-extern const BsLcProfile bs_g_lcprof;
+extern BsLcProfile bs_g_lcprof;
 
 extern const char *const bs_lc_dims[];
 

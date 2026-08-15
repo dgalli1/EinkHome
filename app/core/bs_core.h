@@ -15,8 +15,7 @@
  * Translation units: see the SOURCES list in Makefile.
  */
 
-#include <hwconfig.h>
-#include <inkview.h>
+#include "bs_plat.h"
 
 #include <ctype.h>
 #include <errno.h>
@@ -29,23 +28,6 @@
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
-
-/* libinkview exports iv_update_panel() but the public SDK header omits it.
- * It renders the system status strip (clock / battery / wifi) into the
- * panel region of the framebuffer.  The C++ PBAppFrame framework calls it
- * from the app's CustomDrawPanel() override; a plain-C app must call it
- * itself after DrawPanel() has populated the panel content, otherwise the
- * strip stays blank.  The argument is the reading-mode-enable flag passed
- * through to the panel draw callback (0 for the normal collapsed bar). */
-extern void iv_update_panel(int readingModeEnable);
-
-/* libinkview also exports the canvas lock API but the public SDK header
- * omits it.  GetCanvas() (declared in inkview.h) returns the active draw
- * canvas; the QPA bridge (eink-reader) writes RGB24 pixels straight into
- * the canvas to bypass libinkview's 8-bit draw pipeline — the only way
- * an app gets colour on the Kaleido panel. */
-extern void lockCanvasDrawing(void);
-extern void unlockCanvasDrawing(void);
 
 /* ── configuration ───────────────────────────────────────────────────── */
 
@@ -107,11 +89,6 @@ extern void unlockCanvasDrawing(void);
 #define BS_SUGGEST_TERM_MAX BS_MAX_QUERY_LEN
 #define BS_SUGGEST_MAX_HITS 10
 
-/* Firmware keyboard exports absent from this SDK vintage's headers
- * (same weak pattern as IvSetAppCapability in bs_main.c).  NULL-check
- * before every call; a missing symbol can never crash the app. */
-extern void CloseKeyboard(void) __attribute__((weak));
-extern void GetKeyboardRect(irect *rect) __attribute__((weak));
 
 /* Layout constants — tuned for the 1072x1448 633 Era panel (300 DPI).
  * All sizes are generous for comfortable e-ink touch targets. */
@@ -444,13 +421,13 @@ typedef struct {
  * Wider than the old bare-icon button because it carries text. */
 #define BS_SOURCE_BTN_X 112
 #define BS_SOURCE_BTN_W 176
-typedef struct {
-  const char *device;
-  const char *partner;
-  const char *has_audio;
-  const char *has_cloud;
-  const char *language;
-  const char *localization;
+typedef struct BsLcProfile {
+  char device[16];        /* view.json "device" capability: "all"/"notouch"/"1030" */
+  char partner[24];       /* "pocketbook" */
+  char has_audio[8];      /* "true"/"false" */
+  char has_cloud[8];      /* "false" */
+  char language[8];       /* bs_g_lang at init */
+  char localization[8];   /* "WW" */
 } BsLcProfile;
 #define BS_LAUNCHER_MAX_ITEMS 64
 #define BS_LAUNCHER_MAX_PARAMS 4

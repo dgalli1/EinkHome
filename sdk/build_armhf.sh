@@ -89,7 +89,7 @@ podman run --rm \
 	/usr/bin/arm-linux-gnueabihf-gcc \
 	"-I/work/sdk/pocketbook-sdk-b288/include" \
 	"-I/work/app/core" "-I/work/app/data" "-I/work/app/ui" \
-	"-I/work/app/action" "-I/work/app/vendor" \
+	"-I/work/app/action" "-I/work/app/vendor" "-I/work/app/platform" \
 	"-I/usr/include" \
 	"-L/work/pbemu/U1030_6.11.1437/rootfs/lib" \
 	"--sysroot=/work/pbemu/U1030_6.11.1437/rootfs" \

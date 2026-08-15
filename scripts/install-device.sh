@@ -59,9 +59,12 @@ API_PORT="${PBEMU_API_PORT:-8765}"
 usage() {
 	cat >&2 <<EOF
 usage: $(basename "$0") <device-ip> [api-url]
-       $(basename "$0") --build <device-ip> [api-url]
+       $(basename "$0") --abi armhf <device-ip> [api-url]
+       $(basename "$0") --build [--abi armhf] <device-ip> [api-url]
 
-Pushes build/bookshelf.app + a fresh config to <device-ip>:/mnt/ext1/system/bin/.
+Pushes build/bookshelf.app (or build/bookshelf.armhf.app with --abi
+armhf, for the hard-float InkPad One) + a fresh config to
+<device-ip>:/mnt/ext1/system/bin/.
 
 EOF
 	exit 64
@@ -70,31 +73,52 @@ EOF
 DEVICE=""
 API_URL=""
 DO_BUILD=0
+ABI="armel"
 
 case "${1:-}" in
 "" | -h | --help) usage ;;
 --build)
 	DO_BUILD=1
 	shift
-	DEVICE="${1:-}"
-	API_URL="${2:-}"
-	;;
-*)
-	DEVICE="${1:-}"
-	API_URL="${2:-}"
 	;;
 esac
+case "${1:-}" in
+--abi)
+	ABI="${2:-}"
+	case "${ABI}" in
+	armel | armhf) ;;
+	*)
+		echo "ERROR: --abi must be armel or armhf (got: ${ABI})" >&2
+		exit 64
+		;;
+	esac
+	shift 2
+	;;
+esac
+DEVICE="${1:-}"
+API_URL="${2:-}"
 
 if [ -z "${DEVICE}" ]; then
 	usage
 fi
 
+# armel = the soft-float build every firmware but the InkPad One uses;
+# armhf = the hard-float build linked against U1030_6.11.1437.  The
+# destination name is bookshelf.app in both cases — monitor.app resolves
+# the home task by that exact name.
 SRC_APP="${REPO_ROOT}/build/bookshelf.app"
+if [ "${ABI}" = "armhf" ]; then
+	SRC_APP="${REPO_ROOT}/build/bookshelf.armhf.app"
+fi
 SRC_CFG="${REPO_ROOT}/build/bookshelf.cfg"
 
 if [ "${DO_BUILD}" = "1" ] || [ ! -f "${SRC_APP}" ]; then
 	echo "==> building ${SRC_APP}"
-	make -C "${REPO_ROOT}" all
+	if [ "${ABI}" = "armhf" ]; then
+		make -C "${REPO_ROOT}" armhf
+	else
+		make -C "${REPO_ROOT}" all
+	fi
 fi
 
 if [ ! -f "${SRC_APP}" ]; then

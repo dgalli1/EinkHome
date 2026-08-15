@@ -227,14 +227,13 @@ bs_draw_system_strip(void)
 }
 
 /* Paint the bottom status strip: firmware-painted when the panel painter
- * is active (emulator), self-drawn when it never activates (device). */
+ * is active (emulator), self-drawn when it never activates (device).
+ * The actual draw (iv_update_panel vs draw_system_strip) lives in the
+ * PB backend (bs_plat_stamp_panel). */
 void
 bs_stamp_panel(void)
 {
-    if (bs_g_self_panel)
-        bs_draw_system_strip();
-    else
-        iv_update_panel(0);
+    bs_plat_stamp_panel(bs_g_self_panel);
 }
 
 /* Bottom edge of the app-owned content area: the firmware's type-1

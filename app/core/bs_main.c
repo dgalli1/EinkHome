@@ -14,11 +14,7 @@
 #include "bs_ui.h"
 #include "bs_worker.h"
 
-/* Exported by the firmware's libinkview but absent from this SDK
- * vintage's headers (and its bundled lib).  Weak so the link succeeds
- * either way; the guard skips the call if the runtime library lacks it. */
-extern void IvSetAppCapability(int caps) __attribute__((weak));
-extern void SetDefaultOrientation(int n) __attribute__((weak));
+
 
 /* Sync-engine → UI hook table (see bs_core.h): the sync engine
  * (bs_model.c) drives the spinner, the sync popup and the shelf
@@ -56,8 +52,9 @@ static void init_sync_tick(void *ctx) {
    * during its init; monitor then launches reader_controller, taskmgr,
    * control_panel_mgr, explorer, update_desktop_data and binds the
    * global-request target.  Without it a fresh boot runs only scanner
-   * + bookshelf.  iv_ipc_cmd() is the stock's exact transport. */
-  iv_ipc_cmd(MSG_START_SERVICES, 0);
+   * + bookshelf.  bs_plat_start_services() is the stock's exact
+   * iv_ipc_cmd() transport (see app/platform/bs_plat_pb.c). */
+  bs_plat_start_services();
   /* Startup must never ask to enable WiFi: the firmware's
    * QuickDownload() pops the "Turn on WiFi" dialog whenever it sees
    * no ACTIVE connection — even with the adapter enabled — so an
@@ -225,58 +222,18 @@ int bs_on_event(int type, int par1, int par2) {
      * same way.
      */
 
-    /* Orientation and panel type are registered in main() BEFORE
-     * InkViewMain(), exactly where the stock bookshelf does it
+    /* Orientation and panel type are registered in bs_plat_boot()
+     * BEFORE InkViewMain(), exactly where the stock bookshelf does it
      * (SetOrientation(0); SetDefaultOrientation(-1); SetPanelType(1)).
      * Doing it inside EVT_INIT corrupts the per-task fbinfo on the
      * live device (ScreenHeight() then reports the panel height and
-     * the layout collapses into the system bar's rows). */
-    bs_g_state.panel_h = PanelHeight();
-    if (bs_g_state.panel_h <= 0) {
-      /* Live device: the firmware's panel painter never activates
-       * for this task (PanelHeight()==0), so the stock strip is
-       * never drawn and our content would sit flush against the
-       * top edge.  Reserve the stock bar height and paint the
-       * strip ourselves; draw_system_strip() paints it at the
-       * bottom of the logical space, which the firmware's
-       * fb_y_offset wrap renders at the TOP of the framebuffer —
-       * exactly where the stock bar lives. */
-      bs_g_state.panel_h = BS_SELF_PANEL_H;
-      bs_g_self_panel = 1;
-    }
-    /* Test/debug override: force the self-drawn strip even when the
-     * firmware panel would paint, so the fallback path can be
-     * exercised in the emulator. */
-    if (getenv("PBEMU_SELF_PANEL") != NULL) {
-      bs_g_state.panel_h = BS_SELF_PANEL_H;
-      bs_g_self_panel = 1;
-    }
+     * the layout collapses into the system bar's rows).  The probe,
+     * the self-drawn-strip fallback, and the PBEMU_SELF_PANEL test
+     * override live in the PB backend (bs_plat_panel_height). */
+    bs_g_state.panel_h = bs_plat_panel_height(&bs_g_self_panel);
     bs_LOG("[bookshelf] panel_h=%d self_panel=%d\n", bs_g_state.panel_h,
         bs_g_self_panel);
-
-    /* Populate and render the panel content.  DrawPanel() fills in the
-     * panel_conf content fields (the stock bookshelf.app calls
-     * DrawPanel(NULL, NULL, NULL, -1) from its CustomDrawPanel()
-     * override); iv_update_panel(0) is the function that actually blits
-     * the clock / battery / wifi strip into the framebuffer.  The
-     * framework only calls it via iv_actualize_panel() when
-     * is_state_changed() is true, which it isn't on a fresh launch, so
-     * we force it here.  Arg 0 = reading-mode disabled (normal bar). */
-    DrawPanel(NULL, "EinkHome", NULL, -1);
-    bs_stamp_panel();
-
-    /* Force the firmware to actually draw the system panel now.
-     * Repaint() enqueues EVT_SHOW (=23) on the event loop, which
-     * the firmware handles by calling iv_actualize_panel(), which
-     * in turn calls iv_update_panel() (the function that blits the
-     * day-of-week + 24h-time + down-arrow + lightbulb + battery
-     * strip into the bottom band).  Without this call the panel is
-     * only redrawn on subsequent state changes (clock minute tick,
-     * battery percent change, net state change) — on a freshly
-     * launched task with no state change yet, the panel rect is
-     * blank.  Repaint() forces an immediate one-shot redraw.
-     */
-    Repaint();
+    bs_plat_panel_init();
     bs_LOG("[bookshelf] EVT_INIT panel_h=%d sw=%d sh=%d\n", bs_g_state.panel_h,
         ScreenWidth(), ScreenHeight());
 
@@ -339,6 +296,12 @@ int bs_on_event(int type, int par1, int par2) {
       else
         snprintf(bs_g_lang, sizeof bs_g_lang, "en");
     }
+
+    /* Device identity: fill the launcher profile from runtime probes
+     * (capability-based device key + has_audio + language) and log the
+     * model/firmware once for telemetry.  See bs_plat_device_profile. */
+    bs_plat_device_profile(&bs_g_lcprof, bs_g_lang);
+    bs_plat_log_identity();
 
     /* Resolve API URL via env vars if config didn't set it. */
     if (bs_g_state.api_base[0] == '\0') {
@@ -1065,25 +1028,14 @@ int main(int argc, char **argv) {
     bs_g_argv0[0] = '\0';
   bs_log_open(bs_g_argv0);
 
-  /* Register exactly like the stock bookshelf's main():
-   *   InitInkview(0x4110); IvSetAppCapability(1);
-   *   SetOrientation(0); SetDefaultOrientation(-1); SetPanelType(1);
-   * then run the framework.  The orientation/panel registration MUST
-   * happen before InkViewMain() attaches the task: on the live device
-   * doing it inside EVT_INIT corrupts the per-task fbinfo (the panel
-   * painter then fights our content for the top rows and
-   * ScreenHeight() collapses).  SetOrientation()/
-   * SetDefaultOrientation() are NULL-fb-safe at this point (the
-   * firmware lib logs and returns when hw_getframebuffer() is still
-   * NULL), which is exactly why the stock app can call them here. */
-  InitInkview(0x4110);
-  if (IvSetAppCapability != NULL)
-    IvSetAppCapability(1);
-  SetOrientation(0);
-  if (SetDefaultOrientation != NULL)
-    SetDefaultOrientation(-1);
-  SetPanelType(1); /* the stock bookshelf's literal value */
-  InkViewMain(bs_on_event);
+  /* Register with the firmware exactly like the stock bookshelf's
+   * main() (InitInkview/IvSetAppCapability/SetOrientation/
+   * SetDefaultOrientation/SetPanelType) then run the event loop.
+   * The orientation/panel registration MUST happen before InkViewMain()
+   * attaches the task: on the live device doing it inside EVT_INIT
+   * corrupts the per-task fbinfo.  All of this lives in the PB backend
+   * (see app/platform/bs_plat_pb.c: bs_plat_boot). */
+  bs_plat_boot(bs_on_event);
   /* No log_close(): detached workers may still be mid-LOG() when the
    * event loop unwinds (see the EVT_EXIT comment); freeing g_log
    * under them would be a use-after-free.  Flush and let process

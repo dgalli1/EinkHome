@@ -20,7 +20,7 @@
 
 /* -- device profile for conditional resolution -------------------------- */
 
-const BsLcProfile bs_g_lcprof = {"all", "pocketbook", "true", "false", "en", "WW"};
+BsLcProfile bs_g_lcprof = {"all", "pocketbook", "true", "false", "en", "WW"};
 
 const char *const bs_lc_dims[] = {
     "device",

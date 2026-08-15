@@ -121,7 +121,7 @@ if ! podman image exists localhost/pbdev:latest 2>/dev/null; then
 fi
 
 # --- manifest ----------------------------------------------------------
-# columns: device \t firmware_name \t zip \t url
+# columns: device \t firmware_name \t zip \t url \t abi (empty = armel)
 
 if [ -n "${DEVICE_FILTER}" ]; then
 	if ! awk -F'\t' -v want="${DEVICE_FILTER}" '$2 == want { found=1 } END { exit !found }' \
@@ -133,7 +133,7 @@ fi
 
 # Missing zips are a hard error up front: downloading is a manual step.
 MISSING=$(
-	awk -F'\t' -v dir="${FIRMWARES_DIR}" -v want="${DEVICE_FILTER}" 'NR > 1 &&
+	awk -F'\t' -v dir="${FIRMWARES_DIR}" -v want="${DEVICE_FILTER}" 'NR == 1 ||
 		/^#/ || NF < 4 { next }
 		(want != "" && $2 != want) { next }
 		{
@@ -182,6 +182,10 @@ if [ "${SKIP_BUILD}" -eq 1 ]; then
 		echo "ERROR: build/bookshelf.app missing; drop --skip-build" >&2
 		exit 1
 	}
+	[ -f "${REPO_ROOT}/build/bookshelf.armhf.app" ] || {
+		echo "ERROR: build/bookshelf.armhf.app missing; drop --skip-build" >&2
+		exit 1
+	}
 else
 	echo "==> build: linking against the oldest 6.x firmware (${OLDEST_NAME})"
 	install_firmware "${OLDEST_NAME}"
@@ -195,6 +199,17 @@ else
 		_tags=$(readelf --version-info "${REPO_ROOT}/build/bookshelf.app" 2>/dev/null |
 			grep -o 'GLIBC_[0-9.]*' | sort -u | tr '\n' ' ')
 		echo "  binary glibc requirements: ${_tags}"
+	fi
+	# The armhf variant (InkPad One U1030) links against its own
+	# firmware's armhf libs; only built when such a row is selected.
+	if awk -F'\t' -v want="${DEVICE_FILTER}" 'NR > 1 && NF >= 5 && $5 == "armhf" &&
+		(want == "" || $2 == want) { found = 1 } END { exit !found }' \
+		"${MANIFEST}"; then
+		echo "==> build: armhf variant against U1030_6.11.1437"
+		(
+			cd "${REPO_ROOT}"
+			make armhf
+		)
 	fi
 fi
 
@@ -211,6 +226,14 @@ for row in $(awk -F'\t' 'NR > 1 && NF >= 2 { print $2 }' "${MANIFEST}"); do
 	fi
 	_i=$((_i + 1))
 	_device=$(awk -F'\t' -v name="${row}" '$2 == name { print $1 }' "${MANIFEST}")
+	_abi=$(awk -F'\t' -v name="${row}" '$2 == name { print $5 }' "${MANIFEST}")
+	# armhf rows (InkPad One U1030) run the armhf binary; armel rows use
+	# the default build.  The fixture honours PBEMU_APP_BINARY (stages it
+	# instead of rebuilding; see tests/support/bookshelf/env.py).
+	_app_bin_env=""
+	if [ "${_abi}" = "armhf" ]; then
+		_app_bin_env="PBEMU_APP_BINARY=${REPO_ROOT}/build/bookshelf.armhf.app"
+	fi
 	_logdir="${REPO_ROOT}/build/fwtest"
 	mkdir -p "${_logdir}"
 	_log="${_logdir}/${row}.log"
@@ -253,6 +276,7 @@ for row in $(awk -F'\t' 'NR > 1 && NF >= 2 { print $2 }' "${MANIFEST}"); do
 		PB_TEST_FIRMWARE="${row}" \
 			PBEMU_MOCK_BOOKS_DIR="${row}/.live/mnt/ext1/books" \
 			PBEMU_SYS_TMPFS=1 \
+			${_app_bin_env} \
 			"${PBEMU_DIR}/.venv/bin/python" -m pytest "${TESTS}" "$@" -q
 	) >>"${_log}" 2>&1
 	_rc=$?
