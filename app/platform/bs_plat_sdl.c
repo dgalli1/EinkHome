@@ -52,6 +52,14 @@ static int g_dump_pending;
 static Uint32 g_dump_at;
 static char g_dump_path[512];
 
+/* Clip rect — the app's SetClip()/drawing contract.  The launcher (and
+ * other overlays) depend on it to keep scrolled rows from bleeding into
+ * the header: on the device firmware SetClip actually clips the
+ * renderer, so the SDL backend must clip its own pixel writes to match
+ * (a no-op here lets a scrolled row's label paint over the header). */
+static int g_clip = 0;   /* clip enabled */
+static int g_cx0, g_cy0, g_cx1, g_cy1; /* inclusive-ish bounds */
+
 static void dump_frame(const char *path);
 #ifdef BS_ENABLE_TEST_IPC
 static void AppendIpcText(const char *s);
@@ -80,10 +88,27 @@ col32(int color)
 
 /* ── drawing: inkview surface over the canvas ───────────────────────── */
 
+/* 1 when (x,y) is inside the current clip rect.  Used by every pixel
+ * writer so scrolled content stays within the region the app clipped. */
+static int
+px_visible(int x, int y)
+{
+    if (!g_clip) return 1;
+    return x >= g_cx0 && x < g_cx1 && y >= g_cy0 && y < g_cy1;
+}
+
 void
 SetClip(int x, int y, int w, int h)
 {
-    (void)x; (void)y; (void)w; (void)h; /* not used by the app's draw paths */
+    if (w <= 0 || h <= 0) {
+        g_clip = 0;              /* nothing visible */
+        return;
+    }
+    g_clip = 1;
+    g_cx0 = x;
+    g_cy0 = y;
+    g_cx1 = x + w;
+    g_cy1 = y + h;
 }
 
 void
@@ -95,6 +120,7 @@ FillArea(int x, int y, int w, int h, int color)
         if (j < 0) continue;
         for (int i = x; i < x + w && i < PC_W; i++) {
             if (i < 0) continue;
+            if (!px_visible(i, j)) continue;
             g_px[(size_t)j * PC_W + (size_t)i] = c;
         }
     }
@@ -109,7 +135,7 @@ DrawLine(int x1, int y1, int x2, int y2, int color)
     int dy = -abs(y2 - y1), sy = y1 < y2 ? 1 : -1;
     int err = dx + dy, x = x1, y = y1;
     for (;;) {
-        if (x >= 0 && x < PC_W && y >= 0 && y < PC_H)
+        if (x >= 0 && x < PC_W && y >= 0 && y < PC_H && px_visible(x, y))
             g_px[(size_t)y * PC_W + (size_t)x] = c;
         if (x == x2 && y == y2) break;
         int e2 = 2 * err;
@@ -251,6 +277,7 @@ DrawString(int x, int y, const char *s)
         for (int i = 0; i < glyph->w; i++) {
             int xx = x + i;
             if (xx < 0 || xx >= PC_W) continue;
+            if (!px_visible(xx, yy)) continue;
             /* Alpha blend the glyph onto the canvas. */
             uint8_t a = sp[(size_t)j * glyph->pitch + (size_t)i * 4 + 3];
             if (a == 0) continue;
@@ -299,6 +326,7 @@ bmp_blit(int x, int y, const ibitmap *b, int dw, int dh)
             int sx = sw == 0 ? 0 : (i * sw) / dw;
             int xx = x + i;
             if (xx < 0 || xx >= PC_W) continue;
+            if (!px_visible(xx, yy)) continue;
             if (b->depth == 24) {
                 const uint8_t *p = &b->data[((size_t)sy * b->scanline) + (size_t)sx * 3];
                 g_px[(size_t)yy * PC_W + (size_t)xx] = 0xff000000u |

@@ -44,6 +44,8 @@ from tests.support.bookshelf.env import (
 )
 from tests.support.reader.session import Session
 from tests.support.runtime import container_running, container_sh
+from tests.support import ui_input as _UI_INPUT
+from tests.support.bookshelf.backends import EmulatorBackend
 
 SCALE_PORT = 18766
 SCALE_COUNT = 100_000
@@ -237,7 +239,10 @@ def scale_env(request):
             screen_h=snapshot.height or 1448,
             panel_h=_parse_panel_h(FIRMWARE),
         )
-        bs = BookshelfSession(Session(emulator), geom, FIRMWARE)
+        backend = EmulatorBackend(
+            emulator, FIRMWARE, session_cls=Session, ui_input=_UI_INPUT
+        )
+        bs = BookshelfSession(backend, geom, FIRMWARE)
         request.node._bs_log_open_start = bs.invocation_count()  # type: ignore[attr-defined]
         bs.begin_snapshots(request.node.name)
         bs.snapshot("boot")
