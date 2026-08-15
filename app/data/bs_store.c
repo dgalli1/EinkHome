@@ -26,6 +26,7 @@
  */
 
 #include "bs_core.h"
+#include <stdlib.h>
 #include "cJSON.h"
 #include "bs_config.h"
 #include "bs_downloads.h"
@@ -86,7 +87,7 @@ static const char *const SCHEMA_SQL =
     " id TEXT PRIMARY KEY,"
     " title TEXT, author TEXT, series TEXT, series_id TEXT,"
     " local_path TEXT, added_at INTEGER,"
-    " filename TEXT, source TEXT, search_text TEXT);"
+    " filename TEXT, source TEXT, search_text TEXT, genre TEXT);"
     "CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT);"
     "CREATE TABLE IF NOT EXISTS view("
     " pos INTEGER PRIMARY KEY,"
@@ -169,6 +170,7 @@ static void store_migrate_columns(void) {
       {"size", "INTEGER"},    {"downloaded", "INTEGER"},
       {"local_path", "TEXT"}, {"added_at", "INTEGER"},
       {"filename", "TEXT"},   {"source", "TEXT"},
+      {"genre", "TEXT"},
       {"search_text", "TEXT"},
   };
   int changed = 0;
@@ -560,8 +562,8 @@ int bs_store_upsert_book(const BsBook *b) {
       "INSERT OR REPLACE INTO books("
       "id,title,author,series,series_id,series_idx,"
       "ext,size,downloaded,local_path,added_at,"
-      "filename,source,search_text)"
-      " VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)");
+      "filename,source,search_text,genre)"
+      " VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)");
   if (st == NULL)
     return -1;
   sqlite3_reset(st);
@@ -580,6 +582,7 @@ int bs_store_upsert_book(const BsBook *b) {
   bind_text_trunc(st, 12, b->filename);
   bind_text_trunc(st, 13, b->source[0] ? b->source : "kavita");
   bind_text_trunc(st, 14, b->search_text);
+  bind_text_trunc(st, 15, b->genre);
   int rc = sqlite3_step(st);
   if (rc != SQLITE_DONE)
     bs_LOG("[bookshelf] upsert FAILED id=%s rc=%d: %s\n", b->id, rc,
@@ -725,18 +728,20 @@ static void fill_book_from_stmt(sqlite3_stmt *st, BsBook *b) {
   snprintf(b->filename, sizeof b->filename, "%s", t ? t : "");
   t = (const char *)sqlite3_column_text(st, 12);
   snprintf(b->source, sizeof b->source, "%s", t ? t : "");
+  t = (const char *)sqlite3_column_text(st, 13);
+  snprintf(b->genre, sizeof b->genre, "%s", t ? t : "");
 }
 
 #define BS_BOOK_COLS                                                              \
   "id,title,author,series,series_id,series_idx,ext,size,downloaded,local_"     \
   "path,added_at,"                                                             \
-  "filename,source"
+  "filename,source,genre"
 /* books columns qualified for the view JOIN (bare BOOK_COLS would leave
  * every column after the first unqualified and ambiguous). */
 #define BS_BOOK_COLS_Q                                                            \
   "b.id,b.title,b.author,b.series,b.series_id,b.series_idx,b.ext,b.size,b."    \
   "downloaded,"                                                                \
-  "b.local_path,b.added_at,b.filename,b.source"
+  "b.local_path,b.added_at,b.filename,b.source,b.genre"
 
 /* Fetch one book row by id.  Returns 1 when found, 0 otherwise. */
 int bs_store_get_book(const char *id, BsBook *out) {
@@ -1522,13 +1527,212 @@ static void view_bind_query(sqlite3_stmt *st, int qbind) {
   bind_text_trunc(st, qbind, pat);
 }
 
+/* ── grouped (dimension) view support ───────────────────────────────── *
+ * When group_depth>0 and drill_depth<group_depth the view is ordered by
+ * the current dimension and split into groups; each group-page shows a
+ * tappable header (the group value, at the group's start page) followed
+ * by up to grouped_cap() of the group's tiles.  Rebuilt by
+ * build_groups() after every grouped view_rebuild. */
+
+typedef struct {
+  int  base;                      /* MIN(view.pos) of the group (1-based) */
+  int  count;                     /* tiles in the group */
+  char label[BS_MAX_TITLE_LEN];   /* rendered header */
+  char value[BS_MAX_TITLE_LEN];   /* raw dim value (drill scoping) */
+} BsGroup;
+typedef struct {
+  int g;
+  int off; /* first tile offset inside the group for that page */
+} BsGroupPage;
+
+static BsGroup     *g_groups;
+static int          g_group_count;
+static BsGroupPage *g_pages;
+static int          g_page_count;
+
+/* 1 = the current view is a dimension grouping (renders headers). */
+static int grouped_active(void) {
+  return bs_g_group_depth > 0 && bs_g_drill_depth < bs_g_group_depth;
+}
+
+/* SQL for a grouping dimension; q selects the view-JOIN alias (`b.`). */
+static const char *dim_sql(BsGroupDim dim, int q) {
+  switch (dim) {
+  case BS_GROUP_BY_SERIES:
+    return q ? "b.series COLLATE NOCASE" : "series COLLATE NOCASE";
+  case BS_GROUP_BY_AUTHOR:
+    return q ? "b.author COLLATE NOCASE" : "author COLLATE NOCASE";
+  case BS_GROUP_BY_YEAR:
+    return q ? "strftime('%Y', b.added_at, 'unixepoch')"
+             : "strftime('%Y', added_at, 'unixepoch')";
+  case BS_GROUP_BY_GENRE:
+    return q ? "b.genre COLLATE NOCASE" : "genre COLLATE NOCASE";
+  default:
+    return NULL; /* BS_GROUP_ALL */
+  }
+}
+
+/* Human label of a group header (empty value → "No series" etc). */
+static void group_label_for(BsGroupDim dim, const char *value, char *out,
+                            size_t cap) {
+  if (value[0] == '\0') {
+    const char *kl = NULL;
+    switch (dim) {
+    case BS_GROUP_BY_SERIES: kl = "group.none.series"; break;
+    case BS_GROUP_BY_AUTHOR: kl = "group.none.author"; break;
+    case BS_GROUP_BY_YEAR:   kl = "group.none.year";   break;
+    case BS_GROUP_BY_GENRE:  kl = "group.none.genre";  break;
+    default: break;
+    }
+    snprintf(out, cap, "%s", kl ? bs_i18n(kl) : "...");
+  } else {
+    snprintf(out, cap, "%s", value);
+  }
+}
+
+static void free_group_state(void) {
+  free(g_groups);
+  free(g_pages);
+  g_groups = NULL;
+  g_pages = NULL;
+  g_group_count = 0;
+  g_page_count = 0;
+}
+
+/* Tile capacity of one grouped page (one row is reserved for the
+ * header band, so grouped pages hold one fewer row of tiles). */
+static int grouped_cap(void) {
+  int c = bs_view_cols() * (bs_view_rows() - 1);
+  return c > 0 ? c : 1;
+}
+
+/* Materialise groups[] from the (already rebuilt) view table. */
+static void build_groups(BsGroupDim dim) {
+  free_group_state();
+  if (g_db == NULL || !grouped_active())
+    return;
+  const char *e = dim_sql(dim, 1);
+  char sql[512];
+  snprintf(sql, sizeof sql,
+           "SELECT %s, COUNT(*), MIN(pos) FROM view JOIN books b"
+           " ON b.id=view.book_id GROUP BY %s ORDER BY MIN(pos)", e, e);
+  sqlite3_stmt *st = NULL;
+  if (sqlite3_prepare_v2(g_db, sql, -1, &st, NULL) != SQLITE_OK)
+    return;
+  int n = 0, cap = 64;
+  g_groups = malloc((size_t)cap * sizeof *g_groups);
+  while (sqlite3_step(st) == SQLITE_ROW) {
+    if (n >= cap) {
+      cap *= 2;
+      g_groups = realloc(g_groups, (size_t)cap * sizeof *g_groups);
+    }
+    BsGroup *gr = &g_groups[n++];
+    memset(gr, 0, sizeof *gr);
+    const char *v = (const char *)sqlite3_column_text(st, 0);
+    snprintf(gr->value, sizeof gr->value, "%s", v != NULL ? v : "");
+    gr->count = sqlite3_column_int(st, 1);
+    gr->base = sqlite3_column_int(st, 2);
+    group_label_for(dim, gr->value, gr->label, sizeof gr->label);
+  }
+  sqlite3_finalize(st);
+  g_group_count = n;
+  /* Build the page map (group-per-page, groups span pages when large). */
+  int pc = grouped_cap(), pcap = 64, pn = 0;
+  g_pages = malloc((size_t)pcap * sizeof *g_pages);
+  for (int gi = 0; gi < g_group_count; gi++) {
+    int rem = g_groups[gi].count, off = 0;
+    while (rem > 0) {
+      int thisn = rem > pc ? pc : rem;
+      if (pn >= pcap) {
+        pcap *= 2;
+        g_pages = realloc(g_pages, (size_t)pcap * sizeof *g_pages);
+      }
+      g_pages[pn++] = (BsGroupPage){gi, off};
+      off += thisn;
+      rem -= thisn;
+    }
+  }
+  g_page_count = pn;
+}
+
+int bs_view_group_pages(void) {
+  return grouped_active() ? g_page_count : 0;
+}
+
+/* Resolve the current page against the (grouped or flat) view: returns
+ * the exclusive `pos` lower bound for the page and sets bs_g_group_*.
+ * Non-grouped page p starts at p*pagesize. */
+int bs_view_page_lo(void) {
+  if (grouped_active()) {
+    int p = bs_g_state.page;
+    if (p < 0 || p >= g_page_count)
+      p = 0;
+    BsGroupPage *pg = &g_pages[p];
+    BsGroup     *gr = &g_groups[pg->g];
+    if (pg->off == 0) {
+      snprintf(bs_g_group_label, sizeof bs_g_group_label, "%s", gr->label);
+      snprintf(bs_g_group_value, sizeof bs_g_group_value, "%s", gr->value);
+      bs_g_group_has_header = 1;
+    } else {
+      bs_g_group_label[0] = bs_g_group_value[0] = '\0';
+      bs_g_group_has_header = 0;
+    }
+    return (gr->base - 1) + pg->off;
+  }
+  bs_g_group_label[0] = bs_g_group_value[0] = '\0';
+  bs_g_group_has_header = 0;
+  return bs_g_state.page * bs_view_pagesize();
+}
+
+/* Tile count of the current page (grouped-aware; flat return pagesize). */
+int bs_view_page_n(void) {
+  if (grouped_active()) {
+    int p = bs_g_state.page;
+    if (p < 0 || p >= g_page_count)
+      p = 0;
+    BsGroupPage *pg = &g_pages[p];
+    int rem = g_groups[pg->g].count - pg->off;
+    int cap = grouped_cap();
+    return rem > cap ? cap : rem;
+  }
+  return bs_view_pagesize();
+}
+
+/* 1 when any book in the current source has a non-empty value for this
+ * grouping dimension (drives which options the group chooser offers). */
+int bs_view_dim_available(BsGroupDim dim) {
+  if (dim == BS_GROUP_ALL || g_db == NULL)
+    return 1;
+  const char *e = dim_sql(dim, 0);
+  if (e == NULL)
+    return 1;
+  sqlite3_stmt *st = NULL;
+  char sql[256];
+  snprintf(sql, sizeof sql,
+           "SELECT COUNT(*) FROM books WHERE %s IS NOT NULL AND %s!=''"
+           " AND source=?1", e, e);
+  if (sqlite3_prepare_v2(g_db, sql, -1, &st, NULL) != SQLITE_OK)
+    return 0;
+  bind_text_trunc(st, 1, bs_g_state.source == BS_SOURCE_LOCAL    ? "local"
+                       : bs_g_state.source == BS_SOURCE_FOLDER ? "folder"
+                                                               : "kavita");
+  int n = 0;
+  if (sqlite3_step(st) == SQLITE_ROW)
+    n = sqlite3_column_int(st, 0);
+  sqlite3_finalize(st);
+  return n > 0;
+}
+
+/* ── view rebuild ───────────────────────────────────────────────────── */
+
 /* Rebuild the materialised view table for the current filter/sort/
- * group/drill.  Collapse modes (GROUP_ALL / GROUP_BY_SERIES at the top
- * level) emit standalone books as flat tiles and multi-book series as
- * single cards, interleaved in first-seen order of the active sort;
- * single-member series stay flat.  Everything else (drill, author /
- * recent grouping) is a flat projection.  All ordering and grouping
- * happens in SQL so RAM never holds the whole library. */
+ * group/drill.  Collapse modes (All books) emit standalone books as
+ * flat tiles and multi-book series as single cards, interleaved in
+ * first-seen order of the active sort; single-member series stay flat.
+ * Dimension groupings (series/author/year/genre) order the books by the
+ * current dimension and materialise a group index for header rendering
+ * and drill-in.  All ordering and grouping happens in SQL so RAM never
+ * holds the whole library. */
 void bs_view_rebuild(void) {
   if (g_db == NULL)
     return;
@@ -1588,7 +1792,7 @@ void bs_view_rebuild(void) {
       inserted = sqlite3_changes(g_db);
       sqlite3_finalize(st);
     }
-  } else if (bs_g_state.group == BS_GROUP_BY_SERIES || bs_g_state.group == BS_GROUP_ALL) {
+  } else if (bs_g_group_depth == 0) {
     /* idempotent: a failed earlier rebuild must not wedge the collapse
      * (a leaked t_sorted makes the CREATE TEMP TABLE below fail). */
     sqlite3_exec(g_db, "DROP TABLE IF EXISTS t_sorted", NULL, NULL, NULL);
@@ -1691,18 +1895,40 @@ void bs_view_rebuild(void) {
     sqlite3_exec(g_db, "DROP TABLE IF EXISTS t_grp", NULL, NULL, NULL);
     sqlite3_exec(g_db, "DROP TABLE IF EXISTS t_out", NULL, NULL, NULL);
   } else {
-    /* Flat projection (author / recent grouping). */
-    snprintf(
-        sql, sizeof sql,
-        "INSERT INTO view(kind, book_id, series_id, series_name, series_count)"
-        " SELECT 0, id, series_id, series, 0 FROM books WHERE");
-    view_where(sql, sizeof sql, 1);
-    snprintf(sql + strlen(sql), sizeof sql - strlen(sql), " ORDER BY %s",
-             view_order());
+    /* Dimension grouping.  Scope by the drilled levels (< depth), then
+     * order by the current group dimension (or plain sort at the leaf
+     * when every level is drilled), so each group's books are a
+     * contiguous pos run.  Group materialisation runs after COMMIT. */
+    snprintf(sql, sizeof sql,
+             "INSERT INTO view(kind, book_id, series_id, series_name,"
+             " series_count) SELECT 0, id, series_id, series, 0"
+             " FROM books WHERE");
+    /* view_where appends its own leading "1=1 [+ FTS]" clause, so it
+     * must run before any AND-prefixed drill scope below.  The FTS
+     * query binds at position drill_depth+1 (one slot per level). */
+    view_where(sql, sizeof sql, bs_g_drill_depth + 1);
+    for (int L = 0; L < bs_g_drill_depth; L++) {
+      const char *e = dim_sql(bs_g_group_path[L], 0);
+      if (bs_g_drill_values[L][0])
+        snprintf(sql + strlen(sql), sizeof sql - strlen(sql),
+                 " AND (%s=?%d)", e, L + 1);
+      else
+        snprintf(sql + strlen(sql), sizeof sql - strlen(sql),
+                 " AND (%s IS NULL OR %s='')", e, e);
+    }
+    if (grouped_active())
+      snprintf(sql + strlen(sql), sizeof sql - strlen(sql), " ORDER BY %s, %s",
+               dim_sql(bs_g_group_path[bs_g_drill_depth], 0), view_order());
+    else
+      snprintf(sql + strlen(sql), sizeof sql - strlen(sql), " ORDER BY %s",
+               view_order());
     sqlite3_stmt *st = NULL;
     rc = sqlite3_prepare_v2(g_db, sql, -1, &st, NULL);
     if (rc == SQLITE_OK) {
-      view_bind_query(st, 1);
+      for (int L = 0; L < bs_g_drill_depth; L++)
+        if (bs_g_drill_values[L][0])
+          bind_text_trunc(st, L + 1, bs_g_drill_values[L]);
+      view_bind_query(st, bs_g_drill_depth + 1);
       rc = sqlite3_step(st);
       inserted = sqlite3_changes(g_db);
       sqlite3_finalize(st);
@@ -1731,9 +1957,15 @@ void bs_view_rebuild(void) {
    * catch source switches whose sync applies no rows. */
   bs_g_view_source = bs_g_state.source;
   bs_g_view_total = inserted;
-  bs_LOG("[bookshelf] view_rebuild: view=%d sort=%d group=%d drill=%d\n",
-      bs_g_view_total, (int)bs_g_state.sort, (int)bs_g_state.group,
-      bs_g_drilled_series[0] != '\0');
+  /* Materialise the group index (header rendering + drill paging) for a
+   * dimension-grouped view; the flat/collapse paths keep it empty. */
+  if (grouped_active())
+    build_groups(bs_g_group_path[bs_g_drill_depth]);
+  else
+    free_group_state();
+  bs_LOG("[bookshelf] view_rebuild: view=%d sort=%d depth=%d drill=%d gc=%d\n",
+      bs_g_view_total, (int)bs_g_state.sort, bs_g_group_depth,
+      bs_g_drill_depth, g_group_count);
 }
 
 int bs_view_total(void) {
@@ -1750,13 +1982,13 @@ int bs_view_total(void) {
  * v.series_name=16, v.series_count=17. */
 static void fill_row_from_stmt(sqlite3_stmt *st, BsTileRow *tr) {
   memset(tr, 0, sizeof *tr);
-  fill_book_from_stmt(st, &tr->book); /* book cols first: 0..12 */
-  tr->is_series = sqlite3_column_int(st, 13);
+  fill_book_from_stmt(st, &tr->book); /* book cols first: 0..13 */
+  tr->is_series = sqlite3_column_int(st, 14);
   snprintf(tr->series_id, sizeof tr->series_id, "%s",
-           (const char *)sqlite3_column_text(st, 15));
-  snprintf(tr->series_name, sizeof tr->series_name, "%s",
            (const char *)sqlite3_column_text(st, 16));
-  tr->series_count = sqlite3_column_int(st, 17);
+  snprintf(tr->series_name, sizeof tr->series_name, "%s",
+           (const char *)sqlite3_column_text(st, 17));
+  tr->series_count = sqlite3_column_int(st, 18);
 }
 
 /* Read one page of the current view into rows[].  Returns the number of
@@ -1764,11 +1996,17 @@ static void fill_row_from_stmt(sqlite3_stmt *st, BsTileRow *tr) {
 int bs_view_fetch_page(int page, BsTileRow *rows, int cap) {
   if (g_db == NULL)
     return 0;
-  int ps = bs_view_pagesize();
-  if (ps < 1)
-    ps = BS_PAGESIZE;
-  long long lo = (long long)page * ps; /* exclusive */
-  long long hi = lo + ps;              /* inclusive */
+  long long lo, hi;
+  if (grouped_active()) {
+    lo = bs_view_page_lo();             /* page maps via bs_g_state.page */
+    hi = lo + bs_view_page_n();
+  } else {
+    int ps = bs_view_pagesize();
+    if (ps < 1)
+      ps = BS_PAGESIZE;
+    lo = (long long)page * ps; /* exclusive */
+    hi = lo + ps;              /* inclusive */
+  }
   sqlite3_stmt *st = NULL;
   char sql[512];
   snprintf(sql, sizeof sql,

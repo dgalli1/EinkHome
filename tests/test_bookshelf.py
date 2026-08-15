@@ -992,12 +992,57 @@ def test_pager_prev_returns_page(fresh_bookshelf):
     bs.tap_pager_prev_and_verify()
 
 
-# ── menu overlay (group) ──────────────────────────────────────────────
-# Note: The menu/group overlay (All books, By author, etc.) is currently
-# unreachable from the UI (bs_g_state.menu_open is never set to 1 from any
-# tap handler). The hit_top_bar function returns 3 for the right button
-# which opens the More overlay, not the menu overlay. The menu overlay
-# code exists but is dead code. We skip testing it.
+# ── group drawer / multi-level grouping ───────────────────────────────
+
+def test_group_by_multi_level_headers_and_drill(fresh_bookshelf):
+    """Two-level grouping: rendered group headers, and tapping a header
+    drills into the group, down to the leaf books.
+
+    The left group drawer (Menu key) now holds two buttons -- Group by /
+    Sort by -- each opening a source-chooser-style sheet.  The picks are
+    data-driven (index 2 and 1 are the second and third offered grouping
+    rows -- e.g. Author/Year for the mock library); any two distinct
+    dimensions build a two-level path.
+    """
+    bs = fresh_bookshelf
+    bs.choose_group_options(['year', 'author'])
+    bs.assert_no_crash()
+    # A two-level path (depth 2, no drill) with a header rendered.
+    bs.assert_log_contains("depth=2 drill=0")
+    bs.assert_log_contains("group_header=")
+
+    # Tap the first-level header -> regroup by the second dimension.
+    before = bs.current_log()
+    bs.tap_group_header()
+    bs.assert_no_crash()
+    _wait_log_slice(bs, before, "depth=2 drill=1")
+    _wait_log_slice(bs, before, "group_header=")
+
+    # Tap the leaf header -> that group's books, flat.
+    before = bs.current_log()
+    bs.tap_group_header()
+    bs.assert_no_crash()
+    _wait_log_slice(bs, before, "depth=2 drill=2")
+
+    # Back twice unwinds the drill, then back to All books.
+    bs.send_back_key()
+    _wait_log_slice(bs, before, "depth=2 drill=1")
+    bs.send_back_key()
+    _wait_log_slice(bs, before, "depth=2 drill=0")
+    bs.assert_no_crash()
+
+
+def test_group_by_sort_buttons_and_choosers(fresh_bookshelf):
+    """The drawer exposes Group by and Sort by; the sort sheet applies."""
+    bs = fresh_bookshelf
+    bs.open_group_drawer()
+    bs.tap_drawer_sort_by()
+    before = bs.current_log()
+    # Sort chooser row 1 = By author.
+    bs.tap_at(*bs._g.sort_option_center(1))
+    bs.wait_for_stable()
+    bs.assert_no_crash()
+    _wait_log_slice(bs, before, "sort=1")
 
 
 # ── back key (no overlay) ──────────────────────────────────────────────

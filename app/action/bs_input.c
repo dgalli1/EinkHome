@@ -130,14 +130,18 @@ bs_hit_thumbnail(int x, int y)
     bs_grid_geom(&top, &bot, &cell_w, &cell_h);
     int cols = bs_view_cols();
     int rows = bs_view_rows();
-    int page_start = bs_g_state.page * bs_view_pagesize();
+    int hdr = bs_g_group_has_header ? BS_GROUP_HEADER_H : 0;
+    int page_start = bs_view_page_lo(); /* grouped-aware exclusive lo */
+    int last = page_start + bs_view_page_n();
+    if (last > bs_g_view_total)
+        last = bs_g_view_total;
     for (int row = 0; row < rows; row++) {
         for (int col = 0; col < cols; col++) {
             int idx = page_start + row * cols + col;
-            if (idx >= bs_g_view_total)
+            if (idx >= last)
                 return -1;
-            int tx = 8 + col * cell_w;
-            int ty = top + 4 + row * cell_h;
+            int tx = bs_grid_x0() + col * cell_w;
+            int ty = top + 4 + hdr + row * cell_h;
             int tw = cell_w - 8;
             int th = cell_h - 6;
             if (x >= tx && x < tx + tw && y >= ty && y < ty + th)
@@ -145,6 +149,21 @@ bs_hit_thumbnail(int x, int y)
         }
     }
     return -1;
+}
+
+/* 1 = the tap is on the current page's dimension-group header band. */
+int
+bs_hit_group_header(int x, int y)
+{
+    (void)x;
+    if (!bs_g_group_has_header)
+        return 0;
+    int top, bot, cell_w, cell_h;
+    (void)bot;
+    (void)cell_w;
+    (void)cell_h;
+    bs_grid_geom(&top, &bot, &cell_w, &cell_h);
+    return (y >= top && y < top + BS_GROUP_HEADER_H);
 }
 
 int
@@ -183,15 +202,100 @@ bs_on_tap_overlay_menu(int x, int y)
         bs_g_state.overlay = BS_OV_NONE;
         return;
     }
-    for (int i = 0; i < 4; i++) {
+    for (int i = 0; i < 2; i++) {
         if (y >= y0 + i * item_h && y < y0 + i * item_h + item_h) {
-            bs_g_state.group = (BsGroupMode)i;
-            bs_g_drilled_series[0] = '\0';
-            bs_g_state.overlay = BS_OV_NONE;
-            bs_view_rebuild();
+            bs_g_state.overlay = (i == 0) ? BS_OV_GROUP : BS_OV_SORT;
+            if (bs_g_state.overlay == BS_OV_GROUP)
+                bs_draw_overlay_group();
+            else
+                bs_draw_overlay_sort();
+            FullUpdate();
+            return;
         }
     }
     bs_g_state.overlay = BS_OV_NONE;
+}
+
+/* A dimension tap?  See bs_group_options (bs_overlays.c) for the row
+ * list shared with the draw path. */
+int
+bs_on_tap_overlay_group(int x, int y)
+{
+    BsGroupDim opts[1 + 4];
+    int n = bs_group_options(opts, 1 + 4);
+    int w = ScreenWidth();
+    int pw = w * 3 / 4;
+    int ph = 72 + n * 96 + 24;
+    int px = (w - pw) / 2;
+    int py = (bs_content_bottom() - ph) / 2;
+    if (x < px || x >= px + pw || y < py || y >= py + ph) {
+        bs_g_state.overlay = BS_OV_NONE;
+        return 1;
+    }
+    if (y < py + 84)
+        return 1; /* title/header strip: ignore */
+    int r = (y - (py + 84)) / 96;
+    if (r < 0 || r >= n)
+        return 1;
+    BsGroupDim d = opts[r];
+    if (d == BS_GROUP_ALL) {
+        bs_g_group_depth = 0;
+        bs_g_drill_depth = 0;
+        bs_g_drill_values[0][0] = '\0';
+        bs_g_drilled_series[0] = '\0';
+        bs_g_state.page = 0;
+        bs_view_rebuild();
+        bs_g_state.overlay = BS_OV_NONE;
+        return 1;
+    }
+    int lvl = -1;
+    for (int i = 0; i < bs_g_group_depth; i++)
+        if (bs_g_group_path[i] == d)
+            lvl = i;
+    if (lvl >= 0) {
+        /* Toggle off this dimension (and every later level). */
+        bs_g_group_depth = lvl > 0 ? lvl : 0;
+        for (int i = lvl; i < BS_GROUP_MAX_LEVELS; i++)
+            bs_g_group_path[i] = BS_GROUP_ALL;
+        if (bs_g_drill_depth > bs_g_group_depth)
+            bs_g_drill_depth = bs_g_group_depth;
+    } else if (bs_g_group_depth < BS_GROUP_MAX_LEVELS) {
+        /* Toggle on: append at the end of the path. */
+        bs_g_group_path[bs_g_group_depth++] = d;
+    }
+    bs_g_group_path[bs_g_group_depth] = BS_GROUP_ALL;
+    bs_g_drill_depth = 0;
+    bs_g_drill_values[0][0] = '\0';
+    bs_g_drilled_series[0] = '\0';
+    bs_g_state.page = 0;
+    bs_view_rebuild();
+    bs_draw_overlay_group();
+    FullUpdate();
+    return 1;
+}
+
+int
+bs_on_tap_overlay_sort(int x, int y)
+{
+    int w = ScreenWidth();
+    int pw = w * 3 / 4;
+    int ph = 72 + 4 * 96 + 24;
+    int px = (w - pw) / 2;
+    int py = (bs_content_bottom() - ph) / 2;
+    if (x < px || x >= px + pw || y < py || y >= py + ph) {
+        bs_g_state.overlay = BS_OV_NONE;
+        return 1;
+    }
+    if (y < py + 84)
+        return 1;
+    int r = (y - (py + 84)) / 96;
+    if (r < 0 || r >= 4)
+        return 1;
+    bs_g_state.sort = (BsSortMode)r;
+    bs_g_state.page = 0;
+    bs_view_rebuild();
+    bs_g_state.overlay = BS_OV_NONE;
+    return 1;
 }
 
 /* Handle a tap while the More overlay is open.  Returns 1 when the

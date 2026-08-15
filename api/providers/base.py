@@ -50,6 +50,9 @@ class BookMeta:
     for standalone works.  Used by the device to collapse series into
     a single card in the grid view."""
     series_index: float | None = None
+    genre: str | None = None
+    """Genre/tag of the book. Empty when the provider doesn't expose one;
+    the device groups by it only when non-empty."""
     summary: str | None = None
     language: str | None = None
     file_format: str = "epub"

@@ -9,6 +9,22 @@
 
 extern char bs_g_drilled_series[BS_MAX_ID_LEN];
 
+/* Grouping: an ordered path of dimensions (e.g. Author -> Series) plus
+ * the drill state (which values have been tapped into).  Empty
+ * group_path means "All books" (the collapse view).  When drilled to
+ * `group_depth` levels, the current view is the flat books of the
+ * tapped leaf group. */
+extern int bs_g_group_depth; /* number of chosen grouping dims (0..BS_GROUP_MAX_LEVELS) */
+extern BsGroupDim bs_g_group_path[BS_GROUP_MAX_LEVELS];
+extern int bs_g_drill_depth; /* levels drilled into (0..group_depth) */
+extern char bs_g_drill_values[BS_GROUP_MAX_LEVELS][BS_MAX_TITLE_LEN];
+/* The current page's group header (grouped view); "" = none. */
+extern char bs_g_group_label[BS_MAX_TITLE_LEN];
+/* Raw group value of the current page's header (for drill-in scoping). */
+extern char bs_g_group_value[BS_MAX_TITLE_LEN];
+/* 1 = the current page opens a group (tappable header band shown). */
+extern int bs_g_group_has_header;
+
 extern char bs_g_search_kb_buf[BS_MAX_QUERY_LEN];
 
 /* Live suggestion band state: filled by the debounce tick in

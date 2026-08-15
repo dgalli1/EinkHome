@@ -120,6 +120,9 @@
 #define BS_CELL_MAX_W 420
 #define BS_CELL_MIN_H 280
 #define BS_CELL_MIN_W 280
+/* Height of a dimension-group header band (grouped view).  One grid row
+ * is reserved for it per grouped page, so it is always <= cell height. */
+#define BS_GROUP_HEADER_H 48
 
 /* List-view row height.  A list row is a single full-width band holding a
  * small cover + title + author, so it is much shorter than a grid cell and
@@ -248,11 +251,15 @@ typedef enum {
   BS_SORT_RECENT,
 } BsSortMode;
 typedef enum {
-  BS_GROUP_ALL,
+  BS_GROUP_ALL,       /* no grouping: collapse series into cards (default) */
+  BS_GROUP_BY_SERIES, /* dimension groupings: rendered headers + drill-in */
   BS_GROUP_BY_AUTHOR,
-  BS_GROUP_BY_SERIES,
-  BS_GROUP_BY_RECENT,
-} BsGroupMode;
+  BS_GROUP_BY_YEAR,
+  BS_GROUP_BY_GENRE,
+} BsGroupDim;
+/* Max ordered grouping levels chosen in the group chooser (e.g.
+ * Author -> Series uses two levels). */
+#define BS_GROUP_MAX_LEVELS 3
 typedef enum {
   BS_VIEW_GRID,
   BS_VIEW_LIST,
@@ -274,6 +281,8 @@ typedef enum {
   BS_OV_SOURCE,   /* source chooser sheet (top priority) */
   BS_OV_MENU,     /* hamburger overlay */
   BS_OV_MORE,     /* right "..." overlay */
+  BS_OV_GROUP,    /* group-by dimension chooser sheet */
+  BS_OV_SORT,     /* sort chooser sheet */
   BS_OV_SETTINGS, /* full-screen settings */
   BS_OV_LOG,      /* full-screen log viewer */
   BS_OV_LAUNCHER, /* full-screen launcher */
@@ -287,6 +296,7 @@ typedef struct {
   char series[48];
   char series_id[BS_MAX_ID_LEN];
   float series_idx; /* volume/chapter number inside series; 0 if N/A */
+  char genre[48];   /* grouping dimension; empty when the source doesn't provide it */
   char ext[8];
   int size;
   int downloaded;
@@ -328,7 +338,6 @@ typedef struct {
   char url_openwith[BS_MAX_URL_LEN];
 
   BsSortMode sort;
-  BsGroupMode group;
   BsViewMode view_mode; /* GRID = cover grid, LIST = one row per book */
   /* One modal overlay at a time.  Stackable popups (dl_popup,
    * sync_popup) and the search keyboard (search_kb) are NOT part of

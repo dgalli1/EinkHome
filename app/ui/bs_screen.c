@@ -257,6 +257,9 @@ bs_current_pages(void)
         n = bs_store_search_count();
         ps = bs_history_pagesize();
     } else {
+        int gp = bs_view_group_pages();
+        if (gp > 0)
+            return gp;
         n = bs_g_view_total;
         ps = bs_view_pagesize();
     }

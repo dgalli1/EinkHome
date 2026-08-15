@@ -30,6 +30,15 @@ BsTileRow bs_g_rows[BS_MAX_ROWS * BS_COLS];
 int     bs_g_row_count = 0;
 int     bs_g_view_total = 0;
 
+/* Grouping path + drill (see bs_model.h).  Default: All books. */
+int       bs_g_group_depth = 0;
+BsGroupDim bs_g_group_path[BS_GROUP_MAX_LEVELS];
+int       bs_g_drill_depth = 0;
+char      bs_g_drill_values[BS_GROUP_MAX_LEVELS][BS_MAX_TITLE_LEN];
+char      bs_g_group_label[BS_MAX_TITLE_LEN] = "";
+char      bs_g_group_value[BS_MAX_TITLE_LEN] = "";
+int       bs_g_group_has_header = 0;
+
 /* Dirty flag for the materialised view: set by any sync/local apply
  * path that changed rows, cleared by finish_sync, which then rebuilds
  * the view exactly once per changed sync instead of unconditionally. */
@@ -364,6 +373,7 @@ bs_parse_book_obj(const cJSON *obj, BsBook *b, int probe_fs)
     js_copy(obj, "series", b->series, sizeof b->series);
     js_copy(obj, "seriesId", b->series_id, sizeof b->series_id);
     b->series_idx = js_float(obj, "seriesIdx", 0.0f);
+    js_copy(obj, "genre", b->genre, sizeof b->genre);
     /* Folded search blob (delta "searchText"): the server folds, so the
      * device matches LIKE against the same folded text. */
     js_copy(obj, "searchText", b->search_text, sizeof b->search_text);

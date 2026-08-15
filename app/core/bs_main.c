@@ -204,7 +204,7 @@ int bs_on_event(int type, int par1, int par2) {
      * timer below, so the hook table is always in place first. */
     bs_sync_set_hooks(&g_sync_ui_hooks);
     bs_g_state.sort = BS_SORT_TITLE_ASC;
-    bs_g_state.group = BS_GROUP_ALL;
+    bs_g_group_depth = 0;   /* All books (no dimension grouping) */
 
     /* Keep the system panel visible (battery / wifi / clock).
      * Calling SetPanelType(PANEL_DISABLED) or iv_fullscreen()
@@ -395,6 +395,10 @@ int bs_on_event(int type, int par1, int par2) {
       bs_draw_overlay_menu();
     else if (bs_g_state.overlay == BS_OV_MORE)
       bs_draw_overlay_more();
+    else if (bs_g_state.overlay == BS_OV_GROUP)
+      bs_draw_overlay_group();
+    else if (bs_g_state.overlay == BS_OV_SORT)
+      bs_draw_overlay_sort();
     FullUpdate();
     return 1;
   }
@@ -603,6 +607,21 @@ int bs_on_event(int type, int par1, int par2) {
       }
       return 1;
     }
+    /* The group/sort chooser sheets own taps while open.  Toggling a
+     * grouping keeps the sheet up (multi-level selection); a dismiss
+     * (outside / All / a sort choice) falls to a full shelf redraw. */
+    if (bs_g_state.overlay == BS_OV_GROUP) {
+      bs_on_tap_overlay_group(x, y);
+      if (bs_g_state.overlay == BS_OV_NONE)
+        bs_redraw_shelf();
+      return 1;
+    }
+    if (bs_g_state.overlay == BS_OV_SORT) {
+      bs_on_tap_overlay_sort(x, y);
+      if (bs_g_state.overlay == BS_OV_NONE)
+        bs_redraw_shelf();
+      return 1;
+    }
     /* Bottom system strip (the status bar with clock, battery,
      * etc.).  Tapping anywhere on it opens the firmware control
      * panel — the same gesture as the real device. */
@@ -631,6 +650,12 @@ int bs_on_event(int type, int par1, int par2) {
       }
       if (bs_g_drilled_series[0] != '\0') {
         bs_drill_back();
+        return 1;
+      }
+      /* Group drill-in: the back affordance pops one level toward the
+       * All-books top. */
+      if (bs_g_drill_depth > 0) {
+        bs_group_drill_back();
         return 1;
       }
       /* Home while already on the library shelf is a no-op, not a
@@ -812,6 +837,13 @@ int bs_on_event(int type, int par1, int par2) {
       return 1;
     }
 
+    /* A dimension-group header tap drills into the group instead of
+     * selecting a tile. */
+    if (bs_hit_group_header(x, y) && bs_g_group_has_header) {
+      bs_group_drill(bs_g_group_value);
+      return 1;
+    }
+
     /* Book tap */
     int idx = bs_hit_thumbnail(x, y);
     if (idx >= 0) {
@@ -953,6 +985,11 @@ int bs_on_event(int type, int par1, int par2) {
       }
       if (bs_g_drilled_series[0] != '\0') {
         bs_drill_back();
+        return 1;
+      }
+      /* Group drill-in: back pops one level toward All books. */
+      if (bs_g_drill_depth > 0) {
+        bs_group_drill_back();
         return 1;
       }
       /* Back on the plain shelf: no-op, same reasoning as the home

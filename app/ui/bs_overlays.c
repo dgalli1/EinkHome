@@ -5,6 +5,53 @@
 #include "bs_model.h"
 #include "bs_ui.h"
 
+/* Sort-mode label key for the current sort (drawer value + chooser). */
+static const char *
+sort_label(void)
+{
+    switch (bs_g_state.sort) {
+    case BS_SORT_AUTHOR: return "sort.author";
+    case BS_SORT_SERIES: return "sort.series";
+    case BS_SORT_RECENT: return "sort.recent";
+    default:             return "sort.title_az";
+    }
+}
+
+/* Grouping-dimension label key (drawer value + chooser rows). */
+static const char *
+dim_label(BsGroupDim d)
+{
+    switch (d) {
+    case BS_GROUP_BY_SERIES: return "group.series";
+    case BS_GROUP_BY_AUTHOR: return "group.author";
+    case BS_GROUP_BY_YEAR:   return "group.year";
+    case BS_GROUP_BY_GENRE:  return "group.genre";
+    default:                 return "group.all";
+    }
+}
+
+/* Human summary of the active group path ("Author > Series"), or the
+ * "All books" label when ungrouped. */
+static void
+group_path_summary(char *out, size_t cap)
+{
+    if (bs_g_group_depth == 0) {
+        snprintf(out, cap, "%s", bs_i18n("group.all"));
+        return;
+    }
+    size_t n = 0;
+    for (int i = 0; i < bs_g_group_depth; i++) {
+        int written = snprintf(out + n, cap > n ? cap - n : 0,
+                               i == 0 ? "%s" : " > %s",
+                               bs_i18n(dim_label(bs_g_group_path[i])));
+        if (written < 0)
+            return;
+        n += (size_t)written;
+        if (n >= cap)
+            return; /* truncated, still NUL-terminated */
+    }
+}
+
 void
 bs_draw_overlay_menu(void)
 {
@@ -21,28 +68,163 @@ bs_draw_overlay_menu(void)
         CloseFont(f);
     }
 
-    const char *labels[] = {
-        "group.all",
-        "group.author",
-        "group.series",
-        "group.recent",
-    };
-    int n = (int)(sizeof labels / sizeof labels[0]);
-    /* The menu sheet reuses the More overlay's row geometry (same
-     * 96/88 values — one name, one layout). */
-    int y0 = BS_MORE_Y0;
-    int item_h = BS_MORE_ITEM_H;
+    char gpath[BS_MAX_TITLE_LEN + 32];
+    group_path_summary(gpath, sizeof gpath);
+
+    const char *consttbl[] = { "action.group_by", "action.sort_by" };
+    const char *pval[] = { gpath, bs_i18n(sort_label()) };
+    int y0 = BS_MORE_Y0, item_h = BS_MORE_ITEM_H;
     ifont *tf = OpenFont(DEFAULTFONTB, 28, 0);
-    for (int i = 0; i < n; i++) {
-        int sel = (i == (int)bs_g_state.group);
-        FillArea(12, y0 + i * item_h, pw - 24, item_h - 12, sel ? BLACK : WHITE);
+    for (int i = 0; i < 2; i++) {
+        FillArea(12, y0 + i * item_h, pw - 24, item_h - 12, WHITE);
+        DrawRect(12, y0 + i * item_h, pw - 24, item_h - 12, BLACK);
         if (tf != NULL) {
-            SetFont(tf, sel ? WHITE : BLACK);
-            DrawString(32, y0 + i * item_h + (item_h - 28) / 2 - 2, bs_i18n(labels[i]));
+            SetFont(tf, BLACK);
+            DrawString(32, y0 + i * item_h + (item_h - 28) / 2 - 2,
+                       bs_i18n(consttbl[i]));
+            /* Right-aligned current value. */
+            int tw = StringWidth(pval[i]);
+            SetFont(tf, DGRAY);
+            DrawString(pw - 32 - tw, y0 + i * item_h + (item_h - 28) / 2 - 2,
+                       pval[i]);
         }
     }
     if (tf != NULL)
         CloseFont(tf);
+}
+
+/* ── group / sort choosers (source-chooser style sheets) ────────────── */
+
+/* Row list for the group chooser: All books + every dimension with data
+ * in the current source.  Returns the row count. */
+int
+bs_group_options(BsGroupDim out[], int cap)
+{
+    int n = 0;
+    static const BsGroupDim cand[] = {
+        BS_GROUP_BY_SERIES, BS_GROUP_BY_AUTHOR, BS_GROUP_BY_YEAR,
+        BS_GROUP_BY_GENRE,
+    };
+    if (n < cap)
+        out[n++] = BS_GROUP_ALL;
+    for (unsigned int i = 0; i < sizeof cand / sizeof cand[0]; i++)
+        if (n < cap && bs_view_dim_available(cand[i]))
+            out[n++] = cand[i];
+    return n;
+}
+
+/* Level (1-based) at which *dim* sits in the current group path, or 0. */
+static int
+group_path_level(BsGroupDim dim)
+{
+    for (int i = 0; i < bs_g_group_depth && i < BS_GROUP_MAX_LEVELS; i++)
+        if (bs_g_group_path[i] == dim)
+            return i + 1;
+    return 0;
+}
+
+static void
+bs_group_geom(int *px, int *py, int *pw, int *ph)
+{
+    BsGroupDim opts[1 + 4];
+    int n = bs_group_options(opts, 1 + 4);
+    int w = ScreenWidth();
+    *pw = w * 3 / 4;
+    *ph = 72 + n * 96 + 24;
+    *px = (w - *pw) / 2;
+    *py = (bs_content_bottom() - *ph) / 2;
+}
+
+void
+bs_draw_overlay_group(void)
+{
+    int pw, ph, px, py;
+    bs_group_geom(&px, &py, &pw, &ph);
+
+    bs_dim_content(0);
+    FillArea(px, py, pw, ph, WHITE);
+    DrawRect(px, py, pw, ph, BLACK);
+    DrawRect(px + 1, py + 1, pw - 2, ph - 2, BLACK);
+
+    char gpath[BS_MAX_TITLE_LEN + 32];
+    group_path_summary(gpath, sizeof gpath);
+
+    ifont *tf = OpenFont(DEFAULTFONTB, 28, 0);
+    if (tf != NULL) {
+        SetFont(tf, BLACK);
+        DrawString(px + BS_CTX_PAD, py + 16, bs_i18n("action.group_by"));
+        SetFont(tf, DGRAY);
+        DrawString(px + BS_CTX_PAD, py + 46, gpath);
+        CloseFont(tf);
+    }
+    DrawLine(px + BS_CTX_PAD, py + 76, px + pw - BS_CTX_PAD, py + 76, LGRAY);
+
+    BsGroupDim opts[1 + 4];
+    int n = bs_group_options(opts, 1 + 4);
+    int y0 = py + 84;
+    ifont *f = OpenFont(DEFAULTFONTB, 26, 0);
+    for (int i = 0; i < n; i++) {
+        BsGroupDim d = opts[i];
+        int lvl = (d == BS_GROUP_ALL) ? (bs_g_group_depth == 0 ? 1 : 0)
+                                      : group_path_level(d);
+        int sel = lvl != 0;
+        FillArea(px + 12, y0 + i * 96, pw - 24, 96 - 12, sel ? BLACK : WHITE);
+        DrawRect(px + 12, y0 + i * 96, pw - 24, 96 - 12, BLACK);
+        if (f != NULL) {
+            char line[BS_MAX_TITLE_LEN + 16];
+            if (sel && lvl > 1)
+                snprintf(line, sizeof line, "%s  (%d)", bs_i18n(dim_label(d)), lvl);
+            else
+                snprintf(line, sizeof line, "%s", bs_i18n(dim_label(d)));
+            SetFont(f, sel ? WHITE : BLACK);
+            DrawString(px + 32, y0 + i * 96 + (96 - 26) / 2 - 2, line);
+        }
+    }
+    if (f != NULL)
+        CloseFont(f);
+}
+
+void
+bs_draw_overlay_sort(void)
+{
+    int w = ScreenWidth();
+    int pw = w * 3 / 4;
+    int n = 4;
+    int ph = 72 + n * 96 + 24;
+    int px = (w - pw) / 2;
+    int py = (bs_content_bottom() - ph) / 2;
+
+    bs_dim_content(0);
+    FillArea(px, py, pw, ph, WHITE);
+    DrawRect(px, py, pw, ph, BLACK);
+    DrawRect(px + 1, py + 1, pw - 2, ph - 2, BLACK);
+
+    ifont *tf = OpenFont(DEFAULTFONTB, 28, 0);
+    if (tf != NULL) {
+        SetFont(tf, BLACK);
+        DrawString(px + BS_CTX_PAD, py + 16, bs_i18n("action.sort_by"));
+        SetFont(tf, DGRAY);
+        DrawString(px + BS_CTX_PAD, py + 46, bs_i18n(sort_label()));
+        CloseFont(tf);
+    }
+    DrawLine(px + BS_CTX_PAD, py + 76, px + pw - BS_CTX_PAD, py + 76, LGRAY);
+
+    const char *labels[4] = {
+        "sort.title_az", "sort.author", "sort.series", "sort.recent",
+    };
+    int y0 = py + 84;
+    ifont *f = OpenFont(DEFAULTFONTB, 26, 0);
+    for (int i = 0; i < n; i++) {
+        int sel = (i == (int)bs_g_state.sort);
+        FillArea(px + 12, y0 + i * 96, pw - 24, 96 - 12, sel ? BLACK : WHITE);
+        DrawRect(px + 12, y0 + i * 96, pw - 24, 96 - 12, BLACK);
+        if (f != NULL) {
+            SetFont(f, sel ? WHITE : BLACK);
+            DrawString(px + 32, y0 + i * 96 + (96 - 26) / 2 - 2, bs_i18n(labels[i]));
+        }
+    }
+    if (f != NULL)
+        CloseFont(f);
 }
 
 void

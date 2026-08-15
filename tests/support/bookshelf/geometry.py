@@ -274,6 +274,38 @@ class BookshelfGeometry:
         """A point guaranteed to be right of the left-anchored Menu panel."""
         return (self.screen_w - 4, self.screen_h // 2)
 
+    # ── group / sort chooser sheets (centered source-chooser style) ────
+
+    # App grid area starts just below the top bar (BS_TOP_BAR_H 96 +
+    # BS_TOP_BAR_PAD 12); the group header band is the first 48 px.
+    GROUP_GRID_TOP = 108
+    GROUP_HEADER_H = 48
+
+    def _chooser_py(self, n_rows: int) -> int:
+        ph = 72 + n_rows * 96 + 24
+        return (self.screen_h - ph) // 2
+
+    def chooser_outside_point(self) -> tuple[int, int]:
+        """A point guaranteed outside any centred chooser sheet."""
+        return (self.screen_w - 4, self.screen_h // 2)
+
+    def group_option_center(self, index: int, n_rows: int = 5) -> tuple[int, int]:
+        """Centre of group-chooser option *index*: row 0 = All books, then
+        Series / Author / Year / Genre (n_rows defaults to all five with
+        the mock provider's data)."""
+        py = self._chooser_py(n_rows)
+        return (self.screen_w // 2, py + 84 + index * 96 + 48)
+
+    def sort_option_center(self, index: int) -> tuple[int, int]:
+        """Centre of sort-chooser option *index* (0..3: title/author/
+        series/recent)."""
+        py = self._chooser_py(4)
+        return (self.screen_w // 2, py + 84 + index * 96 + 48)
+
+    def group_header_center(self) -> tuple[int, int]:
+        """Centre of the current page's dimension-group header band."""
+        return (self.screen_w // 2, self.GROUP_GRID_TOP + self.GROUP_HEADER_H // 2)
+
     # ── top-bar right-corner buttons ──────────────────────────────────
 
     def sync_button_center(self) -> tuple[int, int]:

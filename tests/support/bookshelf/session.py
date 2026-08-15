@@ -139,6 +139,84 @@ class BookshelfSession:
     def tap_menu(self) -> None:
         self.tap_at(*self._g.menu_button_center())
 
+    def open_group_drawer(self) -> None:
+        """Open the left group drawer via the physical Menu key."""
+        from tests.support.bookshelf.backends import IV_KEY_MENU
+        self._backend.key(IV_KEY_MENU)
+        time.sleep(0.3)
+        self.snapshot("group_drawer")
+
+    def tap_drawer_group_by(self) -> None:
+        """From the open drawer, tap the "Group by" row."""
+        self.tap_at(*self._g.menu_item_center(0))
+        time.sleep(0.3)
+
+    def tap_drawer_sort_by(self) -> None:
+        """From the open drawer, tap the "Sort by" row."""
+        self.tap_at(*self._g.menu_item_center(1))
+        time.sleep(0.3)
+
+    def group_rows(self) -> dict[str, int]:
+        """Row index (in the group chooser) of each grouping option the
+        app actually offers for the current data.  Rows: 0 = All books,
+        then Series / Author / Year / Genre in that order, minus any
+        dimension for which no book has a value (data-driven).  Reads the
+        app's store so the sheet geometry matches reality."""
+        import sqlite3
+        path = getattr(self._backend, "store_path", None)
+        rows: dict[str, int] = {"all": 0}
+        n = 1
+
+        def _has(col_expr: str) -> bool:
+            if not path:
+                return True
+            try:
+                con = sqlite3.connect(str(path))
+                try:
+                    r = con.execute(
+                        f"SELECT COUNT(*) FROM books WHERE {col_expr}"
+                    ).fetchone()
+                finally:
+                    con.close()
+                return bool(r and r[0] > 0)
+            except Exception:  # noqa: BLE001 - db may be mid-sync
+                return True
+
+        if _has("series IS NOT NULL AND series!=''"):
+            rows["series"] = n
+            n += 1
+        if _has("author IS NOT NULL AND author!=''"):
+            rows["author"] = n
+            n += 1
+        if _has("added_at IS NOT NULL"):
+            rows["year"] = n
+            n += 1
+        if _has("genre IS NOT NULL AND genre!=''"):
+            rows["genre"] = n
+            n += 1
+        rows["_n"] = n
+        return rows
+
+    def choose_group_options(self, dims: list[str]) -> None:
+        """Open the drawer -> Group by -> toggle the given dimensions
+        (e.g. ['year','author']) in order, then dismiss the sheet.
+        Toggling stays open so a multi-level path can be built."""
+        rows = self.group_rows()
+        n = rows.get("_n", 5)
+        self.open_group_drawer()
+        self.tap_drawer_group_by()
+        self.wait_for_stable()
+        for d in dims:
+            self.tap_at(*self._g.group_option_center(rows[d], n))
+            self.wait_for_stable()
+        self.tap_at(*self._g.chooser_outside_point())
+        self.wait_for_stable()
+
+    def tap_group_header(self) -> None:
+        """Tap the current page's group header (drills into the group)."""
+        self.tap_at(*self._g.group_header_center())
+        self.wait_for_stable()
+
     def tap_search(self) -> None:
         self.tap_at(*self._g.search_icon_center())
 

@@ -90,6 +90,12 @@ void bs_draw_series_stack_badge(int cx, int cy, int cw, int ch, int count, ifont
 
 void bs_draw_thumbnail(int x, int y, int w, int h, const BsTileRow *tr, int vi);
 
+/* Dimension-group header band + drill actions (bs_grid.c). */
+void bs_draw_group_header(const char *label, int x, int y, int w, int h);
+void bs_group_drill(const char *value);
+void bs_group_drill_back(void);
+int bs_group_active(void);
+
 int bs_history_pagesize(void);
 
 int bs_current_pages(void);
@@ -156,6 +162,14 @@ void bs_draw_pager(void);
 void bs_draw_overlay_menu(void);
 
 void bs_draw_overlay_more(void);
+
+void bs_draw_overlay_group(void);
+
+void bs_draw_overlay_sort(void);
+
+/* Group chooser row list (bs_overlays.c): All + available dimensions. */
+int bs_group_options(BsGroupDim out[], int cap);
+int bs_view_dim_available(BsGroupDim dim);
 
 /* 1 = any modal overlay or popup is up (input routing, long-press
  * arming, and background work like cover fetches should pause). */

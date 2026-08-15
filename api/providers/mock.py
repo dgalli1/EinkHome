@@ -47,6 +47,7 @@ _SYN_AUTHORS = (
     "Finn Ocker",
 )
 _SYN_FMTS = ("epub", "epub", "epub", "pdf", "fb2")
+_SYN_GENRES = ("Fiction", "Fantasy", "Sci-Fi", "Mystery", "History", "Poetry")
 # Fixed epoch for synthetic timestamps so the whole library has a stable
 # added_at ordering (i-based) independent of the server's wall clock.
 _SYN_EPOCH = 1_700_000_000.0
@@ -412,6 +413,7 @@ class MockProvider(Provider):
             series=series_name,
             series_id=series_id,
             series_index=series_index,
+            genre=rec.get("genre") or _SYN_GENRES[i % len(_SYN_GENRES)],
             summary=f"Open Library work {rec.get('ol_key') or book_id}",
             language=None,
             file_format=fmt,
@@ -449,6 +451,7 @@ class MockProvider(Provider):
             series=series_name,
             series_id=series_id,
             series_index=series_index,
+            genre=_SYN_GENRES[i % len(_SYN_GENRES)],
             summary=f"Synthetic mock book #{i}",
             language=None,
             file_format=fmt,

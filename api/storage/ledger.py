@@ -37,7 +37,7 @@ Schema:
     books(id TEXT PRIMARY KEY, rev INTEGER UNIQUE, added_at TEXT,
           title TEXT, authors TEXT, series TEXT, series_id TEXT,
           series_idx REAL, format TEXT, size INTEGER, fp TEXT,
-          file_name TEXT, search_text TEXT, suggest TEXT)
+          file_name TEXT, search_text TEXT, suggest TEXT, genre TEXT)
         rev         — current revision; bumped on every change
         added_at    — ISO timestamp first seen; NULL = tombstone
         authors     — JSON array of names
@@ -101,6 +101,7 @@ class LedgerEntry:
     file_name: str | None = None
     search_text: str | None = None  # folded search blob, precomputed at walk time
     suggest: str | None = None  # JSON array of suggestion terms, precomputed
+    genre: str | None = None  # grouping dimension; None when provider has none
 
 
 def fingerprint_blob(
@@ -192,6 +193,10 @@ class SyncLedger:
             pass  # column already present
         try:
             self.con.execute("ALTER TABLE books ADD COLUMN suggest TEXT")
+        except sqlite3.OperationalError:
+            pass  # column already present
+        try:
+            self.con.execute("ALTER TABLE books ADD COLUMN genre TEXT")
         except sqlite3.OperationalError:
             pass  # column already present
         self.con.execute(
@@ -581,7 +586,7 @@ class SyncLedger:
         self.con.executemany(
             "INSERT OR IGNORE INTO books(id, rev, added_at, title, authors, "
             "series, series_id, series_idx, format, size, fp, file_name, "
-            "search_text, suggest) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "search_text, suggest, genre) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             rows,
         )
         self._state_set("next_rev", next_rev)
@@ -616,6 +621,7 @@ class SyncLedger:
                     meta.file_name,
                     _search_text(meta.title or "", names, meta.series),
                     suggest_json,
+                    meta.genre,
                     meta.id,
                 )
             )
@@ -623,7 +629,7 @@ class SyncLedger:
         self.con.executemany(
             "UPDATE books SET rev=?, added_at=?, title=?, authors=?, "
             "series=?, series_id=?, series_idx=?, format=?, size=?, fp=?, "
-            "file_name=?, search_text=?, suggest=? WHERE id=?",
+            "file_name=?, search_text=?, suggest=?, genre=? WHERE id=?",
             rows,
         )
         self._state_set("next_rev", next_rev)
@@ -664,6 +670,7 @@ class SyncLedger:
             meta.file_name,
             _search_text(meta.title or "", names, meta.series),
             suggest_json,
+            meta.genre,
         )
 
     def _state_get(self, key: str) -> int:
@@ -688,7 +695,7 @@ class SyncLedger:
         snapshot), so they never block on an in-flight walk."""
         rows = self.rdcon.execute(
             "SELECT rev, id, added_at, title, authors, series, series_id, "
-            "series_idx, format, size, file_name, search_text, suggest "
+            "series_idx, format, size, file_name, search_text, suggest, genre "
             "FROM books WHERE rev > ? ORDER BY rev LIMIT ?",
             (cursor, limit + 1),
         ).fetchall()
@@ -708,6 +715,7 @@ class SyncLedger:
                 file_name=r[10],
                 search_text=r[11],
                 suggest=r[12],
+                genre=r[13],
             )
             for r in rows[:limit]
         ]

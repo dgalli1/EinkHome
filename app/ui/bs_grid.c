@@ -155,15 +155,16 @@ bs_tile_rect_for_index(int idx, int *x, int *y, int *w, int *h)
     (void)bot;
     bs_grid_geom(&top, &bot, &cell_w, &cell_h);
     int cols = bs_view_cols();
-    int ps = bs_view_pagesize();
-    int page_start = bs_g_state.page * ps;
+    int hdr = bs_g_group_has_header ? BS_GROUP_HEADER_H : 0;
+    int page_start = bs_view_page_lo(); /* grouped-aware exclusive lo */
+    int ps = bs_view_page_n();
     int rel = idx - page_start;
     if (rel < 0 || rel >= ps || idx >= bs_g_view_total)
         return 0;
     int row = rel / cols;
     int col = rel % cols;
     *x = bs_grid_x0() + col * cell_w;
-    *y = top + 4 + row * cell_h;
+    *y = top + 4 + hdr + row * cell_h;
     *w = cell_w - 8;
     *h = cell_h - 6;
     return 1;
@@ -207,18 +208,10 @@ bs_cover_schedule_next(void)
 {
     if (bs_g_cover_armed)
         return;
-    int top, bot, cell_w, cell_h;
-    (void)top;
-    (void)cell_w;
-    (void)cell_h;
-    bs_grid_geom(&top, &bot, &cell_w, &cell_h);
-    int ps = bs_view_pagesize();
-    int page_start = bs_g_state.page * ps;
-    int lim = page_start + ps;
-    if (lim > bs_g_view_total)
-        lim = bs_g_view_total;
-    for (int i = page_start; i < lim; i++) {
-        const char *id = page_row_id(i - page_start);
+    /* Schedule from the fetched page rows directly (grouped pages have
+     * a lo offset that isn't a multiple of the pagesize). */
+    for (int i = 0; i < bs_g_row_count; i++) {
+        const char *id = page_row_id(i);
         if (id == NULL)
             break;
         BsCoverSlot *s = bs_cover_slot(id, 1);
@@ -466,6 +459,58 @@ bs_draw_thumbnail(int x, int y, int w, int h, const BsTileRow *tr, int vi)
     grid_fonts_close(&gf);
 }
 
+/* A dimension-group header band: the group value (tappable → drill-in). */
+void
+bs_draw_group_header(const char *label, int x, int y, int w, int h)
+{
+    ifont *f = OpenFont(DEFAULTFONTB, 26, 0);
+    if (f != NULL) {
+        SetFont(f, BLACK);
+        DrawString(x + 14, y + (h - 26) / 2 - 2, label);
+        /* A small drill-in chevron on the right. */
+        DrawString(x + w - 34, y + (h - 26) / 2 - 2, "\u203a");
+        CloseFont(f);
+    }
+}
+
+/* ── dimension-group drill actions ──────────────────────────────────── */
+
+/* Tap a group header: push its value onto the drill path and regroup by
+ * the next level (or show the leaf's books when every level is used). */
+void
+bs_group_drill(const char *value)
+{
+    if (bs_g_drill_depth < 0 || bs_g_drill_depth >= BS_GROUP_MAX_LEVELS)
+        return;
+    snprintf(bs_g_drill_values[bs_g_drill_depth], sizeof bs_g_drill_values[0],
+             "%s", value ? value : "");
+    bs_g_drill_depth++;
+    bs_g_drilled_series[0] = '\0';
+    bs_g_state.page = 0;
+    bs_view_rebuild();
+    bs_redraw_shelf();
+}
+
+/* Pop one group-drill level (top-bar back button / back key). */
+void
+bs_group_drill_back(void)
+{
+    if (bs_g_drill_depth > 0) {
+        bs_g_drill_depth--;
+        bs_g_drill_values[bs_g_drill_depth][0] = '\0';
+    }
+    bs_g_state.page = 0;
+    bs_view_rebuild();
+    bs_redraw_shelf();
+}
+
+/* 1 = a multi-level group path is in effect (not All books). */
+int
+bs_group_active(void)
+{
+    return bs_g_group_depth > 0;
+}
+
 void
 bs_draw_grid(void)
 {
@@ -487,24 +532,32 @@ bs_draw_grid(void)
         top,
         bot);
 
-    int ps = bs_view_pagesize();
     bs_g_row_count = bs_view_fetch_page(bs_g_state.page, bs_g_rows, BS_MAX_ROWS * BS_COLS);
     int cols = bs_view_cols();
     int rows = bs_view_rows();
+    int hdr = bs_g_group_has_header ? BS_GROUP_HEADER_H : 0;
+    /* Group header band: dimension-group pages reserve the top row. */
+    if (hdr > 0) {
+        FillArea(0, top, ScreenWidth(), hdr, LGRAY);
+        bs_draw_group_header(bs_g_group_label, 0, top, ScreenWidth(), hdr);
+        bs_LOG("[bookshelf] group_header=%s has_header=%d\n",
+            bs_g_group_label, bs_g_group_has_header);
+    }
     int drawn = 0;
     /* Open the tile fonts once for the whole page pass instead of once
      * per tile (each draw_thumbnail used to open/close 4 fonts). */
     BsGridFonts gf;
     grid_fonts_open(&gf);
+    int lo = bs_view_page_lo();
     for (int row = 0; row < rows; row++) {
         for (int col = 0; col < cols; col++) {
             if (drawn >= bs_g_row_count)
                 goto done;
             int tx = bs_grid_x0() + col * cell_w;
-            int ty = top + 4 + row * cell_h;
+            int ty = top + 4 + hdr + row * cell_h;
             int tw = cell_w - 8;
             int th = cell_h - 6;
-            draw_thumbnail_fonts(tx, ty, tw, th, &bs_g_rows[drawn], bs_g_state.page * ps + drawn, &gf);
+            draw_thumbnail_fonts(tx, ty, tw, th, &bs_g_rows[drawn], lo + drawn, &gf);
             drawn++;
         }
     }
@@ -608,21 +661,11 @@ cover_job_done(BsJob *job)
     int tx, ty, tw, th;
     int target = -1;
     if (shelf_active_view()) {
-        int top, bot, cell_w, cell_h;
-        (void)top;
-        (void)bot;
-        (void)cell_w;
-        (void)cell_h;
-        bs_grid_geom(&top, &bot, &cell_w, &cell_h);
-        int ps = bs_view_pagesize();
-        int page_start = bs_g_state.page * ps;
-        int lim = page_start + ps;
-        if (lim > bs_g_view_total)
-            lim = bs_g_view_total;
-        for (int i = page_start; i < lim; i++) {
-            const char *id = page_row_id(i - page_start);
+        int page_start = bs_view_page_lo();
+        for (int k = 0; k < bs_g_row_count; k++) {
+            const char *id = page_row_id(k);
             if (id != NULL && strcmp(id, a->id) == 0) {
-                target = i;
+                target = page_start + k;
                 break;
             }
         }
@@ -666,21 +709,16 @@ bs_cover_tick(void *ctx)
     (void)bot;
     (void)cell_w;
     (void)cell_h;
-    bs_grid_geom(&top, &bot, &cell_w, &cell_h);
-    int ps = bs_view_pagesize();
-    int page_start = bs_g_state.page * ps;
-    int lim = page_start + ps;
-    if (lim > bs_g_view_total)
-        lim = bs_g_view_total;
+    int page_start = bs_view_page_lo();
 
     int target = -1;
-    for (int i = page_start; i < lim; i++) {
-        const char *id = page_row_id(i - page_start);
+    for (int k = 0; k < bs_g_row_count; k++) {
+        const char *id = page_row_id(k);
         if (id == NULL)
             break;
         BsCoverSlot *s = bs_cover_slot(id, 1);
         if (s != NULL && s->state == 0) {
-            target = i;
+            target = page_start + k;
             break;
         }
     }
