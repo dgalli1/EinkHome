@@ -11,18 +11,28 @@
  * Adding a future platform (Kobo/Kindle/…) means providing a new backend
  * that implements the functions declared below and the same drawing/event
  * subset; the app code is unchanged.
- */
-
-/* PB backend: this is the only translation unit that pulls in the
- * firmware SDK headers.  The inkview drawing/event API the app uses
+ *
+ * Backend selection: the build defines BS_PLATFORM_SDL to compile the
+ * native PC (x64 Wayland/X11 via SDL2) backend; otherwise the PocketBook
+ * backend is used.  In the SDL case the inkview/hwconfig headers below
+ * resolve to app/platform/sdl/ compat headers (the same struct layouts,
+ * event codes and colour constants as the firmware SDK, so the app
+ * compiles and behaves unchanged).  The drawing/event API the app uses
  * (DrawString/DrawLine/DrawRect/FillArea/SetFont/OpenFont/CloseFont/
  * StringWidth/PartialUpdate/FullUpdate/DrawBitmap/StretchBitmap/
- * GetCanvas/OpenKeyboard/EVT and IV_KEY constants, ibitmap/ifont/irect) is part
- * of the contract.  Colour constants are the contract too:
+ * GetCanvas/OpenKeyboard/EVT and IV_KEY constants, ibitmap/ifont/irect)
+ * is part of the contract.  Colour constants are the contract too:
  *   BLACK = 0x000000, DGRAY = 0x555555, LGRAY = 0xaaaaaa, WHITE = 0xffffff
  */
+#ifdef BS_PLATFORM_SDL
+#include "sdl/inkview.h"
+#include "sdl/hwconfig.h"
+#else
+/* PB backend: this is the only translation unit that pulls in the
+ * firmware SDK headers. */
 #include <inkview.h>
 #include <hwconfig.h>
+#endif
 
 /* libinkview exports iv_update_panel() but the public SDK header omits it.
  * It renders the system status strip (clock / battery / wifi) into the
@@ -50,6 +60,7 @@ extern void GetKeyboardRect(irect *rect) __attribute__((weak));
 /* ── backend functions (implemented in app/platform/bs_plat_pb.c) ──── */
 
 struct BsLcProfile;
+struct BsLauncherItem;
 
 /* Register with the firmware exactly like the stock bookshelf's main()
  * (InitInkview/IvSetAppCapability/SetOrientation/SetDefaultOrientation/
@@ -80,5 +91,19 @@ void bs_plat_device_profile(struct BsLcProfile *out, const char *lang);
 
 /* Log device model + firmware version once at boot. */
 void bs_plat_log_identity(void);
+
+/* Populate the app-launcher item list (the "Apps" overlay).  The items
+ * are platform-neutral (name/path/icon/params); where they come from is
+ * backend-specific — PocketBook reads its firmware view.json/apps_db.json
+ * plus scans /mnt/ext1/applications for *.app files; the PC backend reads
+ * the freedesktop .desktop files (Name/Exec/Icon) from the standard
+ * application dirs.  Returns the number of items written (<= cap).
+ * Callers own the array. */
+int bs_plat_launcher_build(struct BsLauncherItem *items, int cap);
+
+/* Launch the app described by `it`.  argv[0] is the app path followed by
+ * its params (NULL-terminated, so argv/argc let a native backend exec
+ * directly).  Returns 0 on success, non-zero on failure. */
+int bs_plat_launch_app(const struct BsLauncherItem *it, char **argv, int argc);
 
 #endif /* BS_PLAT_H */

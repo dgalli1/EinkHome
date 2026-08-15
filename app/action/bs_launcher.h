@@ -42,6 +42,10 @@ void bs_launcher_add_app(const cJSON *apps, const char *id);
 
 void bs_launcher_build(void);
 
+/* PocketBook data source for the launcher (view.json + apps_db.json +
+ * /mnt/ext1/applications scan); called via bs_plat_launcher_build. */
+void bs_launcher_build_pb(void);
+
 void bs_launcher_scan_ext1_apps(void);
 
 void bs_draw_launcher_icon(int cx, int cy, const char *icon_name,

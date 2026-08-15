@@ -11,6 +11,7 @@ Run with: pytest tests/test_bookshelf.py -v
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -62,6 +63,7 @@ from tests.support.bookshelf.env import (
 from tests.support.reader.session import Session
 from tests.support.runtime import Emulator, container_sh
 from tests.support.runtime_common import REPO_ROOT
+from tests.support import ui_input as _UI_INPUT
 
 pytestmark = pytest.mark.bookshelf
 
@@ -69,9 +71,98 @@ pytestmark = pytest.mark.bookshelf
 # ── fixtures ───────────────────────────────────────────────────────────
 
 
+def _sdl_env():
+    """Headless SDL (native PC) environment: API server + bookshelf.pc
+    driven over the IPC socket.  Fast, no emulator, parallel-safe."""
+    from tests.support.bookshelf.backends import SdlBackend
+
+    root = EINKHOME_ROOT
+    # 1. Build a dedicated test binary with the IPC control socket enabled.
+    #    The plain `make pc` production build has no control socket; this
+    #    uses a distinct output (build/bookshelf.test) so the two never
+    #    clobber each other.
+    _ipc_env = os.environ.copy()
+    _ipc_env["BS_ENABLE_TEST_IPC"] = "1"
+    subprocess.run(
+        ["bash", "sdk/build_pc.sh", "--output", "build/bookshelf.test"],
+        cwd=root, check=True, capture_output=True, env=_ipc_env)
+    # 2. Start the mock API server.
+    api_proc = _start_api_server()
+    sock = f"/tmp/bs-{os.getpid()}.sock"
+    logdir = root / "build" / f"bs-{os.getpid()}"
+    logdir.mkdir(parents=True, exist_ok=True)
+    logpath = logdir / "bookshelf.log"
+    env = os.environ.copy()
+    env["BS_SOCKET"] = sock
+    env["SDL_VIDEODRIVER"] = "dummy"
+    env["PBEMU_LOG_DIR"] = str(logdir)
+    (root / "build").mkdir(parents=True, exist_ok=True)
+    (root / "build" / "bookshelf.cfg").write_text(
+        f"api_url=http://127.0.0.1:{API_PORT}\napi_token=pbemu-dev-token\n",
+        encoding="utf-8")
+    _held = {"proc": None}
+
+    def _launch():
+        p = subprocess.Popen(
+            [str(root / "build" / "bookshelf.test")],
+            cwd=root, env=env, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL)
+        _held["proc"] = p
+        return p
+
+    proc = _launch()
+    backend = SdlBackend(
+        sock, str(logpath), api_url=f"http://127.0.0.1:{API_PORT}",
+        relaunch=_launch)
+
+    # 3. Build geometry (the SDL build is 1072x1448, no panel).
+    geom = BookshelfGeometry(screen_w=1072, screen_h=1448, panel_h=0)
+    # Wait for the app to boot + sync a bit.
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline:
+        try:
+            backend.frame_hash()
+            break
+        except (ConnectionError, OSError):
+            time.sleep(0.2)
+    bs = BookshelfSession(backend, geom, "sdl")
+    time.sleep(3.0)  # let the initial sync + draw settle
+    try:
+        yield bs, _held["proc"]
+    finally:
+        try:
+            backend.kill_all()
+        except Exception:  # noqa: BLE001
+            pass
+        p = _held["proc"]
+        if p is not None:
+            p.terminate()
+            try:
+                p.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                p.kill()
+        _stop_api_server(api_proc)
+
+
 @pytest.fixture(scope="module")
 def bookshelf_env():
-    """Full bookshelf e2e environment: API server + staged binary + emulator."""
+    """Full bookshelf e2e environment: API server + a bookshelf backend.
+
+    The backend is selected by BS_TEST_BACKEND (emulator | sdl);
+    default is the emulator (the classic qemu target).  Each yields
+    ``(bs, runtime)`` where *runtime* is an Emulator for the emulator
+    backend (tests that need its probes) or a Popen for the sdl target.
+    """
+    backend_name = os.environ.get("BS_TEST_BACKEND", "emulator")
+    if backend_name == "sdl":
+        yield from _sdl_env()
+        return
+        return
+    yield from _emulator_env()
+
+
+def _emulator_env():
+    """Emulator-backed environment (the default; the classic qemu path)."""
     if shutil.which(PODMAN) is None:
         pytest.skip(f"{PODMAN} not available")
 
@@ -169,7 +260,12 @@ def bookshelf_env():
             panel_h=panel_h,
         )
         session = Session(emulator)
-        bs = BookshelfSession(session, geom, FIRMWARE)
+        from tests.support.bookshelf.backends import EmulatorBackend
+
+        backend = EmulatorBackend(
+            emulator, FIRMWARE, session_cls=Session, ui_input=_UI_INPUT
+        )
+        bs = BookshelfSession(backend, geom, FIRMWARE)
 
         yield bs, emulator
     except BaseException:
@@ -215,7 +311,7 @@ def fresh_bookshelf(bookshelf_env, request):
     # restart below opens the test's own invocation).
     request.node._bs_log_open_start = bs.invocation_count()  # type: ignore[attr-defined]
     bs.begin_snapshots(request.node.name)
-    _restart_bookshelf(emulator)
+    bs.backend.restart()
     bs.snapshot("boot")
     yield bs
     request.node._bs_log_open_end = bs.invocation_count()  # type: ignore[attr-defined]
@@ -646,7 +742,16 @@ def _dump_frame(emulator: Emulator, name: str) -> bytes:
     return (PBEMU_ROOT / FIRMWARE / ".live" / "tmp" / f"{name}.ppm").read_bytes()
 
 
-def _settled_dump(emulator: Emulator, name: str, *, timeout: float = 5.0) -> bytes:
+def _frame_dump(runtime, name: str) -> bytes:
+    """Return the current framebuffer as PPM bytes.  *runtime* is either
+    an Emulator (emulator backend) or the test's BookshelfSession (other
+    backends) — both let us grab a frame dump."""
+    if hasattr(runtime, "backend"):
+        return runtime.backend.frame_ppm(name)
+    return _dump_frame(runtime, name)
+
+
+def _settled_dump(runtime, name: str, *, timeout: float = 5.0) -> bytes:
     """Dump the framebuffer, retrying until two consecutive dumps are
     byte-identical (the frame settled), then return the settled bytes.
 
@@ -656,7 +761,7 @@ def _settled_dump(emulator: Emulator, name: str, *, timeout: float = 5.0) -> byt
     deadline = time.monotonic() + timeout
     prev: bytes | None = None
     while time.monotonic() < deadline:
-        cur = _dump_frame(emulator, name)
+        cur = _frame_dump(runtime, name)
         if prev is not None and cur == prev:
             return cur
         prev = cur
@@ -699,7 +804,7 @@ def test_search_page_hides_source_button(fresh_bookshelf):
     mx0, my0, mx1, my1 = w - 104, panel + 48, w - 8, panel + 84
 
     # Shelf: both spots are drawn (non-white).
-    shelf = _settled_dump(bs.emulator, "bs_source_shelf")
+    shelf = _settled_dump(bs, "bs_source_shelf")
     assert not _ppm_region_white(shelf, sx0, sy0, sx1, sy1), "source button not drawn on the shelf"
     assert not _ppm_region_white(shelf, mx0, my0, mx1, my1), "menu icon not drawn on the shelf"
 
@@ -708,7 +813,7 @@ def test_search_page_hides_source_button(fresh_bookshelf):
     bs.wait_for_stable()
 
     # Both spots are now plain white — the buttons are gone.
-    search = _settled_dump(bs.emulator, "bs_source_search")
+    search = _settled_dump(bs, "bs_source_search")
     assert _ppm_region_white(search, sx0, sy0, sx1, sy1), "source button still drawn on Search page"
     assert _ppm_region_white(search, mx0, my0, mx1, my1), "right icons still drawn on Search page"
 
@@ -755,7 +860,7 @@ def _dump_suggestion_in_band(bs: BookshelfSession, name: str, *, timeout: float 
     """
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        ppm = _dump_frame(bs.emulator, name)
+        ppm = _frame_dump(bs, name)
         if _ppm_ink_xs(
             ppm, 24, bs.geom.panel_h + 228, 300, bs.geom.panel_h + 430
         ):
@@ -774,7 +879,7 @@ def test_search_page_layout_centered(fresh_bookshelf):
     panel = bs.geom.panel_h
     bs.tap_search_and_verify()
     bs.wait_for_stable()
-    ppm = _settled_dump(bs.emulator, "bs_search_layout")
+    ppm = _settled_dump(bs, "bs_search_layout")
 
     # Title: the only ink in the top-bar band between the back button
     # and the right edge is the title text; its extent must be centred

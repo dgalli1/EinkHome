@@ -1,7 +1,7 @@
 # EinkHome Makefile — build the EinkHome guest app.
 #
 # The source list lives HERE and only here; scripts/run.sh,
-# scripts/run-visible.sh, scripts/install-device.sh and tests/ all
+# scripts/run-visible-pb.sh, scripts/install-device.sh and tests/ all
 # delegate to `make`.  Compilation is done by sdk/build_armel.sh
 # (arm-linux-gnueabi-gcc inside the pbdev container, linked against
 # the firmware rootfs staged in the pbemu submodule — the wrapper
@@ -31,6 +31,15 @@ ARMHF_FIRMWARE_DIR ?= $(PBEMU_DIR)/U1030_6.11.1437
 BUILD_ARMHF := $(CURDIR)/sdk/build_armhf.sh
 OUT_ARMHF := $(CURDIR)/build/bookshelf.armhf.app
 
+# PC (SDL2) native desktop build — the second platform backend.  The
+# same app sources minus the PocketBook backend, plus sdk/build_pc.sh:
+# host gcc with BS_PLATFORM_SDL so bs_plat.h selects the SDL backend.
+# Requires SDL2/SDL2_ttf/SDL2_image/libcurl dev packages on the host.
+BUILD_PC := $(CURDIR)/sdk/build_pc.sh
+OUT_PC := $(CURDIR)/build/bookshelf.pc
+# App sources excluding the PocketBook backend (replaced by the SDL one).
+PC_SOURCES := $(filter-out platform/bs_plat_pb.c,$(SOURCES))
+
 SOURCES := \
 	core/bs_main.c \
 	core/bs_net.c \
@@ -58,11 +67,13 @@ SOURCES := \
 
 SRC_PATHS := $(addprefix $(CURDIR)/app/,$(SOURCES))
 
-.PHONY: all clean test armhf
+.PHONY: all clean test armhf pc
 
 all: $(OUT)
 
 armhf: $(OUT_ARMHF)
+
+pc: $(OUT_PC)
 
 test:
 	scripts/test.sh
@@ -82,5 +93,9 @@ $(OUT_ARMHF): $(SRC_PATHS) $(wildcard $(CURDIR)/app/*/*.h) $(BUILD_ARMHF)
 		-I/work/app/platform \
 		--output build/bookshelf.armhf.app
 
+$(OUT_PC): $(addprefix $(CURDIR)/app/,$(PC_SOURCES)) app/platform/bs_plat_sdl.c $(BUILD_PC)
+	mkdir -p $(CURDIR)/build
+	$(BUILD_PC) --output build/bookshelf.pc
+
 clean:
-	rm -f $(OUT) $(OUT_ARMHF)
+	rm -f $(OUT) $(OUT_ARMHF) $(OUT_PC)

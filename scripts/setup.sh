@@ -11,7 +11,7 @@
 #   6. Build the emulator support artifacts (shim, informer, viewer,
 #      probes) inside the submodule.
 #
-# Afterwards run ./scripts/run-visible.sh to build the app and start
+# Afterwards run ./scripts/run-visible-pb.sh to build the app and start
 # the Wayland viewer.
 #
 # The firmware zip is cached in /tmp; delete it to force a re-download.
@@ -101,4 +101,4 @@ fi
 
 echo
 echo "Setup complete. Next:"
-echo "    ./scripts/run-visible.sh   # builds the app and starts the Wayland viewer"
+echo "    ./scripts/run-visible-pb.sh   # builds the app and starts the Wayland viewer (or run-visible-sdl.sh for the SDL desktop window)"

@@ -1,6 +1,7 @@
 # lib.sh — shared helpers for the EinkHome scripts.
 #
-# Sourced by run.sh, run-visible.sh and install-device.sh.  Must stay
+# Sourced by run.sh, run-visible-pb.sh, run-visible-sdl.sh,
+# lib-run.sh and install-device.sh.  Must stay
 # POSIX-sh compatible: the callers run under `set -eu` with /bin/sh.
 
 # lan_ip — print the host's primary LAN IPv4 address.

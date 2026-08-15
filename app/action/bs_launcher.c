@@ -421,8 +421,27 @@ bs_launcher_scan_ext1_apps(void)
     closedir(d);
 }
 
+/* The launcher's app list comes from the platform backend behind the
+ * seam (bs_plat_launcher_build): on PocketBook it is the firmware's
+ * view.json + apps_db.json + the /mnt/ext1/applications scan (this
+ * function); on PC it is the freedesktop .desktop files.  The UI
+ * (layout / draw / tap) below is platform-independent. */
 void
 bs_launcher_build(void)
+{
+    bs_g_launcher_count = 0;
+    bs_g_launcher_body_h = 0;
+    bs_g_launcher_count = bs_plat_launcher_build(
+        bs_g_launcher_items, BS_LAUNCHER_MAX_ITEMS);
+    bs_launcher_layout();
+    bs_g_launcher_built = 1;
+    bs_LOG("[bookshelf] launcher built: %d items, %d body height\n",
+        bs_g_launcher_count,
+        bs_g_launcher_body_h);
+}
+
+void
+bs_launcher_build_pb(void)
 {
     bs_g_launcher_count = 0;
     bs_g_launcher_body_h = 0;
@@ -443,8 +462,6 @@ bs_launcher_build(void)
     if (db == NULL || vw == NULL || !cJSON_IsObject(db_apps)) {
         cJSON_Delete(db);
         cJSON_Delete(vw);
-        bs_launcher_layout();
-        bs_g_launcher_built = 1;
         return;
     }
 
@@ -536,11 +553,6 @@ bs_launcher_build(void)
 
     cJSON_Delete(db);
     cJSON_Delete(vw);
-    bs_launcher_layout();
-    bs_g_launcher_built = 1;
-    bs_LOG("[bookshelf] launcher built: %d items, %d body height\n",
-        bs_g_launcher_count,
-        bs_g_launcher_body_h);
 }
 
 /* -- launcher draw ------------------------------------------------------ */
@@ -798,27 +810,16 @@ bs_launch_app(const BsLauncherItem *it)
     args[ai] = NULL;
     bs_LOG("[bookshelf] launching app path=%s base=%s params=%d\n", it->path, base, it->nparams);
     /*
-     * Flags 0xa5 = TASK_HIDDEN | TASK_NOUPDATEONFOCUS | TASK_OUTOFSTACK |
-     * TASK_MAKEACTIVE.  TASK_MAKEACTIVE is the load-bearing bit: without it
-     * monitor.app registers the launched task but never brings it to the
-     * foreground, so a plain `NewTaskEx(…, 0x25, …)` leaves the app running
-     * invisibly in the background.  That is exactly how the browser worked
-     * (webbrowser.sh delegates to openbook → start.app, whose launch carries
-     * TASK_MAKEACTIVE) while calc.app appeared to "not start" (direct ELF
-     * launch with 0x25, no activation).  The pre-0x25 flags match what the
-     * stock bookshelf passes; the previous 1u<<30 bit is not a defined
-     * TASK_* flag and made monitor.app treat the task registration oddly on
-     * the live device. */
-    /*
-     * Draw a centered hourglass and leave it up while the app starts; the
-     * launched task (TASK_MAKEACTIVE) overwrites it once it becomes the
-     * foreground task and draws.  The caller suppresses the shelf redraw for
-     * this path, so the screen freezes on the hourglass instead of falling
-     * back to a static shelf that makes a slow launch look like a no-op.
+     * Draw a centered hourglass and leave it up while the app starts; on
+     * PocketBook the launched task (TASK_MAKEACTIVE, see bs_plat_pb.c
+     * bs_plat_launch_app) overwrites it once it becomes the foreground task
+     * and draws.  The caller suppresses the shelf redraw for this path, so
+     * the screen freezes on the hourglass instead of falling back to a
+     * static shelf that makes a slow launch look like a no-op.  The actual
+     * launch (NewTaskEx on PB, fork/exec on PC) is behind the platform seam.
      */
     bs_show_hourglass();
-    if (NewTaskEx(it->path, ai ? args : NULL, base, it->text, NULL, 0x25 | TASK_MAKEACTIVE, 0) <
-        0) {
+    if (bs_plat_launch_app(it, args, ai) < 0) {
         /* Launch failed: drop the hourglass and bring the launcher back so
          * the user is not stuck staring at an indefinite spinner. */
         HideHourglass();

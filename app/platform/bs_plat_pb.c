@@ -8,6 +8,7 @@
 
 #include "bs_core.h"
 #include "bs_ui.h"
+#include "bs_launcher.h"
 
 /* Exported by the firmware's libinkview but absent from this SDK
  * vintage's headers (and its bundled lib).  Weak so the link succeeds
@@ -151,4 +152,39 @@ bs_plat_log_identity(void)
     bs_LOG("[bookshelf] model=%s fw=%s\n",
            (model != NULL && model[0] != '\0') ? model : "?",
            (fw != NULL && fw[0] != '\0') ? fw : "?");
+}
+
+/* ── app launcher (PB data source + launch) ─────────────────────────── */
+/* The launcher's app list on PocketBook comes from the firmware's
+ * view.json / apps_db.json + the /mnt/ext1/applications *.app scan.  That
+ * parser (bs_lc_* resolvers + the build walk) lives in bs_launcher.c as
+ * bs_launcher_build_pb(); this delegates to it.  bs_plat_launcher_build
+ * writes into the passed items array (the app's global bs_g_launcher_items,
+ * so the PB parser's own globals are reused) and returns the count. */
+
+int
+bs_plat_launcher_build(BsLauncherItem *items, int cap)
+{
+    (void)items;
+    (void)cap;
+    bs_launcher_build_pb();
+    return bs_g_launcher_count;
+}
+
+/* Launch a launcher app on PocketBook via NewTaskEx.  argv[0] is the app
+ * path followed by its params; run_as_reader=0 (a launcher tile is a plain
+ * app launch, not a book-open).  Flags 0x25 | TASK_MAKEACTIVE: see the
+ * load-bearing comment in the pre-seam bs_launch_app — TASK_MAKEACTIVE is
+ * what brings the launched task to the foreground. */
+int
+bs_plat_launch_app(const BsLauncherItem *it, char **argv, int argc)
+{
+    (void)argc;
+    if (!it || !it->path[0])
+        return -1;
+    const char *base = strrchr(it->path, '/');
+    base = base ? base + 1 : it->path;
+    if (NewTaskEx(it->path, argv, base, it->text, NULL, 0x25 | TASK_MAKEACTIVE, 0) < 0)
+        return -1;
+    return 0;
 }

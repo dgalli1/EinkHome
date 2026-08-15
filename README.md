@@ -21,11 +21,13 @@ app/                # the app sources, split by layer:
   ui/               #   drawing: grid, top bar, popups, overlays, browsers
   action/           #   downloads/context menu, input hit-testing, app launcher
   vendor/           #   cJSON, sqlite3.h
-scripts/            # run.sh / run-visible.sh (emulator), setup.sh (bootstrap),
-                    # install-device.sh / install-koreader-device.sh (real device),
-                    # install-koreader.sh (emulator KOReader), uninstall-device.sh,
-                    # test.sh, build_ol_corpus.py + click_first_book.py (dev tools),
-                    # legacy/ (superseded on-device helper scripts, kept for reference)
+scripts/            # run.sh (headless), run-visible-pb.sh (emulator+viewer),
+                    # run-visible-sdl.sh (native SDL desktop window), setup.sh
+                    # (bootstrap), install-device.sh / install-koreader-device.sh
+                    # (real device), install-koreader.sh (emulator KOReader),
+                    # uninstall-device.sh, test.sh, build_ol_corpus.py +
+                    # click_first_book.py (dev tools), legacy/ (superseded
+                    # on-device helper scripts, kept for reference)
 sdk/                # cross-compile wrapper + SDK bootstrap
 tests/              # emulator integration test suite + support framework
 pbemu/              # git submodule: the emulator project this app runs in
@@ -71,9 +73,20 @@ make                       # → build/bookshelf.app
 ## Run in the emulator
 
 ```sh
-./scripts/run-visible.sh   # build + stage + start, WITH the Wayland viewer
-./scripts/run.sh           # headless variant (screenshots)
-pbemu/pbemu stop           # stop the emulator
+./scripts/run-visible-pb.sh   # build + stage + start, WITH the Wayland viewer
+./scripts/run.sh              # headless variant (screenshots)
+pbemu/pbemu stop              # stop the emulator
+```
+
+## Run as a desktop app (SDL)
+
+The same app source also builds natively for the PC — a Wayland/X11
+window rendered by SDL2 (the `bs_plat_sdl` backend behind the platform
+seam).  Requires SDL2/SDL2_ttf/SDL2_image/libcurl dev packages.
+
+```sh
+./scripts/run-visible-sdl.sh  # make pc + start the API + open the SDL window
+# or: make pc; ./build/bookshelf.pc
 ```
 
 ## Install on a real device

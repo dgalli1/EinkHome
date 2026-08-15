@@ -432,7 +432,7 @@ typedef struct BsLcProfile {
 #define BS_LAUNCHER_MAX_ITEMS 64
 #define BS_LAUNCHER_MAX_PARAMS 4
 #define BS_LAUNCHER_PARAM_LEN 64
-typedef struct {
+typedef struct BsLauncherItem {
   int kind; /* 0 = header, 1 = app */
   char text[48];
   char path[BS_MAX_PATH_LEN]; /* full app path; MAX_PATH_LEN so long .app names survive */
