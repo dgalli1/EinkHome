@@ -11,6 +11,12 @@
 # pytest-xdist in the venv):
 #   BS_TEST_BACKEND=sdl scripts/test.sh -- -n auto
 #
+# The SDL suite also carries the offline (no-internet) tests
+# (tests/test_offline_sdl.py): the mock API is the app's only network, and
+# the app is launched with BS_OFFLINE=1 so the SDL build reports no
+# connection — the library must stay navigable, an already-downloaded book
+# must open, and sort/group/search must keep working from the cached store.
+#
 # Requirements: the pbemu submodule venv (cd pbemu && ./setup-venv.sh),
 # podman, the staged firmware (pbemu/pbemu install) and staged books in
 # pbemu/U633_6.8.2817/.live/mnt/ext1/books/.

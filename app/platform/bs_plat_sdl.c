@@ -509,7 +509,17 @@ GetBatteryPower(void)
 
 int
 QueryNetwork(void)
-{ return 0x0f00; } /* net_state ACTIVE; see QuickDownload's connection bits */
+{
+    /* Test hook: BS_OFFLINE=1 reports "no active connection" so the app
+     * behaves like a real device with WiFi off — it skips the boot
+     * auto-sync and skips remote cover fetches (see bs_main.c
+     * init_sync_tick and bs_grid.c cover_tick).  This is how the SDL
+     * e2e suite simulates no internet (the emulator gets the same from
+     * the firmware's real QueryNetwork). */
+    if (getenv("BS_OFFLINE") != NULL)
+        return 0;
+    return 0x0f00; /* net_state ACTIVE; see QuickDownload's connection bits */
+}
 
 void
 BanSleep(int sec)
@@ -1284,6 +1294,8 @@ bs_plat_launch_app(const BsLauncherItem *it, char **argv, int argc)
  *   down x y / up x y / move x y
  *   key <0xIVKEY|sym>   EVT_KEYPRESS (par1=key code, par2=0)
  *   type TEXT           feed text to the OpenKeyboard buffer
+ *   kb_commit           close the OpenKeyboard and fire its handler
+ *                       (equivalent to a real RETURN press)
  *   hash                FNV1a-64 of the RGBA canvas -> "hash=0x%016llx"
  *   shot PATH           write the canvas to PATH as P6 PPM
  *   state               "state=<overlay>:<tab>:<page>"
@@ -1349,6 +1361,17 @@ ipc_handle(const char *line)
         ipc_reply("ok\n", NULL);
     } else if (strcmp(cmd, "type") == 0 && n >= 2) {
         AppendIpcText(a);
+        ipc_reply("ok\n", NULL);
+    } else if (strcmp(cmd, "kb_commit") == 0) {
+        /* Commit the open keyboard exactly like a real RETURN press
+         * (see the SDL_SCANCODE_RETURN handler): close it and fire the
+         * app's handler with the buffer.  Test builds need this because
+         * IPC "key" synthesises EVT_KEYPRESS, which bypasses the SDL
+         * scancode path that would otherwise call the handler. */
+        if (g_kb.open && g_kb.handler) {
+            CloseKeyboard();
+            g_kb.handler(g_kb.buf);
+        }
         ipc_reply("ok\n", NULL);
     } else if (strcmp(cmd, "hash") == 0) {
         char h[32];
