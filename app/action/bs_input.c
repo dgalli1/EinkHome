@@ -481,10 +481,20 @@ bs_on_tap_log_view(int x, int y)
         int page = (btn_y - BS_LOG_BODY_TOP) / BS_LOG_ROW_H;
         if (page < 1)
             page = 1;
-        /* Rows are ordered oldest → newest; up (dir -1) goes older. */
-        bs_g_state.log_scroll += dir * page;
-        if (bs_g_state.log_scroll < 0)
-            bs_g_state.log_scroll = 0;
+        if (bs_g_state.log_scroll < 0) {
+            /* Pinned to the tail.  "Newer" (dir > 0) is already at the
+             * newest lines, so it stays pinned; "older" (dir < 0) pages
+             * up from the tail's last full page. */
+            if (dir < 0) {
+                int first = bs_log_view_tail_first() - page;
+                bs_g_state.log_scroll = first < 0 ? 0 : first;
+            }
+        } else {
+            /* Rows are ordered oldest → newest; up (dir -1) goes older. */
+            bs_g_state.log_scroll += dir * page;
+            if (bs_g_state.log_scroll < 0)
+                bs_g_state.log_scroll = 0;
+        }
         bs_draw_log_view();
         /* One page scroll shifts the log body (and the scroll-button
          * state at the extremes); refresh just that region rather than

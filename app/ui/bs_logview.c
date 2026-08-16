@@ -70,52 +70,85 @@ span_width(const char *p, int len)
     return StringWidth(tmp);
 }
 
-/* Greedy word wrap of the log text into display rows no wider than
- * `maxw` px.  Rows point into `text` (never modified).  Returns the
- * row count. */
+/* Greedy word wrap of ONE line [line_start, line_end) into dst, at most
+ * `mcap` rows (forward order).  Rows point into the line's text (never
+ * modified).  Returns the row count. */
 static int
-log_wrap_rows(const char *text, int maxw, BsLogRow *rows, int cap)
+log_wrap_line(const char *line_start, const char *line_end, int maxw,
+              BsLogRow *dst, int mcap)
 {
     int         count = 0;
-    const char *line = text;
-    while (*line != '\0' && count < cap) {
-        const char *nl = strchr(line, '\n');
-        size_t      llen = nl ? (size_t)(nl - line) : strlen(line);
-        const char *end = line + llen;
-        const char *ws = line;
-        while (ws < end) {
-            const char *we = ws;
-            while (we < end && *we != ' ')
-                we++;
-            if (we == ws) { /* collapse space runs */
-                ws++;
-                continue;
-            }
-            int wordw = span_width(ws, (int)(we - ws));
-            int curw = rows[count].len > 0 ? span_width(rows[count].p, rows[count].len) : 0;
-            if (rows[count].len > 0 && curw + wordw + 6 > maxw) {
-                count++;
-                if (count >= cap)
-                    goto done;
-            }
-            if (rows[count].len == 0)
-                rows[count].p = ws;
-            rows[count].len += (int)(we - ws);
-            if (we < end)
-                rows[count].len++; /* the separating space */
-            ws = we;
+    const char *ws = line_start;
+    while (ws < line_end && count < mcap) {
+        const char *we = ws;
+        while (we < line_end && *we != ' ')
+            we++;
+        if (we == ws) { /* collapse space runs */
+            ws++;
+            continue;
         }
-        if (rows[count].len > 0) {
+        int wordw = span_width(ws, (int)(we - ws));
+        int curw = dst[count].len > 0 ? span_width(dst[count].p, dst[count].len) : 0;
+        if (dst[count].len > 0 && curw + wordw + 6 > maxw) {
             count++;
-            if (count >= cap)
-                goto done;
+            if (count >= mcap)
+                break;
         }
-        if (nl == NULL)
-            break;
-        line = nl + 1;
+        if (dst[count].len == 0)
+            dst[count].p = ws;
+        dst[count].len += (int)(we - ws);
+        if (we < line_end)
+            dst[count].len++; /* the separating space */
+        ws = we;
     }
-done:
+    if (count < mcap && dst[count].len > 0)
+        count++; /* finalise the trailing partial row */
     return count;
+}
+
+/* Greedy word wrap of the log tail into at most `cap` rows, anchored on
+ * the NEWEST content: lines are walked backward from the last one and
+ * the resulting rows are returned oldest → newest (row 0 = oldest kept).
+ *
+ * A forward wrap of a big log would fill the cap-bounded row array with
+ * the OLDEST rows of the tail window and never wrap the newest lines,
+ * so an open viewer would show stale content instead of the current
+ * tail.  Rows point into `text` (never modified).  Returns the row
+ * count. */
+static int
+log_wrap_rows_last(const char *text, int maxw, BsLogRow *rows, int cap)
+{
+    int        n = 0;
+    const char *text_end = text + strlen(text);
+    const char *line_end = text_end;
+    BsLogRow   tmp[cap]; /* per-line staging (<cap rows; VLAs supported) */
+    while (n < cap && line_end > text) {
+        /* Back up over this line, skipping its trailing LF. */
+        const char *line_start = line_end - 1;
+        while (line_start > text && line_start[-1] != '\n')
+            line_start--;
+        const char *seg_end = line_end;
+        if (line_end - line_start > 0 && line_end[-1] == '\n')
+            seg_end = line_end - 1;
+        /* log_wrap_line treats dst[0].len==0 as "start a fresh row";
+         * the staging VLA must be zeroed per line or leftover state from
+         * the previous line accumulates into corrupt rows. */
+        memset(tmp, 0, sizeof tmp);
+        int lc = log_wrap_line(line_start, seg_end, maxw, tmp, cap - n);
+        /* Store the line's rows newest-first so the newest overall row
+         * is at the front of the kept set (flipped below). */
+        for (int i = lc - 1; i >= 0 && n < cap; i--)
+            rows[n++] = tmp[i];
+        line_end = line_start;
+    }
+    /* Flip the kept set so the caller sees oldest → newest: row 0 is
+     * the oldest kept row, the last row is the current log tail. */
+    for (int i = 0, j = n - 1; i < j; i++, j--) {
+        BsLogRow t = rows[i];
+        rows[i] = rows[j];
+        rows[j] = t;
+    }
+    return n;
 }
 
 /* Cached wrap of the log tail.  Each scroll tap used to re-read up to
@@ -179,7 +212,7 @@ log_wrap_get(int maxw, int cap)
         log_wrap_cache_clear();
         return NULL;
     }
-    int nrows = log_wrap_rows(text, maxw, rows, cap);
+    int nrows = log_wrap_rows_last(text, maxw, rows, cap);
     log_wrap_cache_clear();
     g_log_wrap.text = text;
     g_log_wrap.rows = rows;
@@ -189,6 +222,28 @@ log_wrap_get(int maxw, int cap)
     g_log_wrap.maxw = maxw;
     g_log_wrap.cap = cap;
     return &g_log_wrap;
+}
+
+/* Resolve the first visible row of the log tail's last full page using
+ * the current view geometry — the materialised position the viewer
+ * shows while pinned.  Shared by bs_draw_log_view (pinning) and the
+ * scroll handler (paging up from a pinned tail).  Returns 0 when the
+ * log is absent or fits entirely on one page. */
+int
+bs_log_view_tail_first(void)
+{
+    int w = ScreenWidth();
+    int h = bs_content_bottom();
+    int btn_y = h - 8 - BS_SCROLL_BTN_H;
+    int body_h = btn_y - BS_LOG_BODY_TOP - 8;
+    if (body_h < BS_LOG_ROW_H)
+        body_h = BS_LOG_ROW_H;
+    int              rows_vis = body_h / BS_LOG_ROW_H;
+    const BsLogWrapCache *wc = log_wrap_get(w - 48, rows_vis * 8);
+    if (wc == NULL)
+        return 0;
+    int maxf = wc->nrows - rows_vis;
+    return maxf < 0 ? 0 : maxf;
 }
 
 /* Full-screen log viewer: the app log tail, line-wrapped, page-scrolled
@@ -239,12 +294,20 @@ bs_draw_log_view(void)
         if (maxf < 0)
             maxf = 0;
         max_first = maxf;
-        first = bs_g_state.log_scroll < 0 ? max_first : bs_g_state.log_scroll;
-        if (first > max_first)
+        /* log_scroll < 0 means pinned to the tail: keep re-pinning on
+         * every redraw so new lines stay visible while the viewer is
+         * open.  Only an explicit scroll (see bs_on_tap_log_view)
+         * materialises a concrete first-line index. */
+        if (bs_g_state.log_scroll < 0) {
             first = max_first;
-        if (first < 0)
-            first = 0;
-        bs_g_state.log_scroll = first;
+        } else {
+            first = bs_g_state.log_scroll;
+            if (first > max_first)
+                first = max_first;
+            if (first < 0)
+                first = 0;
+            bs_g_state.log_scroll = first;
+        }
 
         ifont *lf = OpenFont(DEFAULTFONT, BS_LOG_FONT_PX, 0);
         if (lf != NULL) {

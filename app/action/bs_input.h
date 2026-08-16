@@ -12,6 +12,9 @@ int bs_hit_suggestion(int x, int y);
 
 void bs_on_tap_log_view(int x, int y);
 
+/* First visible row of the log tail's last full page (see bs_logview.c). */
+int bs_log_view_tail_first(void);
+
 void bs_on_tap_licenses_view(int x, int y);
 
 int bs_hit_top_bar(int x, int y);
