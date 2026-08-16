@@ -403,10 +403,14 @@ def fresh_bookshelf(bookshelf_env, request):
     bs.assert_no_crash()
 
 
-@pytest.fixture(autouse=True)
+@pytest.fixture
 def fresh_synth(synth_bookshelf_env, request):
     """Restart bookshelf before each synthetic-library test for a clean
-    state (mirrors fresh_bookshelf for the synth env)."""
+    state (mirrors fresh_bookshelf for the synth env).  Deliberately NOT
+    autouse: synth_bookshelf_env is SDL-only, and an autouse here made it
+    run for every test — under the emulator backend that hit the synth
+    "need SDL" skip and killed the whole module, including the device/
+    storage tests that should run there."""
     bs, _ = synth_bookshelf_env
     request.node._bs_log_open_start = bs.invocation_count()  # type: ignore[attr-defined]
     bs.begin_snapshots(request.node.name)
@@ -758,14 +762,23 @@ def test_settings_api_host_row_opens_keyboard(fresh_bookshelf):
 def test_settings_system_app_toggle_promotes_and_demotes(fresh_bookshelf):
     """Install-as-system-app: toggling ON copies the running binary + a
     fresh cfg to the home-task path; toggling OFF removes them again.
-    Runs with BS_SYSAPP_DIR pointing at the per-instance dir (see
-    _sdl_env), so the promote/demote mechanics are exercised without
-    touching a real /mnt/ext1/system/bin."""
+
+    SDL-only: on the emulator the app IS the home task (it runs from
+    /mnt/ext1/system/bin/bookshelf.app), so sysapp_self_bin() == the
+    promote target -> promote is a deliberate no-op and the copy this
+    test inspects never happens.  The test's premise (target dir differs
+    from the running binary) only holds under SDL, where BS_SYSAPP_DIR
+    isolates a per-instance run_dir/sysapp.
+    """
+    if os.environ.get("BS_TEST_BACKEND", "emulator") != "sdl":
+        pytest.skip("sysapp promote/demote target == running binary under "
+                    "the emulator; needs an isolated BS_SYSAPP_DIR (SDL)")
+
     def _exists(path: Path) -> bool:
         return path.exists()
 
     bs = fresh_bookshelf
-    run_dir = Path(bs.backend._run_dir)
+    run_dir = bs.backend._run_dir
     sysapp = run_dir / "sysapp"
     app = sysapp / "bookshelf.app"
     cfg = sysapp / "bookshelf.cfg"

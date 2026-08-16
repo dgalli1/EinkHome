@@ -20,24 +20,34 @@ import shutil
 import socket
 import socketserver
 import subprocess
+import sys
 import threading
 import time
 import uuid
 from pathlib import Path
 
 import pytest
-from providers.mock import MockProvider
 
-# The api package lives in repo_root/api; importing api.api.server first
-# inserts that dir on sys.path (it does so at import time), which then
-# makes the providers package importable.  Note: this test spans two
-# worlds — the API server (Python, in-process) and the GUI app (the SDL
-# PC build, a subprocess) — so a code change to either side must keep
-# both compiling.
-from api.api.server import PbemuAPIServer, build_default_app
-from tests.support.bookshelf import BookshelfGeometry, BookshelfSession
-from tests.support.bookshelf.backends import SdlBackend
-from tests.support.bookshelf.env import (
+# The api package lives in repo_root/api; its modules are imported as
+# top-level packages (`providers.*`, `api.api.server`), so `api/` must be
+# on sys.path.  Previously this relied on `api.api.server` self-inserting
+# that dir at import time — but only if it was imported BEFORE
+# `providers.mock`.  Relying on import order is fragile (an import
+# sorter can silently break it); bootstrap the path explicitly here.
+_REPO = Path(__file__).resolve().parents[1]
+_API_DIR = str(_REPO / "api")
+if _API_DIR not in sys.path:
+    sys.path.insert(0, _API_DIR)
+
+from providers.mock import MockProvider  # noqa: E402
+
+# Note: this test spans two worlds — the API server (Python, in-process)
+# and the GUI app (the SDL PC build, a subprocess) — so a code change to
+# either side must keep both compiling.
+from api.api.server import PbemuAPIServer, build_default_app  # noqa: E402
+from tests.support.bookshelf import BookshelfGeometry, BookshelfSession  # noqa: E402
+from tests.support.bookshelf.backends import SdlBackend  # noqa: E402
+from tests.support.bookshelf.env import (  # noqa: E402
     API_TOKEN,
     EINKHOME_ROOT,
     _ensure_sdl_test_binary,

@@ -272,7 +272,12 @@ class BookshelfGeometry:
 
     def _chooser_py(self, n_rows: int) -> int:
         ph = 72 + n_rows * 96 + 24
-        return (self.screen_h - ph) // 2
+        # The app centers chooser sheets in the content area (below the top
+        # bar, above the system panel): bs_group_geom uses
+        # (bs_content_bottom() - ph)/2.  Centering in the full screen_h
+        # instead shifts every row ~panel_h down, which on the emulator
+        # (panel_h>0) lands taps on the wrong row.
+        return (self.content_bottom() - ph) // 2
 
     def chooser_outside_point(self) -> tuple[int, int]:
         """A point guaranteed outside any centred chooser sheet."""
