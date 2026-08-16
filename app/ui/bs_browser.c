@@ -166,6 +166,96 @@ browser_row_cmp(const void *a, const void *b)
     return ia - ib; /* stable tie-break */
 }
 
+/* Resolve the real type of a dirent.  d_type is only a hint: DT_UNKNOWN
+ * filesystems (FAT, some FUSE) report nothing and symlinks need
+ * following, so stat() whenever the dirent type is inconclusive.  The
+ * stat target is <path>/<name> where name comes from readdir (never
+ * ".." or "/"), so the browser-root confinement is untouched. */
+static int
+browser_entry_is_dir(const struct dirent *e, int *is_reg)
+{
+    int is_dir = e->d_type == DT_DIR;
+    int rreg = e->d_type == DT_REG;
+    if (e->d_type == DT_UNKNOWN || e->d_type == DT_LNK) {
+        char   path[BS_MAX_PATH_LEN];
+        size_t plen = strlen(bs_g_browse_path);
+        size_t nlen = strlen(e->d_name);
+        if (plen + 1 + nlen < sizeof path) {
+            memcpy(path, bs_g_browse_path, plen);
+            path[plen] = '/';
+            memcpy(path + plen + 1, e->d_name, nlen);
+            path[plen + 1 + nlen] = '\0';
+            struct stat st;
+            if (iv_stat(path, &st) == 0) {
+                is_dir = S_ISDIR(st.st_mode);
+                rreg = S_ISREG(st.st_mode);
+            }
+        }
+    }
+    *is_reg = rreg;
+    return is_dir;
+}
+
+/* True when name is a browser-mode book file: it ends in one of
+ * BOOK_EXTS (case-insensitive).  Subdirectories are handled by the
+ * caller. */
+static int
+browser_should_include_book(const char *name)
+{
+    const char *dot = strrchr(name, '.');
+    if (dot == NULL || dot[1] == '\0')
+        return 0;
+    char   ext[8];
+    size_t xlen = strlen(dot + 1);
+    if (xlen >= sizeof ext)
+        xlen = sizeof ext - 1;
+    memcpy(ext, dot + 1, xlen);
+    ext[xlen] = '\0';
+    for (char *p = ext; *p; p++)
+        *p = (char)((*p >= 'A' && *p <= 'Z') ? *p + 32 : *p);
+    return bs_is_book_ext(ext);
+}
+
+/* True when a dirent row should be listed in the current mode: the
+ * picker lists subdirectories only; the browser lists subdirectories
+ * and book files. */
+static int
+browser_include_entry(int is_dir, int is_reg, const char *name)
+{
+    if (s_bmode == BR_MODE_PICKER)
+        return is_dir;
+    return is_dir || (is_reg && browser_should_include_book(name));
+}
+
+/* Write the rows into place once, following each sort cycle in place:
+ * every row is moved exactly once (O(n) memcpys total). */
+static void
+browser_apply_order(int *order)
+{
+    for (int i = 0; i < g_browse_count; i++) {
+        if (order[i] == i)
+            continue;
+        char name[BS_MAX_PATH_LEN];
+        memcpy(name, g_browse_names[i], BS_MAX_PATH_LEN);
+        int is_dir = g_browse_is_dir[i];
+        int src = i;
+        for (;;) {
+            int dst = order[src];
+            if (dst == i) {
+                memcpy(g_browse_names[src], name, BS_MAX_PATH_LEN);
+                g_browse_is_dir[src] = (char)is_dir;
+            } else {
+                memcpy(g_browse_names[src], g_browse_names[dst], BS_MAX_PATH_LEN);
+                g_browse_is_dir[src] = g_browse_is_dir[dst];
+            }
+            order[src] = src; /* this slot is now placed */
+            if (dst == i)
+                break;
+            src = dst;
+        }
+    }
+}
+
 static void
 browser_load(void)
 {
@@ -187,52 +277,10 @@ browser_load(void)
     while ((e = readdir(d)) != NULL && g_browse_count < max_entries) {
         if (e->d_name[0] == '.')
             continue;
-        /* d_type is a hint: DT_UNKNOWN filesystems (FAT, some FUSE)
-         * report nothing and symlinks need following, so resolve the
-         * real type by stat() whenever the dirent type is
-         * inconclusive.  The stat target is <path>/<name> where name
-         * comes from readdir (never ".." or "/"), so the browser-root
-         * confinement is untouched. */
-        int is_dir = e->d_type == DT_DIR;
-        int is_reg = e->d_type == DT_REG;
-        if (e->d_type == DT_UNKNOWN || e->d_type == DT_LNK) {
-            char   path[BS_MAX_PATH_LEN];
-            size_t plen = strlen(bs_g_browse_path);
-            size_t nlen = strlen(e->d_name);
-            if (plen + 1 + nlen < sizeof path) {
-                memcpy(path, bs_g_browse_path, plen);
-                path[plen] = '/';
-                memcpy(path + plen + 1, e->d_name, nlen);
-                path[plen + 1 + nlen] = '\0';
-                struct stat st;
-                if (iv_stat(path, &st) == 0) {
-                    is_dir = S_ISDIR(st.st_mode);
-                    is_reg = S_ISREG(st.st_mode);
-                }
-            }
-        }
-        if (s_bmode == BR_MODE_PICKER) {
-            if (!is_dir)
-                continue;
-        } else {
-            if (!is_dir && !is_reg)
-                continue;
-            if (!is_dir) {
-                const char *dot = strrchr(e->d_name, '.');
-                if (dot == NULL || dot[1] == '\0')
-                    continue;
-                char   ext[8];
-                size_t xlen = strlen(dot + 1);
-                if (xlen >= sizeof ext)
-                    xlen = sizeof ext - 1;
-                memcpy(ext, dot + 1, xlen);
-                ext[xlen] = '\0';
-                for (char *p = ext; *p; p++)
-                    *p = (char)((*p >= 'A' && *p <= 'Z') ? *p + 32 : *p);
-                if (!bs_is_book_ext(ext))
-                    continue;
-            }
-        }
+        int is_reg = 0;
+        int is_dir = browser_entry_is_dir(e, &is_reg);
+        if (!browser_include_entry(is_dir, is_reg, e->d_name))
+            continue;
         /* Bounded copy: d_name can be NAME_MAX (255) while the row
          * buffer is MAX_PATH_LEN; overlong names are truncated. */
         size_t nlen = strlen(e->d_name);
@@ -257,30 +305,7 @@ browser_load(void)
         order[i] = i;
     // cppcheck-suppress uninitvar -- order[0..g_browse_count) fully initialised above.
     qsort(order, (size_t)g_browse_count, sizeof order[0], browser_row_cmp);
-    /* Write the rows into place once, following each sort cycle in
-     * place: every row is moved exactly once (O(n) memcpys total). */
-    for (int i = 0; i < g_browse_count; i++) {
-        if (order[i] == i)
-            continue;
-        char name[BS_MAX_PATH_LEN];
-        memcpy(name, g_browse_names[i], BS_MAX_PATH_LEN);
-        int is_dir = g_browse_is_dir[i];
-        int src = i;
-        for (;;) {
-            int dst = order[src];
-            if (dst == i) {
-                memcpy(g_browse_names[src], name, BS_MAX_PATH_LEN);
-                g_browse_is_dir[src] = (char)is_dir;
-            } else {
-                memcpy(g_browse_names[src], g_browse_names[dst], BS_MAX_PATH_LEN);
-                g_browse_is_dir[src] = g_browse_is_dir[dst];
-            }
-            order[src] = src; /* this slot is now placed */
-            if (dst == i)
-                break;
-            src = dst;
-        }
-    }
+    browser_apply_order(order);
     bs_LOG("[bookshelf] browser: %s -> %d entries\n", bs_g_browse_path, g_browse_count);
 }
 
@@ -545,17 +570,11 @@ bs_folder_open(void)
     bs_flush_content();
 }
 
-void
-bs_draw_overlay_folder(void)
+/* Overlay header: title + current path (shown relative to /mnt/ext1 —
+ * the mount point is hidden from the user). */
+static void
+overlay_header(int w)
 {
-    int w = ScreenWidth();
-    int h = bs_content_bottom();
-    int rows = browser_rows_visible();
-    int up_row = browser_can_go_up() ? 1 : 0;
-    int max_scroll = browser_clamp_scroll();
-    FillArea(0, 0, w, h, WHITE);
-
-    /* Header: title + current path. */
     ifont *tf = OpenFont(DEFAULTFONTB, 32, 0);
     if (tf != NULL) {
         SetFont(tf, BLACK);
@@ -566,17 +585,21 @@ bs_draw_overlay_folder(void)
     if (pf != NULL) {
         SetFont(pf, DGRAY);
         char trunc[256];
-        /* Show the path relative to /mnt/ext1 — the mount point is
-         * hidden from the user. */
         bs_user_path_display(bs_g_browse_path, trunc, sizeof trunc);
         bs_utf8_fit_width(trunc, sizeof trunc, w - 64);
         DrawString(32, 76, trunc);
         CloseFont(pf);
     }
-    DrawLine(0, BS_FOLDER_LIST_TOP - 12, w, BS_FOLDER_LIST_TOP - 12, BLACK);
+}
 
-    /* Directory rows; a ".." row leads up whenever we are below the
-     * /mnt/ext1 root.  Row font opened once for the pass. */
+/* Overlay list: directory rows (a ".." row leads up whenever below the
+ * /mnt/ext1 root) plus the empty-list message.  Row font opened once
+ * for the pass. */
+static void
+overlay_rows(void)
+{
+    int rows = browser_rows_visible();
+    int up_row = browser_can_go_up() ? 1 : 0;
     ifont *rf = OpenFont(DEFAULTFONTB, 28, 0);
     int shown = 0;
     for (int i = 0; i < rows; i++) {
@@ -603,6 +626,84 @@ bs_draw_overlay_folder(void)
             CloseFont(f);
         }
     }
+}
+
+/* Handle a tap on the corner scroll buttons (raised above the
+ * Select/Back band).  Returns 1 when consumed. */
+static int
+overlay_tap_scroll(int x, int y)
+{
+    int sy0 = bs_content_bottom() - BS_FOLDER_BTN_H - BS_FOLDER_BTN_PAD - BS_SCROLL_BTN_H;
+    int dir = bs_hit_scroll_button_at(x, y, sy0);
+    if (dir != 0) {
+        int rows = browser_rows_visible();
+        bs_g_browse_scroll += dir * rows;
+        if (bs_g_browse_scroll < 0)
+            bs_g_browse_scroll = 0;
+        bs_draw_overlay_folder();
+        bs_flush_content();
+        return 1;
+    }
+    return 0;
+}
+
+/* Handle a tap inside the list rows (including the ".." up row).
+ * Returns 1 when the tap reached the list area. */
+static int
+overlay_tap_row(int y)
+{
+    int rows = browser_rows_visible();
+    int up_row = browser_can_go_up() ? 1 : 0;
+    int idx = (y - BS_FOLDER_LIST_TOP) / BS_FOLDER_ROW_H;
+    if (idx < 0 || idx >= rows)
+        return 0;
+    if (up_row && idx == 0) {
+        browser_navigate("..");
+        return 1;
+    }
+    int dir_idx = bs_g_browse_scroll + idx - up_row;
+    if (dir_idx >= 0 && dir_idx < g_browse_count)
+        browser_navigate(g_browse_names[dir_idx]);
+    return 1;
+}
+
+/* Handle a tap on the picker overlay.  Returns 1 when the tap was
+ * consumed (it always is — the picker owns the screen while open). */
+int
+bs_on_tap_folder(int x, int y)
+{
+    if (overlay_tap_scroll(x, y))
+        return 1;
+    int sx, sy, sw, sh;
+    folder_buttons(&sx, &sy, &sw, &sh);
+    if (y >= sy && y < sy + sh - 12) {
+        if (x >= sx && x < sx + sw) {
+            folder_commit();
+        } else {
+            bs_folder_close();
+        }
+        return 1;
+    }
+    if (y < BS_FOLDER_LIST_TOP)
+        return 1;
+    overlay_tap_row(y);
+    return 1;
+}
+
+void
+bs_draw_overlay_folder(void)
+{
+    int w = ScreenWidth();
+    int h = bs_content_bottom();
+    int max_scroll = browser_clamp_scroll();
+    FillArea(0, 0, w, h, WHITE);
+
+    /* Header: title + current path. */
+    overlay_header(w);
+    DrawLine(0, BS_FOLDER_LIST_TOP - 12, w, BS_FOLDER_LIST_TOP - 12, BLACK);
+
+    /* Directory rows. */
+    overlay_rows();
 
     /* Select / Back.  Button font opened once for both. */
     int sx, sy, sw, sh;
@@ -628,49 +729,4 @@ bs_draw_overlay_folder(void)
     /* Corner scroll buttons, raised above the Select/Back band. */
     int sy0 = bs_content_bottom() - BS_FOLDER_BTN_H - BS_FOLDER_BTN_PAD - BS_SCROLL_BTN_H;
     bs_draw_scroll_buttons_at(bs_g_browse_scroll > 0, bs_g_browse_scroll < max_scroll, sy0);
-}
-
-/* Handle a tap on the picker overlay.  Returns 1 when the tap was
- * consumed (it always is — the picker owns the screen while open). */
-int
-bs_on_tap_folder(int x, int y)
-{
-    /* Corner scroll buttons (raised above the Select/Back band). */
-    int sy0 = bs_content_bottom() - BS_FOLDER_BTN_H - BS_FOLDER_BTN_PAD - BS_SCROLL_BTN_H;
-    int dir = bs_hit_scroll_button_at(x, y, sy0);
-    if (dir != 0) {
-        int rows = browser_rows_visible();
-        bs_g_browse_scroll += dir * rows;
-        if (bs_g_browse_scroll < 0)
-            bs_g_browse_scroll = 0;
-        bs_draw_overlay_folder();
-        bs_flush_content();
-        return 1;
-    }
-    int sx, sy, sw, sh;
-    folder_buttons(&sx, &sy, &sw, &sh);
-    if (y >= sy && y < sy + sh - 12) {
-        if (x >= sx && x < sx + sw) {
-            folder_commit();
-        } else {
-            bs_folder_close();
-        }
-        return 1;
-    }
-    if (y < BS_FOLDER_LIST_TOP)
-        return 1;
-
-    int rows = browser_rows_visible();
-    int up_row = browser_can_go_up() ? 1 : 0;
-    int idx = (y - BS_FOLDER_LIST_TOP) / BS_FOLDER_ROW_H;
-    if (idx < 0 || idx >= rows)
-        return 1;
-    if (up_row && idx == 0) {
-        browser_navigate("..");
-        return 1;
-    }
-    int dir_idx = bs_g_browse_scroll + idx - up_row;
-    if (dir_idx >= 0 && dir_idx < g_browse_count)
-        browser_navigate(g_browse_names[dir_idx]);
-    return 1;
 }

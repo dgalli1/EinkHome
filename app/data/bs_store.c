@@ -290,69 +290,53 @@ static int store_import_legacy(const char *legacy_path) {
  * exists but a legacy JSON store does, import it once and rename the
  * JSON out of the way.  Falls back gracefully (g_db stays NULL) when
  * the directory is not writable; the app then runs online-only. */
-void bs_store_open(void) {
-  char path[BS_MAX_PATH_LEN * 2];
-  store_path(path, sizeof path);
-
-  if (sqlite3_open(path, &g_db) != SQLITE_OK) {
-    bs_LOG("[bookshelf] store: open failed %s: %s\n", path,
-        g_db ? sqlite3_errmsg(g_db) : "?");
-    sqlite3_close(g_db);
-    g_db = NULL;
-    return;
-  }
-
-  /* One connection, journal mode untouched (WAL would hammer the
-   * device flash): a transient lock holder (another process, or a
-   * crash-recovery pass) should delay us, not fail with SQLITE_BUSY. */
-  sqlite3_busy_timeout(g_db, 2000);
-
-  /* Stores from older builds predate some columns; the index in
-   * SCHEMA_SQL would fail on them, so add missing columns first.
-   * `id` is present in every schema version, so it doubles as the
-   * table-exists probe (PRAGMA table_info is reliable here, a
-   * sqlite_master SELECT is not on the guest's sqlite).  The marker
-   * makes the migration one-shot: the cursor reset that follows a
-   * real schema change must not repeat on every boot. */
-  {
-    char ver[8] = "";
-    if (bs_store_meta_value("schema_version", ver, sizeof ver) != 1 ||
-        strcmp(ver, "2") != 0) {
-      if (store_has_column("books", "id"))
-        store_migrate_columns();
-      bs_store_set_meta("schema_version", "2");
-    }
-    /* v3: rebuild the series index as a covering index
-     * (series_id, series_idx, title COLLATE NOCASE, id) so that
-     * store_series_ids' ORDER BY ... title is served by the index
-     * instead of a temp sort of the whole matching set.  v2 stores
-     * carry the old non-covering index and CREATE INDEX IF NOT EXISTS
-     * would no-op on them, so drop + recreate explicitly.  Fresh
-     * stores get the new shape straight from SCHEMA_SQL, so on a
-     * brand-new db (no books table yet, SCHEMA_SQL runs next) this
-     * is just a marker stamp. */
-    if (bs_store_meta_value("schema_version", ver, sizeof ver) != 1 ||
-        strcmp(ver, "3") != 0) {
-      if (store_has_column("books", "id") == 1) {
-        sqlite3_exec(g_db, "DROP INDEX IF EXISTS idx_books_series", NULL,
-                     NULL, NULL);
-        sqlite3_exec(g_db, "CREATE INDEX IF NOT EXISTS idx_books_series"
-                           " ON books(series_id, series_idx,"
-                           " title COLLATE NOCASE, id)",
-                     NULL, NULL, NULL);
-      }
-      bs_store_set_meta("schema_version", "3");
-    }
-    /* Column-driven backstop: builds that stamped the v2 marker
-     * before filename/source joined the migration list would
-     * otherwise skip them forever (the marker check above is
-     * satisfied).  The migration only alters genuinely missing
-     * columns, so this is a no-op on a healthy store. */
-    if (store_has_column("books", "id") == 1 &&
-        (store_has_column("books", "filename") != 1 ||
-         store_has_column("books", "source") != 1))
+/* One-shot schema migrations plus the SCHEMA_SQL create/repair pass.
+ * Stores from older builds predate some columns; the index in
+ * SCHEMA_SQL would fail on them, so add missing columns first.  `id` is
+ * present in every schema version, so it doubles as the table-exists
+ * probe (PRAGMA table_info is reliable here, a sqlite_master SELECT is
+ * not on the guest's sqlite).  The version markers make the migration
+ * one-shot: the cursor reset that follows a real schema change must not
+ * repeat on every boot.  On a fatal (post-retry) schema failure the db
+ * is closed and 0 returned so the caller bails out. */
+static int store_apply_schema(void) {
+  char ver[8] = "";
+  if (bs_store_meta_value("schema_version", ver, sizeof ver) != 1 ||
+      strcmp(ver, "2") != 0) {
+    if (store_has_column("books", "id"))
       store_migrate_columns();
+    bs_store_set_meta("schema_version", "2");
   }
+  /* v3: rebuild the series index as a covering index
+   * (series_id, series_idx, title COLLATE NOCASE, id) so that
+   * store_series_ids' ORDER BY ... title is served by the index
+   * instead of a temp sort of the whole matching set.  v2 stores
+   * carry the old non-covering index and CREATE INDEX IF NOT EXISTS
+   * would no-op on them, so drop + recreate explicitly.  Fresh
+   * stores get the new shape straight from SCHEMA_SQL, so on a
+   * brand-new db (no books table yet, SCHEMA_SQL runs next) this
+   * is just a marker stamp. */
+  if (bs_store_meta_value("schema_version", ver, sizeof ver) != 1 ||
+      strcmp(ver, "3") != 0) {
+    if (store_has_column("books", "id") == 1) {
+      sqlite3_exec(g_db, "DROP INDEX IF EXISTS idx_books_series", NULL,
+                   NULL, NULL);
+      sqlite3_exec(g_db, "CREATE INDEX IF NOT EXISTS idx_books_series"
+                         " ON books(series_id, series_idx,"
+                         " title COLLATE NOCASE, id)",
+                   NULL, NULL, NULL);
+    }
+    bs_store_set_meta("schema_version", "3");
+  }
+  /* Column-driven backstop: builds that stamped the v2 marker
+   * before filename/source joined the migration list would
+   * otherwise skip them forever (the marker check above is
+   * satisfied).  The migration only alters genuinely missing
+   * columns, so this is a no-op on a healthy store. */
+  if (store_has_column("books", "id") == 1 &&
+      (store_has_column("books", "filename") != 1 ||
+       store_has_column("books", "source") != 1))
+    store_migrate_columns();
   if (sqlite3_exec(g_db, SCHEMA_SQL, NULL, NULL, NULL) != SQLITE_OK) {
     /* Introspection can miss a pre-existing table (e.g. a locked or
      * partially-created db); migrate whatever is missing and retry. */
@@ -361,17 +345,19 @@ void bs_store_open(void) {
       bs_LOG("[bookshelf] store: schema failed: %s\n", sqlite3_errmsg(g_db));
       sqlite3_close(g_db);
       g_db = NULL;
-      return;
+      return 0;
     }
   }
+  return 1;
+}
 
-  /* Committed-search index.  FTS5 may be absent from the firmware
-   * build; when it is, CREATE VIRTUAL TABLE errors and g_no_fts routes
-   * search to the byte-identical LIKE path (view_where) and skips every
-   * FTS write.  External content: the index stores only rowid + tokens,
-   * the source text lives in `books`, so the two never drift unless a
-   * book write is missed (store_upsert_book / view_rebuild keep it in
-   * step). */
+/* Committed-search index.  FTS5 may be absent from the firmware build;
+ * when it is, CREATE VIRTUAL TABLE errors and g_no_fts routes search to
+ * the byte-identical LIKE path (view_where) and skips every FTS write.
+ * External content: the index stores only rowid + tokens, the source
+ * text lives in `books`, so the two never drift unless a book write is
+ * missed (store_upsert_book / view_rebuild keep it in step). */
+static void store_init_fts(void) {
   g_no_fts = 0;
   if (sqlite3_exec(g_db,
                    "CREATE VIRTUAL TABLE IF NOT EXISTS search_fts USING fts5("
@@ -382,8 +368,10 @@ void bs_store_open(void) {
     bs_LOG("[bookshelf] store: FTS5 unavailable (%s); search falls back to LIKE\n",
         sqlite3_errmsg(g_db));
   }
+}
 
-  /* One-time legacy JSON import. */
+/* One-time legacy JSON import. */
+static void store_import_legacy_once(void) {
   char legacy[BS_MAX_PATH_LEN * 2];
   char dir[BS_MAX_PATH_LEN];
   bs_dirname_of(bs_g_config_path, dir, sizeof dir);
@@ -404,6 +392,30 @@ void bs_store_open(void) {
       bs_LOG("[bookshelf] store: migrated legacy JSON (%d books)\n", n);
     }
   }
+}
+
+void bs_store_open(void) {
+  char path[BS_MAX_PATH_LEN * 2];
+  store_path(path, sizeof path);
+
+  if (sqlite3_open(path, &g_db) != SQLITE_OK) {
+    bs_LOG("[bookshelf] store: open failed %s: %s\n", path,
+        g_db ? sqlite3_errmsg(g_db) : "?");
+    sqlite3_close(g_db);
+    g_db = NULL;
+    return;
+  }
+
+  /* One connection, journal mode untouched (WAL would hammer the
+   * device flash): a transient lock holder (another process, or a
+   * crash-recovery pass) should delay us, not fail with SQLITE_BUSY. */
+  sqlite3_busy_timeout(g_db, 2000);
+
+  if (!store_apply_schema())
+    return;
+
+  store_init_fts();
+  store_import_legacy_once();
 }
 
 void bs_store_close(void) {
@@ -787,12 +799,13 @@ void bs_store_series_name(const char *series_id, char *out, size_t cap) {
   sqlite3_finalize(st);
 }
 
-int bs_store_count(void) {
+/* COUNT(...) helper shared by the "how many rows" queries so the
+ * prepare/step/column dance isn't repeated. */
+static int store_count_rows(const char *sql) {
   if (g_db == NULL)
     return 0;
   sqlite3_stmt *st = NULL;
-  if (sqlite3_prepare_v2(g_db, "SELECT COUNT(*) FROM books", -1, &st, NULL) !=
-      SQLITE_OK)
+  if (sqlite3_prepare_v2(g_db, sql, -1, &st, NULL) != SQLITE_OK)
     return 0;
   int n = 0;
   if (sqlite3_step(st) == SQLITE_ROW)
@@ -801,18 +814,12 @@ int bs_store_count(void) {
   return n;
 }
 
+int bs_store_count(void) {
+  return store_count_rows("SELECT COUNT(*) FROM books");
+}
+
 int bs_store_count_undownloaded(void) {
-  if (g_db == NULL)
-    return 0;
-  sqlite3_stmt *st = NULL;
-  if (sqlite3_prepare_v2(g_db, "SELECT COUNT(*) FROM books WHERE downloaded=0",
-                         -1, &st, NULL) != SQLITE_OK)
-    return 0;
-  int n = 0;
-  if (sqlite3_step(st) == SQLITE_ROW)
-    n = sqlite3_column_int(st, 0);
-  sqlite3_finalize(st);
-  return n;
+  return store_count_rows("SELECT COUNT(*) FROM books WHERE downloaded=0");
 }
 
 /* First slice of not-downloaded ids in a stable order, for batch
@@ -1001,17 +1008,7 @@ void bs_store_search_add(const char *term) {
 }
 
 int bs_store_search_count(void) {
-  if (g_db == NULL)
-    return 0;
-  sqlite3_stmt *st = NULL;
-  if (sqlite3_prepare_v2(g_db, "SELECT COUNT(*) FROM search_history", -1, &st,
-                         NULL) != SQLITE_OK)
-    return 0;
-  int n = 0;
-  if (sqlite3_step(st) == SQLITE_ROW)
-    n = sqlite3_column_int(st, 0);
-  sqlite3_finalize(st);
-  return n;
+  return store_count_rows("SELECT COUNT(*) FROM search_history");
 }
 
 /* Slice of recent search terms, newest first.  Returns the number of
@@ -1043,6 +1040,65 @@ int bs_store_search_list(char terms[][BS_MAX_QUERY_LEN], int cap, int offset) {
  * greater than every string starting with `prefix` (increment the last
  * code point).  Returns 1 with the bound NUL-terminated in out, or 0
  * when the bound overflows U+10FFFF (caller omits the `<` clause). */
+/* Decode the trailing UTF-8 code point of prefix[0..len); stores the
+ * index of its first byte in *start and returns the scalar. */
+static uint32_t suggest_decode_tail(const char *prefix, size_t len,
+                                    size_t *start) {
+  size_t s = len - 1;
+  while (s > 0 && (prefix[s] & 0xC0) == 0x80)
+    s--;
+  unsigned char lead = (unsigned char)prefix[s];
+  size_t clen = 1;
+  if ((lead & 0xE0) == 0xC0)
+    clen = 2;
+  else if ((lead & 0xF0) == 0xE0)
+    clen = 3;
+  else if ((lead & 0xF8) == 0xF0)
+    clen = 4;
+  uint32_t cp;
+  if (s + clen != len) { /* malformed tail: last byte alone */
+    s = len - 1;
+    cp = (uint32_t)(unsigned char)prefix[s];
+  } else if (clen == 1) {
+    cp = lead;
+  } else {
+    static const uint8_t masks[5] = {0, 0, 0x1F, 0x0F, 0x07};
+    cp = lead & masks[clen];
+    for (size_t k = 1; k < clen; k++)
+      cp = (cp << 6) | ((unsigned char)prefix[s + k] & 0x3F);
+  }
+  *start = s;
+  return cp;
+}
+
+/* Write code point cp as UTF-8 into out[0..], NUL-terminated; returns
+ * the number of bytes written. */
+static int utf8_write_cp(char *out, uint32_t cp) {
+  if (cp < 0x80) {
+    out[0] = (char)cp;
+    out[1] = '\0';
+    return 1;
+  } else if (cp < 0x800) {
+    out[0] = (char)(0xC0 | (cp >> 6));
+    out[1] = (char)(0x80 | (cp & 0x3F));
+    out[2] = '\0';
+    return 2;
+  } else if (cp < 0x10000) {
+    out[0] = (char)(0xE0 | (cp >> 12));
+    out[1] = (char)(0x80 | ((cp >> 6) & 0x3F));
+    out[2] = (char)(0x80 | (cp & 0x3F));
+    out[3] = '\0';
+    return 3;
+  } else {
+    out[0] = (char)(0xF0 | (cp >> 18));
+    out[1] = (char)(0x80 | ((cp >> 12) & 0x3F));
+    out[2] = (char)(0x80 | ((cp >> 6) & 0x3F));
+    out[3] = (char)(0x80 | (cp & 0x3F));
+    out[4] = '\0';
+    return 4;
+  }
+}
+
 static int suggest_upper_bound(const char *prefix, size_t len, char *out,
                                size_t cap) {
   if (len == 0 || len + 4 >= cap)
@@ -1054,54 +1110,14 @@ static int suggest_upper_bound(const char *prefix, size_t len, char *out,
     out[len] = '\0';
     return 1;
   }
-  /* General path: decode the trailing code point, +1, re-encode.
-   * Scan back to its lead byte. */
-  size_t start = len - 1;
-  while (start > 0 && (prefix[start] & 0xC0) == 0x80)
-    start--;
-  unsigned char lead = (unsigned char)prefix[start];
-  size_t clen = 1;
-  if ((lead & 0xE0) == 0xC0)
-    clen = 2;
-  else if ((lead & 0xF0) == 0xE0)
-    clen = 3;
-  else if ((lead & 0xF8) == 0xF0)
-    clen = 4;
-  uint32_t cp;
-  if (start + clen != len) { /* malformed tail: last byte alone */
-    start = len - 1;
-    cp = (uint32_t)(unsigned char)prefix[start];
-  } else if (clen == 1) {
-    cp = lead;
-  } else {
-    static const uint8_t masks[5] = {0, 0, 0x1F, 0x0F, 0x07};
-    cp = lead & masks[clen];
-    for (size_t k = 1; k < clen; k++)
-      cp = (cp << 6) | ((unsigned char)prefix[start + k] & 0x3F);
-  }
+  /* General path: decode the trailing code point, +1, re-encode. */
+  size_t start;
+  uint32_t cp = suggest_decode_tail(prefix, len, &start);
   if (cp == 0x10FFFF)
     return 0;
   cp++;
   memcpy(out, prefix, start);
-  if (cp < 0x80) {
-    out[start] = (char)cp;
-    out[start + 1] = '\0';
-  } else if (cp < 0x800) {
-    out[start] = (char)(0xC0 | (cp >> 6));
-    out[start + 1] = (char)(0x80 | (cp & 0x3F));
-    out[start + 2] = '\0';
-  } else if (cp < 0x10000) {
-    out[start] = (char)(0xE0 | (cp >> 12));
-    out[start + 1] = (char)(0x80 | ((cp >> 6) & 0x3F));
-    out[start + 2] = (char)(0x80 | (cp & 0x3F));
-    out[start + 3] = '\0';
-  } else {
-    out[start] = (char)(0xF0 | (cp >> 18));
-    out[start + 1] = (char)(0x80 | ((cp >> 12) & 0x3F));
-    out[start + 2] = (char)(0x80 | ((cp >> 6) & 0x3F));
-    out[start + 3] = (char)(0x80 | (cp & 0x3F));
-    out[start + 4] = '\0';
-  }
+  utf8_write_cp(out + start, cp);
   return 1;
 }
 
@@ -1109,44 +1125,40 @@ static int suggest_upper_bound(const char *prefix, size_t len, char *out,
  * holds the batch transaction.  n == 0 (or terms == NULL) deletes
  * every edge of the book — used for removed books and re-syncs of
  * books whose server sent no terms (old server). */
-void bs_store_suggest_set(const char *book_id,
-                       const char terms[][BS_SUGGEST_TERM_MAX], int n) {
-  if (g_db == NULL || book_id == NULL)
-    return;
-  /* Snapshot the book's current edge terms before the delete so the
-   * rank refresh below can correct both the removed and the added
-   * sides of this book's change.  The server caps terms per book at
-   * SUGGEST_MAX_TERMS, so a fixed buffer is safe; a store whose edges
-   * exceed it self-heals on the next sync of those books. */
-  char old[BS_SUGGEST_MAX_TERMS][BS_SUGGEST_TERM_MAX];
-  int n_old = 0;
-  {
-    sqlite3_stmt *q = NULL;
-    if (sqlite3_prepare_v2(g_db, "SELECT term FROM suggest WHERE book_id=?1",
-                           -1, &q, NULL) == SQLITE_OK) {
-      bind_text_trunc(q, 1, book_id);
-      while (n_old < BS_SUGGEST_MAX_TERMS && sqlite3_step(q) == SQLITE_ROW) {
-        const char *t = (const char *)sqlite3_column_text(q, 0);
-        snprintf(old[n_old], BS_SUGGEST_TERM_MAX, "%s", t ? t : "");
-        n_old++;
-      }
-      sqlite3_finalize(q);
+/* Snapshot the book's current edge terms into old[0..*n_old) before the
+ * delete, so the rank refresh below can correct both the removed and the
+ * added sides of this book's change.  The server caps terms per book at
+ * SUGGEST_MAX_TERMS, so a fixed max is safe; a store whose edges exceed
+ * it self-heals on the next sync of those books. */
+static void suggest_snapshot_old(const char *book_id,
+                                 char old[][BS_SUGGEST_TERM_MAX], int max,
+                                 int *n_old) {
+  sqlite3_stmt *q = NULL;
+  if (sqlite3_prepare_v2(g_db, "SELECT term FROM suggest WHERE book_id=?1",
+                         -1, &q, NULL) == SQLITE_OK) {
+    bind_text_trunc(q, 1, book_id);
+    while (*n_old < max && sqlite3_step(q) == SQLITE_ROW) {
+      const char *t = (const char *)sqlite3_column_text(q, 0);
+      snprintf(old[*n_old], BS_SUGGEST_TERM_MAX, "%s", t ? t : "");
+      (*n_old)++;
     }
+    sqlite3_finalize(q);
   }
+}
 
-  sqlite3_stmt *del = st_prep_once(&g_st_suggest_del,
-                                   "DELETE FROM suggest WHERE book_id=?1");
-  if (del == NULL)
-    return;
+/* Delete the book's edge rows, then insert the new non-empty terms.
+ * One cached single-row statement, bound once per term: a sync round
+ * runs this per book, and a fresh prepare per term would cost ~100k
+ * prepares on a full sync.  The slot is prepared on first use and
+ * finalized in store_close. */
+static void suggest_insert_terms(sqlite3_stmt *del, const char *book_id,
+                                 const char terms[][BS_SUGGEST_TERM_MAX],
+                                 int n) {
   sqlite3_reset(del);
   sqlite3_clear_bindings(del);
   bind_text_trunc(del, 1, book_id);
   sqlite3_step(del);
   if (n > 0 && terms != NULL) {
-    /* One cached single-row statement, bound once per term: a sync
-     * round runs this per book, and a fresh prepare per term would cost
-     * ~100k prepares on a full sync.  The slot is prepared on first use
-     * and finalized in store_close. */
     sqlite3_stmt *ins = st_prep_once(
         &g_st_suggest_ins,
         "INSERT OR IGNORE INTO suggest(term, book_id) VALUES(?1, ?2)");
@@ -1162,10 +1174,16 @@ void bs_store_suggest_set(const char *book_id,
       }
     }
   }
-  /* Recompute the rank count for every term this book touches (old
-   * edges + new terms) straight from the edge table, so adds and
-   * removes both settle in one pass; then drop any rank term that now
-   * has no edges at all. */
+}
+
+/* Recompute the rank count for every term this book touches (old edges +
+ * new terms) straight from the edge table, so adds and removes both
+ * settle in one pass; then drop any rank term that now has no edges at
+ * all. */
+static void suggest_refresh_rank(const char old[][BS_SUGGEST_TERM_MAX],
+                                 int n_old,
+                                 const char terms[][BS_SUGGEST_TERM_MAX],
+                                 int n) {
   sqlite3_stmt *rf = st_prep_once(
       &g_st_suggest_rank_refresh,
       "INSERT INTO suggest_rank(term, cnt) VALUES(?1,"
@@ -1204,6 +1222,22 @@ void bs_store_suggest_set(const char *book_id,
   }
 }
 
+void bs_store_suggest_set(const char *book_id,
+                       const char terms[][BS_SUGGEST_TERM_MAX], int n) {
+  if (g_db == NULL || book_id == NULL)
+    return;
+  char old[BS_SUGGEST_MAX_TERMS][BS_SUGGEST_TERM_MAX];
+  int n_old = 0;
+  suggest_snapshot_old(book_id, old, BS_SUGGEST_MAX_TERMS, &n_old);
+
+  sqlite3_stmt *del = st_prep_once(&g_st_suggest_del,
+                                   "DELETE FROM suggest WHERE book_id=?1");
+  if (del == NULL)
+    return;
+  suggest_insert_terms(del, book_id, terms, n);
+  suggest_refresh_rank(old, n_old, terms, n);
+}
+
 /* Lazily probe whether the rank table holds any term.  Once it does,
  * sync keeps it populated, so the result is cached; while it is still
  * empty (an older DB upgraded in place), the caller falls back to the
@@ -1230,6 +1264,34 @@ static int suggest_rank_ready(void) {
  * may miss (accepted).  Empty and single-char prefixes return 0: the
  * range is useless at 100k books and the UI keeps showing history.
  * Bounded output: LIMIT keeps RAM O(cap), never the whole index. */
+/* Which SQL scans the suggestion index, given whether the aggregate
+ * rank table is populated and whether a strict upper bound is needed.
+ * Rank path: a pure ordered range scan over the aggregated table (cnt is
+ * the b-tree key after term) — no per-keystroke GROUP BY over the whole
+ * prefix range.  Upgrade fallback (rank table empty but edges may exist):
+ * the grouped edge scan still yields correct suggestions until the next
+ * sync fills the rank table. */
+static const char *suggest_scan_sql(int ranked, int has_bound) {
+  if (ranked)
+    return has_bound
+               ? "SELECT term FROM suggest_rank WHERE term >= ?1 AND term < ?2"
+                 " ORDER BY cnt DESC, term ASC LIMIT ?3"
+               : "SELECT term FROM suggest_rank WHERE term >= ?1"
+                 " ORDER BY cnt DESC, term ASC LIMIT ?3";
+  return has_bound
+             ? "SELECT term FROM suggest WHERE term >= ?1 AND term < ?2"
+               " GROUP BY term ORDER BY COUNT(*) DESC, term ASC LIMIT ?3"
+             : "SELECT term FROM suggest WHERE term >= ?1"
+               " GROUP BY term ORDER BY COUNT(*) DESC, term ASC LIMIT ?3";
+}
+
+/* ASCII-lowercase a NUL-terminated prefix into norm (including the NUL). */
+static void suggest_lower(char *norm, const char *prefix, size_t len) {
+  for (size_t i = 0; i <= len; i++)
+    norm[i] = (prefix[i] >= 'A' && prefix[i] <= 'Z') ? (char)(prefix[i] + 32)
+                                                     : prefix[i];
+}
+
 int bs_store_suggest_list(const char *prefix, char out[][BS_SUGGEST_TERM_MAX],
                        int cap) {
   if (g_db == NULL || prefix == NULL || cap <= 0)
@@ -1238,33 +1300,10 @@ int bs_store_suggest_list(const char *prefix, char out[][BS_SUGGEST_TERM_MAX],
   if (len < 2 || len >= BS_SUGGEST_TERM_MAX)
     return 0;
   char norm[BS_SUGGEST_TERM_MAX];
-  for (size_t i = 0; i <= len; i++)
-    norm[i] = (prefix[i] >= 'A' && prefix[i] <= 'Z') ? (char)(prefix[i] + 32)
-                                                     : prefix[i];
+  suggest_lower(norm, prefix, len);
   char bound[BS_SUGGEST_TERM_MAX + 4];
   int has_bound = suggest_upper_bound(norm, len, bound, sizeof bound);
-
-  const char *sql;
-  if (suggest_rank_ready()) {
-    /* Rank path: a pure ordered range scan over the aggregated table
-     * (cnt is the b-tree key after term) — no per-keystroke GROUP BY
-     * over the whole prefix range. */
-    sql = has_bound
-              ? "SELECT term FROM suggest_rank WHERE term >= ?1 AND term < ?2"
-                " ORDER BY cnt DESC, term ASC LIMIT ?3"
-              : "SELECT term FROM suggest_rank WHERE term >= ?1"
-                " ORDER BY cnt DESC, term ASC LIMIT ?3";
-  } else {
-    /* Upgrade fallback: rank table empty but edges may exist; the
-     * grouped edge scan still yields correct suggestions until the
-     * next sync fills the rank table (and if there are no edges at
-     * all, it naturally returns nothing). */
-    sql = has_bound
-              ? "SELECT term FROM suggest WHERE term >= ?1 AND term < ?2"
-                " GROUP BY term ORDER BY COUNT(*) DESC, term ASC LIMIT ?3"
-              : "SELECT term FROM suggest WHERE term >= ?1"
-                " GROUP BY term ORDER BY COUNT(*) DESC, term ASC LIMIT ?3";
-  }
+  const char *sql = suggest_scan_sql(suggest_rank_ready(), has_bound);
   sqlite3_stmt *st = NULL;
   if (sqlite3_prepare_v2(g_db, sql, -1, &st, NULL) != SQLITE_OK)
     return 0;
@@ -1419,6 +1458,35 @@ static const char *view_source(void) {
  * quoting neutralises operators/punctuation so the query can't change
  * FTS query shape.  Returns the query length, or 0 when nothing usable
  * remains (caller falls back to LIKE). */
+/* Skip ASCII whitespace; returns p advanced to the first non-blank byte. */
+static const char *fts_skip_ws(const char *p) {
+  while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r')
+    p++;
+  return p;
+}
+
+/* Append one whitespace-delimited word from *pp to the phrase buffer,
+ * doubling embedded quotes to escape them inside the FTS phrase.
+ * Advances *pp past the word and returns 0 only on buffer overflow. */
+static int fts_emit_word(const char **pp, char *out, size_t cap, size_t *o) {
+  const char *p = *pp;
+  while (*p != '\0' && *p != ' ' && *p != '\t' && *p != '\n' && *p != '\r') {
+    char c = *p++;
+    if (c == '"') { /* double the quote to escape it inside a phrase */
+      if (*o + 2 >= cap)
+        return 0;
+      out[(*o)++] = '"';
+      out[(*o)++] = '"';
+    } else {
+      if (*o + 1 >= cap)
+        return 0;
+      out[(*o)++] = c;
+    }
+  }
+  *pp = p;
+  return 1;
+}
+
 static int fts_query_from(const char *raw, char *out, size_t cap) {
   if (raw == NULL || cap < 4)
     return 0;
@@ -1427,8 +1495,7 @@ static int fts_query_from(const char *raw, char *out, size_t cap) {
   int any = 0;
   out[o++] = '"';
   while (*p != '\0') {
-    while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r')
-      p++;
+    p = fts_skip_ws(p);
     if (*p == '\0')
       break;
     if (any) { /* one space between words */
@@ -1436,19 +1503,8 @@ static int fts_query_from(const char *raw, char *out, size_t cap) {
         return 0;
       out[o++] = ' ';
     }
-    while (*p != '\0' && *p != ' ' && *p != '\t' && *p != '\n' && *p != '\r') {
-      char c = *p++;
-      if (c == '"') { /* double the quote to escape it inside a phrase */
-        if (o + 2 >= cap)
-          return 0;
-        out[o++] = '"';
-        out[o++] = '"';
-      } else {
-        if (o + 1 >= cap)
-          return 0;
-        out[o++] = c;
-      }
-    }
+    if (!fts_emit_word(&p, out, cap, &o))
+      return 0;
     any = 1;
   }
   if (!any)
@@ -1673,6 +1729,273 @@ int bs_view_dim_available(BsGroupDim dim) {
 
 /* ── view rebuild ───────────────────────────────────────────────────── */
 
+/* Drop the three per-rebuild temp tables if any survived an earlier
+ * failure (idempotent: a failed earlier rebuild must not wedge the
+ * collapse/group paths — a leaked t_sorted makes the CREATE TEMP TABLE
+ * below fail). */
+static void view_drop_temps(void) {
+  sqlite3_exec(g_db, "DROP TABLE IF EXISTS t_sorted", NULL, NULL, NULL);
+  sqlite3_exec(g_db, "DROP TABLE IF EXISTS t_grp", NULL, NULL, NULL);
+  sqlite3_exec(g_db, "DROP TABLE IF EXISTS t_out", NULL, NULL, NULL);
+}
+
+/* Append the drill-scope filters for the active dimension group to sql:
+ * every chosen dimension gets an equality clause where a value is pinned
+ * and a "missing/empty" clause where it is not. */
+static void view_append_drill_conds(char *sql, size_t cap) {
+  for (int L = 0; L < bs_g_drill_level && L < BS_GROUP_MAX_LEVELS; L++) {
+    const char *e = dim_sql(dim_at(bs_g_group, L), 0);
+    if (bs_g_drill_values[L][0])
+      snprintf(sql + strlen(sql), cap - strlen(sql), " AND (%s=?%d)", e,
+               L + 1);
+    else
+      snprintf(sql + strlen(sql), cap - strlen(sql),
+               " AND (%s IS NULL OR %s='')", e, e);
+  }
+}
+
+/* Prepare sql, bind the drill-scope values and then the query, and step.
+ * Normalises SQLITE_DONE to SQLITE_OK for the exec-chain gates and, when
+ * inserted is non-NULL, records the row count written to view.  Returns
+ * the SQLITE result (or the prepare failure). */
+static int view_run_scoped_select(const char *sql, int *inserted) {
+  sqlite3_stmt *st = NULL;
+  int rc = sqlite3_prepare_v2(g_db, sql, -1, &st, NULL);
+  if (rc == SQLITE_OK) {
+    for (int L = 0; L < bs_g_drill_level; L++)
+      if (bs_g_drill_values[L][0])
+        bind_text_trunc(st, L + 1, bs_g_drill_values[L]);
+    view_bind_query(st, bs_g_drill_level + 1);
+    rc = sqlite3_step(st);
+    if (inserted != NULL)
+      *inserted = sqlite3_changes(g_db);
+    if (rc == SQLITE_DONE)
+      rc = SQLITE_OK;
+    sqlite3_finalize(st);
+  }
+  return rc;
+}
+
+/* Shared t_out shape both materialised paths build up. */
+static int view_make_tout(void) {
+  return sqlite3_exec(g_db,
+                      "CREATE TEMP TABLE t_out(fk INTEGER, kind INTEGER,"
+                      " book_id TEXT, series_id TEXT, series_name TEXT,"
+                      " series_count INTEGER)",
+                      NULL, NULL, NULL);
+}
+
+/* Emit the rows materialised in t_out into view and record the insert
+ * count (read before any DROP resets sqlite3_changes). */
+static int view_emit_from_tout(int *inserted) {
+  int rc = sqlite3_exec(g_db,
+                        "INSERT INTO view(kind, book_id, series_id,"
+                        " series_name, series_count)"
+                        " SELECT kind, book_id, series_id, series_name,"
+                        " series_count FROM t_out ORDER BY fk, kind",
+                        NULL, NULL, NULL);
+  if (inserted != NULL)
+    *inserted = sqlite3_changes(g_db);
+  return rc;
+}
+
+/* Drill-down: emit the drilled series' members under the active filter
+ * and sort. */
+static int view_rebuild_drill(int *inserted) {
+  char sql[2048];
+  snprintf(sql, sizeof sql,
+           "INSERT INTO view(kind, book_id, series_id, series_name,"
+           " series_count) SELECT 0, id, series_id, series, 0"
+           " FROM books WHERE series_id=?1 AND");
+  view_where(sql, sizeof sql, 2);
+  snprintf(sql + strlen(sql), sizeof sql - strlen(sql), " ORDER BY %s",
+           view_order());
+  sqlite3_stmt *st = NULL;
+  int rc = sqlite3_prepare_v2(g_db, sql, -1, &st, NULL);
+  if (rc == SQLITE_OK) {
+    bind_text_trunc(st, 1, bs_g_drilled_series);
+    view_bind_query(st, 2);
+    rc = sqlite3_step(st);
+    *inserted = sqlite3_changes(g_db);
+    sqlite3_finalize(st);
+  }
+  return rc;
+}
+
+/* Collapse (All books): order the filtered set once into a temp table
+ * (rowid = sort position), then emit flats and series cards keyed by
+ * first-seen position. */
+static int view_rebuild_collapse(int *inserted) {
+  view_drop_temps();
+  int rc = sqlite3_exec(g_db,
+                        "CREATE TEMP TABLE t_sorted(id TEXT, series_id TEXT,"
+                        " series_idx REAL, series TEXT)",
+                        NULL, NULL, NULL);
+  if (rc != SQLITE_OK)
+    bs_LOG("[bookshelf] view_rebuild: t_sorted create rc=%d: %s\n", rc,
+        sqlite3_errmsg(g_db));
+  if (rc == SQLITE_OK) {
+    char sql[2048];
+    snprintf(sql, sizeof sql,
+             "INSERT INTO t_sorted SELECT id, series_id, series_idx, series"
+             " FROM books WHERE");
+    view_where(sql, sizeof sql, 1);
+    snprintf(sql + strlen(sql), sizeof sql - strlen(sql), " ORDER BY %s",
+             view_order());
+    sqlite3_stmt *st = NULL;
+    rc = sqlite3_prepare_v2(g_db, sql, -1, &st, NULL);
+    if (rc == SQLITE_OK) {
+      view_bind_query(st, 1);
+      rc = sqlite3_step(st);
+      /* step reports SQLITE_DONE on success; the exec chain
+       * below gates on SQLITE_OK, so normalise. */
+      if (rc == SQLITE_DONE)
+        rc = SQLITE_OK;
+      sqlite3_finalize(st);
+    }
+  }
+  if (rc == SQLITE_OK)
+    rc = view_make_tout();
+  if (rc == SQLITE_OK) {
+    /* Per-series aggregates plus an index on the temp sort
+     * table keep the collapse linear in the library size: every
+     * correlated lookup below hits t_sorted_sid instead of
+     * scanning t_sorted once per output row. */
+    rc = sqlite3_exec(g_db,
+                      "CREATE TEMP TABLE t_grp AS"
+                      " SELECT series_id AS sid, COUNT(*) AS c,"
+                      "        MAX(series_idx) AS mx"
+                      " FROM t_sorted WHERE series_id IS NOT NULL"
+                      "  AND series_id!='' GROUP BY series_id;"
+                      "CREATE INDEX t_sorted_sid ON t_sorted(series_id)",
+                      NULL, NULL, NULL);
+  }
+  if (rc == SQLITE_OK) {
+    /* Flat tiles: standalone books and single-member series,
+     * each at its own sort position. */
+    rc = sqlite3_exec(g_db,
+                      "INSERT INTO t_out"
+                      " SELECT s.rowid, 0, s.id, s.series_id, s.series,"
+                      "        COALESCE(g.c, 1)"
+                      " FROM t_sorted s LEFT JOIN t_grp g"
+                      "  ON g.sid=s.series_id"
+                      " WHERE g.c IS NULL OR g.c=1",
+                      NULL, NULL, NULL);
+  }
+  if (rc == SQLITE_OK) {
+    /* One card per multi-book series, after all flat tiles,
+     * ordered by first-seen position.  Representative = highest
+     * volume (ties: earliest sort position). */
+    rc = sqlite3_exec(g_db,
+                      "INSERT INTO t_out"
+                      " SELECT 1000000000 +"
+                      "        (SELECT MIN(s2.rowid) FROM t_sorted s2"
+                      "          WHERE s2.series_id=g.sid),"
+                      "        1, rep.id, g.sid, rep.series, g.c"
+                      " FROM t_grp g"
+                      " JOIN t_sorted rep ON rep.series_id=g.sid"
+                      "  AND rep.series_idx=g.mx"
+                      "  AND rep.rowid=(SELECT MIN(s3.rowid) FROM t_sorted s3"
+                      "                  WHERE s3.series_id=g.sid"
+                      "                    AND s3.series_idx=g.mx)"
+                      " WHERE g.c>1",
+                      NULL, NULL, NULL);
+  }
+  if (rc == SQLITE_OK)
+    rc = view_emit_from_tout(inserted);
+  view_drop_temps();
+  return rc;
+}
+
+/* Dimension grouping: collapse into stack cards (like the series
+ * stacks) keyed by the active dimension's value; single-member groups
+ * stay flat tiles.  Tapping a card drills into it (regroups by the next
+ * dimension, or flat at the leaf). */
+static int view_rebuild_group(int *inserted) {
+  const char *dim = dim_sql(dim_at(bs_g_group, bs_g_drill_level), 0);
+  /* The card label is the display value (series name for series,
+   * which groups by the API series_id). */
+  const char *lbl = (dim_at(bs_g_group, bs_g_drill_level) == BS_GROUP_BY_SERIES)
+                        ? "series"
+                        : dim;
+  view_drop_temps();
+  int rc = sqlite3_exec(g_db,
+                        "CREATE TEMP TABLE t_sorted(id TEXT NOT NULL, g TEXT,"
+                        " lbl TEXT)",
+                        NULL, NULL, NULL);
+  if (rc != SQLITE_OK)
+    bs_LOG("[bookshelf] view_rebuild: t_sorted create rc=%d: %s\n", rc,
+        sqlite3_errmsg(g_db));
+  if (rc == SQLITE_OK) {
+    char sql[2048];
+    snprintf(sql, sizeof sql,
+             "INSERT INTO t_sorted SELECT id, %s, %s FROM books WHERE", dim,
+             lbl);
+    view_where(sql, sizeof sql, bs_g_drill_level + 1);
+    view_append_drill_conds(sql, sizeof sql);
+    snprintf(sql + strlen(sql), sizeof sql - strlen(sql), " ORDER BY %s",
+             view_order());
+    rc = view_run_scoped_select(sql, NULL);
+  }
+  if (rc == SQLITE_OK)
+    rc = view_make_tout();
+  if (rc == SQLITE_OK) {
+    rc = sqlite3_exec(g_db,
+                      "CREATE TEMP TABLE t_grp AS"
+                      " SELECT g AS sid, COUNT(*) AS c FROM t_sorted"
+                      " GROUP BY g;"
+                      "CREATE INDEX t_sorted_g ON t_sorted(g)",
+                      NULL, NULL, NULL);
+  }
+  if (rc == SQLITE_OK) {
+    /* Flat tiles: standalone books and single-member groups. */
+    rc = sqlite3_exec(g_db,
+                      "INSERT INTO t_out"
+                      " SELECT s.rowid, 0, s.id, '', s.lbl, COALESCE(g.c, 1)"
+                      " FROM t_sorted s LEFT JOIN t_grp g ON g.sid=s.g"
+                      " WHERE g.c IS NULL OR g.c=1",
+                      NULL, NULL, NULL);
+  }
+  if (rc == SQLITE_OK) {
+    /* One stack card per multi-book group, at its first member's
+     * sort position so cards interleave with the flat tiles instead
+     * of all landing after them (a multi-member group's rows are
+     * never emitted flat, so the MIN(rowid) fk collides with no flat
+     * tile — distinct groups also get distinct fks).  Representative
+     * = the group's first book in the active sort; series_id carries
+     * the raw group value so a card tap can drill into scope. */
+    rc = sqlite3_exec(g_db,
+                      "INSERT INTO t_out"
+                      " SELECT (SELECT MIN(s2.rowid) FROM t_sorted s2"
+                      "          WHERE s2.g=g.sid),"
+                      "        1, rep.id, g.sid, rep.lbl, g.c"
+                      " FROM t_grp g"
+                      " JOIN t_sorted rep ON rep.g=g.sid AND rep.rowid="
+                      "      (SELECT MIN(s3.rowid) FROM t_sorted s3"
+                      "        WHERE s3.g=g.sid)"
+                      " WHERE g.c>1",
+                      NULL, NULL, NULL);
+  }
+  if (rc == SQLITE_OK)
+    rc = view_emit_from_tout(inserted);
+  view_drop_temps();
+  return rc;
+}
+
+/* Leaf: every chosen dimension is drilled; show the scope's books flat. */
+static int view_rebuild_leaf(int *inserted) {
+  char sql[2048];
+  snprintf(sql, sizeof sql,
+           "INSERT INTO view(kind, book_id, series_id, series_name,"
+           " series_count) SELECT 0, id, series_id, series, 0"
+           " FROM books WHERE");
+  view_where(sql, sizeof sql, bs_g_drill_level + 1);
+  view_append_drill_conds(sql, sizeof sql);
+  snprintf(sql + strlen(sql), sizeof sql - strlen(sql), " ORDER BY %s",
+           view_order());
+  return view_run_scoped_select(sql, inserted);
+}
+
 /* Rebuild the materialised view table for the current filter/sort/
  * group/drill.  Collapse modes (All books) emit standalone books as
  * flat tiles and multi-book series as single cards, interleaved in
@@ -1714,271 +2037,20 @@ void bs_view_rebuild(void) {
   }
   bs_g_view_total = 0;
 
-  char sql[2048];
   int rc = SQLITE_OK;
   /* Rows written to view by the INSERT below; becomes g_view_total
    * after COMMIT (sqlite3_changes must be read before any DROP TABLE
    * or the COMMIT — both reset the counter). */
   int inserted = 0;
 
-  if (bs_g_drilled_series[0] != '\0') {
-    /* Drill-down: the series' members under the active filter/sort. */
-    snprintf(
-        sql, sizeof sql,
-        "INSERT INTO view(kind, book_id, series_id, series_name, series_count)"
-        " SELECT 0, id, series_id, series, 0 FROM books WHERE series_id=?1 "
-        "AND");
-    view_where(sql, sizeof sql, 2);
-    snprintf(sql + strlen(sql), sizeof sql - strlen(sql), " ORDER BY %s",
-             view_order());
-    sqlite3_stmt *st = NULL;
-    rc = sqlite3_prepare_v2(g_db, sql, -1, &st, NULL);
-    if (rc == SQLITE_OK) {
-      bind_text_trunc(st, 1, bs_g_drilled_series);
-      view_bind_query(st, 2);
-      rc = sqlite3_step(st);
-      inserted = sqlite3_changes(g_db);
-      sqlite3_finalize(st);
-    }
-  } else if (bs_g_group == BS_GROUP_NONE) {
-    /* idempotent: a failed earlier rebuild must not wedge the collapse
-     * (a leaked t_sorted makes the CREATE TEMP TABLE below fail). */
-    sqlite3_exec(g_db, "DROP TABLE IF EXISTS t_sorted", NULL, NULL, NULL);
-    sqlite3_exec(g_db, "DROP TABLE IF EXISTS t_grp", NULL, NULL, NULL);
-    sqlite3_exec(g_db, "DROP TABLE IF EXISTS t_out", NULL, NULL, NULL);
-    /* Collapse mode: order the filtered set once into a temp table
-     * (rowid = sort position), then emit flats and series cards
-     * keyed by first-seen position. */
-    rc = sqlite3_exec(g_db,
-                      "CREATE TEMP TABLE t_sorted(id TEXT, series_id TEXT,"
-                      " series_idx REAL, series TEXT)",
-                      NULL, NULL, NULL);
-    if (rc != SQLITE_OK)
-      bs_LOG("[bookshelf] view_rebuild: t_sorted create rc=%d: %s\n", rc,
-          sqlite3_errmsg(g_db));
-    if (rc == SQLITE_OK) {
-      snprintf(sql, sizeof sql,
-               "INSERT INTO t_sorted SELECT id, series_id, series_idx, series"
-               " FROM books WHERE");
-      view_where(sql, sizeof sql, 1);
-      snprintf(sql + strlen(sql), sizeof sql - strlen(sql), " ORDER BY %s",
-               view_order());
-      sqlite3_stmt *st = NULL;
-      rc = sqlite3_prepare_v2(g_db, sql, -1, &st, NULL);
-      if (rc == SQLITE_OK) {
-        view_bind_query(st, 1);
-        rc = sqlite3_step(st);
-        sqlite3_finalize(st);
-        /* step reports SQLITE_DONE on success; the exec chain
-         * below gates on SQLITE_OK, so normalise. */
-        if (rc == SQLITE_DONE)
-          rc = SQLITE_OK;
-      }
-    }
-    if (rc == SQLITE_OK) {
-      rc = sqlite3_exec(
-          g_db,
-          "CREATE TEMP TABLE t_out(fk INTEGER, kind INTEGER, book_id TEXT,"
-          " series_id TEXT, series_name TEXT, series_count INTEGER)",
-          NULL, NULL, NULL);
-    }
-    if (rc == SQLITE_OK) {
-      /* Per-series aggregates plus an index on the temp sort
-       * table keep the collapse linear in the library size: every
-       * correlated lookup below hits t_sorted_sid instead of
-       * scanning t_sorted once per output row. */
-      rc = sqlite3_exec(g_db,
-                        "CREATE TEMP TABLE t_grp AS"
-                        " SELECT series_id AS sid, COUNT(*) AS c,"
-                        "        MAX(series_idx) AS mx"
-                        " FROM t_sorted WHERE series_id IS NOT NULL"
-                        "  AND series_id!='' GROUP BY series_id;"
-                        "CREATE INDEX t_sorted_sid ON t_sorted(series_id)",
-                        NULL, NULL, NULL);
-    }
-    if (rc == SQLITE_OK) {
-      /* Flat tiles: standalone books and single-member series,
-       * each at its own sort position. */
-      rc = sqlite3_exec(g_db,
-                        "INSERT INTO t_out"
-                        " SELECT s.rowid, 0, s.id, s.series_id, s.series,"
-                        "        COALESCE(g.c, 1)"
-                        " FROM t_sorted s LEFT JOIN t_grp g"
-                        "  ON g.sid=s.series_id"
-                        " WHERE g.c IS NULL OR g.c=1",
-                        NULL, NULL, NULL);
-    }
-    if (rc == SQLITE_OK) {
-      /* One card per multi-book series, after all flat tiles,
-       * ordered by first-seen position.  Representative = highest
-       * volume (ties: earliest sort position). */
-      rc = sqlite3_exec(g_db,
-                        "INSERT INTO t_out"
-                        " SELECT 1000000000 +"
-                        "        (SELECT MIN(s2.rowid) FROM t_sorted s2"
-                        "          WHERE s2.series_id=g.sid),"
-                        "        1, rep.id, g.sid, rep.series, g.c"
-                        " FROM t_grp g"
-                        " JOIN t_sorted rep ON rep.series_id=g.sid"
-                        "  AND rep.series_idx=g.mx"
-                        "  AND rep.rowid=(SELECT MIN(s3.rowid) FROM t_sorted s3"
-                        "                  WHERE s3.series_id=g.sid"
-                        "                    AND s3.series_idx=g.mx)"
-                        " WHERE g.c>1",
-                        NULL, NULL, NULL);
-    }
-    if (rc == SQLITE_OK) {
-      rc = sqlite3_exec(
-          g_db,
-          "INSERT INTO view(kind, book_id, series_id, series_name,"
-          " series_count)"
-          " SELECT kind, book_id, series_id, series_name, series_count"
-          " FROM t_out ORDER BY fk, kind",
-          NULL, NULL, NULL);
-      /* Read the insert count before the DROP TABLEs below (any
-       * non-SELECT statement resets sqlite3_changes). */
-      inserted = sqlite3_changes(g_db);
-    }
-    sqlite3_exec(g_db, "DROP TABLE IF EXISTS t_sorted", NULL, NULL, NULL);
-    sqlite3_exec(g_db, "DROP TABLE IF EXISTS t_grp", NULL, NULL, NULL);
-    sqlite3_exec(g_db, "DROP TABLE IF EXISTS t_out", NULL, NULL, NULL);
-  } else if (grouped_active()) {
-    /* Dimension grouping collapses into stack cards (like the series
-     * stacks) keyed by the active dimension's value; single-member
-     * groups stay flat tiles.  Tapping a card drills into it (regroups
-     * by the next dimension, or flat at the leaf). */
-    const char *dim = dim_sql(dim_at(bs_g_group, bs_g_drill_level), 0);
-    /* The card label is the display value (series name for series,
-     * which groups by the API series_id). */
-    const char *lbl = (dim_at(bs_g_group, bs_g_drill_level) == BS_GROUP_BY_SERIES)
-                          ? "series"
-                          : dim;
-    sqlite3_exec(g_db, "DROP TABLE IF EXISTS t_sorted", NULL, NULL, NULL);
-    sqlite3_exec(g_db, "DROP TABLE IF EXISTS t_grp", NULL, NULL, NULL);
-    sqlite3_exec(g_db, "DROP TABLE IF EXISTS t_out", NULL, NULL, NULL);
-    rc = sqlite3_exec(g_db,
-                      "CREATE TEMP TABLE t_sorted(id TEXT NOT NULL, g TEXT,"
-                      " lbl TEXT)",
-                      NULL, NULL, NULL);
-    if (rc != SQLITE_OK)
-      bs_LOG("[bookshelf] view_rebuild: t_sorted create rc=%d: %s\n", rc,
-          sqlite3_errmsg(g_db));
-    if (rc == SQLITE_OK) {
-      snprintf(sql, sizeof sql,
-               "INSERT INTO t_sorted SELECT id, %s, %s FROM books WHERE", dim,
-               lbl);
-      view_where(sql, sizeof sql, bs_g_drill_level + 1);
-      for (int L = 0; L < bs_g_drill_level && L < BS_GROUP_MAX_LEVELS; L++) {
-        const char *e = dim_sql(dim_at(bs_g_group, L), 0);
-        if (bs_g_drill_values[L][0])
-          snprintf(sql + strlen(sql), sizeof sql - strlen(sql),
-                   " AND (%s=?%d)", e, L + 1);
-        else
-          snprintf(sql + strlen(sql), sizeof sql - strlen(sql),
-                   " AND (%s IS NULL OR %s='')", e, e);
-      }
-      snprintf(sql + strlen(sql), sizeof sql - strlen(sql), " ORDER BY %s",
-               view_order());
-      sqlite3_stmt *st = NULL;
-      rc = sqlite3_prepare_v2(g_db, sql, -1, &st, NULL);
-      if (rc == SQLITE_OK) {
-        for (int L = 0; L < bs_g_drill_level; L++)
-          if (bs_g_drill_values[L][0])
-            bind_text_trunc(st, L + 1, bs_g_drill_values[L]);
-        view_bind_query(st, bs_g_drill_level + 1);
-        rc = sqlite3_step(st);
-        if (rc == SQLITE_DONE)
-          rc = SQLITE_OK; /* exec chain below gates on SQLITE_OK */
-        sqlite3_finalize(st);
-      }
-    }
-    if (rc == SQLITE_OK) {
-      rc = sqlite3_exec(g_db,
-                        "CREATE TEMP TABLE t_out(fk INTEGER, kind INTEGER,"
-                        " book_id TEXT, series_id TEXT, series_name TEXT,"
-                        " series_count INTEGER)",
-                        NULL, NULL, NULL);
-    }
-    if (rc == SQLITE_OK) {
-      rc = sqlite3_exec(g_db,
-                        "CREATE TEMP TABLE t_grp AS"
-                        " SELECT g AS sid, COUNT(*) AS c FROM t_sorted"
-                        " GROUP BY g;"
-                        "CREATE INDEX t_sorted_g ON t_sorted(g)",
-                        NULL, NULL, NULL);
-    }
-    if (rc == SQLITE_OK) {
-      /* Flat tiles: standalone books and single-member groups. */
-      rc = sqlite3_exec(g_db,
-                        "INSERT INTO t_out"
-                        " SELECT s.rowid, 0, s.id, '', s.lbl, COALESCE(g.c, 1)"
-                        " FROM t_sorted s LEFT JOIN t_grp g ON g.sid=s.g"
-                        " WHERE g.c IS NULL OR g.c=1",
-                        NULL, NULL, NULL);
-    }
-    if (rc == SQLITE_OK) {
-      /* One stack card per multi-book group, at its first member's
-       * sort position so cards interleave with the flat tiles instead
-       * of all landing after them (a multi-member group's rows are
-       * never emitted flat, so the MIN(rowid) fk collides with no flat
-       * tile — distinct groups also get distinct fks).  Representative
-       * = the group's first book in the active sort; series_id carries
-       * the raw group value so a card tap can drill into scope. */
-      rc = sqlite3_exec(g_db,
-                        "INSERT INTO t_out"
-                        " SELECT (SELECT MIN(s2.rowid) FROM t_sorted s2"
-                        "          WHERE s2.g=g.sid),"
-                        "        1, rep.id, g.sid, rep.lbl, g.c"
-                        " FROM t_grp g"
-                        " JOIN t_sorted rep ON rep.g=g.sid AND rep.rowid="
-                        "      (SELECT MIN(s3.rowid) FROM t_sorted s3"
-                        "        WHERE s3.g=g.sid)"
-                        " WHERE g.c>1",
-                        NULL, NULL, NULL);
-    }
-    if (rc == SQLITE_OK) {
-      rc = sqlite3_exec(g_db,
-                        "INSERT INTO view(kind, book_id, series_id,"
-                        " series_name, series_count)"
-                        " SELECT kind, book_id, series_id, series_name,"
-                        " series_count FROM t_out ORDER BY fk, kind",
-                        NULL, NULL, NULL);
-      inserted = sqlite3_changes(g_db);
-    }
-    sqlite3_exec(g_db, "DROP TABLE IF EXISTS t_sorted", NULL, NULL, NULL);
-    sqlite3_exec(g_db, "DROP TABLE IF EXISTS t_grp", NULL, NULL, NULL);
-    sqlite3_exec(g_db, "DROP TABLE IF EXISTS t_out", NULL, NULL, NULL);
-  } else {
-    /* Leaf: every chosen dimension is drilled; show the scope's books
-     * flat. */
-    snprintf(sql, sizeof sql,
-             "INSERT INTO view(kind, book_id, series_id, series_name,"
-             " series_count) SELECT 0, id, series_id, series, 0"
-             " FROM books WHERE");
-    view_where(sql, sizeof sql, bs_g_drill_level + 1);
-    for (int L = 0; L < bs_g_drill_level && L < BS_GROUP_MAX_LEVELS; L++) {
-      const char *e = dim_sql(dim_at(bs_g_group, L), 0);
-      if (bs_g_drill_values[L][0])
-        snprintf(sql + strlen(sql), sizeof sql - strlen(sql),
-                 " AND (%s=?%d)", e, L + 1);
-      else
-        snprintf(sql + strlen(sql), sizeof sql - strlen(sql),
-                 " AND (%s IS NULL OR %s='')", e, e);
-    }
-    snprintf(sql + strlen(sql), sizeof sql - strlen(sql), " ORDER BY %s",
-             view_order());
-    sqlite3_stmt *st = NULL;
-    rc = sqlite3_prepare_v2(g_db, sql, -1, &st, NULL);
-    if (rc == SQLITE_OK) {
-      for (int L = 0; L < bs_g_drill_level; L++)
-        if (bs_g_drill_values[L][0])
-          bind_text_trunc(st, L + 1, bs_g_drill_values[L]);
-      view_bind_query(st, bs_g_drill_level + 1);
-      rc = sqlite3_step(st);
-      inserted = sqlite3_changes(g_db);
-      sqlite3_finalize(st);
-    }
-  }
+  if (bs_g_drilled_series[0] != '\0')
+    rc = view_rebuild_drill(&inserted);
+  else if (bs_g_group == BS_GROUP_NONE)
+    rc = view_rebuild_collapse(&inserted);
+  else if (grouped_active())
+    rc = view_rebuild_group(&inserted);
+  else
+    rc = view_rebuild_leaf(&inserted);
 
   if (rc != SQLITE_DONE && rc != SQLITE_OK) {
     bs_LOG("[bookshelf] view_rebuild failed: %s\n", sqlite3_errmsg(g_db));

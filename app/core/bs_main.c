@@ -197,8 +197,42 @@ drag_scroll_lift(int *scroll, int *drag, int *moved, void (*draw)(void),
   return was_drag;
 }
 
-int bs_on_event(int type, int par1, int par2) {
-  if (type == EVT_INIT) {
+static void bs_evt_detect_lang(void) {
+  char plat_lang[8] = "";
+  if (bs_plat_device_language(plat_lang, sizeof plat_lang) == 0) {
+      snprintf(bs_g_lang, sizeof bs_g_lang, "%.3s", plat_lang);
+  } else {
+    const char *env_lang = getenv("LANG");
+    if (env_lang != NULL && env_lang[0] != '\0') {
+      if (strncmp(env_lang, "de", 2) == 0)
+        snprintf(bs_g_lang, sizeof bs_g_lang, "de");
+      else if (strncmp(env_lang, "fr", 2) == 0)
+        snprintf(bs_g_lang, sizeof bs_g_lang, "fr");
+      else if (strncmp(env_lang, "it", 2) == 0)
+        snprintf(bs_g_lang, sizeof bs_g_lang, "it");
+      else
+        snprintf(bs_g_lang, sizeof bs_g_lang, "en");
+    }
+  }
+}
+
+static void bs_evt_resolve_api_url(void) {
+  if (bs_g_state.api_base[0] == '\0') {
+    const char *env_url = getenv("PBEMU_API_URL");
+    const char *env_host = getenv("PBEMU_API_HOST");
+    const char *url =
+        env_url ? env_url : (env_host ? env_host : BS_API_BASE_DEFAULT);
+    if (strncmp(url, "http://", 7) != 0 && strncmp(url, "https://", 8) != 0) {
+      char tmp[200];
+      snprintf(tmp, sizeof tmp, "http://%s:8765", url);
+      snprintf(bs_g_state.api_base, sizeof bs_g_state.api_base, "%s", tmp);
+    } else {
+      snprintf(bs_g_state.api_base, sizeof bs_g_state.api_base, "%s", url);
+    }
+  }
+}
+
+static int bs_evt_init(void) {
     memset(&bs_g_state, 0, sizeof bs_g_state);
     /* Wire the sync engine to the UI before anything can trigger a
      * sync: the boot sync is deferred to the one-shot init_sync_tick
@@ -293,22 +327,7 @@ int bs_on_event(int type, int par1, int par2) {
      * does NOT export it via the environment, so the PB backend parses
      * that file.  Fall back to LANG (the SDL/PC host), then the app's
      * own config loaded above. */
-    char plat_lang[8] = "";
-    if (bs_plat_device_language(plat_lang, sizeof plat_lang) == 0) {
-        snprintf(bs_g_lang, sizeof bs_g_lang, "%.3s", plat_lang);
-    } else {
-      const char *env_lang = getenv("LANG");
-      if (env_lang != NULL && env_lang[0] != '\0') {
-        if (strncmp(env_lang, "de", 2) == 0)
-          snprintf(bs_g_lang, sizeof bs_g_lang, "de");
-        else if (strncmp(env_lang, "fr", 2) == 0)
-          snprintf(bs_g_lang, sizeof bs_g_lang, "fr");
-        else if (strncmp(env_lang, "it", 2) == 0)
-          snprintf(bs_g_lang, sizeof bs_g_lang, "it");
-        else
-          snprintf(bs_g_lang, sizeof bs_g_lang, "en");
-      }
-    }
+    bs_evt_detect_lang();
 
     /* Device identity: fill the launcher profile from runtime probes
      * (capability-based device key + has_audio + language) and log the
@@ -317,19 +336,7 @@ int bs_on_event(int type, int par1, int par2) {
     bs_plat_log_identity();
 
     /* Resolve API URL via env vars if config didn't set it. */
-    if (bs_g_state.api_base[0] == '\0') {
-      const char *env_url = getenv("PBEMU_API_URL");
-      const char *env_host = getenv("PBEMU_API_HOST");
-      const char *url =
-          env_url ? env_url : (env_host ? env_host : BS_API_BASE_DEFAULT);
-      if (strncmp(url, "http://", 7) != 0 && strncmp(url, "https://", 8) != 0) {
-        char tmp[200];
-        snprintf(tmp, sizeof tmp, "http://%s:8765", url);
-        snprintf(bs_g_state.api_base, sizeof bs_g_state.api_base, "%s", tmp);
-      } else {
-        snprintf(bs_g_state.api_base, sizeof bs_g_state.api_base, "%s", url);
-      }
-    }
+    bs_evt_resolve_api_url();
 
     bs_build_endpoint_urls();
     /* Auto-sync on first launch so the shelf populates without a
@@ -352,9 +359,42 @@ int bs_on_event(int type, int par1, int par2) {
     bs_draw_pager();
     FullUpdate();
     return 1;
+}
+static int bs_show_draw_overlay(void) {
+  if (bs_g_state.overlay == BS_OV_SOURCE) {
+    bs_draw_overlay_source();
+    FullUpdate();
+    return 1;
   }
+  if (bs_g_state.overlay == BS_OV_LAUNCHER) {
+    bs_draw_overlay_launcher();
+    FullUpdate();
+    return 1;
+  }
+  if (bs_g_state.overlay == BS_OV_FOLDER) {
+    bs_draw_overlay_folder();
+    FullUpdate();
+    return 1;
+  }
+  if (bs_g_state.overlay == BS_OV_SETTINGS) {
+    bs_draw_overlay_settings();
+    FullUpdate();
+    return 1;
+  }
+  if (bs_g_state.overlay == BS_OV_LOG) {
+    bs_draw_log_view();
+    FullUpdate();
+    return 1;
+  }
+  if (bs_g_state.overlay == BS_OV_LICENSES) {
+    bs_draw_licenses_view();
+    FullUpdate();
+    return 1;
+  }
+  return 0;
+}
 
-  if (type == EVT_SHOW || type == EVT_REPAINT || type == EVT_FOREGROUND) {
+static int bs_evt_show(void) {
     /* Render the system panel strip before drawing app content.
      * The framework's iv_actualize_panel() skips the draw when
      * is_state_changed() returns 0 (no clock/battery/net change),
@@ -366,36 +406,8 @@ int bs_on_event(int type, int par1, int par2) {
     /* The user may have been reading with the integrated reader or
      * KOReader while we were away — refresh their progress. */
     bs_progress_reload();
-    if (bs_g_state.overlay == BS_OV_SOURCE) {
-      bs_draw_overlay_source();
-      FullUpdate();
+    if (bs_show_draw_overlay())
       return 1;
-    }
-    if (bs_g_state.overlay == BS_OV_LAUNCHER) {
-      bs_draw_overlay_launcher();
-      FullUpdate();
-      return 1;
-    }
-    if (bs_g_state.overlay == BS_OV_FOLDER) {
-      bs_draw_overlay_folder();
-      FullUpdate();
-      return 1;
-    }
-    if (bs_g_state.overlay == BS_OV_SETTINGS) {
-      bs_draw_overlay_settings();
-      FullUpdate();
-      return 1;
-    }
-    if (bs_g_state.overlay == BS_OV_LOG) {
-      bs_draw_log_view();
-      FullUpdate();
-      return 1;
-    }
-    if (bs_g_state.overlay == BS_OV_LICENSES) {
-      bs_draw_licenses_view();
-      FullUpdate();
-      return 1;
-    }
     bs_draw_top_bar();
     if (bs_g_state.tab == BS_TAB_SEARCH)
       bs_draw_search_tab();
@@ -417,9 +429,8 @@ int bs_on_event(int type, int par1, int par2) {
       bs_draw_overlay_sort();
     FullUpdate();
     return 1;
-  }
-
-  if (type == EVT_POINTERDOWN) {
+}
+static int bs_evt_pointerdown(int par1, int par2) {
     int x = par1, y = par2;
     /* The file browser body is drag-scrolled like the launcher; a
      * press on the top bar above it is a button press, not a
@@ -465,9 +476,8 @@ int bs_on_event(int type, int par1, int par2) {
       }
     }
     return 1;
-  }
-
-  if (type == EVT_POINTERMOVE) {
+}
+static int bs_evt_pointermove(int par1, int par2) {
     if (bs_g_browse_open && bs_g_state.source == BS_SOURCE_FOLDER) {
       drag_scroll_move(par2, &bs_g_browse_scroll, &bs_g_browser_drag,
                        &bs_g_browser_drag_y, &bs_g_browser_moved, bs_draw_browse);
@@ -495,30 +505,8 @@ int bs_on_event(int type, int par1, int par2) {
       }
     }
     return 0;
-  }
-
-  if (type == EVT_POINTERUP) {
-    int x = par1, y = par2;
-    bs_LOG("[bookshelf] EVT_POINTERUP x=%d y=%d overlay=%d tab=%d\n", x, y,
-        (int)bs_g_state.overlay, (int)bs_g_state.tab);
-    bs_g_lp_armed = 0;
-    bs_g_lp_vi = -1;
-    ClearTimerByName("blp");
-    /* Drop the release that opened the context menu (see longpress_tick). */
-    if (bs_g_ctx_suppress_up) {
-      bs_g_ctx_suppress_up = 0;
-      return 1;
-    }
-
-    /* The file browser body is drag-scrolled; a lift that ended a
-     * scroll drag is not a tap.  Plain taps fall through to the
-     * normal top-bar / body routing below. */
-    if (bs_g_browse_open && bs_g_state.source == BS_SOURCE_FOLDER) {
-      if (drag_scroll_lift(&bs_g_browse_scroll, &bs_g_browser_drag,
-                           &bs_g_browser_moved, bs_draw_browse, bs_flush_content))
-        return 1;
-    }
-    /* The source chooser owns all taps while open. */
+}
+static int bs_pu_handle_modal(int x, int y) {
     if (bs_g_state.overlay == BS_OV_SOURCE) {
       bs_on_tap_source(x, y);
       return 1;
@@ -578,6 +566,9 @@ int bs_on_event(int type, int par1, int par2) {
       return 1;
     }
 
+  return 0;
+}
+static int bs_pu_handle_dl(int x, int y) {
     /* The download popup owns all taps while open.  The X button
      * aborts the whole queue (batch, series, or single download);
      * the rest of the popup is modal while any download is active
@@ -605,6 +596,9 @@ int bs_on_event(int type, int par1, int par2) {
       return 1;
     }
 
+  return 0;
+}
+static int bs_pu_handle_popover(int x, int y) {
     /* Overlay taps take priority; outside-of-panel taps close. */
     if (bs_g_state.overlay == BS_OV_MORE) {
       /* on_tap_overlay_more reports 1 when its action already
@@ -634,23 +628,18 @@ int bs_on_event(int type, int par1, int par2) {
         bs_redraw_shelf();
       return 1;
     }
-    /* Bottom system strip (the status bar with clock, battery,
-     * etc.).  Tapping anywhere on it opens the firmware control
-     * panel — the same gesture as the real device. */
+  return 0;
+}
+static int bs_pu_handle_chrome_system(int x, int y) {
+    (void)x;
     if (y >= bs_content_bottom()) {
       bs_LOG("[bookshelf] system bar tapped -> control panel\n");
       OpenControlPanel(NULL);
       return 1;
     }
-
-    /* Top-bar buttons.  hit_top_bar returns:
-     *   1 = back  (left; back on the Search view or a drilled
-     *              series, no-op on the library shelf)
-     *   2 = sync  (left of the menu button; runs a library sync)
-     *   3 = menu  (right; opens the More overlay)
-     *   5 = search icon (opens the Search sub-page)
-     *   6 = source chooser
-     */
+  return 0;
+}
+static int bs_pu_handle_chrome_which(int x, int y) {
     int which = bs_hit_top_bar(x, y);
     if (which == 1) {
       if (bs_g_state.tab == BS_TAB_SEARCH) {
@@ -725,46 +714,20 @@ int bs_on_event(int type, int par1, int par2) {
       return 1;
     }
 
+  return 0;
+}
+static int bs_pu_handle_chrome(int x, int y) {
+    if (bs_pu_handle_chrome_system(x, y)) return 1;
+    if (bs_pu_handle_chrome_which(x, y)) return 1;
     /* Folder-source file browser: the top-bar buttons were handled
      * above; any other body tap navigates or opens an entry. */
     if (bs_g_browse_open && bs_g_state.source == BS_SOURCE_FOLDER) {
       bs_on_tap_browse(x, y);
       return 1;
     }
-
-    /* Pager — the page count is per-tab (library grid / search
-     * history). */
-    int pg = bs_hit_pager(x, y);
-    if (pg == -1) {
-      bs_g_state.page--;
-      bs_flip_page();
-      return 1;
-    }
-    if (pg == -2) {
-      bs_g_state.page++;
-      bs_flip_page();
-      return 1;
-    }
-    if (pg == -3) {
-      bs_g_state.page = 0;
-      bs_flip_page();
-      return 1;
-    }
-    if (pg == -4) {
-      bs_g_state.page = bs_current_pages() - 1;
-      bs_flip_page();
-      return 1;
-    }
-
-    /* Below the pager the body is tab-specific.  The Search page
-     * owns its whole body: the input row opens the keyboard, a
-     * history term re-runs that search, anything else is swallowed.
-     * While the keyboard is open (KBD_PASSEVENTS passes pointer
-     * events through), the suggestion band above it is hit-tested
-     * first; any other tap returns 0 so the firmware keyboard sees
-     * it (it may be a key press). */
-    if (bs_g_state.tab == BS_TAB_SEARCH) {
-      if (bs_g_state.search_kb) {
+  return 0;
+}
+static int bs_pu_handle_search_kb(int x, int y) {
         if (bs_g_nsuggest > 0) {
           int si = bs_hit_suggestion(x, y);
           if (si >= 0 && si < bs_g_nsuggest) {
@@ -821,7 +784,10 @@ int bs_on_event(int type, int par1, int par2) {
           return 1;
         }
         return 0;
-      }
+  return 0;
+}
+static int bs_pu_handle_search(int x, int y) {
+  if (bs_g_state.search_kb) return bs_pu_handle_search_kb(x, y);
       if (bs_hit_search_input(x, y) == 1) {
         bs_g_state.search_kb = 1;
         snprintf(bs_g_search_kb_buf, sizeof bs_g_search_kb_buf, "%s", bs_g_state.query);
@@ -847,41 +813,8 @@ int bs_on_event(int type, int par1, int par2) {
         }
       }
       return 1;
-    }
-
-    /* Book / card tap */
-    int idx = bs_hit_thumbnail(x, y);
-    if (idx >= 0) {
-      bs_on_tap_thumbnail(idx);
-      /* book_press_action already flushed the download popup when
-       * the book had to be fetched; repainting the grid here would
-       * wipe it. */
-      if (!bs_g_state.dl_popup) {
-        bs_draw_grid();
-        PartialUpdate(0, BS_TOP_BAR_H + BS_TOP_BAR_PAD, ScreenWidth(),
-                      bs_content_bottom() - BS_TOP_BAR_H - BS_TOP_BAR_PAD);
-      }
-      return 1;
-    }
-    return 0;
-  }
-
-  if (type == EVT_KEYPRESS) {
-    int is_page_key = (par1 == IV_KEY_PREV || par1 == IV_KEY_NEXT ||
-                       par1 == IV_KEY_PREV2 || par1 == IV_KEY_NEXT2);
-
-    /* Home: this app is the home task (see bookshelf-wrapper.sh —
-     * monitor.app launches it as "bookshelf.app"), so the
-     * taskmanager foregrounds us globally when Home is pressed.
-     * A Home key that reaches us while we are already foreground
-     * is a no-op; closing here would read as a crash. */
-    if (par1 == IV_KEY_HOME)
-      return 1;
-
-    /* Page-turn buttons paginate the shelf.  With a modal open they
-     * fall through to the Back logic below (close the topmost
-     * sheet), matching how the stock bookshelf treats them. */
-    if (is_page_key && !bs_modal_open() && !bs_g_browse_open) {
+}
+static int bs_evt_page_key(int par1) {
       int pages = bs_current_pages();
       if ((par1 == IV_KEY_NEXT || par1 == IV_KEY_NEXT2) &&
           bs_g_state.page + 1 < pages) {
@@ -893,12 +826,10 @@ int bs_on_event(int type, int par1, int par2) {
         bs_flip_page();
       }
       return 1;
-    }
-
-    if (par1 == IV_KEY_BACK || is_page_key) {
-      /* The file browser: Back ascends, at the root it opens the
-       * source chooser; page keys scroll the list. */
-      if (bs_g_browse_open && bs_g_state.source == BS_SOURCE_FOLDER) {
+  return 1;
+}
+static int bs_evt_back_browse(int par1, int is_page_key) {
+  if (bs_g_browse_open && bs_g_state.source == BS_SOURCE_FOLDER) {
         if (is_page_key) {
           int fwd = par1 == IV_KEY_NEXT || par1 == IV_KEY_NEXT2;
           bs_browse_page(fwd ? 1 : -1);
@@ -909,7 +840,13 @@ int bs_on_event(int type, int par1, int par2) {
           bs_flush_content();
         }
         return 1;
-      }
+  }
+  return 0;
+}
+static int bs_evt_back_modal(int par1, int is_page_key) {
+      /* The file browser: Back ascends, at the root it opens the
+       * source chooser; page keys scroll the list. */
+  if (bs_evt_back_browse(par1, is_page_key)) return 1;
       if (bs_g_state.overlay == BS_OV_SOURCE) {
         bs_g_state.overlay = BS_OV_NONE;
         bs_redraw_shelf();
@@ -941,6 +878,10 @@ int bs_on_event(int type, int par1, int par2) {
         bs_settings_close();
         return 1;
       }
+  return 0;
+}
+static int bs_evt_back_overlay(int par1) {
+    (void)par1;
       if (bs_g_state.overlay == BS_OV_LICENSES) {
         /* Back pops a license detail to its list, then closes the
          * viewer (mirrors the on-screen Back chevron). */
@@ -966,6 +907,10 @@ int bs_on_event(int type, int par1, int par2) {
         bs_redraw_shelf();
         return 1;
       }
+  return 0;
+}
+static int bs_evt_back_search_drill(int par1) {
+    (void)par1;
       if (bs_g_state.tab == BS_TAB_SEARCH) {
         /* Back from the Search page returns to the library, keeping
          * the active query filter in place.  A still-open keyboard
@@ -997,11 +942,105 @@ int bs_on_event(int type, int par1, int par2) {
        * button above — closing the home replacement reads as a
        * crash on the live device. */
       return 1;
+  return 0;
+}
+static int bs_evt_back_key(int par1, int is_page_key) {
+  if (bs_evt_back_modal(par1, is_page_key)) return 1;
+  if (bs_evt_back_overlay(par1)) return 1;
+  if (bs_evt_back_search_drill(par1)) return 1;
+  return 1;
+}
+static int bs_pu_handle_tail(int x, int y) {
+    /* Pager — the page count is per-tab (library grid / search
+     * history). */
+    int pg = bs_hit_pager(x, y);
+    if (pg == -1) {
+      bs_g_state.page--;
+      bs_flip_page();
+      return 1;
+    }
+    if (pg == -2) {
+      bs_g_state.page++;
+      bs_flip_page();
+      return 1;
+    }
+    if (pg == -3) {
+      bs_g_state.page = 0;
+      bs_flip_page();
+      return 1;
+    }
+    if (pg == -4) {
+      bs_g_state.page = bs_current_pages() - 1;
+      bs_flip_page();
+      return 1;
+    }
+    if (bs_g_state.tab == BS_TAB_SEARCH) return bs_pu_handle_search(x, y);
+    /* Book / card tap */
+    int idx = bs_hit_thumbnail(x, y);
+    if (idx >= 0) {
+      bs_on_tap_thumbnail(idx);
+      /* book_press_action already flushed the download popup when
+       * the book had to be fetched; repainting the grid here would
+       * wipe it. */
+      if (!bs_g_state.dl_popup) {
+        bs_draw_grid();
+        PartialUpdate(0, BS_TOP_BAR_H + BS_TOP_BAR_PAD, ScreenWidth(),
+                      bs_content_bottom() - BS_TOP_BAR_H - BS_TOP_BAR_PAD);
+      }
+      return 1;
     }
     return 0;
-  }
+}
 
-  if (type == EVT_EXIT) {
+static int bs_evt_pointerup(int par1, int par2) {
+    int x = par1, y = par2;
+    bs_LOG("[bookshelf] EVT_POINTERUP x=%d y=%d overlay=%d tab=%d\n", x, y,
+        (int)bs_g_state.overlay, (int)bs_g_state.tab);
+    bs_g_lp_armed = 0;
+    bs_g_lp_vi = -1;
+    ClearTimerByName("blp");
+    /* Drop the release that opened the context menu (see longpress_tick). */
+    if (bs_g_ctx_suppress_up) {
+      bs_g_ctx_suppress_up = 0;
+      return 1;
+    }
+    /* The file browser body is drag-scrolled; a lift that ended a
+     * scroll drag is not a tap.  Plain taps fall through to the
+     * normal top-bar / body routing below. */
+    if (bs_g_browse_open && bs_g_state.source == BS_SOURCE_FOLDER) {
+      if (drag_scroll_lift(&bs_g_browse_scroll, &bs_g_browser_drag,
+                           &bs_g_browser_moved, bs_draw_browse, bs_flush_content))
+        return 1;
+    }
+    if (bs_pu_handle_modal(x, y)) return 1;
+    if (bs_pu_handle_dl(x, y)) return 1;
+    if (bs_pu_handle_popover(x, y)) return 1;
+    if (bs_pu_handle_chrome(x, y)) return 1;
+    return bs_pu_handle_tail(x, y);
+}
+
+static int bs_evt_keypress(int par1) {
+    int is_page_key = (par1 == IV_KEY_PREV || par1 == IV_KEY_NEXT ||
+                       par1 == IV_KEY_PREV2 || par1 == IV_KEY_NEXT2);
+
+    /* Home: this app is the home task (see bookshelf-wrapper.sh —
+     * monitor.app launches it as "bookshelf.app"), so the
+     * taskmanager foregrounds us globally when Home is pressed.
+     * A Home key that reaches us while we are already foreground
+     * is a no-op; closing here would read as a crash. */
+    if (par1 == IV_KEY_HOME)
+      return 1;
+
+    /* Page-turn buttons paginate the shelf.  With a modal open they
+     * fall through to the Back logic below (close the topmost
+     * sheet), matching how the stock bookshelf treats them. */
+  if (is_page_key && !bs_modal_open() && !bs_g_browse_open)
+    return bs_evt_page_key(par1);
+  if (par1 == IV_KEY_BACK || is_page_key)
+    return bs_evt_back_key(par1, is_page_key);
+  return 0;
+}
+static int bs_evt_exit(void) {
     /* Tell every in-flight worker job to stop (cooperative flag; the
      * detached threads then get killed by process exit, same as the
      * old download/sync threads).  The log is deliberately NOT closed
@@ -1015,7 +1054,15 @@ int bs_on_event(int type, int par1, int par2) {
     if (bs_g_log != NULL)
         fflush(bs_g_log);
     return 1;
-  }
+}
+int bs_on_event(int type, int par1, int par2) {
+  if (type == EVT_INIT) return bs_evt_init();
+  if (type == EVT_SHOW || type == EVT_REPAINT || type == EVT_FOREGROUND) return bs_evt_show();
+  if (type == EVT_POINTERDOWN) return bs_evt_pointerdown(par1, par2);
+  if (type == EVT_POINTERMOVE) return bs_evt_pointermove(par1, par2);
+  if (type == EVT_POINTERUP) return bs_evt_pointerup(par1, par2);
+  if (type == EVT_KEYPRESS) return bs_evt_keypress(par1);
+  if (type == EVT_EXIT) return bs_evt_exit();
   return 0;
 }
 

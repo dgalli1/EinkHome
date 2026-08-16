@@ -22,6 +22,18 @@ bs_draw_back_icon(int cx, int cy, int col)
     DrawLine(ax + 4, ay, ax + 30, ay + 26, col);
 }
 
+/* Draw one polyline segment of a globe arc from the previous point to
+ * (xx, yy); s == 0 is the arc's start point, drawn as nothing.  The
+ * second, y-offset line thickens the 1px stroke. */
+static void
+globe_arc_piece(int px, int py, int xx, int yy, int col, int s)
+{
+    if (s > 0) {
+        DrawLine(px, py, xx, yy, col);
+        DrawLine(px, py + 1, xx, yy + 1, col);
+    }
+}
+
 /* Line-art globe (Kavita / online): circle, equator, meridian.  Drawn
  * in the common TOP_ICON_SIZE x TOP_ICON_SIZE icon box. */
 static void
@@ -33,10 +45,7 @@ draw_globe_icon(int x, int y, int col)
         double a = s * 2 * M_PI / 16.0;
         int    xx = cx + (int)(r * cos(a));
         int    yy = cy + (int)(r * sin(a));
-        if (s > 0) {
-            DrawLine(px, py, xx, yy, col);
-            DrawLine(px, py + 1, xx, yy + 1, col);
-        }
+        globe_arc_piece(px, py, xx, yy, col, s);
         px = xx;
         py = yy;
     }
@@ -46,10 +55,7 @@ draw_globe_icon(int x, int y, int col)
         double a = s * 2 * M_PI / 16.0;
         int    xx = cx + (int)(r * cos(a));
         int    yy = cy + (int)(r * 0.42 * sin(a));
-        if (s > 0) {
-            DrawLine(px, py, xx, yy, col);
-            DrawLine(px, py + 1, xx, yy + 1, col);
-        }
+        globe_arc_piece(px, py, xx, yy, col, s);
         px = xx;
         py = yy;
     }
@@ -59,10 +65,7 @@ draw_globe_icon(int x, int y, int col)
         double a = s * 2 * M_PI / 16.0;
         int    xx = cx + (int)(r * 0.42 * cos(a));
         int    yy = cy + (int)(r * sin(a));
-        if (s > 0) {
-            DrawLine(px, py, xx, yy, col);
-            DrawLine(px, py + 1, xx, yy + 1, col);
-        }
+        globe_arc_piece(px, py, xx, yy, col, s);
         px = xx;
         py = yy;
     }
@@ -154,6 +157,70 @@ draw_source_button(void)
     }
 }
 
+/* The top-bar title: series name when drilled into a series, "Search"
+ * on the search page, the active query on the filtered library shelf,
+ * the folder browser's current directory while it is open, and nothing
+ * on the plain shelf. */
+static void
+top_bar_title(char *title, size_t cap)
+{
+    if (bs_g_state.tab == BS_TAB_SEARCH) {
+        snprintf(title, cap, "%s", bs_i18n("tab.search"));
+    } else if (bs_g_state.source == BS_SOURCE_FOLDER && bs_g_browse_open) {
+        /* The file browser shows its current directory as the title,
+         * relative to /mnt/ext1 (the mount point is hidden from the
+         * user). */
+        char shown[96];
+        bs_user_path_display(bs_g_browse_path, shown, sizeof shown);
+        size_t plen = strlen(shown);
+        if (plen > cap - 1)
+            plen = cap - 1;
+        memcpy(title, shown, plen);
+        title[plen] = '\0';
+    } else if (bs_g_state.query[0] != '\0') {
+        snprintf(title, cap, "%s", bs_g_state.query);
+    } else {
+        title[0] = '\0';
+    }
+}
+
+/* Draw the centred top-bar title, trimmed to either half the screen
+ * width (search page) or the free band between the flanking icon
+ * stacks. */
+static void
+draw_top_bar_title(int w, int y0, int home_x, int home_w, int col, ifont *tf,
+                   char *title, size_t tsiz)
+{
+    if (bs_g_state.tab == BS_TAB_SEARCH) {
+        /* The Search bar carries only the back arrow: centre the
+         * title on the whole screen width, trimmed only so it cannot
+         * run under the back button.  Centring itself is
+         * StringWidth-based, so translated titles of any length stay
+         * centred. */
+        int guard = home_x + home_w + BS_TOP_BTN_PAD;
+        int budget = w - 2 * guard;
+        bs_utf8_fit_width(title, tsiz, budget);
+        SetFont(tf, col);
+        DrawString((w - StringWidth(title)) / 2, y0 + (BS_TOP_BAR_H - 40) / 2, title);
+    } else {
+        /* Centre inside the free band between the flanking icon
+         * stacks (home + source left; search + downloads + menu
+         * right).  Centring on the whole screen width would let a
+         * long series name run under the right icons: the trim budget
+         * is the band width and the draw origin the band, not 0. */
+        int left_w = BS_TOP_BTN_PAD + BS_TOP_BTN_SIZE + BS_TOP_BTN_PAD + bs_source_btn_w();
+        int right_w = BS_TOP_BTN_PAD + 4 * BS_TOP_BTN_SIZE;
+        int band_w = w - left_w - right_w;
+        if (band_w < 64)
+            band_w = 64;
+        bs_utf8_fit_width(title, tsiz, band_w);
+        SetFont(tf, col);
+        DrawString(left_w + (band_w - StringWidth(title)) / 2,
+                   y0 + (BS_TOP_BAR_H - 40) / 2,
+                   title);
+    }
+}
+
 void
 bs_draw_top_bar(void)
 {
@@ -205,58 +272,9 @@ bs_draw_top_bar(void)
     ifont *tf = OpenFont(DEFAULTFONT, 44, 0);
     if (tf != NULL) {
         char title[BS_MAX_QUERY_LEN + 16];
-        if (bs_g_state.tab == BS_TAB_SEARCH) {
-            snprintf(title, sizeof title, "%s", bs_i18n("tab.search"));
-        } else if (bs_g_state.source == BS_SOURCE_FOLDER && bs_g_browse_open) {
-            /* The file browser shows its current directory as the
-             * title, like the shelf shows the active query — relative
-             * to /mnt/ext1 (the mount point is hidden from the user). */
-            char shown[96];
-            bs_user_path_display(bs_g_browse_path, shown, sizeof shown);
-            size_t plen = strlen(shown);
-            if (plen > sizeof title - 1)
-                plen = sizeof title - 1;
-            memcpy(title, shown, plen);
-            title[plen] = '\0';
-        } else if (bs_g_state.query[0] != '\0') {
-            /* The active filter shown as the shelf title. */
-            snprintf(title, sizeof title, "%s", bs_g_state.query);
-        } else {
-            title[0] = '\0';
-        }
-        if (title[0] != '\0') {
-            if (bs_g_state.tab == BS_TAB_SEARCH) {
-                /* The Search bar carries only the back arrow: centre
-                 * the title on the whole screen width, trimmed only so
-                 * it cannot run under the back button (the button box
-                 * plus its margin, mirrored around the screen centre).
-                 * Centring itself is StringWidth-based, so translated
-                 * titles of any length stay centred. */
-                int guard = home_x + home_w + BS_TOP_BTN_PAD;
-                int budget = w - 2 * guard;
-                bs_utf8_fit_width(title, sizeof title, budget);
-                SetFont(tf, col);
-                DrawString(
-                    (w - StringWidth(title)) / 2, y0 + (BS_TOP_BAR_H - 40) / 2, title);
-            } else {
-                /* Centre the title inside the free band between the
-                 * flanking icon stacks (home + source left; search +
-                 * downloads + menu right).  Centring on the whole
-                 * screen width lets a long series name run under the
-                 * right icons: the trim budget must be the band width,
-                 * not w - 420, and the draw origin the band, not 0. */
-                int left_w = BS_TOP_BTN_PAD + BS_TOP_BTN_SIZE + BS_TOP_BTN_PAD + bs_source_btn_w();
-                int right_w = BS_TOP_BTN_PAD + 4 * BS_TOP_BTN_SIZE;
-                int band_w = w - left_w - right_w;
-                if (band_w < 64)
-                    band_w = 64;
-                bs_utf8_fit_width(title, sizeof title, band_w);
-                SetFont(tf, col);
-                DrawString(left_w + (band_w - StringWidth(title)) / 2,
-                           y0 + (BS_TOP_BAR_H - 40) / 2,
-                           title);
-            }
-        }
+        top_bar_title(title, sizeof title);
+        if (title[0] != '\0')
+            draw_top_bar_title(w, y0, home_x, home_w, col, tf, title, sizeof title);
         CloseFont(tf);
     }
     if (bs_g_state.tab == BS_TAB_SEARCH) {

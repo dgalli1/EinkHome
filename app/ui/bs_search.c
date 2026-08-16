@@ -5,29 +5,12 @@
 #include "bs_store.h"
 #include "bs_ui.h"
 
-/* Search sub-page body: the input row (magnifier + text box) at the
- * top, then the previously committed search terms below.  Tapping the
- * input opens the firmware keyboard; tapping a term re-runs that
- * search (see on_event). */
-void
-bs_draw_search_tab(void)
-{
-    /* Drawn on tab switch, keystroke, and suggestion taps — one line
-     * per user event (the offline e2e test polls this marker). */
-    bs_LOG("[bookshelf] draw_search_tab\n");
-    int top, bot, cell_w, cell_h;
-    (void)cell_w;
-    (void)cell_h;
-    bs_grid_geom(&top, &bot, &cell_w, &cell_h);
-    int w = ScreenWidth();
-    FillArea(0, top, w, bot - top, WHITE);
+/* ── helpers extracted from bs_draw_search_tab (behavior-preserving) ── */
 
-    /* ── input row: full-width search bar, magnifier inside ── */
-    int bx = 16, bw = w - 32; /* bar spans the page width */
-    int by = top + 10, bh = BS_SEARCH_ROW_H - 20;
-    DrawRect(bx, by, bw, bh, BLACK);
-    FillArea(bx + 1, by + 1, bw - 2, bh - 2, bs_g_state.search_kb ? BLACK : WHITE);
-    int col = bs_g_state.search_kb ? WHITE : BLACK;
+/* Magnifier circle + handle centered inside the search bar. */
+static void
+draw_search_magnifier(int bx, int by, int bh, int col)
+{
     int gx = bx + 30, gy = by + bh / 2;
     int px = 0, py = 0;
     for (int s = 0; s <= 16; s++) {
@@ -43,36 +26,48 @@ bs_draw_search_tab(void)
     }
     DrawLine(gx + 9, gy + 10, gx + 22, gy + 23, col);
     DrawLine(gx + 10, gy + 9, gx + 23, gy + 22, col);
+}
 
-    ifont *f = OpenFont(DEFAULTFONT, 28, 0);
-    ifont *hf = OpenFont(DEFAULTFONTB, 28, 0); /* history rows, hoisted */
-    if (f != NULL) {
-        int tx = bx + 68;
-        SetFont(f, col);
-        if (bs_g_state.query[0] != '\0') {
-            DrawString(tx, by + (bh - 28) / 2 - 2, bs_g_state.query);
-        } else if (!bs_g_state.search_kb) {
-            DrawString(tx, by + (bh - 28) / 2 - 2, bs_i18n("search.ph"));
-        }
-        /* cursor when the keyboard is editing the input */
-        if (bs_g_state.search_kb) {
-            int cursor_x = tx + StringWidth(bs_g_state.query) + 1;
-            DrawLine(cursor_x, by + 6, cursor_x, by + bh - 6, WHITE);
-        }
+/* Input-row text (query or placeholder) and the edit cursor. */
+static void
+draw_search_input_text(ifont *f, int bx, int by, int bh, int col)
+{
+    int tx = bx + 68;
+    SetFont(f, col);
+    if (bs_g_state.query[0] != '\0') {
+        DrawString(tx, by + (bh - 28) / 2 - 2, bs_g_state.query);
+    } else if (!bs_g_state.search_kb) {
+        DrawString(tx, by + (bh - 28) / 2 - 2, bs_i18n("search.ph"));
     }
+    /* cursor when the keyboard is editing the input */
+    if (bs_g_state.search_kb) {
+        int cursor_x = tx + StringWidth(bs_g_state.query) + 1;
+        DrawLine(cursor_x, by + 6, cursor_x, by + bh - 6, WHITE);
+    }
+}
 
-    /* ── previously searched terms ── */
+/* "No searches yet" message; closes the fonts and returns from the tab. */
+static void
+draw_search_empty(ifont *f, ifont *hf, int w, int top)
+{
+    if (f != NULL) {
+        SetFont(f, DGRAY);
+        const char *msg = bs_i18n("search.empty");
+        DrawString((w - StringWidth(msg)) / 2, top + BS_SEARCH_ROW_H + 60, msg);
+    }
+    if (hf != NULL)
+        CloseFont(hf);
+    if (f != NULL)
+        CloseFont(f);
+}
+
+/* Previously committed search terms, one page at a time. */
+static void
+draw_search_history(ifont *f, ifont *hf, int w, int top, int bot)
+{
     int n = bs_store_search_count();
     if (n == 0) {
-        if (f != NULL) {
-            SetFont(f, DGRAY);
-            const char *msg = bs_i18n("search.empty");
-            DrawString((w - StringWidth(msg)) / 2, top + BS_SEARCH_ROW_H + 60, msg);
-        }
-        if (hf != NULL)
-            CloseFont(hf);
-        if (f != NULL)
-            CloseFont(f);
+        draw_search_empty(f, hf, w, top);
         return;
     }
     int ps = bs_history_pagesize();
@@ -102,6 +97,40 @@ bs_draw_search_tab(void)
         CloseFont(hf);
     if (f != NULL)
         CloseFont(f);
+}
+
+/* Search sub-page body: the input row (magnifier + text box) at the
+ * top, then the previously committed search terms below.  Tapping the
+ * input opens the firmware keyboard; tapping a term re-runs that
+ * search (see on_event). */
+void
+bs_draw_search_tab(void)
+{
+    /* Drawn on tab switch, keystroke, and suggestion taps — one line
+     * per user event (the offline e2e test polls this marker). */
+    bs_LOG("[bookshelf] draw_search_tab\n");
+    int top, bot, cell_w, cell_h;
+    (void)cell_w;
+    (void)cell_h;
+    bs_grid_geom(&top, &bot, &cell_w, &cell_h);
+    int w = ScreenWidth();
+    FillArea(0, top, w, bot - top, WHITE);
+
+    /* ── input row: full-width search bar, magnifier inside ── */
+    int bx = 16, bw = w - 32; /* bar spans the page width */
+    int by = top + 10, bh = BS_SEARCH_ROW_H - 20;
+    DrawRect(bx, by, bw, bh, BLACK);
+    FillArea(bx + 1, by + 1, bw - 2, bh - 2, bs_g_state.search_kb ? BLACK : WHITE);
+    int col = bs_g_state.search_kb ? WHITE : BLACK;
+    draw_search_magnifier(bx, by, bh, col);
+
+    ifont *f = OpenFont(DEFAULTFONT, 28, 0);
+    ifont *hf = OpenFont(DEFAULTFONTB, 28, 0); /* history rows, hoisted */
+    if (f != NULL)
+        draw_search_input_text(f, bx, by, bh, col);
+
+    /* ── previously searched terms ── */
+    draw_search_history(f, hf, w, top, bot);
 }
 
 /* Screen rect of the live suggestion band: below the search input

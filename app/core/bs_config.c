@@ -133,6 +133,27 @@ bs_read_kv_file(const char *path, bs_cfg_kv_cb cb, void *user)
  * detect_readers() runs (the reader table must exist first). */
 char bs_g_cfg_reader[220];
 
+/* Store the (trimmed) language string, lowercased, in bs_g_lang. */
+static void
+cfg_set_language(const char *value)
+{
+    snprintf(bs_g_lang, sizeof bs_g_lang, "%.3s", value);
+    for (char *p = bs_g_lang; *p; p++)
+        *p = (char)tolower((unsigned char)*p);
+}
+
+/* Resolve a `source=` value into the enum-typed state. */
+static void
+cfg_set_source(const char *value)
+{
+    if (strcmp(value, "local") == 0)
+        bs_g_state.source = BS_SOURCE_LOCAL;
+    else if (strcmp(value, "folder") == 0)
+        bs_g_state.source = BS_SOURCE_FOLDER;
+    else
+        bs_g_state.source = BS_SOURCE_KAVITA;
+}
+
 void
 bs_cfg_set_kv(const char *key, const char *value, void *user)
 {
@@ -142,20 +163,13 @@ bs_cfg_set_kv(const char *key, const char *value, void *user)
     } else if (strcmp(key, "api_token") == 0 || strcmp(key, "token") == 0) {
         snprintf(out->api_token, out->token_cap, "%s", value);
     } else if (strcmp(key, "language") == 0 || strcmp(key, "lang") == 0) {
-        snprintf(bs_g_lang, sizeof bs_g_lang, "%.3s", value);
-        for (char *p = bs_g_lang; *p; p++)
-            *p = (char)tolower((unsigned char)*p);
+        cfg_set_language(value);
     } else if (strcmp(key, "reader") == 0) {
         snprintf(bs_g_cfg_reader, sizeof bs_g_cfg_reader, "%s", value);
     } else if (strcmp(key, "downloads_dir") == 0 || strcmp(key, "download_dir") == 0) {
         snprintf(bs_g_cfg_downloads_dir, sizeof bs_g_cfg_downloads_dir, "%s", value);
     } else if (strcmp(key, "source") == 0) {
-        if (strcmp(value, "local") == 0)
-            bs_g_state.source = BS_SOURCE_LOCAL;
-        else if (strcmp(value, "folder") == 0)
-            bs_g_state.source = BS_SOURCE_FOLDER;
-        else
-            bs_g_state.source = BS_SOURCE_KAVITA;
+        cfg_set_source(value);
     } else {
         bs_LOG("[bookshelf] config: unknown key `%s`\n", key);
     }

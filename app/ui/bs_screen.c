@@ -59,6 +59,26 @@ prefix_width(char *s, size_t b)
     return w;
 }
 
+/* Snap `mid` to a UTF-8 character boundary strictly inside (lo, hi), the
+ * same heuristic the binary search below uses to keep a multibyte char
+ * whole.  Returns the boundary byte index, or -1 when no character lies
+ * strictly between lo and hi (the search must then give up). */
+static long
+utf8_boundary_between(const char *s, size_t lo, size_t hi, size_t mid)
+{
+    size_t b = mid;
+    while (b > lo && ((unsigned char)s[b] & 0xC0) == 0x80)
+        b--;
+    if (b == lo) {
+        b = mid;
+        while (b < hi && ((unsigned char)s[b] & 0xC0) == 0x80)
+            b++;
+        if (b >= hi)
+            return -1;
+    }
+    return (long)b;
+}
+
 void
 bs_utf8_fit_width(char *s, size_t cap, int maxw)
 {
@@ -86,26 +106,15 @@ bs_utf8_fit_width(char *s, size_t cap, int maxw)
     if (prefix_width(s, lo) <= maxw) {
         while (hi - lo > 1) {
             size_t mid = lo + (hi - lo) / 2;
-            /* Snap mid to a character boundary: back up continuation
-             * bytes to the char's lead byte.  If that lands on `lo`
-             * (mid sits inside the char that starts at lo), step
-             * forward to that char's end instead.  Either way the byte
-             * cut lands exactly on a boundary, so a multibyte char is
-             * kept intact or dropped whole. */
-            size_t b = mid;
-            while (b > lo && ((unsigned char)s[b] & 0xC0) == 0x80)
-                b--;
-            if (b == lo) {
-                b = mid;
-                while (b < hi && ((unsigned char)s[b] & 0xC0) == 0x80)
-                    b++;
-                if (b >= hi)
-                    break;   /* no boundary strictly between lo and hi */
-            }
-            if (prefix_width(s, b) <= maxw)
-                lo = b;
+            /* Snap mid to a character boundary; if none lies strictly
+             * between lo and hi, abandon the search. */
+            long b = utf8_boundary_between(s, lo, hi, mid);
+            if (b < 0)
+                break;
+            if (prefix_width(s, (size_t)b) <= maxw)
+                lo = (size_t)b;
             else
-                hi = b;
+                hi = (size_t)b;
         }
     }
     /* Else the 4-char floor itself is too wide: keep it, matching the

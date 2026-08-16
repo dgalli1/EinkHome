@@ -73,6 +73,38 @@ span_width(const char *p, int len)
     return StringWidth(tmp);
 }
 
+/* Place one word of a line starting at *ws into dst, advancing *ws.
+ * Returns:
+ *   1  space run skipped (*ws advanced past it, no word placed)
+ *   2  line ran out of rows (no room on a fresh row)
+ *   0  word placed */
+static int
+log_wrap_word(const char *line_end, int maxw, BsLogRow *dst, int mcap,
+              int *count, const char **ws)
+{
+    const char *we = *ws;
+    while (we < line_end && *we != ' ')
+        we++;
+    if (we == *ws) { /* collapse space runs */
+        (*ws)++;
+        return 1;
+    }
+    int wordw = span_width(*ws, (int)(we - *ws));
+    int curw = dst[*count].len > 0 ? span_width(dst[*count].p, dst[*count].len) : 0;
+    if (dst[*count].len > 0 && curw + wordw + 6 > maxw) {
+        (*count)++;
+        if (*count >= mcap)
+            return 2;
+    }
+    if (dst[*count].len == 0)
+        dst[*count].p = *ws;
+    dst[*count].len += (int)(we - *ws);
+    if (we < line_end)
+        dst[*count].len++; /* the separating space */
+    *ws = we;
+    return 0;
+}
+
 /* Greedy word wrap of ONE line [line_start, line_end) into dst, at most
  * `mcap` rows (forward order).  Rows point into the line's text (never
  * modified).  Returns the row count. */
@@ -83,26 +115,11 @@ log_wrap_line(const char *line_start, const char *line_end, int maxw,
     int         count = 0;
     const char *ws = line_start;
     while (ws < line_end && count < mcap) {
-        const char *we = ws;
-        while (we < line_end && *we != ' ')
-            we++;
-        if (we == ws) { /* collapse space runs */
-            ws++;
+        int r = log_wrap_word(line_end, maxw, dst, mcap, &count, &ws);
+        if (r == 1) /* space run */
             continue;
-        }
-        int wordw = span_width(ws, (int)(we - ws));
-        int curw = dst[count].len > 0 ? span_width(dst[count].p, dst[count].len) : 0;
-        if (dst[count].len > 0 && curw + wordw + 6 > maxw) {
-            count++;
-            if (count >= mcap)
-                break;
-        }
-        if (dst[count].len == 0)
-            dst[count].p = ws;
-        dst[count].len += (int)(we - ws);
-        if (we < line_end)
-            dst[count].len++; /* the separating space */
-        ws = we;
+        if (r == 2) /* no room on a fresh row */
+            break;
     }
     if (count < mcap && dst[count].len > 0)
         count++; /* finalise the trailing partial row */

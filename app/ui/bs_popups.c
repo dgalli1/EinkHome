@@ -17,6 +17,21 @@ bs_dim_content(int y0)
         DrawLine(0, yy, w, yy, LGRAY);
 }
 
+/* Store the four tallied counters into the (optional) output pointers. */
+static void
+progress_set_outs(int *total_out, int total, int *done_out, int done,
+                  int *failed_out, int failed, int *active_out, int active)
+{
+    if (total_out)
+        *total_out = total;
+    if (done_out)
+        *done_out = done;
+    if (failed_out)
+        *failed_out = failed;
+    if (active_out)
+        *active_out = active;
+}
+
 /* Tally the open download queue (falling back to the whole-batch tally
  * when a download-all batch is active, since the queue only holds the
  * current slice).  Shared by the popup bar and its status line. */
@@ -45,14 +60,8 @@ bs_dl_progress_metrics(int *total_out, int *done_out, int *failed_out, int *acti
         failed = total - done;
     if (bs_g_dl_batch_active)
         active++;
-    if (total_out)
-        *total_out = total;
-    if (done_out)
-        *done_out = done;
-    if (failed_out)
-        *failed_out = failed;
-    if (active_out)
-        *active_out = active;
+    progress_set_outs(total_out, total, done_out, done,
+                      failed_out, failed, active_out, active);
 }
 
 /* Single batch progress bar for the download popup: one bar for the
@@ -140,17 +149,25 @@ bs_refresh_dl_popup(void)
     PartialUpdate(px, py, pw, ph);
 }
 
+/* Centred 3/4-width sheet geometry, shared by the dl and sync popups
+ * (they only differ in height). */
+static void
+popup_geom(int *px, int *py, int *pw, int *ph, int ph_const)
+{
+    int w = ScreenWidth();
+    int h = ScreenHeight();
+    *pw = w * 3 / 4;
+    *ph = ph_const;
+    *px = (w - *pw) / 2;
+    *py = (h - *ph) / 2;
+}
+
 /* Download-popup sheet geometry: a centred 3/4-width sheet.  Shared by
  * the draw path, the cancel-button rect, and the popup-only refresh. */
 void
 bs_dl_popup_geom(int *px, int *py, int *pw, int *ph)
 {
-    int w = ScreenWidth();
-    int h = ScreenHeight();
-    *pw = w * 3 / 4;
-    *ph = 320;
-    *px = (w - *pw) / 2;
-    *py = (h - *ph) / 2;
+    popup_geom(px, py, pw, ph, 320);
 }
 
 /* Download-progress popup: a centred modal sheet over a dimmed shelf.
@@ -255,12 +272,7 @@ draw_dl_popup_sheet(void)
 void
 bs_sync_popup_geom(int *px, int *py, int *pw, int *ph)
 {
-    int w = ScreenWidth();
-    int h = ScreenHeight();
-    *pw = w * 3 / 4;
-    *ph = 190;
-    *px = (w - *pw) / 2;
-    *py = (h - *ph) / 2;
+    popup_geom(px, py, pw, ph, 190);
 }
 
 /* Title / status line for the current sync stage.  The sub-line carries
@@ -283,6 +295,33 @@ sync_popup_line(int *sub)
         return bs_i18n("status.fail");
     default:
         return bs_i18n("sync.done");
+    }
+}
+
+/* The sub-line under the sync stage title, carrying the counter
+ * (batch number / scanned books / result count). */
+static void
+sync_subline(char *subline, size_t n, int sub)
+{
+    switch (sub) {
+    case 1:
+        snprintf(subline, n, bs_i18n("sync.batch"), bs_g_state.sync_round);
+        break;
+    case 2:
+        snprintf(subline, n, bs_i18n("sync.books"), bs_g_state.sync_scan);
+        break;
+    case 3: {
+        int done = 0, total = 0;
+        bs_cover_warm_progress(&done, &total);
+        if (total > 0)
+            snprintf(subline, n, bs_i18n("sync.cover_count"), done, total);
+        else
+            snprintf(subline, n, "%s", bs_i18n("sync.covers"));
+        break;
+    }
+    default:
+        snprintf(subline, n, bs_i18n("sync.books"), bs_view_total());
+        break;
     }
 }
 
@@ -317,26 +356,7 @@ draw_sync_popup_sheet(void)
     if (sf != NULL) {
         SetFont(sf, DGRAY);
         char subline[96];
-        switch (sub) {
-        case 1:
-            snprintf(subline, sizeof subline, bs_i18n("sync.batch"), bs_g_state.sync_round);
-            break;
-        case 2:
-            snprintf(subline, sizeof subline, bs_i18n("sync.books"), bs_g_state.sync_scan);
-            break;
-        case 3: {
-            int done = 0, total = 0;
-            bs_cover_warm_progress(&done, &total);
-            if (total > 0)
-                snprintf(subline, sizeof subline, bs_i18n("sync.cover_count"), done, total);
-            else
-                snprintf(subline, sizeof subline, "%s", bs_i18n("sync.covers"));
-            break;
-        }
-        default:
-            snprintf(subline, sizeof subline, bs_i18n("sync.books"), bs_view_total());
-            break;
-        }
+        sync_subline(subline, sizeof subline, sub);
         DrawString(px + BS_CTX_PAD, py + BS_CTX_TITLE_H + 68, subline);
         CloseFont(sf);
     }

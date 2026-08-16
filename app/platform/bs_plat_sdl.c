@@ -259,6 +259,34 @@ StringWidth(const char *s)
     return w;
 }
 
+/* Alpha-blend one glyph pixel row (at canvas y=yy) onto the canvas.
+ * Extracted from DrawString to keep that hot loop's complexity down. */
+static void
+draw_glyph_row(int yy, int gx, int gw, const uint8_t *row, SDL_Color fg)
+{
+    for (int i = 0; i < gw; i++) {
+        int xx = gx + i;
+        if (xx < 0 || xx >= PC_W) continue;
+        if (!px_visible(xx, yy)) continue;
+        /* Alpha blend the glyph onto the canvas. */
+        uint8_t a = row[(size_t)i * 4 + 3];
+        if (a == 0) continue;
+        uint32_t dst = g_px[(size_t)yy * PC_W + (size_t)xx];
+        uint32_t src = ((uint32_t)fg.a << 24) |
+                       ((uint32_t)row[(size_t)i * 4] << 0) |
+                       ((uint32_t)row[(size_t)i * 4 + 1] << 8) |
+                       ((uint32_t)row[(size_t)i * 4 + 2] << 16);
+        uint32_t out = 0;
+        for (int k = 0; k < 3; k++) {
+            int dv = (dst >> (k * 8)) & 0xff;
+            int sv = (src >> (k * 8)) & 0xff;
+            int v = (int)((sv * a + dv * (255 - a)) / 255u);
+            out |= (uint32_t)(v & 0xff) << (k * 8);
+        }
+        g_px[(size_t)yy * PC_W + (size_t)xx] = (0xffu << 24) | out;
+    }
+}
+
 void
 DrawString(int x, int y, const char *s)
 {
@@ -274,27 +302,7 @@ DrawString(int x, int y, const char *s)
     for (int j = 0; j < glyph->h; j++) {
         int yy = y + j;
         if (yy < 0 || yy >= PC_H) continue;
-        for (int i = 0; i < glyph->w; i++) {
-            int xx = x + i;
-            if (xx < 0 || xx >= PC_W) continue;
-            if (!px_visible(xx, yy)) continue;
-            /* Alpha blend the glyph onto the canvas. */
-            uint8_t a = sp[(size_t)j * glyph->pitch + (size_t)i * 4 + 3];
-            if (a == 0) continue;
-            uint32_t dst = g_px[(size_t)yy * PC_W + (size_t)xx];
-            uint32_t src = ((uint32_t)fg.a << 24) |
-                           ((uint32_t)sp[(size_t)j * glyph->pitch + (size_t)i * 4] << 0) |
-                           ((uint32_t)sp[(size_t)j * glyph->pitch + (size_t)i * 4 + 1] << 8) |
-                           ((uint32_t)sp[(size_t)j * glyph->pitch + (size_t)i * 4 + 2] << 16);
-            uint32_t out = 0;
-            for (int k = 0; k < 3; k++) {
-                int dv = (dst >> (k * 8)) & 0xff;
-                int sv = (src >> (k * 8)) & 0xff;
-                int v = (int)((sv * a + dv * (255 - a)) / 255u);
-                out |= (uint32_t)(v & 0xff) << (k * 8);
-            }
-            g_px[(size_t)yy * PC_W + (size_t)xx] = (0xffu << 24) | out;
-        }
+        draw_glyph_row(yy, x, glyph->w, sp + (size_t)j * glyph->pitch, fg);
     }
     SDL_FreeSurface(glyph);
 }
@@ -899,51 +907,77 @@ static int map_scancode_to_ivkey(SDL_Scancode sc)
 }
 
 static void
+sdl_on_quit(void)
+{
+    g_running = 0;
+    if (g_on_event) g_on_event(EVT_EXIT, 0, 0);
+}
+
+static void
+sdl_on_mouse(int type, int x, int y)
+{
+    if (g_on_event) g_on_event(type, x, y);
+}
+
+static void
+sdl_on_text_input(const char *text)
+{
+    if (g_kb.open && g_kb.buf) {
+        size_t cur = strlen(g_kb.buf);
+        size_t n = strlen(text);
+        if (cur + n < (size_t)g_kb.cap) {
+            memcpy(g_kb.buf + cur, text, n + 1);
+            if (g_on_event) g_on_event(EVT_REPAINT, 0, 0);
+        }
+    }
+}
+
+static void
+sdl_on_key_down(const SDL_KeyboardEvent *k)
+{
+    int iv = map_scancode_to_ivkey(k->keysym.scancode);
+    if (k->keysym.scancode == SDL_SCANCODE_RETURN &&
+        g_kb.open && g_kb.handler) {
+        CloseKeyboard();
+        g_kb.handler(g_kb.buf);
+    } else if (iv >= 0 && g_on_event) {
+        g_on_event(EVT_KEYPRESS, iv, k->repeat ? 0 : 0);
+    }
+}
+
+static void
+sdl_on_window_event(const SDL_WindowEvent *we)
+{
+    if (we->event == SDL_WINDOWEVENT_RESIZED)
+        FullUpdate();
+}
+
+static void
 poll_sdl(void)
 {
     SDL_Event e;
     while (SDL_PollEvent(&e)) {
         switch (e.type) {
         case SDL_QUIT:
-            g_running = 0;
-            if (g_on_event) g_on_event(EVT_EXIT, 0, 0);
+            sdl_on_quit();
             break;
         case SDL_MOUSEBUTTONDOWN:
-            if (g_on_event)
-                g_on_event(EVT_POINTERDOWN, e.button.x, e.button.y);
+            sdl_on_mouse(EVT_POINTERDOWN, e.button.x, e.button.y);
             break;
         case SDL_MOUSEBUTTONUP:
-            if (g_on_event)
-                g_on_event(EVT_POINTERUP, e.button.x, e.button.y);
+            sdl_on_mouse(EVT_POINTERUP, e.button.x, e.button.y);
             break;
         case SDL_MOUSEMOTION:
-            if (g_on_event)
-                g_on_event(EVT_POINTERMOVE, e.motion.x, e.motion.y);
+            sdl_on_mouse(EVT_POINTERMOVE, e.motion.x, e.motion.y);
             break;
         case SDL_TEXTINPUT:
-            if (g_kb.open && g_kb.buf) {
-                size_t cur = strlen(g_kb.buf);
-                size_t n = strlen(e.text.text);
-                if (cur + n < (size_t)g_kb.cap) {
-                    memcpy(g_kb.buf + cur, e.text.text, n + 1);
-                    if (g_on_event) g_on_event(EVT_REPAINT, 0, 0);
-                }
-            }
+            sdl_on_text_input(e.text.text);
             break;
-        case SDL_KEYDOWN: {
-            int iv = map_scancode_to_ivkey(e.key.keysym.scancode);
-            if (e.key.keysym.scancode == SDL_SCANCODE_RETURN &&
-                g_kb.open && g_kb.handler) {
-                CloseKeyboard();
-                g_kb.handler(g_kb.buf);
-            } else if (iv >= 0 && g_on_event) {
-                g_on_event(EVT_KEYPRESS, iv, e.key.repeat ? 0 : 0);
-            }
+        case SDL_KEYDOWN:
+            sdl_on_key_down(&e.key);
             break;
-        }
         case SDL_WINDOWEVENT:
-            if (e.window.event == SDL_WINDOWEVENT_RESIZED)
-                FullUpdate();
+            sdl_on_window_event(&e.window);
             break;
         default:
             break;
@@ -957,10 +991,9 @@ void
 bs_plat_start_services(void)
 {} /* no monitor on a PC */
 
-void
-bs_plat_boot(int (*on_event)(int, int, int))
+static void
+sdl_init_subsystems(void)
 {
-    g_on_event = on_event;
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_TIMER) != 0) {
         fprintf(stderr, "[pc] SDL_Init: %s\n", SDL_GetError());
         exit(1);
@@ -973,6 +1006,11 @@ bs_plat_boot(int (*on_event)(int, int, int))
         fprintf(stderr, "[pc] curl_global_init failed\n");
         exit(1);
     }
+}
+
+static void
+sdl_create_window_state(void)
+{
     /* Window scale: the logical canvas is 1072x1448; default to ~60%
      * of it so the window fits a 1080p desktop, and let BS_SCALE
      * override (e.g. BS_SCALE=1.2 for a larger window).  The render is
@@ -1015,6 +1053,60 @@ bs_plat_boot(int (*on_event)(int, int, int))
     g_canvas24 = malloc((size_t)PC_W * PC_H * 3);
     if (!g_canvas24) exit(1);
     memset(g_canvas24, 0xff, (size_t)PC_W * PC_H * 3);
+}
+
+/* Debug: BS_AUTO_LAUNCHER=1 opens the app launcher right after boot
+ * (headless verification of the .desktop-backed launcher listing).
+ * bs_launcher_open_set() builds the list (through the platform seam
+ * → bs_plat_launcher_build → .desktop parser) and draws it. */
+static void
+sdl_boot_auto_launcher(void)
+{
+    bs_launcher_open_set();
+    FullUpdate();
+    /* Give the build + draw a moment, then dump and exit. */
+    for (int i = 0; i < 60; i++) {
+        run_timers();
+        SDL_Delay(16);
+    }
+    const char *dump = getenv("BS_DUMP_FRAME");
+    if (dump) {
+        FILE *f = fopen(dump, "wb");
+        if (f) {
+            fprintf(f, "P6\n%d %d\n255\n", PC_W, PC_H);
+            for (int j = 0; j < PC_H; j++)
+                for (int i = 0; i < PC_W; i++) {
+                    uint32_t p = g_px[(size_t)j * PC_W + (size_t)i];
+                    fputc((int)((p >> 0) & 0xff), f);
+                    fputc((int)((p >> 8) & 0xff), f);
+                    fputc((int)((p >> 16) & 0xff), f);
+                }
+            fclose(f);
+            fprintf(stderr, "[pc] launcher frame dumped to %s\n", dump);
+        }
+    }
+    g_running = 0;
+}
+
+static void
+sdl_teardown(void)
+{
+    SDL_DestroyTexture(g_tex);
+    SDL_DestroyRenderer(g_ren);
+    SDL_DestroyWindow(g_win);
+    free(g_px);
+    free(g_canvas24);
+    TTF_Quit();
+    SDL_Quit();
+    curl_global_cleanup();
+}
+
+void
+bs_plat_boot(int (*on_event)(int, int, int))
+{
+    g_on_event = on_event;
+    sdl_init_subsystems();
+    sdl_create_window_state();
 
     g_running = 1;
 #ifdef BS_ENABLE_TEST_IPC
@@ -1023,35 +1115,8 @@ bs_plat_boot(int (*on_event)(int, int, int))
     g_on_event(EVT_INIT, 0, 0);
     g_on_event(EVT_SHOW, 0, 0);
 
-/* Debug: BS_AUTO_LAUNCHER=1 opens the app launcher right after boot
-     * (headless verification of the .desktop-backed launcher listing).
-     * bs_launcher_open_set() builds the list (through the platform seam
-     * → bs_plat_launcher_build → .desktop parser) and draws it. */
     if (getenv("BS_AUTO_LAUNCHER") != NULL) {
-        bs_launcher_open_set();
-        FullUpdate();
-        /* Give the build + draw a moment, then dump and exit. */
-        for (int i = 0; i < 60; i++) {
-            run_timers();
-            SDL_Delay(16);
-        }
-        const char *dump = getenv("BS_DUMP_FRAME");
-        if (dump) {
-            FILE *f = fopen(dump, "wb");
-            if (f) {
-                fprintf(f, "P6\n%d %d\n255\n", PC_W, PC_H);
-                for (int j = 0; j < PC_H; j++)
-                    for (int i = 0; i < PC_W; i++) {
-                        uint32_t p = g_px[(size_t)j * PC_W + (size_t)i];
-                        fputc((int)((p >> 0) & 0xff), f);
-                        fputc((int)((p >> 8) & 0xff), f);
-                        fputc((int)((p >> 16) & 0xff), f);
-                    }
-                fclose(f);
-                fprintf(stderr, "[pc] launcher frame dumped to %s\n", dump);
-            }
-        }
-        g_running = 0;
+        sdl_boot_auto_launcher();
     }
 
     while (g_running) {
@@ -1075,14 +1140,7 @@ bs_plat_boot(int (*on_event)(int, int, int))
         if (delay > 0) SDL_Delay((Uint32)delay);
     }
 
-    SDL_DestroyTexture(g_tex);
-    SDL_DestroyRenderer(g_ren);
-    SDL_DestroyWindow(g_win);
-    free(g_px);
-    free(g_canvas24);
-    TTF_Quit();
-    SDL_Quit();
-    curl_global_cleanup();
+    sdl_teardown();
 }
 
 int
@@ -1153,6 +1211,26 @@ parse_desktop_line(const char *line, const char *key, char *out, size_t cap)
     return 1;
 }
 
+/* Scan one argv token out of the Exec= string (quoted or bare),
+ * returning the position after it.  Extracted from parse_desktop_exec. */
+static const char *
+desktop_exec_token(const char *p, char *tok, size_t cap)
+{
+    if (*p == '"' || *p == '\'') {
+        char q = *p++;
+        size_t ti = 0;
+        while (*p && *p != q && ti + 1 < cap) tok[ti++] = *p++;
+        if (*p == q) p++;
+        tok[ti] = '\0';
+    } else {
+        size_t ti = 0;
+        while (*p && *p != ' ' && *p != '\t' && ti + 1 < cap)
+            tok[ti++] = *p++;
+        tok[ti] = '\0';
+    }
+    return p;
+}
+
 static void
 parse_desktop_exec(const char *exec, char *out_cmd, size_t cmd_cap,
                    char params[][BS_LAUNCHER_PARAM_LEN], int *nparams)
@@ -1173,22 +1251,34 @@ parse_desktop_exec(const char *exec, char *out_cmd, size_t cmd_cap,
             continue;
         }
         if (*p == ' ' || *p == '\t') { p++; continue; }
-        if (*p == '"' || *p == '\'') {
-            char q = *p++;
-            size_t ti = 0;
-            while (*p && *p != q && ti + 1 < sizeof tok) tok[ti++] = *p++;
-            if (*p == q) p++;
-            tok[ti] = '\0';
-        } else {
-            size_t ti = 0;
-            while (*p && *p != ' ' && *p != '\t' && ti + 1 < sizeof tok)
-                tok[ti++] = *p++;
-            tok[ti] = '\0';
-        }
+        p = desktop_exec_token(p, tok, sizeof tok);
         if (tok[0] && *nparams < BS_LAUNCHER_MAX_PARAMS) {
             snprintf(params[(*nparams)++], BS_LAUNCHER_PARAM_LEN, "%s", tok);
         }
     }
+}
+
+/* Parse one .desktop line into the item fields.  Mirrors the original
+ * loop's continue-vs-parse flow: leaves the values untouched if the
+ * line is a comment or a key we don't care about. */
+static void
+desktop_parse_line(char *line, char *name, size_t ncap, char *exec, size_t ecap,
+                   char *icon, size_t icap, int *hidden, int *nodisplay,
+                   int *type_app)
+{
+    char *p = line;
+    while (*p == ' ') p++;
+    if (p[0] == '#') return;
+    if (parse_desktop_line(p, "Name", name, ncap)) return;
+    if (parse_desktop_line(p, "Exec", exec, ecap)) return;
+    if (parse_desktop_line(p, "Icon", icon, icap)) return;
+    char v[16];
+    if (parse_desktop_line(p, "Hidden", v, sizeof v) && strcmp(v, "true") == 0)
+        *hidden = 1;
+    if (parse_desktop_line(p, "NoDisplay", v, sizeof v) && strcmp(v, "true") == 0)
+        *nodisplay = 1;
+    if (parse_desktop_line(p, "Type", v, sizeof v) && strcmp(v, "Application") != 0)
+        *type_app = 0;
 }
 
 static void
@@ -1200,19 +1290,8 @@ desktop_file_to_item(const char *path, BsLauncherItem *it, int *n)
     char name[96] = "", exec[BS_MAX_PATH_LEN] = "", icon[64] = "";
     int hidden = 0, nodisplay = 0, type_app = 1;
     while (fgets(line, sizeof line, f)) {
-        char *p = line;
-        while (*p == ' ') p++;
-        if (p[0] == '#') continue;
-        if (parse_desktop_line(p, "Name", name, sizeof name)) continue;
-        if (parse_desktop_line(p, "Exec", exec, sizeof exec)) continue;
-        if (parse_desktop_line(p, "Icon", icon, sizeof icon)) continue;
-        char v[16];
-        if (parse_desktop_line(p, "Hidden", v, sizeof v) && strcmp(v, "true") == 0)
-            hidden = 1;
-        if (parse_desktop_line(p, "NoDisplay", v, sizeof v) && strcmp(v, "true") == 0)
-            nodisplay = 1;
-        if (parse_desktop_line(p, "Type", v, sizeof v) && strcmp(v, "Application") != 0)
-            type_app = 0;
+        desktop_parse_line(line, name, sizeof name, exec, sizeof exec,
+                           icon, sizeof icon, &hidden, &nodisplay, &type_app);
     }
     fclose(f);
     if (hidden || nodisplay || !type_app || !exec[0] || !name[0])
@@ -1345,14 +1424,29 @@ ipc_reply(const char *fmt, const char *arg)
     (void)write(g_ipc_client, buf, strlen(buf));
 }
 
-static void
-ipc_handle(const char *line)
+static int
+ipc_is_pointer_cmd(const char *cmd)
 {
-    char cmd[16];
-    char a[128], b[128];
-    int  n = sscanf(line, "%15s %127s %127s", cmd, a, b);
-    if (n < 1) return;
-    int ax = atoi(a), ay = atoi(b);
+    return strcmp(cmd, "tap") == 0 || strcmp(cmd, "down") == 0 ||
+           strcmp(cmd, "up") == 0 || strcmp(cmd, "move") == 0;
+}
+
+static int
+ipc_is_text_cmd(const char *cmd)
+{
+    return strcmp(cmd, "type") == 0 || strcmp(cmd, "kb_commit") == 0;
+}
+
+static int
+ipc_is_query_cmd(const char *cmd)
+{
+    return strcmp(cmd, "key") == 0 || strcmp(cmd, "shot") == 0 ||
+           strcmp(cmd, "hash") == 0 || strcmp(cmd, "state") == 0;
+}
+
+static void
+ipc_pointer_group(const char *cmd, int n, int ax, int ay)
+{
     if (strcmp(cmd, "tap") == 0 && n >= 3) {
         if (g_on_event) { g_on_event(EVT_POINTERDOWN, ax, ay); g_on_event(EVT_POINTERUP, ax, ay); }
         ipc_reply("ok\n", NULL);
@@ -1365,12 +1459,15 @@ ipc_handle(const char *line)
     } else if (strcmp(cmd, "move") == 0 && n >= 3) {
         if (g_on_event) g_on_event(EVT_POINTERMOVE, ax, ay);
         ipc_reply("ok\n", NULL);
-    } else if (strcmp(cmd, "key") == 0 && n >= 2) {
-        int code = (strncmp(a, "0x", 2) == 0) ? (int)strtol(a, NULL, 16)
-                                               : atoi(a);
-        if (g_on_event) g_on_event(EVT_KEYPRESS, code, 0);
-        ipc_reply("ok\n", NULL);
-    } else if (strcmp(cmd, "type") == 0 && n >= 2) {
+    } else {
+        ipc_reply("err unknown cmd\n", NULL);
+    }
+}
+
+static void
+ipc_text_group(const char *cmd, int n, const char *a)
+{
+    if (strcmp(cmd, "type") == 0 && n >= 2) {
         AppendIpcText(a);
         ipc_reply("ok\n", NULL);
     } else if (strcmp(cmd, "kb_commit") == 0) {
@@ -1384,25 +1481,63 @@ ipc_handle(const char *line)
             g_kb.handler(g_kb.buf);
         }
         ipc_reply("ok\n", NULL);
+    } else {
+        ipc_reply("err unknown cmd\n", NULL);
+    }
+}
+
+static void
+ipc_query_group(const char *cmd, int n, const char *a)
+{
+    if (strcmp(cmd, "key") == 0 && n >= 2) {
+        int code = (strncmp(a, "0x", 2) == 0) ? (int)strtol(a, NULL, 16)
+                                               : atoi(a);
+        if (g_on_event) g_on_event(EVT_KEYPRESS, code, 0);
+        ipc_reply("ok\n", NULL);
+    } else if (strcmp(cmd, "shot") == 0 && n >= 2) {
+        dump_frame(a);
+        ipc_reply("ok\n", NULL);
     } else if (strcmp(cmd, "hash") == 0) {
         char h[32];
         uint64_t v = fnv1a_64((const uint8_t *)g_px, (size_t)PC_W * PC_H * 4u);
         snprintf(h, sizeof h, "hash=0x%016llx\n", (unsigned long long)v);
         ipc_reply("%s", h);
-    } else if (strcmp(cmd, "shot") == 0 && n >= 2) {
-        dump_frame(a);
-        ipc_reply("ok\n", NULL);
     } else if (strcmp(cmd, "state") == 0) {
         char s[64];
         snprintf(s, sizeof s, "state=%d:%d:%d\n", bs_g_state.overlay,
                  bs_g_state.tab, bs_g_state.page);
         ipc_reply("%s", s);
-    } else if (strcmp(cmd, "quit") == 0) {
-        g_running = 0;
-        ipc_reply("ok\n", NULL);
     } else {
         ipc_reply("err unknown cmd\n", NULL);
     }
+}
+
+static void
+ipc_handle(const char *line)
+{
+    char cmd[16];
+    char a[128], b[128];
+    int  n = sscanf(line, "%15s %127s %127s", cmd, a, b);
+    if (n < 1) return;
+    int ax = atoi(a), ay = atoi(b);
+    if (ipc_is_pointer_cmd(cmd)) {
+        ipc_pointer_group(cmd, n, ax, ay);
+        return;
+    }
+    if (ipc_is_text_cmd(cmd)) {
+        ipc_text_group(cmd, n, a);
+        return;
+    }
+    if (ipc_is_query_cmd(cmd)) {
+        ipc_query_group(cmd, n, a);
+        return;
+    }
+    if (strcmp(cmd, "quit") == 0) {
+        g_running = 0;
+        ipc_reply("ok\n", NULL);
+        return;
+    }
+    ipc_reply("err unknown cmd\n", NULL);
 }
 
 static void

@@ -873,6 +873,78 @@ dl_job_done(BsJob *job)
  * the batch up / finalise when the queue is drained.  Started by
  * enqueue_download and by every completed download job; a no-op while
  * a job is in flight. */
+/* Batch-mode only: try to enqueue the next slice of undownloaded ids.
+ * Returns 1 when a slice was started (the caller's work is done), 0
+ * otherwise (no action taken — the batch ended or was never active). */
+static int
+dl_advance_batch(void)
+{
+    if (!bs_g_dl_batch_active)
+        return 0;
+    int got = 0, enq = batch_enqueue_slice(&got);
+    int settled = bs_g_dl_batch_done + bs_g_dl_batch_failed;
+    if (enq > 0 || (got == 64 && settled < bs_g_dl_batch_total)) {
+        if (enq == 0) {
+            /* Full slice, nothing enqueued: every id already
+             * owns a queue entry or already failed.  Prune one
+             * finished entry so the queue makes room and the
+             * next pass can enqueue, instead of looping on the
+             * same slice forever. */
+            if (prune_finished_download()) {
+                dl_kick();
+                return 1;
+            }
+            /* Nothing finished left to prune: the whole slice
+             * is made of ids that are already failed (or
+             * unreadable), so no retry can ever make progress
+             * — finalize the batch instead of kicking on the
+             * same slice forever. */
+            bs_LOG("[bookshelf] download-all batch stalled, finalizing\n");
+        } else {
+            dl_start_next();
+            if (bs_g_state.dl_popup)
+                bs_refresh_dl_popup();
+            else
+                bs_draw_top_bar();
+            return 1;
+        }
+    }
+    /* Every batch book has settled (done + failed == total),
+     * or the slice is exhausted with nothing left to enqueue:
+     * end the batch.  Keep the final tally on screen — zeroing
+     * the counters here made the bar fall back to queue-derived
+     * counts, and the pruned queue only holds the last slice
+     * (<=64).  download_all_start() resets the counters for the
+     * next batch; a manual enqueue_download() clears them. */
+    bs_g_dl_batch_active = 0;
+    bs_LOG("[bookshelf] download-all batch complete\n");
+    return 0;
+}
+
+/* Queue fully drained with a popup up.  A single-book press auto-opens
+ * the reader once its file landed; any other popup stays up showing the
+ * finished tally until the user taps it closed.  Returns 1 when the
+ * reader was launched, 0 otherwise. */
+static int
+dl_advance_drain_popup(void)
+{
+    if (bs_g_state.dl_popup) {
+        if (bs_g_state.dl_popup_auto_open) {
+            BsBook b;
+            if (bs_store_get_book(bs_g_state.dl_popup_book_id, &b) && b.downloaded) {
+                bs_g_state.dl_popup = 0;
+                bs_g_state.dl_popup_auto_open = 0;
+                bs_redraw_shelf();
+                bs_LOG("[bookshelf] popup drain complete, launching reader id=%s\n", b.id);
+                bs_launch_reader(&b);
+                return 1;
+            }
+        }
+        bs_redraw_shelf(); /* popup shows the finished/failed state */
+    }
+    return 0;
+}
+
 static void
 dl_advance(void)
 {
@@ -887,64 +959,10 @@ dl_advance(void)
         }
     }
     if (target == NULL) {
-        if (bs_g_dl_batch_active) {
-            /* Batch mode: enqueue the next slice of undownloaded ids. */
-            int got = 0, enq = batch_enqueue_slice(&got);
-            int settled = bs_g_dl_batch_done + bs_g_dl_batch_failed;
-            if (enq > 0 || (got == 64 && settled < bs_g_dl_batch_total)) {
-                if (enq == 0) {
-                    /* Full slice, nothing enqueued: every id already
-                     * owns a queue entry or already failed.  Prune one
-                     * finished entry so the queue makes room and the
-                     * next pass can enqueue, instead of looping on the
-                     * same slice forever. */
-                    if (prune_finished_download()) {
-                        dl_kick();
-                        return;
-                    }
-                    /* Nothing finished left to prune: the whole slice
-                     * is made of ids that are already failed (or
-                     * unreadable), so no retry can ever make progress
-                     * — finalize the batch instead of kicking on the
-                     * same slice forever. */
-                    bs_LOG("[bookshelf] download-all batch stalled, finalizing\n");
-                } else {
-                    dl_start_next();
-                    if (bs_g_state.dl_popup)
-                        bs_refresh_dl_popup();
-                    else
-                        bs_draw_top_bar();
-                    return;
-                }
-            }
-            /* Every batch book has settled (done + failed == total),
-             * or the slice is exhausted with nothing left to enqueue:
-             * end the batch.  Keep the final tally on screen — zeroing
-             * the counters here made the bar fall back to queue-derived
-             * counts, and the pruned queue only holds the last slice
-             * (<=64).  download_all_start() resets the counters for the
-             * next batch; a manual enqueue_download() clears them. */
-            bs_g_dl_batch_active = 0;
-            bs_LOG("[bookshelf] download-all batch complete\n");
-        }
+        if (dl_advance_batch())
+            return;
         bs_sync_set_active(0);
-        /* Queue drained.  A single-book press auto-opens the reader
-         * once its file landed; any other popup stays up showing the
-         * finished tally until the user taps it closed. */
-        if (bs_g_state.dl_popup) {
-            if (bs_g_state.dl_popup_auto_open) {
-                BsBook b;
-                if (bs_store_get_book(bs_g_state.dl_popup_book_id, &b) && b.downloaded) {
-                    bs_g_state.dl_popup = 0;
-                    bs_g_state.dl_popup_auto_open = 0;
-                    bs_redraw_shelf();
-                    bs_LOG("[bookshelf] popup drain complete, launching reader id=%s\n", b.id);
-                    bs_launch_reader(&b);
-                    return;
-                }
-            }
-            bs_redraw_shelf(); /* popup shows the finished/failed state */
-        }
+        dl_advance_drain_popup();
         return;
     }
 

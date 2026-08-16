@@ -14,6 +14,32 @@
 
 /* ── hit-testing ─────────────────────────────────────────────────────── */
 
+/* Hit-test the top-bar buttons that sit in the right band (menu / sync /
+ * layout-switch / search-icon), all TOP_BTN_SIZE×TOP_BTN_SIZE regions
+ * padded TOP_BTN_PAD px from the right edge.  Returns the button id, or
+ * -1 when x falls outside every region. */
+static int
+bs_hit_top_bar_right(int x, int w)
+{
+    /* Right TOP_BTN_SIZE×TOP_BTN_SIZE region, padded TOP_BTN_PAD px on
+     * the right: the hamburger/More button. */
+    if (x >= w - BS_TOP_BTN_SIZE - BS_TOP_BTN_PAD && x < w - BS_TOP_BTN_PAD)
+        return 3;
+    /* Sync button — TOP_BTN_SIZE region left of the menu button; runs
+     * a library sync. */
+    if (x >= w - BS_TOP_BTN_PAD - 2 * BS_TOP_BTN_SIZE && x < w - BS_TOP_BTN_SIZE - BS_TOP_BTN_PAD)
+        return 2;
+    /* Layout-switch button — TOP_BTN_SIZE region left of the sync
+     * button; toggles grid / list view. */
+    if (x >= w - BS_TOP_BTN_PAD - 3 * BS_TOP_BTN_SIZE && x < w - BS_TOP_BTN_PAD - 2 * BS_TOP_BTN_SIZE)
+        return 7;
+    /* Search icon — TOP_BTN_SIZE region left of the layout button;
+     * opens the Search sub-page. */
+    if (x >= w - BS_TOP_BTN_PAD - 4 * BS_TOP_BTN_SIZE && x < w - BS_TOP_BTN_PAD - 3 * BS_TOP_BTN_SIZE)
+        return 5;
+    return -1;
+}
+
 int
 bs_hit_top_bar(int x, int y)
 {
@@ -36,23 +62,7 @@ bs_hit_top_bar(int x, int y)
      * to fill the band on the 758px panels). */
     if (x >= BS_SOURCE_BTN_X && x < BS_SOURCE_BTN_X + bs_source_btn_w())
         return 6;
-    /* Right TOP_BTN_SIZE×TOP_BTN_SIZE region, padded TOP_BTN_PAD px on
-     * the right: the hamburger/More button. */
-    if (x >= w - BS_TOP_BTN_SIZE - BS_TOP_BTN_PAD && x < w - BS_TOP_BTN_PAD)
-        return 3;
-    /* Sync button — TOP_BTN_SIZE region left of the menu button; runs
-     * a library sync. */
-    if (x >= w - BS_TOP_BTN_PAD - 2 * BS_TOP_BTN_SIZE && x < w - BS_TOP_BTN_SIZE - BS_TOP_BTN_PAD)
-        return 2;
-    /* Layout-switch button — TOP_BTN_SIZE region left of the sync
-     * button; toggles grid / list view. */
-    if (x >= w - BS_TOP_BTN_PAD - 3 * BS_TOP_BTN_SIZE && x < w - BS_TOP_BTN_PAD - 2 * BS_TOP_BTN_SIZE)
-        return 7;
-    /* Search icon — TOP_BTN_SIZE region left of the layout button;
-     * opens the Search sub-page. */
-    if (x >= w - BS_TOP_BTN_PAD - 4 * BS_TOP_BTN_SIZE && x < w - BS_TOP_BTN_PAD - 3 * BS_TOP_BTN_SIZE)
-        return 5;
-    return -1;
+    return bs_hit_top_bar_right(x, w);
 }
 
 /* 1 when (x, y) is inside the top-bar search icon (the hit region is
@@ -152,6 +162,34 @@ bs_hit_thumbnail(int x, int y)
     return -1;
 }
 
+/* Left (prev-page) pager buttons: "< prev" and "<< first".  Returns
+ * -1/-3 when x is inside a button, 0 otherwise. */
+static int
+bs_hit_pager_prev(int x)
+{
+    /* < prev — 96px wide starting at x=12 */
+    if (bs_g_state.page > 0 && x >= 12 && x < 12 + 96)
+        return -1;
+    /* << first page — next 96px slot */
+    if (bs_g_state.page > 0 && x >= 116 && x < 116 + 96)
+        return -3;
+    return 0;
+}
+
+/* Right (next-page) pager buttons: ">> last" and "> next".  Returns
+ * -4/-2 when x is inside a button, 0 otherwise. */
+static int
+bs_hit_pager_next(int x, int w, int pages)
+{
+    /* >> last page — 96px slot left of the next button */
+    if (bs_g_state.page + 1 < pages && x >= w - 212 && x < w - 116)
+        return -4;
+    /* > next — 96px wide ending at x=w-12 */
+    if (bs_g_state.page + 1 < pages && x >= w - 108 && x < w - 12)
+        return -2;
+    return 0;
+}
+
 /* 1 = the tap is on the current page's dimension-group header band. */
 int
 bs_hit_pager(int x, int y)
@@ -161,19 +199,10 @@ bs_hit_pager(int x, int y)
         return 0;
     int w = ScreenWidth();
     int pages = bs_current_pages();
-    /* < prev — 96px wide starting at x=12 */
-    if (bs_g_state.page > 0 && x >= 12 && x < 12 + 96)
-        return -1;
-    /* << first page — next 96px slot */
-    if (bs_g_state.page > 0 && x >= 116 && x < 116 + 96)
-        return -3;
-    /* >> last page — 96px slot left of the next button */
-    if (bs_g_state.page + 1 < pages && x >= w - 212 && x < w - 116)
-        return -4;
-    /* > next — 96px wide ending at x=w-12 */
-    if (bs_g_state.page + 1 < pages && x >= w - 108 && x < w - 12)
-        return -2;
-    return 0;
+    int r = bs_hit_pager_prev(x);
+    if (r != 0)
+        return r;
+    return bs_hit_pager_next(x, w, pages);
 }
 
 /* ── tap handlers ────────────────────────────────────────────────────── */
@@ -401,6 +430,126 @@ bs_settings_toggle_sysapp(void)
                 : "stock home returns after reboot");
 }
 
+/* Per-row tap handlers for the settings overlay.  Each returns 1 when
+ * the row's y-band was hit (and the row handled the tap), 0 otherwise,
+ * so the dispatcher above can fall through to the next row. */
+static int
+bs_on_tap_settings_api_host(int y, int y_row)
+{
+    if (y >= y_row && y < y_row + BS_SETTINGS_ROW_H - 12) {
+        bs_g_settings_edit = 1;
+        snprintf(bs_g_settings_kb_buf, sizeof bs_g_settings_kb_buf, "%s", bs_g_state.api_base);
+        bs_draw_overlay_settings();
+        FullUpdate();
+        OpenKeyboard(bs_i18n("settings.api_host"),
+                     bs_g_settings_kb_buf,
+                     sizeof bs_g_settings_kb_buf - 1,
+                     0,
+                     bs_settings_keyboard_handler);
+        return 1;
+    }
+    return 0;
+}
+
+static int
+bs_on_tap_settings_api_token(int y, int y_row)
+{
+    if (y >= y_row && y < y_row + BS_SETTINGS_ROW_H - 12) {
+        bs_g_settings_edit = 2;
+        snprintf(bs_g_settings_kb_buf, sizeof bs_g_settings_kb_buf, "%s", bs_g_state.api_token);
+        bs_draw_overlay_settings();
+        FullUpdate();
+        OpenKeyboard(bs_i18n("settings.api_key"),
+                     bs_g_settings_kb_buf,
+                     sizeof bs_g_settings_kb_buf - 1,
+                     0,
+                     bs_settings_keyboard_handler);
+        return 1;
+    }
+    return 0;
+}
+
+static int
+bs_on_tap_settings_reader(int y, int y_row)
+{
+    if (y >= y_row && y < y_row + BS_SETTINGS_ROW_H - 12) {
+        /* Cycle Auto → reader[0] → reader[1] → … → Auto. */
+        bs_g_state.reader_pref = (bs_g_state.reader_pref + 1) % (bs_g_reader_count + 1);
+        bs_draw_overlay_settings();
+        /* Only the reader row's value text changed; refresh just that
+         * row instead of a full-screen flash. */
+        PartialUpdate(32, y_row, ScreenWidth() - 64, BS_SETTINGS_ROW_H - 12);
+        return 1;
+    }
+    return 0;
+}
+
+static int
+bs_on_tap_settings_folder(int y, int y_row)
+{
+    if (y >= y_row && y < y_row + BS_SETTINGS_ROW_H - 12) {
+        /* Download-folder picker (confined to /mnt/ext1). */
+        bs_folder_open();
+        return 1;
+    }
+    return 0;
+}
+
+static int
+bs_on_tap_settings_sysapp(int y, int y_row)
+{
+    if (y >= y_row && y < y_row + BS_SETTINGS_ROW_H - 12) {
+        bs_settings_toggle_sysapp();
+        return 1;
+    }
+    return 0;
+}
+
+static int
+bs_on_tap_settings_apply(int y, int y_save)
+{
+    if (y >= y_save && y < y_save + BS_SETTINGS_BTN_H - 12) {
+        bs_settings_apply();
+        return 1;
+    }
+    return 0;
+}
+
+static int
+bs_on_tap_settings_logs(int y, int y_logs)
+{
+    if (y >= y_logs && y < y_logs + BS_SETTINGS_BTN_H - 12) {
+        /* Show the app log directly (Settings → Show logs).  Settings
+         * is NOT restored when the log closes — the log's Back goes
+         * straight to the shelf (see on_tap_log_view). */
+        bs_g_settings_edit = 0;
+        bs_g_state.overlay = BS_OV_LOG;
+        bs_g_state.log_scroll = -1; /* start at the tail */
+        bs_draw_log_view();
+        FullUpdate();
+        return 1;
+    }
+    return 0;
+}
+
+static int
+bs_on_tap_settings_licenses(int y, int y_lic)
+{
+    if (y >= y_lic && y < y_lic + BS_SETTINGS_BTN_H - 12) {
+        /* Open the third-party licenses viewer (Settings → Licenses).
+         * Like the log viewer it owns the screen while open; its Back
+         * returns to the shelf (via the list). */
+        bs_g_settings_edit = 0;
+        bs_g_state.overlay = BS_OV_LICENSES;
+        bs_g_state.lic_sel = -1; /* start on the entry list */
+        bs_g_state.lic_scroll = 0;
+        bs_draw_licenses_view();
+        FullUpdate();
+        return 1;
+    }
+    return 0;
+}
+
 void
 bs_on_tap_overlay_settings(int x, int y)
 {
@@ -421,76 +570,24 @@ bs_on_tap_overlay_settings(int x, int y)
     int y_save = y_row5 + BS_SETTINGS_ROW_H + 24;
     int y_logs = y_save + BS_SETTINGS_BTN_H;
 
-    if (y >= y_row1 && y < y_row1 + BS_SETTINGS_ROW_H - 12) {
-        bs_g_settings_edit = 1;
-        snprintf(bs_g_settings_kb_buf, sizeof bs_g_settings_kb_buf, "%s", bs_g_state.api_base);
-        bs_draw_overlay_settings();
-        FullUpdate();
-        OpenKeyboard(bs_i18n("settings.api_host"),
-                     bs_g_settings_kb_buf,
-                     sizeof bs_g_settings_kb_buf - 1,
-                     0,
-                     bs_settings_keyboard_handler);
+    if (bs_on_tap_settings_api_host(y, y_row1))
         return;
-    }
-    if (y >= y_row2 && y < y_row2 + BS_SETTINGS_ROW_H - 12) {
-        bs_g_settings_edit = 2;
-        snprintf(bs_g_settings_kb_buf, sizeof bs_g_settings_kb_buf, "%s", bs_g_state.api_token);
-        bs_draw_overlay_settings();
-        FullUpdate();
-        OpenKeyboard(bs_i18n("settings.api_key"),
-                     bs_g_settings_kb_buf,
-                     sizeof bs_g_settings_kb_buf - 1,
-                     0,
-                     bs_settings_keyboard_handler);
+    if (bs_on_tap_settings_api_token(y, y_row2))
         return;
-    }
-    if (y >= y_row3 && y < y_row3 + BS_SETTINGS_ROW_H - 12) {
-        /* Cycle Auto → reader[0] → reader[1] → … → Auto. */
-        bs_g_state.reader_pref = (bs_g_state.reader_pref + 1) % (bs_g_reader_count + 1);
-        bs_draw_overlay_settings();
-        /* Only the reader row's value text changed; refresh just that
-         * row instead of a full-screen flash. */
-        PartialUpdate(32, y_row3, ScreenWidth() - 64, BS_SETTINGS_ROW_H - 12);
+    if (bs_on_tap_settings_reader(y, y_row3))
         return;
-    }
-    if (y >= y_row4 && y < y_row4 + BS_SETTINGS_ROW_H - 12) {
-        /* Download-folder picker (confined to /mnt/ext1). */
-        bs_folder_open();
+    if (bs_on_tap_settings_folder(y, y_row4))
         return;
-    }
-    if (y >= y_row5 && y < y_row5 + BS_SETTINGS_ROW_H - 12) {
-        bs_settings_toggle_sysapp();
+    if (bs_on_tap_settings_sysapp(y, y_row5))
         return;
-    }
-    if (y >= y_save && y < y_save + BS_SETTINGS_BTN_H - 12) {
-        bs_settings_apply();
+    if (bs_on_tap_settings_apply(y, y_save))
         return;
-    }
-    if (y >= y_logs && y < y_logs + BS_SETTINGS_BTN_H - 12) {
-        /* Show the app log directly (Settings → Show logs).  Settings
-         * is NOT restored when the log closes — the log's Back goes
-         * straight to the shelf (see on_tap_log_view). */
-        bs_g_settings_edit = 0;
-        bs_g_state.overlay = BS_OV_LOG;
-        bs_g_state.log_scroll = -1; /* start at the tail */
-        bs_draw_log_view();
-        FullUpdate();
+    if (bs_on_tap_settings_logs(y, y_logs))
         return;
-    }
+
     int y_lic = y_logs + BS_SETTINGS_BTN_H;
-    if (y >= y_lic && y < y_lic + BS_SETTINGS_BTN_H - 12) {
-        /* Open the third-party licenses viewer (Settings → Licenses).
-         * Like the log viewer it owns the screen while open; its Back
-         * returns to the shelf (via the list). */
-        bs_g_settings_edit = 0;
-        bs_g_state.overlay = BS_OV_LICENSES;
-        bs_g_state.lic_sel = -1; /* start on the entry list */
-        bs_g_state.lic_scroll = 0;
-        bs_draw_licenses_view();
-        FullUpdate();
+    if (bs_on_tap_settings_licenses(y, y_lic))
         return;
-    }
 }
 
 /* Taps on the full-screen log viewer: Back (top-left) or the corner
@@ -546,6 +643,59 @@ bs_on_tap_log_view(int x, int y)
  * list; from the list it closes to the shelf (mirroring the log
  * viewer).  The corner scroll buttons page-scroll the current view; a
  * tap on a list row opens that license's full text. */
+/* Handle a tap on the licenses view's corner scroll buttons (up =
+ * older, down = newer).  Returns 1 when a button was hit (and the
+ * scroll was applied), 0 otherwise. */
+static int
+bs_on_tap_lic_scroll(int x, int y, int btn_y)
+{
+    int h = bs_content_bottom();
+    int dir = bs_hit_scroll_button(x, y);
+    if (dir != 0) {
+        int body_top = bs_g_state.lic_sel < 0 ? BS_LIC_LIST_TOP : BS_LOG_BODY_TOP;
+        int page = bs_g_state.lic_sel < 0
+                       ? (btn_y - body_top - 8) / BS_LIC_LIST_H
+                       : (btn_y - body_top) / BS_LOG_ROW_H;
+        if (page < 1)
+            page = 1;
+        bs_g_state.lic_scroll += dir * page;
+        if (bs_g_state.lic_scroll < 0)
+            bs_g_state.lic_scroll = 0;
+        bs_draw_licenses_view();
+        /* Only the body moves on a scroll; the header is unchanged. */
+        PartialUpdate(0, body_top, ScreenWidth(), h - body_top);
+        return 1;
+    }
+    return 0;
+}
+
+/* Handle a tap on a list-view row (opens that license's full text).
+ * Returns 1 when in list mode (row selected or tap ignored), 0
+ * otherwise (detail mode — body taps are ignored). */
+static int
+bs_on_tap_lic_list(int n, int y, int btn_y)
+{
+    /* List view: a tap on a row opens that license's full text. */
+    if (bs_g_state.lic_sel < 0) {
+        int body_h = btn_y - BS_LIC_LIST_TOP - 8;
+        int rows_vis = body_h / BS_LIC_LIST_H;
+        if (rows_vis < 1)
+            rows_vis = 1;
+        int rel = (y - BS_LIC_LIST_TOP) / BS_LIC_LIST_H;
+        if (y >= BS_LIC_LIST_TOP && rel >= 0 && rel < rows_vis) {
+            int idx = bs_g_state.lic_scroll + rel;
+            if (idx >= 0 && idx < n) {
+                bs_g_state.lic_sel = idx;
+                bs_g_state.lic_scroll = 0;
+                bs_draw_licenses_view();
+                FullUpdate();
+            }
+        }
+        return 1;
+    }
+    return 0;
+}
+
 void
 bs_on_tap_licenses_view(int x, int y)
 {
@@ -570,40 +720,9 @@ bs_on_tap_licenses_view(int x, int y)
     int h = bs_content_bottom();
     int btn_y = h - 8 - BS_SCROLL_BTN_H;
 
-    int dir = bs_hit_scroll_button(x, y);
-    if (dir != 0) {
-        int body_top = bs_g_state.lic_sel < 0 ? BS_LIC_LIST_TOP : BS_LOG_BODY_TOP;
-        int page = bs_g_state.lic_sel < 0
-                       ? (btn_y - body_top - 8) / BS_LIC_LIST_H
-                       : (btn_y - body_top) / BS_LOG_ROW_H;
-        if (page < 1)
-            page = 1;
-        bs_g_state.lic_scroll += dir * page;
-        if (bs_g_state.lic_scroll < 0)
-            bs_g_state.lic_scroll = 0;
-        bs_draw_licenses_view();
-        /* Only the body moves on a scroll; the header is unchanged. */
-        PartialUpdate(0, body_top, ScreenWidth(), h - body_top);
+    if (bs_on_tap_lic_scroll(x, y, btn_y))
         return;
-    }
 
-    /* List view: a tap on a row opens that license's full text. */
-    if (bs_g_state.lic_sel < 0) {
-        int body_h = btn_y - BS_LIC_LIST_TOP - 8;
-        int rows_vis = body_h / BS_LIC_LIST_H;
-        if (rows_vis < 1)
-            rows_vis = 1;
-        int rel = (y - BS_LIC_LIST_TOP) / BS_LIC_LIST_H;
-        if (y >= BS_LIC_LIST_TOP && rel >= 0 && rel < rows_vis) {
-            int idx = bs_g_state.lic_scroll + rel;
-            if (idx >= 0 && idx < n) {
-                bs_g_state.lic_sel = idx;
-                bs_g_state.lic_scroll = 0;
-                bs_draw_licenses_view();
-                FullUpdate();
-            }
-        }
-        return;
-    }
+    bs_on_tap_lic_list(n, y, btn_y);
     /* Detail: taps in the body are ignored (only Back / scroll). */
 }

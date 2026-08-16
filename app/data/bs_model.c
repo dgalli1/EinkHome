@@ -447,6 +447,31 @@ js_epoch(const cJSON *obj, const char *key)
     return (long)(days * 86400 + h * 3600 + mi * 60 + (long long)sec);
 }
 
+/* Normalize a book format string to lowercase, truncated at the first
+ * non-alphanumeric character. */
+static void
+book_format_normalize(char *s)
+{
+    for (char *q = s; *q; q++) {
+        if (*q >= 'A' && *q <= 'Z')
+            *q = (char)(*q + 32);
+        if (*q == '/' || *q == '+' || *q == '.') {
+            *q = '\0';
+            break;
+        }
+    }
+}
+
+/* Collapse a filename to its bare basename (strip any directory
+ * prefix). */
+static void
+book_filename_basename(char *fn)
+{
+    char *slash = strrchr(fn, '/');
+    if (slash != NULL)
+        memmove(fn, slash + 1, strlen(slash + 1) + 1);
+}
+
 int
 bs_parse_book_obj(const cJSON *obj, BsBook *b, int probe_fs)
 {
@@ -476,14 +501,7 @@ bs_parse_book_obj(const cJSON *obj, BsBook *b, int probe_fs)
     js_copy(obj, "searchText", b->search_text, sizeof b->search_text);
     js_copy(obj, "format", b->ext, sizeof b->ext);
     /* Strip format string past first non-alnum. */
-    for (char *q = b->ext; *q; q++) {
-        if (*q >= 'A' && *q <= 'Z')
-            *q = (char)(*q + 32);
-        if (*q == '/' || *q == '+' || *q == '.') {
-            *q = '\0';
-            break;
-        }
-    }
+    book_format_normalize(b->ext);
     b->size = js_int(obj, "size", 0);
     b->added_at = js_epoch(obj, "addedAt");
     /* Server books come from the remote library; local imports set
@@ -492,9 +510,7 @@ bs_parse_book_obj(const cJSON *obj, BsBook *b, int probe_fs)
     js_copy(obj, "filename", b->filename, sizeof b->filename);
     /* Sanitize to a bare basename right away: the downloads path is
      * built from this and must stay inside the downloads dir. */
-    char *slash = strrchr(b->filename, '/');
-    if (slash != NULL)
-        memmove(b->filename, slash + 1, strlen(slash + 1) + 1);
+    book_filename_basename(b->filename);
 
     /* Check if the file exists on local storage (resolved downloads
      * dir).  Only the local-import path probes the filesystem
@@ -748,6 +764,77 @@ added_item_cmp(const void *a, const void *b)
     return strcmp(((const BsAddedItem *)a)->id, ((const BsAddedItem *)b)->id);
 }
 
+/* Sort the round's added entries by id and apply every one inside the
+ * current transaction.  Returns 0 on success, -1 when any upsert fails
+ * (the caller rolls back).  The server streams the catalogue in its
+ * own order, but the SQLite b-tree insert cost collapses when the
+ * per-round ids are sequential: every insert then hits pages the round
+ * already warmed instead of evicting and re-reading them from flash.
+ * Unsorted, a 100k ingest re-reads ~1GB of pages and the per-round
+ * time grows with the table (measured 2s -> 9s+ per round on device). */
+static int
+sync_apply_added_array(const cJSON *added, long long cursor)
+{
+    int        n_added = cJSON_GetArraySize(added);
+    BsAddedItem *items = NULL;
+    int        n_items = 0;
+    if (n_added > 0)
+        items = malloc(sizeof *items * (size_t)n_added);
+    if (items != NULL) {
+        const cJSON *it;
+        cJSON_ArrayForEach(it, added) {
+            if (!cJSON_IsObject(it))
+                continue;
+            js_copy(it, "id", items[n_items].id, sizeof items[n_items].id);
+            if (items[n_items].id[0] == '\0')
+                continue; /* parse_book_obj rejects it below */
+            items[n_items].it = it;
+            n_items++;
+        }
+        if (n_items > 1)
+            qsort(items, (size_t)n_items, sizeof *items, added_item_cmp);
+    }
+    if (items != NULL) {
+        for (int i = 0; i < n_items; i++) {
+            if (sync_apply_added(items[i].it, cursor) != 0) {
+                /* A failed upsert aborts the whole sync: roll back so
+                 * the half-written batch is not persisted (a later
+                 * round would otherwise apply its rows on top of a
+                 * partial batch).  The caller-computed cursor was
+                 * already set; the caller leaves it unchanged. */
+                free(items);
+                return -1;
+            }
+        }
+        free(items);
+    } else {
+        /* Allocation failed: apply in server order (same result,
+         * worse flash locality). */
+        const cJSON *it;
+        cJSON_ArrayForEach(it, added) {
+            if (sync_apply_added(it, cursor) != 0)
+                return -1;
+        }
+    }
+    return 0;
+}
+
+/* Apply every removal in the round (id strings) inside the current
+ * transaction. */
+static void
+sync_apply_removed(const cJSON *rem)
+{
+    const cJSON *it;
+    cJSON_ArrayForEach(it, rem) {
+        if (cJSON_IsString(it) && it->valuestring != NULL &&
+            it->valuestring[0] != '\0') {
+            bs_store_delete_book(it->valuestring);
+            bs_store_suggest_set(it->valuestring, NULL, 0);
+            bs_g_sync_changed = 1; /* rows removed: rebuild at finish */
+        }
+    }
+}
+
 static int
 sync_apply_round(cJSON *root, long long cursor, long long *next_out,
                  int *more_out)
@@ -768,74 +855,19 @@ sync_apply_round(cJSON *root, long long cursor, long long *next_out,
         return SYNC_ROUND_STORE_FAIL;
     }
     if (cJSON_IsArray(added)) {
-        /* Sort the round's added entries by id before applying.  The
-         * server streams the catalogue in its own order, but the
-         * SQLite b-tree insert cost collapses when the per-round ids
-         * are sequential: every insert then hits pages the round
-         * already warmed instead of evicting and re-reading them from
-         * flash.  Unsorted, a 100k ingest re-reads ~1GB of pages and
-         * the per-round time grows with the table (measured 2s -> 9s+
-         * per round on device). */
-        int n_added = cJSON_GetArraySize(added);
-        BsAddedItem *items = NULL;
-        int        n_items = 0;
-        if (n_added > 0)
-            items = malloc(sizeof *items * (size_t)n_added);
-        if (items != NULL) {
-            const cJSON *it;
-            cJSON_ArrayForEach(it, added) {
-                if (!cJSON_IsObject(it))
-                    continue;
-                js_copy(it, "id", items[n_items].id, sizeof items[n_items].id);
-                if (items[n_items].id[0] == '\0')
-                    continue; /* parse_book_obj rejects it below */
-                items[n_items].it = it;
-                n_items++;
-            }
-            if (n_items > 1)
-                qsort(items, (size_t)n_items, sizeof *items, added_item_cmp);
-        }
-        if (items != NULL) {
-            for (int i = 0; i < n_items; i++) {
-                if (sync_apply_added(items[i].it, cursor) != 0) {
-                    /* A failed upsert aborts the whole sync: roll
-                     * back so the half-written batch is not persisted
-                     * (a later round would otherwise apply its rows on
-                     * top of a partial batch), and leave the cursor
-                     * unchanged so the next sync retries from this
-                     * same delta.  *next_out / *more_out were already
-                     * set to cursor/0 at the top. */
-                    bs_store_rollback();
-                    free(items);
-                    cJSON_Delete(root);
-                    return SYNC_ROUND_STORE_FAIL;
-                }
-            }
-            free(items);
-        } else {
-            /* Allocation failed: apply in server order (same result,
-             * worse flash locality). */
-            const cJSON *it;
-            cJSON_ArrayForEach(it, added) {
-                if (sync_apply_added(it, cursor) != 0) {
-                    bs_store_rollback();
-                    cJSON_Delete(root);
-                    return SYNC_ROUND_STORE_FAIL;
-                }
-            }
+        if (sync_apply_added_array(added, cursor) != 0) {
+            /* A failed upsert aborts the whole sync: roll back so the
+             * half-written batch is not persisted, and leave the cursor
+             * unchanged so the next sync retries from this same delta.
+             * *next_out / *more_out were already set to cursor/0 at the
+             * top. */
+            bs_store_rollback();
+            cJSON_Delete(root);
+            return SYNC_ROUND_STORE_FAIL;
         }
     }
-    if (cJSON_IsArray(rem)) {
-        const cJSON *it;
-        cJSON_ArrayForEach(it, rem) {
-            if (cJSON_IsString(it) && it->valuestring != NULL &&
-                it->valuestring[0] != '\0') {
-                bs_store_delete_book(it->valuestring);
-                bs_store_suggest_set(it->valuestring, NULL, 0);
-                bs_g_sync_changed = 1; /* rows removed: rebuild at finish */
-            }
-        }
-    }
+    if (cJSON_IsArray(rem))
+        sync_apply_removed(rem);
     if (cJSON_IsNumber(nc))
         *next_out = (long long)nc->valuedouble;
     const cJSON *mk = cJSON_GetObjectItemCaseSensitive(root, "more");
@@ -970,20 +1002,18 @@ sync_submit_finish(void)
     }
 }
 
-/* done_cb for a round job: apply the batch and chain the next round or
- * the finish job.  The terminal paths (done, failed, capped) do not
- * chain. */
-static void
-sync_round_done(BsJob *job)
+/* Drop a round result that is stale (sync aborted, or the chain was
+ * restarted underneath it) and return 1; on the live path return 0
+ * without touching arg.  The sync_state check catches a plain abort
+ * (sync_state reset to 0), the generation check catches an abort
+ * followed by an immediate restart (settings_apply does both in one
+ * turn), where sync_state is already 1 again but the round belongs to
+ * the old chain with the old endpoint/cursor.  A stale response must
+ * never be applied to a newer chain. */
+static int
+sync_round_drop_stale(BsJob *job)
 {
     BsSyncRoundArg *arg = job->arg;
-    /* Consume and drop the result when the sync was aborted while the
-     * fetch was in flight — the sync_state check catches a plain abort
-     * (sync_state reset to 0), the generation check catches an abort
-     * followed by an immediate restart (settings_apply does both in one
-     * turn), where sync_state is already 1 again but the round belongs
-     * to the old chain with the old endpoint/cursor.  A stale response
-     * must never be applied to a newer chain. */
     if (!bs_g_state.sync_state || arg->gen != g_sync_gen) {
         BsSyncRoundResult *r = job->result;
         if (r != NULL) {
@@ -991,24 +1021,99 @@ sync_round_done(BsJob *job)
             free(r);
         }
         free(arg);
-        return;
+        return 1;
     }
+    return 0;
+}
+
+/* Transport failure: rc != 0 is exactly the old "rc != 0 || resp ==
+ * NULL": http_post_timeout_status returns -1 whenever it produced no
+ * body (see bs_net.c), and the worker frees the raw body after parsing,
+ * so only rc reaches the main thread. */
+static int
+sync_round_transport_fail(BsJob *job, BsSyncRoundResult *r, int rc)
+{
+    bs_LOG("[bookshelf] do_sync FAILED: url=%s rc=%d\n",
+        bs_g_state.url_delta, rc);
+    bs_g_state.sync_state = 2;
+    sync_ui_active(0);
+    free(r);
+    free(job->arg);
+    sync_ui_popup_fail();
+    return 1;
+}
+
+/* Classify a round's result into a SYNC_ROUND_* outcome: BAD_RESP for a
+ * non-200 HTTP answer or an unparsable body, otherwise delegate to the
+ * apply step.  Consumes r->root. */
+static int
+sync_round_classify(BsSyncRoundResult *r, long long cursor,
+                    long long *next, int *more)
+{
+    if (r != NULL && r->http_status != 0 && r->http_status != 200) {
+        /* The server answered with an HTTP error status: the body is an
+         * error response, not a delta (a transport failure above yields
+         * no body at all).  Treat it exactly like a bad response —
+         * abort the chain visibly, cursor un-advanced. */
+        bs_LOG("[bookshelf] sync: HTTP status %d with body; error response\n",
+            r->http_status);
+        cJSON_Delete(r->root);
+        return SYNC_ROUND_BAD_RESP;
+    } else if (r == NULL || !r->parse_ok) {
+        /* Bad JSON or a malformed delta, diagnosed on the worker. */
+        if (r != NULL)
+            cJSON_Delete(r->root);
+        return SYNC_ROUND_BAD_RESP;
+    }
+    return sync_apply_round(r->root, cursor, next, more);
+}
+
+/* A round that failed outright (bad response or store failure): abort
+ * the WHOLE chain — no finish job, no "done" popup.  The cursor was not
+ * advanced, so the next sync retries from this delta. */
+static int
+sync_round_outcome_fail(int outcome)
+{
+    bs_LOG("[bookshelf] do_sync: round failed (outcome=%d); aborting\n",
+        outcome);
+    bs_g_state.sync_state = 2;
+    sync_ui_active(0);
+    sync_ui_popup_fail();
+    return 1;
+}
+
+/* Copy the chain to the next round when more work remains (bounded by
+ * the 400-round ceiling = 200k books); returns 1 when it chained,
+ * 0 when the caller should finish.  Repaints the progress sheet every
+ * few batches; the round trip itself is the slow part, so the sheet
+ * tracks it live. */
+static int
+sync_round_chain_next(int more, int rounds)
+{
+    if (more && rounds < 400) { /* 400 * SYNC_BATCH = 200k ceiling */
+        bs_g_state.sync_round = rounds + 1;
+        if (bs_g_state.sync_popup && (rounds % 5 == 0))
+            sync_ui_popup_refresh();
+        sync_submit_round();
+        return 1;
+    }
+    return 0;
+}
+
+/* done_cb for a round job: apply the batch and chain the next round or
+ * the finish job.  The terminal paths (done, failed, capped) do not
+ * chain. */
+static void
+sync_round_done(BsJob *job)
+{
+    if (sync_round_drop_stale(job))
+        return;
     BsSyncRoundResult *r = job->result;
     int   rc = (r != NULL) ? r->rc : job->rc;
     int   rlen = (r != NULL) ? r->rlen : 0;
 
-    /* Transport failure.  rc != 0 is exactly the old "rc != 0 ||
-     * resp == NULL": http_post_timeout_status returns -1 whenever it
-     * produced no body (see bs_net.c), and the worker frees the raw
-     * body after parsing, so only rc reaches the main thread. */
     if (rc != 0) {
-        bs_LOG("[bookshelf] do_sync FAILED: url=%s rc=%d\n",
-            bs_g_state.url_delta, rc);
-        bs_g_state.sync_state = 2;
-        sync_ui_active(0);
-        free(r);
-        free(job->arg);
-        sync_ui_popup_fail();
+        sync_round_transport_fail(job, r, rc);
         return;
     }
     bs_LOG("[bookshelf] do_sync: retsize=%d cursor=%lld\n", rlen,
@@ -1016,49 +1121,18 @@ sync_round_done(BsJob *job)
 
     long long next = g_sync_cursor;
     int       more = 0;
-    int       outcome;
-    if (r != NULL && r->http_status != 0 && r->http_status != 200) {
-        /* The server answered with an HTTP error status: the body is
-         * an error response, not a delta (a transport failure above
-         * yields no body at all).  Treat it exactly like a bad
-         * response — abort the chain visibly, cursor un-advanced. */
-        bs_LOG("[bookshelf] sync: HTTP status %d with body; error response\n",
-            r->http_status);
-        cJSON_Delete(r->root);
-        outcome = SYNC_ROUND_BAD_RESP;
-    } else if (r == NULL || !r->parse_ok) {
-        /* Bad JSON or a malformed delta, diagnosed on the worker. */
-        if (r != NULL)
-            cJSON_Delete(r->root);
-        outcome = SYNC_ROUND_BAD_RESP;
-    } else {
-        outcome = sync_apply_round(r->root, g_sync_cursor, &next, &more);
-    }
+    int       outcome = sync_round_classify(r, g_sync_cursor, &next, &more);
     free(r);
     free(job->arg);
     if (outcome != SYNC_ROUND_OK) {
-        /* Bad response or store failure: abort the WHOLE chain here —
-         * no finish job, no "done" popup.  The cursor was not
-         * advanced, so the next sync retries from this delta. */
-        bs_LOG("[bookshelf] do_sync: round failed (outcome=%d); aborting\n",
-            outcome);
-        bs_g_state.sync_state = 2;
-        sync_ui_active(0);
-        sync_ui_popup_fail();
+        sync_round_outcome_fail(outcome);
         return;
     }
     g_sync_cursor = next;
     g_sync_rounds++;
 
-    if (more && g_sync_rounds < 400) { /* 400 * SYNC_BATCH = 200k ceiling */
-        bs_g_state.sync_round = g_sync_rounds + 1;
-        /* Repaint the progress sheet every few batches; the round trip
-         * itself is the slow part, so the sheet tracks it live. */
-        if (bs_g_state.sync_popup && (g_sync_rounds % 5 == 0))
-            sync_ui_popup_refresh();
-        sync_submit_round();
+    if (sync_round_chain_next(more, g_sync_rounds))
         return;
-    }
     bs_LOG("[bookshelf] do_sync: rounds=%d cursor=%lld\n", g_sync_rounds,
         g_sync_cursor);
     sync_submit_finish();

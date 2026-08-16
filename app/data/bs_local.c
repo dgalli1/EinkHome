@@ -93,6 +93,104 @@ local_result_append(BsLocalScanResult *res)
     return &res->books[res->count++];
 }
 
+/* Join "dir/name" into path (cap bytes); returns 0 on success, -1 when
+ * the path cannot be represented. */
+static int
+local_scan_path(const char *dir, const char *name, char *path, size_t cap)
+{
+    size_t dlen = strlen(dir);
+    size_t nlen = strlen(name);
+    if (dlen + 1 + nlen >= cap)
+        return -1; /* path too deep to represent */
+    memcpy(path, dir, dlen);
+    path[dlen] = '/';
+    memcpy(path + dlen + 1, name, nlen);
+    path[dlen + 1 + nlen] = '\0';
+    return 0;
+}
+
+/* Classify a dirent as directory or regular file.  d_type is a hint:
+ * DT_UNKNOWN filesystems (FAT, some FUSE) report nothing and symlinks
+ * need following — resolve the real type by stat() whenever the
+ * dirent type is inconclusive.  Hidden entries yield neither.  The
+ * recursion depth cap bounds any symlink cycle. */
+static void
+local_scan_classify(const char *name, const char *path, int d_type,
+                    int *is_dir, int *is_reg)
+{
+    if (name[0] == '.') {
+        *is_dir = 0;
+        *is_reg = 0;
+        return;
+    }
+    if (d_type == DT_DIR) {
+        *is_dir = 1;
+        *is_reg = 0;
+        return;
+    }
+    if (d_type == DT_REG) {
+        *is_dir = 0;
+        *is_reg = 1;
+        return;
+    }
+    /* DT_UNKNOWN / DT_LNK: resolve by stat() (__xstat on the
+     * firmware libc). */
+    *is_dir = 0;
+    *is_reg = 0;
+    struct stat stbuf;
+    if (__xstat(0, path, &stbuf) == 0) {
+        *is_dir = S_ISDIR(stbuf.st_mode);
+        *is_reg = S_ISREG(stbuf.st_mode);
+    }
+}
+
+/* Normalize (lowercase) the filename's extension into ext and report
+ * whether it is a book extension. */
+static int
+local_scan_is_book(const char *name, char *ext, size_t extcap)
+{
+    const char *dot = strrchr(name, '.');
+    if (dot == NULL || dot[1] == '\0')
+        return 0;
+    size_t xlen = strlen(dot + 1);
+    if (xlen >= extcap)
+        xlen = extcap - 1;
+    memcpy(ext, dot + 1, xlen);
+    ext[xlen] = '\0';
+    for (char *p = ext; *p; p++)
+        *p = (char)((*p >= 'A' && *p <= 'Z') ? *p + 32 : *p);
+    return bs_is_book_ext(ext);
+}
+
+/* Fill the leaf fields of a collected record (title, ext, size, path,
+ * filename) from the walked entry.  Behavior mirrors the original
+ * inline fill. */
+static void
+local_scan_fill(const char *dir, const char *name, const char *path,
+                const char *ext, BsLocalFile *f)
+{
+    size_t dlen = strlen(dir);
+    size_t nlen = strlen(name);
+    size_t xlen = strlen(ext);
+    /* Title = filename without extension, truncated to the field. */
+    size_t stem_len = nlen > xlen + 1 ? nlen - (xlen + 1) : 0;
+    if (stem_len > BS_MAX_TITLE_LEN - 1)
+        stem_len = BS_MAX_TITLE_LEN - 1;
+    memcpy(f->title, name, stem_len);
+    f->title[stem_len] = '\0';
+    snprintf(f->ext, sizeof f->ext, "%s", ext);
+    struct stat stbuf;
+    if (__xstat(0, path, &stbuf) == 0)
+        f->size = (int)stbuf.st_size;
+    /* Copy only the path bytes actually written (plus NUL). */
+    memcpy(f->local_path, path, dlen + 1 + nlen + 1);
+    size_t fname_len = nlen;
+    if (fname_len >= sizeof f->filename)
+        fname_len = sizeof f->filename - 1;
+    memcpy(f->filename, name, fname_len);
+    f->filename[fname_len] = '\0';
+}
+
 /* Worker: walk the tree and collect book records (blocking I/O only —
  * no SQLite, no UI, no g_state). */
 static void
@@ -105,49 +203,19 @@ folder_scan_collect(const char *dir, int depth, BsLocalScanResult *res)
         return;
     struct dirent *e;
     while ((e = readdir(d)) != NULL && res->count < BS_LOCAL_SCAN_CAP) {
-        if (e->d_name[0] == '.')
-            continue;
-        char   path[BS_MAX_PATH_LEN];
-        size_t dlen = strlen(dir);
-        size_t nlen = strlen(e->d_name);
-        if (dlen + 1 + nlen >= sizeof path)
+        char path[BS_MAX_PATH_LEN];
+        if (local_scan_path(dir, e->d_name, path, sizeof path) != 0)
             continue; /* path too deep to represent */
-        memcpy(path, dir, dlen);
-        path[dlen] = '/';
-        memcpy(path + dlen + 1, e->d_name, nlen);
-        path[dlen + 1 + nlen] = '\0';
-        /* d_type is a hint: DT_UNKNOWN filesystems (FAT, some FUSE)
-         * report nothing and symlinks need following — resolve the
-         * real type by stat() whenever the dirent type is
-         * inconclusive.  The recursion depth cap below bounds any
-         * symlink cycle. */
-        int is_dir = e->d_type == DT_DIR;
-        int is_reg = e->d_type == DT_REG;
-        if (e->d_type == DT_UNKNOWN || e->d_type == DT_LNK) {
-            struct stat stbuf;
-            if (__xstat(0, path, &stbuf) == 0) {
-                is_dir = S_ISDIR(stbuf.st_mode);
-                is_reg = S_ISREG(stbuf.st_mode);
-            }
-        }
+        int is_dir, is_reg;
+        local_scan_classify(e->d_name, path, e->d_type, &is_dir, &is_reg);
         if (is_dir) {
             folder_scan_collect(path, depth + 1, res);
             continue;
         }
         if (!is_reg)
             continue;
-        const char *dot = strrchr(e->d_name, '.');
-        if (dot == NULL || dot[1] == '\0')
-            continue;
-        char   ext[8];
-        size_t xlen = strlen(dot + 1);
-        if (xlen >= sizeof ext)
-            xlen = sizeof ext - 1;
-        memcpy(ext, dot + 1, xlen);
-        ext[xlen] = '\0';
-        for (char *p = ext; *p; p++)
-            *p = (char)((*p >= 'A' && *p <= 'Z') ? *p + 32 : *p);
-        if (!bs_is_book_ext(ext))
+        char ext[8];
+        if (!local_scan_is_book(e->d_name, ext, sizeof ext))
             continue;
 
         BsLocalFile *f = local_result_append(res);
@@ -156,24 +224,7 @@ folder_scan_collect(const char *dir, int depth, BsLocalScanResult *res)
         char h[9];
         bs_hash_hex(path, h);
         snprintf(f->id, sizeof f->id, "fld_%s", h);
-        /* Title = filename without extension, truncated to the field. */
-        size_t stem_len = nlen > xlen + 1 ? nlen - (xlen + 1) : 0;
-        if (stem_len > BS_MAX_TITLE_LEN - 1)
-            stem_len = BS_MAX_TITLE_LEN - 1;
-        memcpy(f->title, e->d_name, stem_len);
-        f->title[stem_len] = '\0';
-        snprintf(f->ext, sizeof f->ext, "%s", ext);
-        /* The firmware libc exports __xstat, not stat. */
-        struct stat stbuf;
-        if (__xstat(0, path, &stbuf) == 0)
-            f->size = (int)stbuf.st_size;
-        /* Copy only the path bytes actually written (plus NUL). */
-        memcpy(f->local_path, path, dlen + 1 + nlen + 1);
-        size_t fname_len = nlen;
-        if (fname_len >= sizeof f->filename)
-            fname_len = sizeof f->filename - 1;
-        memcpy(f->filename, e->d_name, fname_len);
-        f->filename[fname_len] = '\0';
+        local_scan_fill(dir, e->d_name, path, ext, f);
         snprintf(f->source, sizeof f->source, "%s", res->src);
     }
     closedir(d);

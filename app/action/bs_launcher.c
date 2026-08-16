@@ -76,6 +76,52 @@ bs_lc_pick_key(const cJSON *obj, const char *want)
     return first;
 }
 
+/* No current dimension: pick a fallback key from the object and resolve
+ * it with a NULL dimension. */
+static void
+lc_resolve_fallback(const cJSON *v, char *out, size_t cap)
+{
+    const char *k = bs_lc_pick_key(v, NULL);
+    if (k != NULL) {
+        const cJSON *vp = cJSON_GetObjectItemCaseSensitive(v, k);
+        if (vp != NULL)
+            bs_lc_resolve(vp, NULL, out, cap);
+    }
+}
+
+/* The globalcfg variant: the first member whose value is an object
+ * carrying a "default" wins. */
+static void
+lc_resolve_globalcfg(const cJSON *v, const char *cur_dim, char *out, size_t cap)
+{
+    const cJSON *m = NULL;
+    const cJSON *it;
+    cJSON_ArrayForEach(it, v) {
+        if (!cJSON_IsObject(it))
+            continue;
+        const cJSON *defp = cJSON_GetObjectItemCaseSensitive(it, "default");
+        if (defp != NULL) {
+            m = defp;
+            break;
+        }
+    }
+    if (m != NULL)
+        bs_lc_resolve(m, cur_dim, out, cap);
+}
+
+/* Current dimension set: resolve the profile-mapped key. */
+static void
+lc_resolve_dim(const cJSON *v, const char *cur_dim, char *out, size_t cap)
+{
+    const char *want = bs_lc_prof_val(cur_dim);
+    const char *k = bs_lc_pick_key(v, want);
+    if (k != NULL) {
+        const cJSON *vp = cJSON_GetObjectItemCaseSensitive(v, k);
+        if (vp != NULL)
+            bs_lc_resolve(vp, cur_dim, out, cap);
+    }
+}
+
 void
 bs_lc_resolve(const cJSON *v, const char *cur_dim, char *out, size_t cap)
 {
@@ -98,39 +144,14 @@ bs_lc_resolve(const cJSON *v, const char *cur_dim, char *out, size_t cap)
         }
     }
     if (!cur_dim) {
-        const char *k = bs_lc_pick_key(v, NULL);
-        if (k != NULL) {
-            const cJSON *vp = cJSON_GetObjectItemCaseSensitive(v, k);
-            if (vp != NULL)
-                bs_lc_resolve(vp, cur_dim, out, cap);
-        }
+        lc_resolve_fallback(v, out, cap);
         return;
     }
     if (strcmp(cur_dim, "globalcfg") == 0) {
-        /* The globalcfg variant: the first member whose value is an
-         * object carrying a "default" wins. */
-        const cJSON *m = NULL;
-        const cJSON *it;
-        cJSON_ArrayForEach(it, v) {
-            if (!cJSON_IsObject(it))
-                continue;
-            const cJSON *defp = cJSON_GetObjectItemCaseSensitive(it, "default");
-            if (defp != NULL) {
-                m = defp;
-                break;
-            }
-        }
-        if (m != NULL)
-            bs_lc_resolve(m, cur_dim, out, cap);
+        lc_resolve_globalcfg(v, cur_dim, out, cap);
         return;
     }
-    const char *want = bs_lc_prof_val(cur_dim);
-    const char *k = bs_lc_pick_key(v, want);
-    if (k != NULL) {
-        const cJSON *vp = cJSON_GetObjectItemCaseSensitive(v, k);
-        if (vp != NULL)
-            bs_lc_resolve(vp, cur_dim, out, cap);
-    }
+    lc_resolve_dim(v, cur_dim, out, cap);
 }
 
 int
@@ -300,20 +321,11 @@ bs_launcher_layout(void)
     bs_g_launcher_body_h = y;
 }
 
-void
-bs_launcher_add_app(const cJSON *apps, const char *id)
+/* Resolve the item's display title from the "title" entry, falling back
+ * to the raw app id when empty. */
+static void
+launcher_set_title(BsLauncherItem *it, const cJSON *def, const char *id)
 {
-    if (bs_g_launcher_count >= BS_LAUNCHER_MAX_ITEMS)
-        return;
-    const cJSON *def = cJSON_GetObjectItemCaseSensitive(apps, id);
-    if (!cJSON_IsObject(def))
-        return;
-    const cJSON *vis = cJSON_GetObjectItemCaseSensitive(def, "visible");
-    if (vis != NULL && !bs_lc_resolve_bool(vis))
-        return;
-    BsLauncherItem *it = &bs_g_launcher_items[bs_g_launcher_count];
-    memset(it, 0, sizeof *it);
-    it->kind = 1;
     const cJSON *tp = cJSON_GetObjectItemCaseSensitive(def, "title");
     if (tp != NULL) {
         char raw[64];
@@ -322,12 +334,12 @@ bs_launcher_add_app(const cJSON *apps, const char *id)
     }
     if (!it->text[0])
         snprintf(it->text, sizeof it->text, "%s", id);
-    const cJSON *pp = cJSON_GetObjectItemCaseSensitive(def, "path");
-    if (pp != NULL)
-        bs_lc_resolve(pp, NULL, it->path, sizeof it->path);
-    const cJSON *ip = cJSON_GetObjectItemCaseSensitive(def, "icon");
-    if (ip != NULL)
-        bs_lc_resolve(ip, NULL, it->icon, sizeof it->icon);
+}
+
+/* Copy the optional "params"/"param" argument list into the item. */
+static void
+launcher_set_params(BsLauncherItem *it, const cJSON *def)
+{
     const cJSON *par = cJSON_GetObjectItemCaseSensitive(def, "params");
     if (!cJSON_IsArray(par))
         par = cJSON_GetObjectItemCaseSensitive(def, "param");
@@ -344,6 +356,30 @@ bs_launcher_add_app(const cJSON *apps, const char *id)
         snprintf(it->params[0], BS_LAUNCHER_PARAM_LEN, "%s", par->valuestring);
         it->nparams = 1;
     }
+}
+
+void
+bs_launcher_add_app(const cJSON *apps, const char *id)
+{
+    if (bs_g_launcher_count >= BS_LAUNCHER_MAX_ITEMS)
+        return;
+    const cJSON *def = cJSON_GetObjectItemCaseSensitive(apps, id);
+    if (!cJSON_IsObject(def))
+        return;
+    const cJSON *vis = cJSON_GetObjectItemCaseSensitive(def, "visible");
+    if (vis != NULL && !bs_lc_resolve_bool(vis))
+        return;
+    BsLauncherItem *it = &bs_g_launcher_items[bs_g_launcher_count];
+    memset(it, 0, sizeof *it);
+    it->kind = 1;
+    launcher_set_title(it, def, id);
+    const cJSON *pp = cJSON_GetObjectItemCaseSensitive(def, "path");
+    if (pp != NULL)
+        bs_lc_resolve(pp, NULL, it->path, sizeof it->path);
+    const cJSON *ip = cJSON_GetObjectItemCaseSensitive(def, "icon");
+    if (ip != NULL)
+        bs_lc_resolve(ip, NULL, it->icon, sizeof it->icon);
+    launcher_set_params(it, def);
     bs_g_launcher_count++;
 }
 
@@ -441,6 +477,97 @@ bs_launcher_build(void)
         bs_g_launcher_body_h);
 }
 
+/* Add every app listed under a view.json "groups" array entry, with a
+ * group header row when the group has a resolved title. */
+static void
+pb_build_groups(const cJSON *groups, const cJSON *db_apps)
+{
+    const cJSON *g;
+    cJSON_ArrayForEach(g, groups) {
+        if (!cJSON_IsObject(g))
+            continue;
+        const cJSON *tp = cJSON_GetObjectItemCaseSensitive(g, "title");
+        char        raw_title[64] = "";
+        char        disp_title[64] = "";
+        if (tp != NULL) {
+            bs_lc_resolve(tp, NULL, raw_title, sizeof raw_title);
+            bs_lc_translate(raw_title, disp_title, sizeof disp_title);
+        }
+        const cJSON *apps_arr = cJSON_GetObjectItemCaseSensitive(g, "apps");
+        if (cJSON_IsArray(apps_arr)) {
+            if (bs_g_launcher_count < BS_LAUNCHER_MAX_ITEMS && disp_title[0]) {
+                BsLauncherItem *hdr = &bs_g_launcher_items[bs_g_launcher_count++];
+                memset(hdr, 0, sizeof *hdr);
+                hdr->kind = 0;
+                snprintf(hdr->text, sizeof hdr->text, "%s", disp_title);
+            }
+            const cJSON *a;
+            cJSON_ArrayForEach(a, apps_arr) {
+                if (cJSON_IsString(a) && a->valuestring != NULL)
+                    bs_launcher_add_app(db_apps, a->valuestring);
+            }
+        }
+    }
+}
+
+/* Add a single U_* user app from view.json to the launcher list, filling
+ * in its title/path/icon (falling back to the key as the title). */
+static void
+pb_build_user_app(const cJSON *item, const char *key)
+{
+    BsLauncherItem *li = &bs_g_launcher_items[bs_g_launcher_count];
+    memset(li, 0, sizeof *li);
+    li->kind = 1;
+    if (cJSON_IsObject(item)) {
+        const cJSON *tp2 = cJSON_GetObjectItemCaseSensitive(item, "title");
+        if (tp2 != NULL)
+            bs_lc_resolve(tp2, NULL, li->text, sizeof li->text);
+        const cJSON *pp2 = cJSON_GetObjectItemCaseSensitive(item, "path");
+        if (pp2 != NULL)
+            bs_lc_resolve(pp2, NULL, li->path, sizeof li->path);
+        const cJSON *ip2 = cJSON_GetObjectItemCaseSensitive(item, "icon");
+        if (ip2 != NULL)
+            bs_lc_resolve(ip2, NULL, li->icon, sizeof li->icon);
+    }
+    if (!li->text[0])
+        snprintf(li->text, sizeof li->text, "%s", key);
+    bs_g_launcher_count++;
+}
+
+/* Scan view.json applications for U_* user apps not in any group and add
+ * each visible one, under a "Users" header. */
+static void
+pb_build_vw_apps(const cJSON *vw_apps)
+{
+    int user_hdr_added = 0;
+    const cJSON *it;
+    cJSON_ArrayForEach(it, vw_apps) {
+        const char *key = it->string;
+        if (key == NULL || key[0] != 'U' || key[1] != '_')
+            continue;
+        int vis = 1;
+        if (cJSON_IsObject(it)) {
+            const cJSON *v2 = cJSON_GetObjectItemCaseSensitive(it, "visible");
+            if (v2 != NULL && !bs_lc_resolve_bool(v2))
+                vis = 0;
+        }
+        if (!vis)
+            continue;
+        if (!user_hdr_added && bs_g_launcher_count < BS_LAUNCHER_MAX_ITEMS) {
+            BsLauncherItem *hdr = &bs_g_launcher_items[bs_g_launcher_count++];
+            memset(hdr, 0, sizeof *hdr);
+            hdr->kind = 0;
+            snprintf(hdr->text, sizeof hdr->text, "Users");
+            user_hdr_added = 1;
+        }
+        if (bs_g_launcher_count >= BS_LAUNCHER_MAX_ITEMS)
+            continue;
+        char id[48];
+        snprintf(id, sizeof id, "%s", key);
+        pb_build_user_app(it, id);
+    }
+}
+
 void
 bs_launcher_build_pb(void)
 {
@@ -470,82 +597,13 @@ bs_launcher_build_pb(void)
     const cJSON *groups = cJSON_IsObject(view_obj)
         ? cJSON_GetObjectItemCaseSensitive(view_obj, "groups")
         : NULL;
-    if (cJSON_IsArray(groups)) {
-        const cJSON *g;
-        cJSON_ArrayForEach(g, groups) {
-            if (!cJSON_IsObject(g))
-                continue;
-            const cJSON *tp = cJSON_GetObjectItemCaseSensitive(g, "title");
-            char        raw_title[64] = "";
-            char        disp_title[64] = "";
-            if (tp != NULL) {
-                bs_lc_resolve(tp, NULL, raw_title, sizeof raw_title);
-                bs_lc_translate(raw_title, disp_title, sizeof disp_title);
-            }
-            const cJSON *apps_arr = cJSON_GetObjectItemCaseSensitive(g, "apps");
-            if (cJSON_IsArray(apps_arr)) {
-                if (bs_g_launcher_count < BS_LAUNCHER_MAX_ITEMS && disp_title[0]) {
-                    BsLauncherItem *hdr = &bs_g_launcher_items[bs_g_launcher_count++];
-                    memset(hdr, 0, sizeof *hdr);
-                    hdr->kind = 0;
-                    snprintf(hdr->text, sizeof hdr->text, "%s", disp_title);
-                }
-                const cJSON *a;
-                cJSON_ArrayForEach(a, apps_arr) {
-                    if (cJSON_IsString(a) && a->valuestring != NULL)
-                        bs_launcher_add_app(db_apps, a->valuestring);
-                }
-            }
-        }
-    }
+    if (cJSON_IsArray(groups))
+        pb_build_groups(groups, db_apps);
 
     /* Scan view.json applications for U_* user apps not in any group. */
     const cJSON *vw_apps = cJSON_GetObjectItemCaseSensitive(vw, "applications");
-    if (cJSON_IsObject(vw_apps)) {
-        int user_hdr_added = 0;
-        const cJSON *it;
-        cJSON_ArrayForEach(it, vw_apps) {
-            const char *key = it->string;
-            if (key == NULL || key[0] != 'U' || key[1] != '_')
-                continue;
-            int vis = 1;
-            if (cJSON_IsObject(it)) {
-                const cJSON *v2 = cJSON_GetObjectItemCaseSensitive(it, "visible");
-                if (v2 != NULL && !bs_lc_resolve_bool(v2))
-                    vis = 0;
-            }
-            if (!vis)
-                continue;
-            if (!user_hdr_added && bs_g_launcher_count < BS_LAUNCHER_MAX_ITEMS) {
-                BsLauncherItem *hdr = &bs_g_launcher_items[bs_g_launcher_count++];
-                memset(hdr, 0, sizeof *hdr);
-                hdr->kind = 0;
-                snprintf(hdr->text, sizeof hdr->text, "Users");
-                user_hdr_added = 1;
-            }
-            if (bs_g_launcher_count >= BS_LAUNCHER_MAX_ITEMS)
-                continue;
-            char id[48];
-            snprintf(id, sizeof id, "%s", key);
-            BsLauncherItem *li = &bs_g_launcher_items[bs_g_launcher_count];
-            memset(li, 0, sizeof *li);
-            li->kind = 1;
-            if (cJSON_IsObject(it)) {
-                const cJSON *tp2 = cJSON_GetObjectItemCaseSensitive(it, "title");
-                if (tp2 != NULL)
-                    bs_lc_resolve(tp2, NULL, li->text, sizeof li->text);
-                const cJSON *pp2 = cJSON_GetObjectItemCaseSensitive(it, "path");
-                if (pp2 != NULL)
-                    bs_lc_resolve(pp2, NULL, li->path, sizeof li->path);
-                const cJSON *ip2 = cJSON_GetObjectItemCaseSensitive(it, "icon");
-                if (ip2 != NULL)
-                    bs_lc_resolve(ip2, NULL, li->icon, sizeof li->icon);
-            }
-            if (!li->text[0])
-                snprintf(li->text, sizeof li->text, "%s", id);
-            bs_g_launcher_count++;
-        }
-    }
+    if (cJSON_IsObject(vw_apps))
+        pb_build_vw_apps(vw_apps);
 
     /* Register user apps from /mnt/ext1/applications that the firmware
      * has not recorded in view.json yet (same scan the stock bookshelf
@@ -604,66 +662,74 @@ bs_launcher_icons_free(void)
     g_icon_cache_age = 0;
 }
 
-void
-bs_draw_launcher_icon(int cx, int cy, const char *icon_name, const char *title)
+/* Find a cached decode of icon_name; on a hit bump its LRU stamp and
+ * return it, else NULL. */
+static ibitmap *
+launcher_cache_find(const char *icon_name)
 {
-    int      sz = BS_LAUNCHER_ICON_SZ;
-    int      x0 = cx - sz / 2;
-    int      y0 = cy - sz / 2;
-    ibitmap *bm = NULL;
-    if (icon_name && icon_name[0]) {
-        /* LRU hit: reuse the cached decode, bump its stamp. */
-        for (int i = 0; i < BS_LAUNCHER_ICON_CACHE; i++) {
-            if (g_icon_cache[i].bm != NULL &&
-                strcmp(g_icon_cache[i].name, icon_name) == 0) {
-                g_icon_cache[i].age = ++g_icon_cache_age;
-                bm = g_icon_cache[i].bm;
-                break;
-            }
-        }
-        if (bm == NULL) {
-            bm = launcher_icon_get(icon_name);
-            if (bm != NULL) {
-                /* Evict the least-recently-used slot (lowest age). */
-                int slot = 0;
-                for (int i = 1; i < BS_LAUNCHER_ICON_CACHE; i++) {
-                    if (g_icon_cache[i].bm == NULL) {
-                        slot = i;
-                        break;
-                    }
-                    if (g_icon_cache[slot].bm == NULL ||
-                        g_icon_cache[i].age < g_icon_cache[slot].age)
-                        slot = i;
-                }
-                snprintf(g_icon_cache[slot].name, sizeof g_icon_cache[slot].name,
-                         "%s", icon_name);
-                g_icon_cache[slot].bm = bm;
-                g_icon_cache[slot].age = ++g_icon_cache_age;
-            }
+    for (int i = 0; i < BS_LAUNCHER_ICON_CACHE; i++) {
+        if (g_icon_cache[i].bm != NULL &&
+            strcmp(g_icon_cache[i].name, icon_name) == 0) {
+            g_icon_cache[i].age = ++g_icon_cache_age;
+            return g_icon_cache[i].bm;
         }
     }
-    if (bm) {
-        /* Center the bitmap inside the icon box.  The firmware icon
-         * resources come in various native sizes; anchoring them at the
-         * box's top-left made small glyphs drift toward the corner
-         * (and off the label's centre line).  Oversized icons are
-         * scaled down, aspect-preserving, to fit the box. */
-        int bw = bm->width;
-        int bh = bm->height;
-        if (bw > sz || bh > sz) {
-            if (bw > bh) {
-                bh = bh * sz / bw;
-                bw = sz;
-            } else {
-                bw = bw * sz / bh;
-                bh = sz;
-            }
-            StretchBitmap(x0 + (sz - bw) / 2, y0 + (sz - bh) / 2, bw, bh, bm, STRETCH);
+    return NULL;
+}
+
+/* Decode icon_name and insert it into the LRU cache, evicting the
+ * least-recently-used slot.  Returns the decoded bitmap or NULL if it
+ * could not be decoded. */
+static ibitmap *
+launcher_cache_insert(const char *icon_name)
+{
+    ibitmap *bm = launcher_icon_get(icon_name);
+    if (bm == NULL)
+        return NULL;
+    int slot = 0;
+    for (int i = 1; i < BS_LAUNCHER_ICON_CACHE; i++) {
+        if (g_icon_cache[i].bm == NULL) {
+            slot = i;
+            break;
+        }
+        if (g_icon_cache[slot].bm == NULL ||
+            g_icon_cache[i].age < g_icon_cache[slot].age)
+            slot = i;
+    }
+    snprintf(g_icon_cache[slot].name, sizeof g_icon_cache[slot].name,
+             "%s", icon_name);
+    g_icon_cache[slot].bm = bm;
+    g_icon_cache[slot].age = ++g_icon_cache_age;
+    return bm;
+}
+
+/* Center the bitmap inside the icon box, scaling down any oversized icon
+ * aspect-preserving. */
+static void
+launcher_draw_bitmap(ibitmap *bm, int x0, int y0, int sz)
+{
+    int bw = bm->width;
+    int bh = bm->height;
+    if (bw > sz || bh > sz) {
+        if (bw > bh) {
+            bh = bh * sz / bw;
+            bw = sz;
         } else {
-            DrawBitmap(x0 + (sz - bw) / 2, y0 + (sz - bh) / 2, bm);
+            bw = bw * sz / bh;
+            bh = sz;
         }
-        return;
+        StretchBitmap(x0 + (sz - bw) / 2, y0 + (sz - bh) / 2, bw, bh, bm, STRETCH);
+    } else {
+        DrawBitmap(x0 + (sz - bw) / 2, y0 + (sz - bh) / 2, bm);
     }
+}
+
+/* No icon available: draw an empty placeholder box with a centred
+ * single-letter glyph taken from the first title character. */
+static void
+launcher_draw_placeholder(int x0, int y0, int sz, int cx, int cy,
+                          const char *title)
+{
     FillArea(x0, y0, sz, sz, WHITE);
     DrawRect(x0, y0, sz, sz, BLACK);
     if (title && title[0]) {
@@ -676,6 +742,26 @@ bs_draw_launcher_icon(int cx, int cy, const char *icon_name, const char *title)
             CloseFont(f);
         }
     }
+}
+
+void
+bs_draw_launcher_icon(int cx, int cy, const char *icon_name, const char *title)
+{
+    int      sz = BS_LAUNCHER_ICON_SZ;
+    int      x0 = cx - sz / 2;
+    int      y0 = cy - sz / 2;
+    ibitmap *bm = NULL;
+    if (icon_name && icon_name[0]) {
+        /* LRU hit: reuse the cached decode, bump its stamp. */
+        bm = launcher_cache_find(icon_name);
+        if (bm == NULL)
+            bm = launcher_cache_insert(icon_name);
+    }
+    if (bm) {
+        launcher_draw_bitmap(bm, x0, y0, sz);
+        return;
+    }
+    launcher_draw_placeholder(x0, y0, sz, cx, cy, title);
 }
 
 /* Scrollable body height: when the column overflows, reserve the corner
@@ -691,6 +777,65 @@ launcher_body_h(void)
     if (body_h < 0)
         body_h = 0;
     return body_h;
+}
+
+/* Centred "launcher.empty" hint drawn when the launcher has no items. */
+static void
+launcher_draw_empty(int w, int body_top, int body_h)
+{
+    ifont *ef = OpenFont(DEFAULTFONT, 32, 0);
+    if (ef) {
+        SetFont(ef, BLACK);
+        const char *empty = bs_i18n("launcher.empty");
+        int         tw = StringWidth(empty);
+        DrawString((w - tw) / 2, body_top + body_h / 2, empty);
+        CloseFont(ef);
+    }
+}
+
+/* Draw a group heading row (band + baseline rule + title). */
+static void
+launcher_draw_heading(ifont *hf, const BsLauncherItem *it, int sy)
+{
+    FillArea(it->x, sy, it->w, it->h, WHITE);
+    DrawLine(it->x, sy + it->h - 1, it->x + it->w, sy + it->h - 1, BLACK);
+    if (hf) {
+        SetFont(hf, BLACK);
+        DrawString(it->x + 12, sy + (it->h - 28) / 2 - 2, it->text);
+    }
+}
+
+/* Draw an app cell label under the icon, wrapping at the last space or
+ * truncating to 20 chars when there is no space to break on. */
+static void
+launcher_draw_app_label(ifont *af, const BsLauncherItem *it, int cx, int sy)
+{
+    SetFont(af, BLACK);
+    int ly = sy + 12 + BS_LAUNCHER_ICON_SZ + 8;
+    int maxw = it->w - 8;
+    if (StringWidth(it->text) <= maxw) {
+        int tw = StringWidth(it->text);
+        DrawString(cx - tw / 2, ly, it->text);
+    } else {
+        const char *sp = strrchr(it->text, ' ');
+        if (sp) {
+            char   line1[48];
+            size_t l1 = (size_t)(sp - it->text);
+            if (l1 >= sizeof line1)
+                l1 = sizeof line1 - 1;
+            memcpy(line1, it->text, l1);
+            line1[l1] = '\0';
+            int tw = StringWidth(line1);
+            DrawString(cx - tw / 2, ly, line1);
+            tw = StringWidth(sp + 1);
+            DrawString(cx - tw / 2, ly + 28, sp + 1);
+        } else {
+            char trunc[24];
+            snprintf(trunc, sizeof trunc, "%.20s", it->text);
+            int tw = StringWidth(trunc);
+            DrawString(cx - tw / 2, ly, trunc);
+        }
+    }
 }
 
 void
@@ -719,16 +864,8 @@ bs_draw_overlay_launcher(void)
 
     /* Scrollable body, clipped so rows never bleed into the header. */
     SetClip(0, body_top, w, body_h);
-    if (bs_g_launcher_count == 0) {
-        ifont *ef = OpenFont(DEFAULTFONT, 32, 0);
-        if (ef) {
-            SetFont(ef, BLACK);
-            const char *empty = bs_i18n("launcher.empty");
-            int         tw = StringWidth(empty);
-            DrawString((w - tw) / 2, body_top + body_h / 2, empty);
-            CloseFont(ef);
-        }
-    }
+    if (bs_g_launcher_count == 0)
+        launcher_draw_empty(w, body_top, body_h);
 
     ifont *hf = OpenFont(DEFAULTFONTB, 28, 0);
     ifont *af = OpenFont(DEFAULTFONT, 24, 0);
@@ -743,44 +880,13 @@ bs_draw_overlay_launcher(void)
         if (sy + it->h <= body_top || sy + it->h > body_bottom)
             continue;
         if (it->kind == 0) {
-            FillArea(it->x, sy, it->w, it->h, WHITE);
-            DrawLine(it->x, sy + it->h - 1, it->x + it->w, sy + it->h - 1, BLACK);
-            if (hf) {
-                SetFont(hf, BLACK);
-                DrawString(it->x + 12, sy + (it->h - 28) / 2 - 2, it->text);
-            }
+            launcher_draw_heading(hf, it, sy);
         } else {
             int cx = it->x + it->w / 2;
             int icon_cy = sy + 12 + BS_LAUNCHER_ICON_SZ / 2;
             bs_draw_launcher_icon(cx, icon_cy, it->icon, it->text);
-            if (af) {
-                SetFont(af, BLACK);
-                int ly = sy + 12 + BS_LAUNCHER_ICON_SZ + 8;
-                int maxw = it->w - 8;
-                if (StringWidth(it->text) <= maxw) {
-                    int tw = StringWidth(it->text);
-                    DrawString(cx - tw / 2, ly, it->text);
-                } else {
-                    const char *sp = strrchr(it->text, ' ');
-                    if (sp) {
-                        char   line1[48];
-                        size_t l1 = (size_t)(sp - it->text);
-                        if (l1 >= sizeof line1)
-                            l1 = sizeof line1 - 1;
-                        memcpy(line1, it->text, l1);
-                        line1[l1] = '\0';
-                        int tw = StringWidth(line1);
-                        DrawString(cx - tw / 2, ly, line1);
-                        tw = StringWidth(sp + 1);
-                        DrawString(cx - tw / 2, ly + 28, sp + 1);
-                    } else {
-                        char trunc[24];
-                        snprintf(trunc, sizeof trunc, "%.20s", it->text);
-                        int tw = StringWidth(trunc);
-                        DrawString(cx - tw / 2, ly, trunc);
-                    }
-                }
-            }
+            if (af)
+                launcher_draw_app_label(af, it, cx, sy);
         }
     }
     SetClip(0, 0, w, h);
@@ -828,35 +934,33 @@ bs_launch_app(const BsLauncherItem *it)
     }
 }
 
-void
-bs_on_tap_overlay_launcher(int x, int y)
+/* Handle a tap on a corner scroll button: page the column by one body
+ * height.  Returns 1 when a button was hit (and a redraw was issued). */
+static int
+launcher_tap_scroll(int x, int y)
 {
-    int body_top = BS_OVERLAY_HEADER_H;
-    int rx, ry, rw, rh;
-    bs_overlay_back_rect(&rx, &ry, &rw, &rh);
-    if (x >= rx && x < rx + rw && y >= ry && y < ry + rh) {
-        bs_launcher_close();
-        return;
-    }
-    /* Corner scroll buttons: page up/down the column. */
     int dir = bs_hit_scroll_button(x, y);
-    if (dir != 0) {
-        int body_h = launcher_body_h();
-        int max_scroll = bs_g_launcher_body_h - body_h;
-        if (max_scroll < 0)
-            max_scroll = 0;
-        bs_g_state.launcher_scroll += dir * body_h;
-        if (bs_g_state.launcher_scroll < 0)
-            bs_g_state.launcher_scroll = 0;
-        if (bs_g_state.launcher_scroll > max_scroll)
-            bs_g_state.launcher_scroll = max_scroll;
-        bs_draw_overlay_launcher();
-        bs_flush_content();
-        return;
-    }
-    if (y < body_top || y >= bs_content_bottom())
-        return;
-    int by = y - body_top + bs_g_state.launcher_scroll;
+    if (dir == 0)
+        return 0;
+    int body_h = launcher_body_h();
+    int max_scroll = bs_g_launcher_body_h - body_h;
+    if (max_scroll < 0)
+        max_scroll = 0;
+    bs_g_state.launcher_scroll += dir * body_h;
+    if (bs_g_state.launcher_scroll < 0)
+        bs_g_state.launcher_scroll = 0;
+    if (bs_g_state.launcher_scroll > max_scroll)
+        bs_g_state.launcher_scroll = max_scroll;
+    bs_draw_overlay_launcher();
+    bs_flush_content();
+    return 1;
+}
+
+/* Find the tapped app cell under (x, by) and launch it.  Returns 1 when
+ * an app was launched. */
+static int
+launcher_tap_app(int x, int by)
+{
     for (int i = 0; i < bs_g_launcher_count; i++) {
         const BsLauncherItem *it = &bs_g_launcher_items[i];
         if (it->kind != 1)
@@ -871,9 +975,29 @@ bs_on_tap_overlay_launcher(int x, int y)
             bs_g_state.launcher_drag = 0;
             bs_g_state.launcher_moved = 0;
             bs_launch_app(it);
-            return;
+            return 1;
         }
     }
+    return 0;
+}
+
+void
+bs_on_tap_overlay_launcher(int x, int y)
+{
+    int body_top = BS_OVERLAY_HEADER_H;
+    int rx, ry, rw, rh;
+    bs_overlay_back_rect(&rx, &ry, &rw, &rh);
+    if (x >= rx && x < rx + rw && y >= ry && y < ry + rh) {
+        bs_launcher_close();
+        return;
+    }
+    /* Corner scroll buttons: page up/down the column. */
+    if (launcher_tap_scroll(x, y))
+        return;
+    if (y < body_top || y >= bs_content_bottom())
+        return;
+    int by = y - body_top + bs_g_state.launcher_scroll;
+    launcher_tap_app(x, by);
 }
 
 void

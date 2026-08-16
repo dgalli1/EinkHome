@@ -507,6 +507,30 @@ draw_progress_bar(int cx, int cy, int cw, int ch, int pct)
 }
 
 static void
+draw_thumbnail_text(int tx0, int title_y, int author_y, int fitw,
+                    const BsTileRow *tr, ifont *tf, ifont *af)
+{
+    const BsBook *b = &tr->book;
+    const char *label = tr->is_series ? tr->series_name : b->title;
+    if (tf != NULL) {
+        SetFont(tf, BLACK);
+        char truncated[BS_MAX_TITLE_LEN];
+        snprintf(truncated, sizeof truncated, "%s", label);
+        bs_utf8_fit_width(truncated, sizeof truncated, fitw);
+        DrawString(tx0, title_y, truncated);
+    }
+    if (!tr->is_series && b->author[0] != '\0') {
+        if (af != NULL) {
+            SetFont(af, DGRAY);
+            char truncated[80];
+            snprintf(truncated, sizeof truncated, "%s", b->author);
+            bs_utf8_fit_width(truncated, sizeof truncated, fitw);
+            DrawString(tx0, author_y, truncated);
+        }
+    }
+}
+
+static void
 draw_thumbnail_fonts(int x, int y, int w, int h, const BsTileRow *tr, int vi,
                      const BsGridFonts *gf)
 {
@@ -535,25 +559,8 @@ draw_thumbnail_fonts(int x, int y, int w, int h, const BsTileRow *tr, int vi,
         int tw0 = (x + w - pad) - tx0;
         if (tw0 < 64)
             tw0 = 64;
-        const char *label = tr->is_series ? tr->series_name : b->title;
-        ifont      *f = gf->list_title;
-        if (f != NULL) {
-            SetFont(f, BLACK);
-            char truncated[BS_MAX_TITLE_LEN];
-            snprintf(truncated, sizeof truncated, "%s", label);
-            bs_utf8_fit_width(truncated, sizeof truncated, tw0);
-            DrawString(tx0, y + pad + 8, truncated);
-        }
-        if (!tr->is_series && b->author[0] != '\0') {
-            ifont *af = gf->list_author;
-            if (af != NULL) {
-                SetFont(af, DGRAY);
-                char truncated[80];
-                snprintf(truncated, sizeof truncated, "%s", b->author);
-                bs_utf8_fit_width(truncated, sizeof truncated, tw0);
-                DrawString(tx0, y + pad + 8 + 40, truncated);
-            }
-        }
+        draw_thumbnail_text(tx0, y + pad + 8, y + pad + 8 + 40, tw0, tr,
+                            gf->list_title, gf->list_author);
         return;
     }
 
@@ -572,29 +579,11 @@ draw_thumbnail_fonts(int x, int y, int w, int h, const BsTileRow *tr, int vi,
     /* Reading progress: a black bar at the cover's bottom edge. */
     draw_progress_bar(cx, cy, cw, ch, bs_progress_percent(b->local_path));
 
-    /* Caption: series name for cards, title for books. */
-    int         cap_y = cy + ch + 6;
-    const char *label = tr->is_series ? tr->series_name : b->title;
-    ifont      *f = gf->grid_title;
-    if (f != NULL) {
-        SetFont(f, BLACK);
-        char truncated[BS_MAX_TITLE_LEN];
-        snprintf(truncated, sizeof truncated, "%s", label);
-        bs_utf8_fit_width(truncated, sizeof truncated, w - 8);
-        DrawString(x + 4, cap_y, truncated);
-    }
-
-    /* Second line: author for books, omitted for series cards. */
-    if (!tr->is_series && b->author[0] != '\0') {
-        ifont *af = gf->grid_author;
-        if (af != NULL) {
-            SetFont(af, DGRAY);
-            char truncated[80];
-            snprintf(truncated, sizeof truncated, "%s", b->author);
-            bs_utf8_fit_width(truncated, sizeof truncated, w - 8);
-            DrawString(x + 4, cap_y + 24, truncated);
-        }
-    }
+    /* Caption: series name for cards, title for books, with the author
+     * skipped for series cards. */
+    int cap_y = cy + ch + 6;
+    draw_thumbnail_text(x + 4, cap_y, cap_y + 24, w - 8, tr,
+                        gf->grid_title, gf->grid_author);
 }
 
 void
@@ -766,17 +755,12 @@ shelf_active_view(void)
 /* Cover fetch finished (main thread): decode on the main thread and
  * blit the tile if it is still on the current page, then schedule the
  * next cover.  A failed or canceled job still schedules the next. */
+/* Warm-pass bookkeeping: a placeholder-only provider gets disabled once
+ * the probe threshold is reached, while a single real cover rules the
+ * placeholder-only provider out permanently. */
 static void
-cover_job_done(BsJob *job)
+cover_job_handle_warm(BsCoverJobArg *a)
 {
-    BsCoverJobArg *a = job->arg;
-    g_cover_job = NULL;
-
-    /* Warm pass result: if the provider serves only 1x1 placeholders,
-     * stop warming — downloading hundreds of thousands of empty images
-     * is pointless.  A single real cover at any point rules out the
-     * placeholder-only provider permanently, so scattered coverless
-     * books never abort the pass. */
     if (a->warm) {
         if (a->is_placeholder) {
             if (!g_cover_warm_seen_real && ++g_cover_warm_probe_ph >= 5)
@@ -785,6 +769,30 @@ cover_job_done(BsJob *job)
             g_cover_warm_seen_real = 1;
         }
     }
+}
+
+/* Find the current page row index whose book id matches `id`, or -1. */
+static int
+cover_job_page_target(const char *id, int page_start)
+{
+    int target = -1;
+    for (int k = 0; k < bs_g_row_count; k++) {
+        const char *pid = page_row_id(k);
+        if (pid != NULL && strcmp(pid, id) == 0) {
+            target = page_start + k;
+            break;
+        }
+    }
+    return target;
+}
+
+static void
+cover_job_done(BsJob *job)
+{
+    BsCoverJobArg *a = job->arg;
+    g_cover_job = NULL;
+
+    cover_job_handle_warm(a);
 
     BsCoverSlot *s = bs_cover_slot(a->id, 1);
     ibitmap   *bmp = NULL;
@@ -817,16 +825,9 @@ cover_job_done(BsJob *job)
      * left the shelf) while it ran: blit only when the grid is on
      * screen and the tile is still on the current page. */
     int tx, ty, tw, th;
-    int target = -1;
     if (shelf_active_view()) {
         int page_start = bs_g_state.page * bs_view_pagesize();
-        for (int k = 0; k < bs_g_row_count; k++) {
-            const char *id = page_row_id(k);
-            if (id != NULL && strcmp(id, a->id) == 0) {
-                target = page_start + k;
-                break;
-            }
-        }
+        int target = cover_job_page_target(a->id, page_start);
         if (target >= 0 && bs_tile_rect_for_index(target, &tx, &ty, &tw, &th)) {
             FillArea(tx, ty, tw, th, WHITE);
             bs_draw_thumbnail(tx, ty, tw, th, &bs_g_rows[target - page_start], target);
@@ -852,6 +853,185 @@ cover_job_done(BsJob *job)
  * batched decodes stay on the main thread too; they are short on a
  * cached page and bounded by one event-loop slice rather than a busy
  * loop. */
+/* Load the cover for one pending slot from the local filesystem, the
+ * on-disk PNG cache, or a remote fetch — mirroring the original
+ * else-if chain.  Returns 1 if the slot was already handled (a fetch
+ * was submitted, or a second remote cover stays pending) and the loop
+ * must skip storage/blit; 0 if the caller should store *bmp (NULL =
+ * failed state) and blit it. */
+static int
+cover_slot_fetch(BsCoverSlot *s, const char *bid, int local_book,
+                 const BsBook *cbook, int *submitted, ibitmap **bmp)
+{
+    *bmp = NULL;
+    if (local_book) {
+        /* Local (filesystem) books have no remote cover: extract the
+         * embedded cover image (EPUB) when the format has one,
+         * otherwise the tile keeps the placeholder.  The raw extracted
+         * cover is cached on disk next to the PNG cache; only unknown
+         * books hit the zip parser. */
+        char cover_path[BS_MAX_PATH_LEN];
+        bs_cover_raw_path(bid, cover_path, sizeof cover_path);
+        if (access(cover_path, R_OK) != 0 && cbook->local_path[0] != '\0') {
+            bs_cover_ensure_bucket(bid); /* sharded dir must exist to write the .raw */
+            if (bs_extract_book_cover(cbook->local_path, cbook->ext, cover_path, sizeof cover_path) != 0)
+                cover_path[0] = '\0'; /* extraction failed; no cover */
+        }
+        if (cover_path[0] != '\0' && access(cover_path, R_OK) == 0) {
+            *bmp = bs_load_image_scaled(cover_path);
+            bs_LOG("[bookshelf] cover_tick cover id=%s bmp=%p\n", bid, (void *)*bmp);
+        }
+        return 0;
+    }
+    if (bs_cover_cache_load(bid, bmp) == 0) {
+        bs_LOG("[bookshelf] cover_tick cache hit id=%s\n", bid);
+        return 0;
+    }
+    if (!(QueryNetwork() & 0xf00)) {
+        /* No active connection: skip the fetch silently and let the
+         * slot land in the failed state below so the next sync — the
+         * only place the app may ask for WiFi — retries it. */
+        bs_LOG("[bookshelf] cover_tick offline, skipping cover fetch id=%s\n", bid);
+        return 0;
+    }
+    if (*submitted)
+        return 1; /* a second remote cover stays pending (state 0) */
+    /* Remote cover, not cached, online: hand the fetch to the shared
+     * worker; the done_cb decodes and blits and then reschedules the
+     * tick.  At most one remote job per tick. */
+    {
+        char url[BS_MAX_URL_LEN + 128];
+        snprintf(url,
+                 sizeof url,
+                 "%s/api/v1/books/%s/cover?access_token=%s",
+                 bs_g_state.api_base,
+                 bid,
+                 bs_g_state.api_token);
+        bs_LOG("[bookshelf] cover_tick submitting fetch url=%s\n", url);
+        BsCoverJobArg *a = calloc(1, sizeof *a);
+        if (a != NULL) {
+            snprintf(a->url, sizeof a->url, "%s", url);
+            snprintf(a->id, sizeof a->id, "%s", bid);
+            bs_cover_cache_path(bid, a->cache_path, sizeof a->cache_path);
+            BsJob *j = bs_worker_submit(cover_fetch_job, cover_job_done, a);
+            if (j != NULL) {
+                s->state = 1; /* in flight until the done_cb lands */
+                g_cover_job = j;
+                *submitted = 1;
+                return 1;
+            }
+            free(a);
+        }
+        /* Cannot submit: fall through to the failed state. */
+    }
+    return 0;
+}
+
+/* Accumulate the on-screen blit for one tile into the shared min/max
+ * bounds, mirroring the original bounding-box update. */
+static void
+cover_tick_blit_region(int idx, int k, const BsGridFonts *gf,
+                       int *min_x, int *min_y, int *max_x, int *max_y, int *nblit)
+{
+    int tx, ty, tw, th;
+    if (shelf_active_view() && bs_tile_rect_for_index(idx, &tx, &ty, &tw, &th)) {
+        FillArea(tx, ty, tw, th, WHITE);
+        draw_thumbnail_fonts(tx, ty, tw, th, &bs_g_rows[k], idx, gf);
+        if (!*nblit) {
+            *min_x = tx;
+            *min_y = ty;
+            *max_x = tx + tw;
+            *max_y = ty + th;
+        } else {
+            if (tx < *min_x)
+                *min_x = tx;
+            if (ty < *min_y)
+                *min_y = ty;
+            if (tx + tw > *max_x)
+                *max_x = tx + tw;
+            if (ty + th > *max_y)
+                *max_y = ty + th;
+        }
+        (*nblit)++;
+    }
+}
+
+/* Walk the visible page once, loading/caching covers and accumulating
+ * the dirty region.  Mirrors the original loop body. */
+static void
+cover_tick_drain_page(BsGridFonts *gf, int *processed, int *submitted,
+                      int *min_x, int *min_y, int *max_x, int *max_y, int *nblit)
+{
+    int page_start = bs_g_state.page * bs_view_pagesize();
+    for (int k = 0; k < bs_g_row_count; k++) {
+        const char *bid = page_row_id(k);
+        if (bid == NULL)
+            break;
+        int         idx = page_start + k;
+        BsCoverSlot *s = bs_cover_slot(bid, 1);
+        if (s == NULL || s->state != 0)
+            continue; /* already loaded / in flight / failed */
+        *processed = 1;
+        BsBook   cbook;
+        int      local_book = !bs_store_get_book(bid, &cbook) || strcmp(cbook.source, "kavita") != 0;
+        ibitmap *bmp = NULL;
+        if (cover_slot_fetch(s, bid, local_book, &cbook, submitted, &bmp))
+            continue; /* fetch in flight or a second remote cover pending */
+        if (bmp != NULL) {
+            if (s->cover_bmp) {
+                bs_LOG("[bookshelf] cover_tick free(old cover_bmp) begin\n");
+                free(s->cover_bmp);
+                bs_LOG("[bookshelf] cover_tick free(old cover_bmp) done\n");
+            }
+            s->cover_bmp = bmp;
+            s->state = 2;
+        } else {
+            s->state = 3;
+        }
+        cover_tick_blit_region(idx, k, gf, min_x, min_y, max_x, max_y, nblit);
+    }
+}
+
+/* Hand the pending off-page warm cover to the worker; returns 1 if a job
+ * was submitted (so the caller returns).  On failure the candidate is
+ * dropped; the next arm picks up from the cursor. */
+static int
+cover_tick_warm_fetch(void)
+{
+    const char *bid = g_cover_warm_id;
+    char        url[BS_MAX_URL_LEN + 128];
+    snprintf(url,
+             sizeof url,
+             "%s/api/v1/books/%s/cover?access_token=%s",
+             bs_g_state.api_base,
+             bid,
+             bs_g_state.api_token);
+    BsCoverJobArg *a = calloc(1, sizeof *a);
+    if (a != NULL) {
+        snprintf(a->url, sizeof a->url, "%s", url);
+        snprintf(a->id, sizeof a->id, "%s", bid);
+        bs_cover_cache_path(bid, a->cache_path, sizeof a->cache_path);
+        a->warm = 1;
+        BsCoverSlot *s = bs_cover_slot(bid, 1);
+        if (s != NULL)
+            s->state = 1; /* in flight until the done_cb lands */
+        BsJob *j = bs_worker_submit(cover_fetch_job, cover_job_done, a);
+        if (j != NULL) {
+            g_cover_job = j;
+            g_cover_warm_id[0] = '\0'; /* consumed; fill finds the next */
+            bs_LOG("[bookshelf] cover_tick warm fetch id=%s\n", bid);
+            return 1; /* the done_cb decodes, persists and reschedules */
+        }
+        free(a);
+        if (s != NULL)
+            s->state = 0;
+    }
+    /* Could not submit: drop the candidate; the next arm picks up
+     * from the cursor. */
+    g_cover_warm_id[0] = '\0';
+    return 0;
+}
+
 void
 bs_cover_tick(void *ctx)
 {
@@ -868,128 +1048,14 @@ bs_cover_tick(void *ctx)
     if (g_cover_job != NULL)
         return;
 
-    int page_start = bs_g_state.page * bs_view_pagesize();
-
     int        processed = 0; /* a pending cover was classified this tick */
     int        submitted = 0; /* a remote fetch was handed to the worker */
     BsGridFonts gf;
     grid_fonts_open(&gf);
-    int  min_x = 0, min_y = 0, max_x = 0, max_y = 0;
-    int  nblit = 0;
-    for (int k = 0; k < bs_g_row_count; k++) {
-        const char *bid = page_row_id(k);
-        if (bid == NULL)
-            break;
-        int         idx = page_start + k;
-        BsCoverSlot *s = bs_cover_slot(bid, 1);
-        if (s == NULL || s->state != 0)
-            continue; /* already loaded / in flight / failed */
-        processed = 1;
-
-        /* Local (filesystem) books have no remote cover: extract the
-         * embedded cover image (EPUB) when the format has one,
-         * otherwise the tile keeps the placeholder. */
-        BsBook   cbook;
-        int      local_book = !bs_store_get_book(bid, &cbook) || strcmp(cbook.source, "kavita") != 0;
-        ibitmap *bmp = NULL;
-        if (local_book) {
-            /* The raw extracted cover is cached on disk next to the
-             * PNG cache; only unknown books hit the zip parser. */
-            char cover_path[BS_MAX_PATH_LEN];
-            bs_cover_raw_path(bid, cover_path, sizeof cover_path);
-            if (access(cover_path, R_OK) != 0 && cbook.local_path[0] != '\0') {
-                bs_cover_ensure_bucket(bid); /* sharded dir must exist to write the .raw */
-                if (bs_extract_book_cover(cbook.local_path, cbook.ext, cover_path, sizeof cover_path) != 0)
-                    cover_path[0] = '\0'; /* extraction failed; no cover */
-            }
-            if (cover_path[0] != '\0' && access(cover_path, R_OK) == 0) {
-                bmp = bs_load_image_scaled(cover_path);
-                bs_LOG("[bookshelf] cover_tick cover id=%s bmp=%p\n", bid, (void *)bmp);
-            }
-        } else if (bs_cover_cache_load(bid, &bmp) == 0) {
-            bs_LOG("[bookshelf] cover_tick cache hit id=%s\n", bid);
-        } else if (!(QueryNetwork() & 0xf00)) {
-            /* No active connection: skip the fetch silently and let
-             * the slot land in the failed state below so the next
-             * sync — the only place the app may ask for WiFi —
-             * retries it.  An unguarded QuickDownload() here would
-             * pop the firmware's "Turn on WiFi" dialog whenever an
-             * offline launch shows books whose covers are not in the
-             * on-disk cache. */
-            bs_LOG("[bookshelf] cover_tick offline, skipping cover fetch id=%s\n", bid);
-        } else if (!submitted) {
-            /* Remote cover, not cached, online: hand the fetch to the
-             * shared worker; the done_cb decodes and blits and then
-             * reschedules the tick.  At most one remote job per tick. */
-            char url[BS_MAX_URL_LEN + 128];
-            snprintf(url,
-                     sizeof url,
-                     "%s/api/v1/books/%s/cover?access_token=%s",
-                     bs_g_state.api_base,
-                     bid,
-                     bs_g_state.api_token);
-            bs_LOG("[bookshelf] cover_tick submitting fetch url=%s\n", url);
-            BsCoverJobArg *a = calloc(1, sizeof *a);
-            if (a != NULL) {
-                snprintf(a->url, sizeof a->url, "%s", url);
-                snprintf(a->id, sizeof a->id, "%s", bid);
-                bs_cover_cache_path(bid, a->cache_path, sizeof a->cache_path);
-                BsJob *j = bs_worker_submit(cover_fetch_job, cover_job_done, a);
-                if (j != NULL) {
-                    s->state = 1; /* in flight until the done_cb lands */
-                    g_cover_job = j;
-                    submitted = 1;
-                    continue; /* the done_cb blits + schedules the next */
-                }
-                free(a);
-            }
-            /* Cannot submit: fall through to the failed state. */
-        } else {
-            /* A second remote cover past the one already submitted
-             * stays pending (state 0); the done_cb reschedule chain
-             * picks it up one at a time. */
-            continue;
-        }
-
-        if (bmp != NULL) {
-            if (s->cover_bmp) {
-                bs_LOG("[bookshelf] cover_tick free(old cover_bmp) begin\n");
-                free(s->cover_bmp);
-                bs_LOG("[bookshelf] cover_tick free(old cover_bmp) done\n");
-            }
-            s->cover_bmp = bmp;
-            s->state = 2;
-        } else {
-            s->state = 3;
-        }
-        /* The cached bitmap is stored on the slot regardless; only the
-         * on-screen blit is skipped while a modal owns the framebuffer
-         * or the shelf is not the live view, so a partial update can't
-         * punch a hole through an overlay's dim mask or paint over the
-         * wrong page (the full redraw then shows the now-cached
-         * cover). */
-        int tx, ty, tw, th;
-        if (shelf_active_view() && bs_tile_rect_for_index(idx, &tx, &ty, &tw, &th)) {
-            FillArea(tx, ty, tw, th, WHITE);
-            draw_thumbnail_fonts(tx, ty, tw, th, &bs_g_rows[k], idx, &gf);
-            if (!nblit) {
-                min_x = tx;
-                min_y = ty;
-                max_x = tx + tw;
-                max_y = ty + th;
-            } else {
-                if (tx < min_x)
-                    min_x = tx;
-                if (ty < min_y)
-                    min_y = ty;
-                if (tx + tw > max_x)
-                    max_x = tx + tw;
-                if (ty + th > max_y)
-                    max_y = ty + th;
-            }
-            nblit++;
-        }
-    }
+    int min_x = 0, min_y = 0, max_x = 0, max_y = 0;
+    int nblit = 0;
+    cover_tick_drain_page(&gf, &processed, &submitted,
+                          &min_x, &min_y, &max_x, &max_y, &nblit);
     grid_fonts_close(&gf);
 
     int modal = bs_modal_open();
@@ -1007,39 +1073,8 @@ bs_cover_tick(void *ctx)
      * and the chain continues until the whole library is warm.  Off-page
      * so there is no blit: the PNG is persisted to the on-disk cache,
      * which is what offline rendering needs. */
-    if (cover_warm_pending()) {
-        const char *bid = g_cover_warm_id;
-        char        url[BS_MAX_URL_LEN + 128];
-        snprintf(url,
-                 sizeof url,
-                 "%s/api/v1/books/%s/cover?access_token=%s",
-                 bs_g_state.api_base,
-                 bid,
-                 bs_g_state.api_token);
-        BsCoverJobArg *a = calloc(1, sizeof *a);
-        if (a != NULL) {
-            snprintf(a->url, sizeof a->url, "%s", url);
-            snprintf(a->id, sizeof a->id, "%s", bid);
-            bs_cover_cache_path(bid, a->cache_path, sizeof a->cache_path);
-            a->warm = 1;
-            BsCoverSlot *s = bs_cover_slot(bid, 1);
-            if (s != NULL)
-                s->state = 1; /* in flight until the done_cb lands */
-            BsJob *j = bs_worker_submit(cover_fetch_job, cover_job_done, a);
-            if (j != NULL) {
-                g_cover_job = j;
-                g_cover_warm_id[0] = '\0'; /* consumed; fill finds the next */
-                bs_LOG("[bookshelf] cover_tick warm fetch id=%s\n", bid);
-                return; /* the done_cb decodes, persists and reschedules */
-            }
-            free(a);
-            if (s != NULL)
-                s->state = 0;
-        }
-        /* Could not submit: drop the candidate; the next arm picks up
-         * from the cursor. */
-        g_cover_warm_id[0] = '\0';
-    }
+    if (cover_warm_pending() && cover_tick_warm_fetch())
+        return;
 
     if (!processed) {
         /* Nothing pending on this page.  A manual sync that opened the
