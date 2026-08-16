@@ -16,6 +16,8 @@
 #   scripts/run-visible-sdl.sh            # build + launch
 #   scripts/run-visible-sdl.sh --no-build # skip the rebuild (faster)
 #   scripts/run-visible-sdl.sh --host URL # API base URL override
+#   BS_RES=1404x1872 scripts/run-visible-sdl.sh  # start at a PB resolution
+#   # (after launch, F11 cycles 758x1024 / 1072x1448 / 1404x1872)
 #
 # Stop the app with Ctrl-C (also stops the API server it started).
 #

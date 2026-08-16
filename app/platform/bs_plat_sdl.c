@@ -6,10 +6,15 @@
  * full inkview API subset the app links (declared in app/platform/sdl/).
  *
  * Design notes:
- *  - The app draws on a logical 1072x1448 canvas (the default U633
- *    panel) and calls FullUpdate()/PartialUpdate() to commit.  We render
- *    into an offscreen RGBA surface at that size and blit it (scaled to
- *    fit) to the SDL window on every commit — a windowed CRT, not e-ink.
+ *  - The app draws on a logical canvas and calls FullUpdate()/
+ *    PartialUpdate() to commit.  We render into an offscreen RGBA
+ *    surface at that size and blit it (scaled to fit) to the SDL window
+ *    on every commit — a windowed CRT, not e-ink.  The canvas size is
+ *    one of the supported PocketBook screens (see g_resolutions below):
+ *    press F11 to cycle through them at runtime, or set the BS_RES launch
+ *    flag ("BS_RES=1404x1872 ./scripts/run-visible-sdl.sh") to start on
+ *    a specific one.  The app relayouts on the EVT_REPAINT we fire after
+ *    a switch, against the new ScreenWidth()/ScreenHeight().
  *  - Mouse = pointer: button down/up -> EVT_POINTERDOWN/UP, motion ->
  *    EVT_POINTERMOVE, coordinates in the logical canvas space.
  *  - Physical keys map onto the IV_KEY_* codes the app's key handler
@@ -38,13 +43,33 @@
 #include "sdl/hwconfig.h"
 
 /* ── window / canvas state ──────────────────────────────────────────── */
-#define PC_W 1072
-#define PC_H 1448
+/*
+ * Logical screen geometry.  The app adapts its layout to the three
+ * PocketBook screen classes the pbemu firmwares run, so the SDL backend
+ * can cycle between them at runtime (F11) or fix one up front via the
+ * BS_RES launch flag.  g_sw/g_sh are the *current* logical canvas size;
+ * the window scales it to fit (BS_SCALE) and SDL maps pointer
+ * coordinates back into this space, so none of the app sees the change
+ * until the next EVT_REPAINT relayouts against ScreenWidth/Height.
+ */
+struct pb_res { int w; int h; };
+static const struct pb_res g_resolutions[] = {
+    { 758, 1024 },   /* 6" class          */
+    { 1072, 1448 },  /* 6" HD (U633 default) */
+    { 1404, 1872 },  /* 7.8"/10.3" class   */
+};
+#define PC_RES_DEFAULT 1u                                             /* index into g_resolutions */
+#define PC_RES_COUNT ((int)(sizeof g_resolutions / sizeof g_resolutions[0]))
+
+static int     g_sw = g_resolutions[PC_RES_DEFAULT].w;   /* logical canvas width  */
+static int     g_sh = g_resolutions[PC_RES_DEFAULT].h;   /* logical canvas height */
+static int     g_res_idx = PC_RES_DEFAULT;               /* current element of g_resolutions */
+static double  g_scale = 0.6;                            /* window scale (BS_SCALE) */
 
 static SDL_Window   *g_win;
 static SDL_Renderer *g_ren;
 static SDL_Texture  *g_tex;
-static uint32_t     *g_px;      /* logical RGBA canvas (PC_W*PC_H) */
+static uint32_t     *g_px;      /* logical RGBA canvas (g_sw*g_sh) */
 static int (*g_on_event)(int, int, int);
 static int g_running;
 static int g_text_input;
@@ -61,6 +86,7 @@ static int g_clip = 0;   /* clip enabled */
 static int g_cx0, g_cy0, g_cx1, g_cy1; /* inclusive-ish bounds */
 
 static void dump_frame(const char *path);
+static void sdl_set_resolution(int idx);
 #ifdef BS_ENABLE_TEST_IPC
 static void AppendIpcText(const char *s);
 static void ipc_init(void);
@@ -116,12 +142,12 @@ FillArea(int x, int y, int w, int h, int color)
 {
     if (w <= 0 || h <= 0) return;
     uint32_t c = col32(color);
-    for (int j = y; j < y + h && j < PC_H; j++) {
+    for (int j = y; j < y + h && j < g_sh; j++) {
         if (j < 0) continue;
-        for (int i = x; i < x + w && i < PC_W; i++) {
+        for (int i = x; i < x + w && i < g_sw; i++) {
             if (i < 0) continue;
             if (!px_visible(i, j)) continue;
-            g_px[(size_t)j * PC_W + (size_t)i] = c;
+            g_px[(size_t)j * g_sw + (size_t)i] = c;
         }
     }
 }
@@ -135,8 +161,8 @@ DrawLine(int x1, int y1, int x2, int y2, int color)
     int dy = -abs(y2 - y1), sy = y1 < y2 ? 1 : -1;
     int err = dx + dy, x = x1, y = y1;
     for (;;) {
-        if (x >= 0 && x < PC_W && y >= 0 && y < PC_H && px_visible(x, y))
-            g_px[(size_t)y * PC_W + (size_t)x] = c;
+        if (x >= 0 && x < g_sw && y >= 0 && y < g_sh && px_visible(x, y))
+            g_px[(size_t)y * g_sw + (size_t)x] = c;
         if (x == x2 && y == y2) break;
         int e2 = 2 * err;
         if (e2 >= dy) { err += dy; x += sx; }
@@ -266,12 +292,12 @@ draw_glyph_row(int yy, int gx, int gw, const uint8_t *row, SDL_Color fg)
 {
     for (int i = 0; i < gw; i++) {
         int xx = gx + i;
-        if (xx < 0 || xx >= PC_W) continue;
+        if (xx < 0 || xx >= g_sw) continue;
         if (!px_visible(xx, yy)) continue;
         /* Alpha blend the glyph onto the canvas. */
         uint8_t a = row[(size_t)i * 4 + 3];
         if (a == 0) continue;
-        uint32_t dst = g_px[(size_t)yy * PC_W + (size_t)xx];
+        uint32_t dst = g_px[(size_t)yy * g_sw + (size_t)xx];
         uint32_t src = ((uint32_t)fg.a << 24) |
                        ((uint32_t)row[(size_t)i * 4] << 0) |
                        ((uint32_t)row[(size_t)i * 4 + 1] << 8) |
@@ -283,7 +309,7 @@ draw_glyph_row(int yy, int gx, int gw, const uint8_t *row, SDL_Color fg)
             int v = (int)((sv * a + dv * (255 - a)) / 255u);
             out |= (uint32_t)(v & 0xff) << (k * 8);
         }
-        g_px[(size_t)yy * PC_W + (size_t)xx] = (0xffu << 24) | out;
+        g_px[(size_t)yy * g_sw + (size_t)xx] = (0xffu << 24) | out;
     }
 }
 
@@ -301,7 +327,7 @@ DrawString(int x, int y, const char *s)
     uint8_t *sp = (uint8_t *)glyph->pixels;
     for (int j = 0; j < glyph->h; j++) {
         int yy = y + j;
-        if (yy < 0 || yy >= PC_H) continue;
+        if (yy < 0 || yy >= g_sh) continue;
         draw_glyph_row(yy, x, glyph->w, sp + (size_t)j * glyph->pitch, fg);
     }
     SDL_FreeSurface(glyph);
@@ -329,19 +355,19 @@ bmp_blit(int x, int y, const ibitmap *b, int dw, int dh)
     for (int j = 0; j < dh; j++) {
         int sy = sh == 0 ? 0 : (j * sh) / dh;
         int yy = y + j;
-        if (yy < 0 || yy >= PC_H) continue;
+        if (yy < 0 || yy >= g_sh) continue;
         for (int i = 0; i < dw; i++) {
             int sx = sw == 0 ? 0 : (i * sw) / dw;
             int xx = x + i;
-            if (xx < 0 || xx >= PC_W) continue;
+            if (xx < 0 || xx >= g_sw) continue;
             if (!px_visible(xx, yy)) continue;
             if (b->depth == 24) {
                 const uint8_t *p = &b->data[((size_t)sy * b->scanline) + (size_t)sx * 3];
-                g_px[(size_t)yy * PC_W + (size_t)xx] = 0xff000000u |
+                g_px[(size_t)yy * g_sw + (size_t)xx] = 0xff000000u |
                     ((uint32_t)p[0] << 0) | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16);
             } else {
                 uint8_t v = b->data[(size_t)sy * b->scanline + (size_t)sx];
-                g_px[(size_t)yy * PC_W + (size_t)xx] = 0xff000000u |
+                g_px[(size_t)yy * g_sw + (size_t)xx] = 0xff000000u |
                     ((uint32_t)v << 0) | ((uint32_t)v << 8) | ((uint32_t)v << 16);
             }
         }
@@ -478,9 +504,9 @@ GetCanvas(void)
     static icanvas cv;
     if (g_canvas24 == NULL)
         return NULL;
-    cv.width = PC_W;
-    cv.height = PC_H;
-    cv.scanline = PC_W * 3;   /* 24bpp: 3 bytes per row pixel */
+    cv.width = g_sw;
+    cv.height = g_sh;
+    cv.scanline = g_sw * 3;   /* 24bpp: 3 bytes per row pixel */
     cv.depth = 24;
     cv.addr = g_canvas24;
     return &cv;
@@ -501,11 +527,11 @@ unlockCanvasDrawing(void)
 /* ── screen / device ────────────────────────────────────────────────── */
 int
 ScreenWidth(void)
-{ return PC_W; }
+{ return g_sw; }
 
 int
 ScreenHeight(void)
-{ return PC_H; }
+{ return g_sh; }
 
 int
 PanelHeight(void)
@@ -641,7 +667,7 @@ CloseKeyboard(void)
 void
 GetKeyboardRect(irect *rect)
 {
-    if (rect) { rect->x = 0; rect->y = PC_H * 2 / 3; rect->w = PC_W; rect->h = PC_H / 3; }
+    if (rect) { rect->x = 0; rect->y = g_sh * 2 / 3; rect->w = g_sw; rect->h = g_sh / 3; }
 }
 
 /* Feed text into the OpenKeyboard buffer live (IPC "type" command),
@@ -728,10 +754,10 @@ dump_frame(const char *path)
     if (path == NULL || g_px == NULL) return;
     FILE *f = fopen(path, "wb");
     if (!f) { fprintf(stderr, "[pc] dump_frame: cannot open %s\n", path); return; }
-    fprintf(f, "P6\n%d %d\n255\n", PC_W, PC_H);
-    for (int j = 0; j < PC_H; j++)
-        for (int i = 0; i < PC_W; i++) {
-            uint32_t p = g_px[(size_t)j * PC_W + (size_t)i];
+    fprintf(f, "P6\n%d %d\n255\n", g_sw, g_sh);
+    for (int j = 0; j < g_sh; j++)
+        for (int i = 0; i < g_sw; i++) {
+            uint32_t p = g_px[(size_t)j * g_sw + (size_t)i];
             fputc((int)((p >> 0) & 0xff), f);
             fputc((int)((p >> 8) & 0xff), f);
             fputc((int)((p >> 16) & 0xff), f);
@@ -764,17 +790,17 @@ sdl_merge_covers(void)
 {
     if (g_canvas24 == NULL)
         return;
-    for (size_t j = 0; j < PC_H; j++) {
-        for (size_t i = 0; i < PC_W; i++) {
-            const uint8_t *c = g_canvas24 + (j * PC_W + i) * 3;
+    for (size_t j = 0; j < (size_t)g_sh; j++) {
+        for (size_t i = 0; i < (size_t)g_sw; i++) {
+            const uint8_t *c = g_canvas24 + (j * (size_t)g_sw + i) * 3;
             if (c[0] == 0xff && c[1] == 0xff && c[2] == 0xff)
                 continue; /* untouched: leave the 8-bit pixel */
-            g_px[j * PC_W + i] = 0xff000000u |
+            g_px[j * g_sw + i] = 0xff000000u |
                 ((uint32_t)c[0] << 0) | ((uint32_t)c[1] << 8) |
                 ((uint32_t)c[2] << 16);
         }
     }
-    memset(g_canvas24, 0xff, (size_t)PC_W * PC_H * 3);
+    memset(g_canvas24, 0xff, (size_t)g_sw * g_sh * 3);
 }
 
 /* Platform seam: composite + clear the cover overlay now (see
@@ -805,7 +831,7 @@ FullUpdate(void)
         g_dump_at = SDL_GetTicks() +
             (after ? (Uint32)strtoul(after, NULL, 10) : 0u);
     }
-    SDL_UpdateTexture(g_tex, NULL, g_px, PC_W * 4);
+    SDL_UpdateTexture(g_tex, NULL, g_px, g_sw * 4);
     SDL_RenderClear(g_ren);
     SDL_RenderCopy(g_ren, g_tex, NULL, NULL);
     SDL_RenderPresent(g_ren);
@@ -936,6 +962,13 @@ static void
 sdl_on_key_down(const SDL_KeyboardEvent *k)
 {
     int iv = map_scancode_to_ivkey(k->keysym.scancode);
+    /* Cycle the logical screen through the supported PB resolutions.
+     * F11 is not in map_scancode_to_ivkey, so it never reaches the app
+     * as a key — it only drives the backend around. */
+    if (k->keysym.scancode == SDL_SCANCODE_F11) {
+        sdl_set_resolution(g_res_idx < PC_RES_COUNT - 1 ? g_res_idx + 1 : 0);
+        return;
+    }
     if (k->keysym.scancode == SDL_SCANCODE_RETURN &&
         g_kb.open && g_kb.handler) {
         CloseKeyboard();
@@ -1008,23 +1041,114 @@ sdl_init_subsystems(void)
     }
 }
 
+/* Resolve the initial resolution from the BS_RES launch flag before the
+ * window exists.  Accepts "WxH" or a bare width (first matching element
+ * of g_resolutions wins); anything unknown keeps the default. */
+static void
+sdl_resolve_initial_resolution(void)
+{
+    const char *e = getenv("BS_RES");
+    if (e == NULL || e[0] == '\0') return;
+    int w = 0, h = 0;
+    if (sscanf(e, "%dx%d", &w, &h) != 2) {
+        /* width-only form; h stays 0 -> first width match */
+        if (sscanf(e, "%d", &w) != 1 || w <= 0) {
+            fprintf(stderr, "[pc] BS_RES=%s: malformed, ignoring\n", e);
+            return;
+        }
+    }
+    for (int i = 0; i < PC_RES_COUNT; i++) {
+        if (g_resolutions[i].w != w) continue;
+        if (h != 0 && g_resolutions[i].h != h) continue;
+        g_res_idx = i;
+        g_sw = g_resolutions[i].w;
+        g_sh = g_resolutions[i].h; /* h may be 0 when only w given */
+        fprintf(stderr, "[pc] BS_RES=%s -> %dx%d\n", e, g_sw, g_sh);
+        return;
+    }
+    fprintf(stderr, "[pc] BS_RES=%s: no supported match, keeping %dx%d\n",
+            e, g_sw, g_sh);
+}
+
+/* Size the SDL window to a logical w x h canvas at `scale`, clamped so
+ * a tall resolution (1404x1872 at 0.6 is 842x1123) still fits the
+ * desktop height (~92%).  BS_SCALE still governs whenever it fits. */
+static void
+sdl_size_window_for(int w, int h, double scale)
+{
+    double s = scale;
+    SDL_DisplayMode dm;
+    if (SDL_GetCurrentDisplayMode(SDL_GetWindowDisplayIndex(g_win), &dm) == 0
+        && dm.h > 0 && (double)dm.h * 0.92 / (double)h < s)
+        s = (double)dm.h * 0.92 / (double)h;
+    SDL_SetWindowSize(g_win, (int)(w * s), (int)(h * s));
+}
+
+/* (Re)allocate the pixel canvases and the SDL texture for a logical
+ * w x h.  Called once at boot and on every runtime resolution switch
+ * (free() on a NULL g_px/g_canvas24 is a no-op, so this doubles as the
+ * boot allocator).  Exits on OOM like the rest of the bootstrap. */
+static void
+sdl_alloc_canvas(int w, int h)
+{
+    uint32_t *px = calloc((size_t)w * h, sizeof(uint32_t));
+    uint8_t  *c24 = malloc((size_t)w * h * 3);
+    if (!px || !c24) {
+        fprintf(stderr, "[pc] cannot allocate %dx%d canvas\n", w, h);
+        free(px);
+        free(c24);
+        exit(1);
+    }
+    for (size_t i = 0; i < (size_t)w * h; i++) px[i] = 0xffffffffu;
+    memset(c24, 0xff, (size_t)w * h * 3);
+    free(g_px);
+    free(g_canvas24);
+    g_px = px;
+    g_canvas24 = c24;
+    if (g_tex) SDL_DestroyTexture(g_tex);
+    g_tex = SDL_CreateTexture(g_ren, SDL_PIXELFORMAT_RGBA32,
+                              SDL_TEXTUREACCESS_STREAMING, w, h);
+    if (!g_tex) {
+        fprintf(stderr, "[pc] SDL_CreateTexture: %s\n", SDL_GetError());
+        exit(1);
+    }
+}
+
+/* Switch the logical canvas to g_resolutions[idx] at runtime: realloc
+ * the buffers, retarget the texture / logical size / window, then
+ * repaint so the app relayouts against the new ScreenWidth/Height.
+ * Driven by the F11 cycle key; called between frames, g_win real. */
+static void
+sdl_set_resolution(int idx)
+{
+    if (idx < 0 || idx >= PC_RES_COUNT || idx == g_res_idx) return;
+    g_res_idx = idx;
+    g_sw = g_resolutions[idx].w;
+    g_sh = g_resolutions[idx].h;
+    sdl_alloc_canvas(g_sw, g_sh);
+    SDL_RenderSetLogicalSize(g_ren, g_sw, g_sh);
+    sdl_size_window_for(g_sw, g_sh, g_scale);
+    fprintf(stderr, "[pc] resolution -> %dx%d\n", g_sw, g_sh);
+    /* Ask the app to relayout at the new geometry, then present. */
+    if (g_on_event) g_on_event(EVT_REPAINT, 0, 0);
+    FullUpdate();
+}
+
 static void
 sdl_create_window_state(void)
 {
-    /* Window scale: the logical canvas is 1072x1448; default to ~60%
-     * of it so the window fits a 1080p desktop, and let BS_SCALE
-     * override (e.g. BS_SCALE=1.2 for a larger window).  The render is
-     * set to logical size so SDL scales the framebuffer to whatever the
-     * window is; pointer events are mapped back to logical coords. */
-    double scale = 0.6;
+    /* Window scale: default to ~60% of the logical canvas so the window
+     * fits a 1080p desktop; BS_SCALE overrides (e.g. 1.2 = larger). */
     const char *scale_env = getenv("BS_SCALE");
     if (scale_env != NULL && scale_env[0] != '\0') {
         double s = strtod(scale_env, NULL);
-        if (s > 0.1 && s <= 4.0) scale = s;
+        if (s > 0.1 && s <= 4.0) g_scale = s;
     }
+    sdl_resolve_initial_resolution();
+
     g_win = SDL_CreateWindow("EinkHome (PC)", SDL_WINDOWPOS_CENTERED,
                              SDL_WINDOWPOS_CENTERED,
-                             (int)(PC_W * scale), (int)(PC_H * scale),
+                             (int)(g_sw * g_scale), (int)(g_sh * g_scale),
                              SDL_WINDOW_RESIZABLE);
     if (!g_win) {
         fprintf(stderr, "[pc] SDL_CreateWindow: %s\n", SDL_GetError());
@@ -1037,22 +1161,9 @@ sdl_create_window_state(void)
     }
     /* Logical presentation: the whole logical canvas maps to the window
      * (letterboxed if the aspect differs), and SDL scales automatically. */
-    SDL_RenderSetLogicalSize(g_ren, PC_W, PC_H);
-    g_tex = SDL_CreateTexture(g_ren, SDL_PIXELFORMAT_RGBA32,
-                              SDL_TEXTUREACCESS_STREAMING, PC_W, PC_H);
-    if (!g_tex) {
-        fprintf(stderr, "[pc] SDL_CreateTexture: %s\n", SDL_GetError());
-        exit(1);
-    }
-    g_px = calloc((size_t)PC_W * PC_H, sizeof(uint32_t));
-    if (!g_px) exit(1);
-    /* Baseline: white canvas. */
-    for (size_t i = 0; i < (size_t)PC_W * PC_H; i++)
-        g_px[i] = 0xffffffffu;
-    /* RGB24 backing for GetCanvas / blit_cover_color24; defaults white. */
-    g_canvas24 = malloc((size_t)PC_W * PC_H * 3);
-    if (!g_canvas24) exit(1);
-    memset(g_canvas24, 0xff, (size_t)PC_W * PC_H * 3);
+    SDL_RenderSetLogicalSize(g_ren, g_sw, g_sh);
+    sdl_size_window_for(g_sw, g_sh, g_scale);
+    sdl_alloc_canvas(g_sw, g_sh);
 }
 
 /* Debug: BS_AUTO_LAUNCHER=1 opens the app launcher right after boot
@@ -1073,10 +1184,10 @@ sdl_boot_auto_launcher(void)
     if (dump) {
         FILE *f = fopen(dump, "wb");
         if (f) {
-            fprintf(f, "P6\n%d %d\n255\n", PC_W, PC_H);
-            for (int j = 0; j < PC_H; j++)
-                for (int i = 0; i < PC_W; i++) {
-                    uint32_t p = g_px[(size_t)j * PC_W + (size_t)i];
+            fprintf(f, "P6\n%d %d\n255\n", g_sw, g_sh);
+            for (int j = 0; j < g_sh; j++)
+                for (int i = 0; i < g_sw; i++) {
+                    uint32_t p = g_px[(size_t)j * g_sw + (size_t)i];
                     fputc((int)((p >> 0) & 0xff), f);
                     fputc((int)((p >> 8) & 0xff), f);
                     fputc((int)((p >> 16) & 0xff), f);
@@ -1382,6 +1493,9 @@ bs_plat_launch_app(const BsLauncherItem *it, char **argv, int argc)
  *   tap x y             POINTERDOWN then POINTERUP at logical (x,y)
  *   down x y / up x y / move x y
  *   key <0xIVKEY|sym>   EVT_KEYPRESS (par1=key code, par2=0)
+ *   keydown <scancode>  push a real SDL_KEYDOWN at that scancode through
+ *                       the event loop (reaches sdl_on_key_down, e.g.
+ *                       F11=82 cycle)
  *   type TEXT           feed text to the OpenKeyboard buffer
  *   kb_commit           close the OpenKeyboard and fire its handler
  *                       (equivalent to a real RETURN press)
@@ -1440,8 +1554,9 @@ ipc_is_text_cmd(const char *cmd)
 static int
 ipc_is_query_cmd(const char *cmd)
 {
-    return strcmp(cmd, "key") == 0 || strcmp(cmd, "shot") == 0 ||
-           strcmp(cmd, "hash") == 0 || strcmp(cmd, "state") == 0;
+    return strcmp(cmd, "key") == 0 || strcmp(cmd, "keydown") == 0 ||
+           strcmp(cmd, "shot") == 0 || strcmp(cmd, "hash") == 0 ||
+           strcmp(cmd, "state") == 0;
 }
 
 static void
@@ -1494,12 +1609,25 @@ ipc_query_group(const char *cmd, int n, const char *a)
                                                : atoi(a);
         if (g_on_event) g_on_event(EVT_KEYPRESS, code, 0);
         ipc_reply("ok\n", NULL);
+    } else if (strcmp(cmd, "keydown") == 0 && n >= 2) {
+        /* Push a real SDL key event through the event loop so it flows
+         * through sdl_on_key_down — the only way to exercise backend
+         * shortcuts like the F11 resolution cycle (SDL_SCANCODE_F11=82),
+         * which the `key` command bypasses. */
+        SDL_Event ev;
+        memset(&ev, 0, sizeof ev);
+        ev.type = SDL_KEYDOWN;
+        ev.key.keysym.scancode = (SDL_Scancode)atoi(a);
+        ev.key.keysym.sym = SDLK_UNKNOWN;
+        ev.key.state = SDL_PRESSED;
+        SDL_PushEvent(&ev);
+        ipc_reply("ok\n", NULL);
     } else if (strcmp(cmd, "shot") == 0 && n >= 2) {
         dump_frame(a);
         ipc_reply("ok\n", NULL);
     } else if (strcmp(cmd, "hash") == 0) {
         char h[32];
-        uint64_t v = fnv1a_64((const uint8_t *)g_px, (size_t)PC_W * PC_H * 4u);
+        uint64_t v = fnv1a_64((const uint8_t *)g_px, (size_t)g_sw * g_sh * 4u);
         snprintf(h, sizeof h, "hash=0x%016llx\n", (unsigned long long)v);
         ipc_reply("%s", h);
     } else if (strcmp(cmd, "state") == 0) {
