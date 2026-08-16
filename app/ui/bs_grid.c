@@ -461,41 +461,35 @@ bs_draw_thumbnail(int x, int y, int w, int h, const BsTileRow *tr, int vi)
 
 /* ── dimension-group drill actions ──────────────────────────────────── */
 
-/* Tap a group card: push its value onto the drill path and regroup by
- * the next dimension (or show the leaf's books when every level is
- * used). */
+/* Tap a group card: set the drilled group, so the shelf shows that
+ * group's books flat. */
 void
 bs_group_drill(const char *value)
 {
-    if (bs_g_drill_depth < 0 || bs_g_drill_depth >= BS_GROUP_MAX_LEVELS)
-        return;
-    snprintf(bs_g_drill_values[bs_g_drill_depth], sizeof bs_g_drill_values[0],
-             "%s", value ? value : "");
-    bs_g_drill_depth++;
+    snprintf(bs_g_drill_value, sizeof bs_g_drill_value, "%s",
+             value ? value : "");
     bs_g_drilled_series[0] = '\0';
     bs_g_state.page = 0;
     bs_view_rebuild();
     bs_redraw_shelf();
 }
 
-/* Pop one group-drill level (top-bar back button / back key). */
+/* Pop the group drill (top-bar back button / back key): back to the
+ * grouped stack view. */
 void
 bs_group_drill_back(void)
 {
-    if (bs_g_drill_depth > 0) {
-        bs_g_drill_depth--;
-        bs_g_drill_values[bs_g_drill_depth][0] = '\0';
-    }
+    bs_g_drill_value[0] = '\0';
     bs_g_state.page = 0;
     bs_view_rebuild();
     bs_redraw_shelf();
 }
 
-/* 1 = a multi-level group path is in effect (not All books). */
+/* 1 = a dimension grouping is active (not All books). */
 int
 bs_group_active(void)
 {
-    return bs_g_group_depth > 0;
+    return bs_g_group_dim != BS_GROUP_ALL;
 }
 
 void

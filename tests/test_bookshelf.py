@@ -993,42 +993,33 @@ def test_pager_prev_returns_page(fresh_bookshelf):
 
 # ── group drawer / multi-level grouping ───────────────────────────────
 
-def test_group_by_multi_level_stacks_and_drill(fresh_bookshelf):
-    """Two-level grouping collapses into stack cards and taps drill into
-    them, down to the leaf books.
+def test_group_by_single_level_stacks_and_drill(fresh_bookshelf):
+    """Grouping picks ONE dimension; the shelf collapses into stack cards
+    and tapping a card shows that group's books flat.
 
-    The right drawer's Group by button opens a chooser; picking two
-    dimensions builds a two-level path.  The shelf then re-collapses into
-    one stack card per group (the same stack look the series cards use);
-    the mock library is a single author/year, so the top level is one
-    card.  Tapping it drills to the next level (a card again), then to
-    the flat leaf.
+    The mock library is a single author, so "By author" collapses to one
+    stack card; tapping it drills into the author's flat books, and Back
+    returns to the grouped stacks.
     """
     bs = fresh_bookshelf
-    bs.choose_group_options(['year', 'author'])
+    # The SDL mock has author data available (year too); pick author.
+    bs.choose_group('author')
     bs.assert_no_crash()
-    # A two-level path (depth 2, no drill) collapsed to a single stack
-    # card (the whole mock library is one year/author group).
-    bs.assert_log_contains("depth=2 drill=0")
+    # Group=2 (author), no drill, collapsed to a single stack card.
+    bs.assert_log_contains("group=2 drill=0")
     bs.assert_log_contains("view=1")
 
-    # Tap the top-level stack card -> regroup by the second dimension.
+    # Tap the stack card -> the author's books, flat.
     before = bs.current_log()
     h = bs.frame_hash()
-    bs.tap_book(0)  # tile 0 is the year stack card
-    assert bs.frame_hash() != h, "stack card tap did not change the view"
-    _wait_log_slice(bs, before, "depth=2 drill=1")
-
-    # Tap the next stack card -> the group's books, flat.
-    before = bs.current_log()
     bs.tap_book(0)
-    _wait_log_slice(bs, before, "depth=2 drill=2")
+    assert bs.frame_hash() != h, "stack card tap did not change the view"
+    _wait_log_slice(bs, before, "drill=1")
 
-    # Back twice unwinds the drill back to the Author/Year grouping.
+    # Back returns to the grouped stacks.
+    before = bs.current_log()
     bs.send_back_key()
-    _wait_log_slice(bs, before, "depth=2 drill=1")
-    bs.send_back_key()
-    _wait_log_slice(bs, before, "depth=2 drill=0")
+    _wait_log_slice(bs, before, "drill=0")
     bs.assert_no_crash()
 
 

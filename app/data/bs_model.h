@@ -9,15 +9,12 @@
 
 extern char bs_g_drilled_series[BS_MAX_ID_LEN];
 
-/* Grouping: an ordered path of dimensions (e.g. Author -> Series) plus
- * the drill state (which values have been tapped into).  Empty
- * group_path means "All books" (the collapse view).  When drilled to
- * `group_depth` levels, the current view is the flat books of the
- * tapped leaf group. */
-extern int bs_g_group_depth; /* number of chosen grouping dims (0..BS_GROUP_MAX_LEVELS) */
-extern BsGroupDim bs_g_group_path[BS_GROUP_MAX_LEVELS];
-extern int bs_g_drill_depth; /* levels drilled into (0..group_depth) */
-extern char bs_g_drill_values[BS_GROUP_MAX_LEVELS][BS_MAX_TITLE_LEN];
+/* Grouping: a single chosen dimension (BS_GROUP_ALL = All books / the
+ * plain collapse view).  Tapping a collapsed group card sets
+ * bs_g_drill_value to that group; the view then shows that group's books
+ * flat ("" = at the top grouping level). */
+extern BsGroupDim bs_g_group_dim;
+extern char bs_g_drill_value[BS_MAX_TITLE_LEN];
 
 extern char bs_g_search_kb_buf[BS_MAX_QUERY_LEN];
 

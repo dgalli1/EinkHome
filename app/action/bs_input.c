@@ -195,40 +195,13 @@ bs_on_tap_overlay_group(int x, int y)
     int r = (y - (py + 84)) / 96;
     if (r < 0 || r >= n)
         return 1;
-    BsGroupDim d = opts[r];
-    if (d == BS_GROUP_ALL) {
-        bs_g_group_depth = 0;
-        bs_g_drill_depth = 0;
-        bs_g_drill_values[0][0] = '\0';
-        bs_g_drilled_series[0] = '\0';
-        bs_g_state.page = 0;
-        bs_view_rebuild();
-        bs_g_state.overlay = BS_OV_NONE;
-        return 1;
-    }
-    int lvl = -1;
-    for (int i = 0; i < bs_g_group_depth; i++)
-        if (bs_g_group_path[i] == d)
-            lvl = i;
-    if (lvl >= 0) {
-        /* Toggle off this dimension (and every later level). */
-        bs_g_group_depth = lvl > 0 ? lvl : 0;
-        for (int i = lvl; i < BS_GROUP_MAX_LEVELS; i++)
-            bs_g_group_path[i] = BS_GROUP_ALL;
-        if (bs_g_drill_depth > bs_g_group_depth)
-            bs_g_drill_depth = bs_g_group_depth;
-    } else if (bs_g_group_depth < BS_GROUP_MAX_LEVELS) {
-        /* Toggle on: append at the end of the path. */
-        bs_g_group_path[bs_g_group_depth++] = d;
-    }
-    bs_g_group_path[bs_g_group_depth] = BS_GROUP_ALL;
-    bs_g_drill_depth = 0;
-    bs_g_drill_values[0][0] = '\0';
+    /* Single-select: choosing a row applies it and closes the sheet. */
+    bs_g_group_dim = opts[r];
+    bs_g_drill_value[0] = '\0';
     bs_g_drilled_series[0] = '\0';
     bs_g_state.page = 0;
     bs_view_rebuild();
-    bs_draw_overlay_group();
-    FullUpdate();
+    bs_g_state.overlay = BS_OV_NONE;
     return 1;
 }
 

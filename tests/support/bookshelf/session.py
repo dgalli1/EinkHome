@@ -203,18 +203,14 @@ class BookshelfSession:
         rows["_n"] = n
         return rows
 
-    def choose_group_options(self, dims: list[str]) -> None:
-        """Right drawer -> Group by -> toggle the given dimensions
-        (e.g. ['year','author']) in order, then dismiss the sheet.
-        Toggling stays open so a multi-level path can be built."""
+    def choose_group(self, dim: str) -> None:
+        """Right drawer -> Group by -> pick one dimension (e.g. 'author'),
+        which applies and closes the sheet (single-select)."""
         rows = self.group_rows()
         n = rows.get("_n", 5)
         self.open_group_chooser()
         self.wait_for_stable()
-        for d in dims:
-            self.tap_at(*self._g.group_option_center(rows[d], n))
-            self.wait_for_stable()
-        self.tap_at(*self._g.chooser_outside_point())
+        self.tap_at(*self._g.group_option_center(rows[dim], n))
         self.wait_for_stable()
 
     def choose_sort(self, option_row: int) -> None:

@@ -30,26 +30,12 @@ dim_label(BsGroupDim d)
     }
 }
 
-/* Human summary of the active group path ("Author > Series"), or the
- * "All books" label when ungrouped. */
+/* Human label of the active grouping, or "All books" when ungrouped. */
 static void
-group_path_summary(char *out, size_t cap)
+group_summary(char *out, size_t cap)
 {
-    if (bs_g_group_depth == 0) {
-        snprintf(out, cap, "%s", bs_i18n("group.all"));
-        return;
-    }
-    size_t n = 0;
-    for (int i = 0; i < bs_g_group_depth; i++) {
-        int written = snprintf(out + n, cap > n ? cap - n : 0,
-                               i == 0 ? "%s" : " > %s",
-                               bs_i18n(dim_label(bs_g_group_path[i])));
-        if (written < 0)
-            return;
-        n += (size_t)written;
-        if (n >= cap)
-            return; /* truncated, still NUL-terminated */
-    }
+    snprintf(out, cap, "%s",
+             bs_i18n(dim_label(bs_g_group_dim)));
 }
 
 /* ── group / sort choosers (source-chooser style sheets) ────────────── */
@@ -70,16 +56,6 @@ bs_group_options(BsGroupDim out[], int cap)
         if (n < cap && bs_view_dim_available(cand[i]))
             out[n++] = cand[i];
     return n;
-}
-
-/* Level (1-based) at which *dim* sits in the current group path, or 0. */
-static int
-group_path_level(BsGroupDim dim)
-{
-    for (int i = 0; i < bs_g_group_depth && i < BS_GROUP_MAX_LEVELS; i++)
-        if (bs_g_group_path[i] == dim)
-            return i + 1;
-    return 0;
 }
 
 static void
@@ -106,7 +82,7 @@ bs_draw_overlay_group(void)
     DrawRect(px + 1, py + 1, pw - 2, ph - 2, BLACK);
 
     char gpath[BS_MAX_TITLE_LEN + 32];
-    group_path_summary(gpath, sizeof gpath);
+    group_summary(gpath, sizeof gpath);
 
     ifont *tf = OpenFont(DEFAULTFONTB, 28, 0);
     if (tf != NULL) {
@@ -124,19 +100,13 @@ bs_draw_overlay_group(void)
     ifont *f = OpenFont(DEFAULTFONTB, 26, 0);
     for (int i = 0; i < n; i++) {
         BsGroupDim d = opts[i];
-        int lvl = (d == BS_GROUP_ALL) ? (bs_g_group_depth == 0 ? 1 : 0)
-                                      : group_path_level(d);
-        int sel = lvl != 0;
+        int sel = (bs_g_group_dim == d);
         FillArea(px + 12, y0 + i * 96, pw - 24, 96 - 12, sel ? BLACK : WHITE);
         DrawRect(px + 12, y0 + i * 96, pw - 24, 96 - 12, BLACK);
         if (f != NULL) {
-            char line[BS_MAX_TITLE_LEN + 16];
-            if (sel && lvl > 1)
-                snprintf(line, sizeof line, "%s  (%d)", bs_i18n(dim_label(d)), lvl);
-            else
-                snprintf(line, sizeof line, "%s", bs_i18n(dim_label(d)));
             SetFont(f, sel ? WHITE : BLACK);
-            DrawString(px + 32, y0 + i * 96 + (96 - 26) / 2 - 2, line);
+            DrawString(px + 32, y0 + i * 96 + (96 - 26) / 2 - 2,
+                       bs_i18n(dim_label(d)));
         }
     }
     if (f != NULL)
@@ -199,7 +169,7 @@ bs_draw_overlay_more(void)
     /* No title header: the drawer is a plain row list starting at the
      * first button. */
     char gpath[BS_MAX_TITLE_LEN + 32];
-    group_path_summary(gpath, sizeof gpath);
+    group_summary(gpath, sizeof gpath);
 
     const char *labels[BS_MORE_N_ITEMS] = {
         "action.group_by",
@@ -212,7 +182,7 @@ bs_draw_overlay_more(void)
     int y0 = BS_MORE_Y0;
     ifont *tf = OpenFont(DEFAULTFONTB, 28, 0);
     for (int i = 0; i < BS_MORE_N_ITEMS; i++) {
-        int sel = (i == BS_MORE_GROUP_IDX && bs_g_group_depth > 0);
+        int sel = (i == BS_MORE_GROUP_IDX && bs_g_group_dim != BS_GROUP_ALL);
         FillArea(px + 12, y0 + i * BS_MORE_ITEM_H, pw - 24, BS_MORE_ITEM_H - 12, sel ? BLACK : WHITE);
         if (tf != NULL) {
             SetFont(tf, sel ? WHITE : BLACK);

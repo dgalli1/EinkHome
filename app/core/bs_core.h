@@ -254,9 +254,6 @@ typedef enum {
   BS_GROUP_BY_YEAR,
   BS_GROUP_BY_GENRE,
 } BsGroupDim;
-/* Max ordered grouping levels chosen in the group chooser (e.g.
- * Author -> Series uses two levels). */
-#define BS_GROUP_MAX_LEVELS 3
 typedef enum {
   BS_VIEW_GRID,
   BS_VIEW_LIST,
