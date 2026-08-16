@@ -31,8 +31,9 @@ int     bs_g_row_count = 0;
 int     bs_g_view_total = 0;
 
 /* Grouping path + drill (see bs_model.h).  Default: All books. */
-BsGroupDim bs_g_group_dim = BS_GROUP_ALL;
-char      bs_g_drill_value[BS_MAX_TITLE_LEN] = "";
+BsGroupPreset bs_g_group = BS_GROUP_NONE;
+int       bs_g_drill_level = 0;
+char      bs_g_drill_values[BS_GROUP_MAX_LEVELS][BS_MAX_TITLE_LEN];
 
 /* Dirty flag for the materialised view: set by any sync/local apply
  * path that changed rows, cleared by finish_sync, which then rebuilds

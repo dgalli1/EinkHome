@@ -249,11 +249,24 @@ typedef enum {
 } BsSortMode;
 typedef enum {
   BS_GROUP_ALL,       /* no grouping: collapse series into cards (default) */
-  BS_GROUP_BY_SERIES, /* dimension groupings: rendered headers + drill-in */
+  BS_GROUP_BY_SERIES, /* a single grouping dimension */
   BS_GROUP_BY_AUTHOR,
   BS_GROUP_BY_YEAR,
   BS_GROUP_BY_GENRE,
 } BsGroupDim;
+
+/* The grouping the user picked: a single dimension, or the one sensible
+ * two-level preset (Author -> Series).  BS_GROUP_NONE = no grouping. */
+typedef enum {
+  BS_GROUP_NONE,
+  BS_GROUP_SERIES,
+  BS_GROUP_AUTHOR,
+  BS_GROUP_YEAR,
+  BS_GROUP_GENRE,
+  BS_GROUP_AUTHOR_SERIES, /* by author, then series (2 levels) */
+} BsGroupPreset;
+/* Max levels any preset drills (Author -> Series uses two). */
+#define BS_GROUP_MAX_LEVELS 2
 typedef enum {
   BS_VIEW_GRID,
   BS_VIEW_LIST,

@@ -164,14 +164,13 @@ class BookshelfSession:
 
     def group_rows(self) -> dict[str, int]:
         """Row index (in the group chooser) of each grouping option the
-        app actually offers for the current data.  Rows: 0 = All books,
-        then Series / Author / Year / Genre in that order, minus any
-        dimension for which no book has a value (data-driven).  Reads the
-        app's store so the sheet geometry matches reality."""
+        app actually offers for the current data.  Row order mirrors the
+        app: None, Author > Series (if both), Series, Author, Year, Genre
+        (minus unavailable single dimensions).  Reads the app's store so
+        the sheet geometry matches reality."""
         import sqlite3
         path = getattr(self._backend, "store_path", None)
-        rows: dict[str, int] = {"all": 0}
-        n = 1
+        src = getattr(self._backend, "source", "kavita")
 
         def _has(col_expr: str) -> bool:
             if not path:
@@ -188,10 +187,20 @@ class BookshelfSession:
             except Exception:  # noqa: BLE001 - db may be mid-sync
                 return True
 
-        if _has("series IS NOT NULL AND series!=''"):
+        # Mirror bs_view_dim_available (series = kavita + series_id).
+        a_avail = _has("author IS NOT NULL AND author!=''")
+        s_avail = src == "kavita" and _has(
+            "series_id IS NOT NULL AND series_id!=''"
+        )
+        rows: dict[str, int] = {"none": 0}
+        n = 1
+        if a_avail and s_avail:
+            rows["author_series"] = n
+            n += 1
+        if s_avail:
             rows["series"] = n
             n += 1
-        if _has("author IS NOT NULL AND author!=''"):
+        if a_avail:
             rows["author"] = n
             n += 1
         if _has("added_at IS NOT NULL"):

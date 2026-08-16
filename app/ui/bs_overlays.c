@@ -17,51 +17,57 @@ sort_label(void)
     }
 }
 
-/* Grouping-dimension label key (drawer value + chooser rows). */
+/* Grouping-preset label key (drawer value + chooser rows). */
 static const char *
-dim_label(BsGroupDim d)
+group_label(BsGroupPreset g)
 {
-    switch (d) {
-    case BS_GROUP_BY_SERIES: return "group.series";
-    case BS_GROUP_BY_AUTHOR: return "group.author";
-    case BS_GROUP_BY_YEAR:   return "group.year";
-    case BS_GROUP_BY_GENRE:  return "group.genre";
-    default:                 return "group.all";
+    switch (g) {
+    case BS_GROUP_NONE:          return "group.none";
+    case BS_GROUP_SERIES:        return "group.series";
+    case BS_GROUP_AUTHOR:        return "group.author";
+    case BS_GROUP_YEAR:          return "group.year";
+    case BS_GROUP_GENRE:         return "group.genre";
+    case BS_GROUP_AUTHOR_SERIES: return "group.author_series";
+    default:                     return "group.none";
     }
 }
 
-/* Human label of the active grouping, or "All books" when ungrouped. */
+/* Human label of the active grouping. */
 static void
 group_summary(char *out, size_t cap)
 {
-    snprintf(out, cap, "%s",
-             bs_i18n(dim_label(bs_g_group_dim)));
+    snprintf(out, cap, "%s", bs_i18n(group_label(bs_g_group)));
 }
 
 /* ── group / sort choosers (source-chooser style sheets) ────────────── */
 
-/* Row list for the group chooser: All books + every dimension with data
- * in the current source.  Returns the row count. */
+/* Row list for the group chooser: None + the Author->Series preset +
+ * every single dimension with data in the current source.  Returns the
+ * row count. */
 int
-bs_group_options(BsGroupDim out[], int cap)
+bs_group_options(BsGroupPreset out[], int cap)
 {
     int n = 0;
-    static const BsGroupDim cand[] = {
-        BS_GROUP_BY_SERIES, BS_GROUP_BY_AUTHOR, BS_GROUP_BY_YEAR,
-        BS_GROUP_BY_GENRE,
-    };
     if (n < cap)
-        out[n++] = BS_GROUP_ALL;
-    for (unsigned int i = 0; i < sizeof cand / sizeof cand[0]; i++)
-        if (n < cap && bs_view_dim_available(cand[i]))
-            out[n++] = cand[i];
+        out[n++] = BS_GROUP_NONE;
+    if (n < cap && bs_view_dim_available(BS_GROUP_BY_AUTHOR) &&
+        bs_view_dim_available(BS_GROUP_BY_SERIES))
+        out[n++] = BS_GROUP_AUTHOR_SERIES;
+    if (n < cap && bs_view_dim_available(BS_GROUP_BY_SERIES))
+        out[n++] = BS_GROUP_SERIES;
+    if (n < cap && bs_view_dim_available(BS_GROUP_BY_AUTHOR))
+        out[n++] = BS_GROUP_AUTHOR;
+    if (n < cap && bs_view_dim_available(BS_GROUP_BY_YEAR))
+        out[n++] = BS_GROUP_YEAR;
+    if (n < cap && bs_view_dim_available(BS_GROUP_BY_GENRE))
+        out[n++] = BS_GROUP_GENRE;
     return n;
 }
 
 static void
 bs_group_geom(int *px, int *py, int *pw, int *ph)
 {
-    BsGroupDim opts[1 + 4];
+    BsGroupPreset opts[1 + 5];
     int n = bs_group_options(opts, 1 + 4);
     int w = ScreenWidth();
     *pw = w * 3 / 4;
@@ -94,19 +100,19 @@ bs_draw_overlay_group(void)
     }
     DrawLine(px + BS_CTX_PAD, py + 76, px + pw - BS_CTX_PAD, py + 76, LGRAY);
 
-    BsGroupDim opts[1 + 4];
+    BsGroupPreset opts[1 + 5];
     int n = bs_group_options(opts, 1 + 4);
     int y0 = py + 84;
     ifont *f = OpenFont(DEFAULTFONTB, 26, 0);
     for (int i = 0; i < n; i++) {
-        BsGroupDim d = opts[i];
-        int sel = (bs_g_group_dim == d);
+        BsGroupPreset g = opts[i];
+        int sel = (bs_g_group == g);
         FillArea(px + 12, y0 + i * 96, pw - 24, 96 - 12, sel ? BLACK : WHITE);
         DrawRect(px + 12, y0 + i * 96, pw - 24, 96 - 12, BLACK);
         if (f != NULL) {
             SetFont(f, sel ? WHITE : BLACK);
             DrawString(px + 32, y0 + i * 96 + (96 - 26) / 2 - 2,
-                       bs_i18n(dim_label(d)));
+                       bs_i18n(group_label(g)));
         }
     }
     if (f != NULL)
@@ -182,7 +188,7 @@ bs_draw_overlay_more(void)
     int y0 = BS_MORE_Y0;
     ifont *tf = OpenFont(DEFAULTFONTB, 28, 0);
     for (int i = 0; i < BS_MORE_N_ITEMS; i++) {
-        int sel = (i == BS_MORE_GROUP_IDX && bs_g_group_dim != BS_GROUP_ALL);
+        int sel = (i == BS_MORE_GROUP_IDX && bs_g_group != BS_GROUP_NONE);
         FillArea(px + 12, y0 + i * BS_MORE_ITEM_H, pw - 24, BS_MORE_ITEM_H - 12, sel ? BLACK : WHITE);
         if (tf != NULL) {
             SetFont(tf, sel ? WHITE : BLACK);

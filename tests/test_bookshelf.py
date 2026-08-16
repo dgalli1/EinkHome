@@ -1002,10 +1002,15 @@ def test_group_by_single_level_stacks_and_drill(fresh_bookshelf):
     returns to the grouped stacks.
     """
     bs = fresh_bookshelf
-    # The SDL mock has author data available (year too); pick author.
+    # The SDL mock has author (and year) data but no API series, so the
+    # Author > Series preset and Series options are hidden; author works.
+    rows = bs.group_rows()
+    assert 'series' not in rows and 'author_series' not in rows, (
+        "series grouping offered without API series data"
+    )
     bs.choose_group('author')
     bs.assert_no_crash()
-    # Group=2 (author), no drill, collapsed to a single stack card.
+    # Group=2 (by author), no drill, collapsed to a single stack card.
     bs.assert_log_contains("group=2 drill=0")
     bs.assert_log_contains("view=1")
 

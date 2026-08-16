@@ -166,7 +166,7 @@ void bs_draw_overlay_group(void);
 void bs_draw_overlay_sort(void);
 
 /* Group chooser row list (bs_overlays.c): All + available dimensions. */
-int bs_group_options(BsGroupDim out[], int cap);
+int bs_group_options(BsGroupPreset out[], int cap);
 int bs_view_dim_available(BsGroupDim dim);
 
 /* 1 = any modal overlay or popup is up (input routing, long-press

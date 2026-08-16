@@ -1533,9 +1533,32 @@ static void view_bind_query(sqlite3_stmt *st, int qbind) {
  * rendering the series stacks use — so a group is one card you tap to
  * drill into (regroup by the next dimension, or flat at the leaf). */
 
-/* 1 = a dimension grouping is active (drilling < chosen levels). */
+/* Level count of a grouping preset. */
+static int group_levels(BsGroupPreset g) {
+  switch (g) {
+  case BS_GROUP_AUTHOR_SERIES: return 2;
+  case BS_GROUP_NONE:          return 0;
+  default:                     return 1;
+  }
+}
+
+/* The grouping dimension in effect at drill level *lvl* of a preset. */
+static BsGroupDim dim_at(BsGroupPreset g, int lvl) {
+  switch (g) {
+  case BS_GROUP_SERIES:        return BS_GROUP_BY_SERIES;
+  case BS_GROUP_AUTHOR:        return BS_GROUP_BY_AUTHOR;
+  case BS_GROUP_YEAR:          return BS_GROUP_BY_YEAR;
+  case BS_GROUP_GENRE:         return BS_GROUP_BY_GENRE;
+  case BS_GROUP_AUTHOR_SERIES: return lvl == 0 ? BS_GROUP_BY_AUTHOR
+                                               : BS_GROUP_BY_SERIES;
+  default:                     return BS_GROUP_ALL;
+  }
+}
+
+/* 1 = a dimension grouping is active (drilling beneath the top). */
 static int grouped_active(void) {
-  return bs_g_group_dim != BS_GROUP_ALL && bs_g_drill_value[0] == '\0';
+  return bs_g_group != BS_GROUP_NONE &&
+         bs_g_drill_level < group_levels(bs_g_group);
 }
 
 /* SQL for a grouping dimension; q selects the view-JOIN alias (`b.`). */
@@ -1676,7 +1699,7 @@ void bs_view_rebuild(void) {
       inserted = sqlite3_changes(g_db);
       sqlite3_finalize(st);
     }
-  } else if (bs_g_group_dim == BS_GROUP_ALL) {
+  } else if (bs_g_group == BS_GROUP_NONE) {
     /* idempotent: a failed earlier rebuild must not wedge the collapse
      * (a leaked t_sorted makes the CREATE TEMP TABLE below fail). */
     sqlite3_exec(g_db, "DROP TABLE IF EXISTS t_sorted", NULL, NULL, NULL);
@@ -1783,10 +1806,12 @@ void bs_view_rebuild(void) {
      * stacks) keyed by the active dimension's value; single-member
      * groups stay flat tiles.  Tapping a card drills into it (regroups
      * by the next dimension, or flat at the leaf). */
-    const char *dim = dim_sql(bs_g_group_dim, 0);
+    const char *dim = dim_sql(dim_at(bs_g_group, bs_g_drill_level), 0);
     /* The card label is the display value (series name for series,
      * which groups by the API series_id). */
-    const char *lbl = (bs_g_group_dim == BS_GROUP_BY_SERIES) ? "series" : dim;
+    const char *lbl = (dim_at(bs_g_group, bs_g_drill_level) == BS_GROUP_BY_SERIES)
+                          ? "series"
+                          : dim;
     sqlite3_exec(g_db, "DROP TABLE IF EXISTS t_sorted", NULL, NULL, NULL);
     sqlite3_exec(g_db, "DROP TABLE IF EXISTS t_grp", NULL, NULL, NULL);
     sqlite3_exec(g_db, "DROP TABLE IF EXISTS t_out", NULL, NULL, NULL);
@@ -1801,18 +1826,25 @@ void bs_view_rebuild(void) {
       snprintf(sql, sizeof sql,
                "INSERT INTO t_sorted SELECT id, %s, %s FROM books WHERE", dim,
                lbl);
-      view_where(sql, sizeof sql, bs_g_drill_value[0] ? 2 : 1);
-      if (bs_g_drill_value[0])
-        snprintf(sql + strlen(sql), sizeof sql - strlen(sql),
-                 " AND (%s=?1)", dim);
+      view_where(sql, sizeof sql, bs_g_drill_level + 1);
+      for (int L = 0; L < bs_g_drill_level; L++) {
+        const char *e = dim_sql(dim_at(bs_g_group, L), 0);
+        if (bs_g_drill_values[L][0])
+          snprintf(sql + strlen(sql), sizeof sql - strlen(sql),
+                   " AND (%s=?%d)", e, L + 1);
+        else
+          snprintf(sql + strlen(sql), sizeof sql - strlen(sql),
+                   " AND (%s IS NULL OR %s='')", e, e);
+      }
       snprintf(sql + strlen(sql), sizeof sql - strlen(sql), " ORDER BY %s",
                view_order());
       sqlite3_stmt *st = NULL;
       rc = sqlite3_prepare_v2(g_db, sql, -1, &st, NULL);
       if (rc == SQLITE_OK) {
-        if (bs_g_drill_value[0])
-          bind_text_trunc(st, 1, bs_g_drill_value);
-        view_bind_query(st, bs_g_drill_value[0] ? 2 : 1);
+        for (int L = 0; L < bs_g_drill_level; L++)
+          if (bs_g_drill_values[L][0])
+            bind_text_trunc(st, L + 1, bs_g_drill_values[L]);
+        view_bind_query(st, bs_g_drill_level + 1);
         rc = sqlite3_step(st);
         if (rc == SQLITE_DONE)
           rc = SQLITE_OK; /* exec chain below gates on SQLITE_OK */
@@ -1880,22 +1912,25 @@ void bs_view_rebuild(void) {
              "INSERT INTO view(kind, book_id, series_id, series_name,"
              " series_count) SELECT 0, id, series_id, series, 0"
              " FROM books WHERE");
-    const char *dim = dim_sql(bs_g_group_dim, 0);
-    view_where(sql, sizeof sql, bs_g_drill_value[0] ? 2 : 1);
-    if (bs_g_drill_value[0])
-      snprintf(sql + strlen(sql), sizeof sql - strlen(sql),
-               " AND (%s=?1)", dim);
-    else
-      snprintf(sql + strlen(sql), sizeof sql - strlen(sql),
-               " AND (%s IS NULL OR %s='')", dim, dim);
+    view_where(sql, sizeof sql, bs_g_drill_level + 1);
+    for (int L = 0; L < bs_g_drill_level; L++) {
+      const char *e = dim_sql(dim_at(bs_g_group, L), 0);
+      if (bs_g_drill_values[L][0])
+        snprintf(sql + strlen(sql), sizeof sql - strlen(sql),
+                 " AND (%s=?%d)", e, L + 1);
+      else
+        snprintf(sql + strlen(sql), sizeof sql - strlen(sql),
+                 " AND (%s IS NULL OR %s='')", e, e);
+    }
     snprintf(sql + strlen(sql), sizeof sql - strlen(sql), " ORDER BY %s",
              view_order());
     sqlite3_stmt *st = NULL;
     rc = sqlite3_prepare_v2(g_db, sql, -1, &st, NULL);
     if (rc == SQLITE_OK) {
-      if (bs_g_drill_value[0])
-        bind_text_trunc(st, 1, bs_g_drill_value);
-      view_bind_query(st, bs_g_drill_value[0] ? 2 : 1);
+      for (int L = 0; L < bs_g_drill_level; L++)
+        if (bs_g_drill_values[L][0])
+          bind_text_trunc(st, L + 1, bs_g_drill_values[L]);
+      view_bind_query(st, bs_g_drill_level + 1);
       rc = sqlite3_step(st);
       inserted = sqlite3_changes(g_db);
       sqlite3_finalize(st);
@@ -1925,8 +1960,8 @@ void bs_view_rebuild(void) {
   bs_g_view_source = bs_g_state.source;
   bs_g_view_total = inserted;
   bs_LOG("[bookshelf] view_rebuild: view=%d sort=%d group=%d drill=%d\n",
-      bs_g_view_total, (int)bs_g_state.sort, (int)bs_g_group_dim,
-      bs_g_drill_value[0] != '\0');
+      bs_g_view_total, (int)bs_g_state.sort, (int)bs_g_group,
+      bs_g_drill_level);
 }
 
 int bs_view_total(void) {
@@ -1982,7 +2017,7 @@ int bs_view_fetch_page(int page, BsTileRow *rows, int cap) {
   /* A grouped stack card whose dimension value is empty gets the
    * "No <dim>" label instead of a blank caption. */
   if (grouped_active() && n > 0) {
-    BsGroupDim d = bs_g_group_dim;
+    BsGroupDim d = dim_at(bs_g_group, bs_g_drill_level);
     for (int i = 0; i < n; i++)
       if (rows[i].is_series && rows[i].series_name[0] == '\0')
         group_label_for(d, "", rows[i].series_name, sizeof rows[i].series_name);

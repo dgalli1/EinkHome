@@ -52,6 +52,8 @@ const BsI18n bs_g_i18n[] = {
     {"group.none.year", "Unknown year", "Unbekanntes Jahr", "Ann\u00e9e inconnue", "Anno sconosciuto"},
     {"group.none.genre", "Unknown genre", "Unbekanntes Genre", "Genre inconnu", "Genere sconosciuto"},
     {"action.group_by", "Group by", "Gruppieren nach", "Grouper par", "Raggruppa per"},
+    {"group.none", "None", "Keine", "Aucune", "Nessuna"},
+    {"group.author_series", "Author > Series", "Autor > Reihe", "Auteur > S\u00e9rie", "Autore > Serie"},
     {"action.sort_by", "Sort by", "Sortieren nach", "Trier par", "Ordina per"},
     {"sort.title_az", "Title A\u2013Z", "Titel A\u2013Z", "Titre A\u2013Z", "Titolo A\u2013Z"},
     {"sort.author", "By author", "Nach Autor", "Par auteur", "Per autore"},

@@ -9,12 +9,13 @@
 
 extern char bs_g_drilled_series[BS_MAX_ID_LEN];
 
-/* Grouping: a single chosen dimension (BS_GROUP_ALL = All books / the
- * plain collapse view).  Tapping a collapsed group card sets
- * bs_g_drill_value to that group; the view then shows that group's books
- * flat ("" = at the top grouping level). */
-extern BsGroupDim bs_g_group_dim;
-extern char bs_g_drill_value[BS_MAX_TITLE_LEN];
+/* The active grouping preset (BS_GROUP_NONE = All books) and the drill
+ * state: bs_g_drill_level counts how many group cards have been tapped
+ * into (0 = top), with the tapped group's value per level.  At
+ * drill_level == preset level count the view shows flat books. */
+extern BsGroupPreset bs_g_group;
+extern int bs_g_drill_level;
+extern char bs_g_drill_values[BS_GROUP_MAX_LEVELS][BS_MAX_TITLE_LEN];
 
 extern char bs_g_search_kb_buf[BS_MAX_QUERY_LEN];
 

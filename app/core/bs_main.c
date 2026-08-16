@@ -204,7 +204,7 @@ int bs_on_event(int type, int par1, int par2) {
      * timer below, so the hook table is always in place first. */
     bs_sync_set_hooks(&g_sync_ui_hooks);
     bs_g_state.sort = BS_SORT_TITLE_ASC;
-    bs_g_group_dim = BS_GROUP_ALL;   /* All books (no dimension grouping) */
+    bs_g_group = BS_GROUP_NONE;   /* All books (no grouping) */
 
     /* Keep the system panel visible (battery / wifi / clock).
      * Calling SetPanelType(PANEL_DISABLED) or iv_fullscreen()
@@ -643,7 +643,7 @@ int bs_on_event(int type, int par1, int par2) {
       }
       /* Group drill-in: the back affordance pops one level toward the
        * All-books top. */
-      if (bs_g_drill_value[0] != '\0') {
+      if (bs_g_drill_level > 0) {
         bs_group_drill_back();
         return 1;
       }
@@ -951,7 +951,7 @@ int bs_on_event(int type, int par1, int par2) {
         return 1;
       }
       /* Group drill-in: back pops one level toward All books. */
-      if (bs_g_drill_value[0] != '\0') {
+      if (bs_g_drill_level > 0) {
         bs_group_drill_back();
         return 1;
       }

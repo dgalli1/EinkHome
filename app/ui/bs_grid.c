@@ -461,35 +461,41 @@ bs_draw_thumbnail(int x, int y, int w, int h, const BsTileRow *tr, int vi)
 
 /* ── dimension-group drill actions ──────────────────────────────────── */
 
-/* Tap a group card: set the drilled group, so the shelf shows that
- * group's books flat. */
+/* Tap a group card: record the group's value at the next drill level, so
+ * the shelf regroups within that group (or shows flat books at the
+ * preset's last level). */
 void
 bs_group_drill(const char *value)
 {
-    snprintf(bs_g_drill_value, sizeof bs_g_drill_value, "%s",
-             value ? value : "");
+    if (bs_g_drill_level < 0 || bs_g_drill_level >= BS_GROUP_MAX_LEVELS)
+        return;
+    snprintf(bs_g_drill_values[bs_g_drill_level],
+             sizeof bs_g_drill_values[0], "%s", value ? value : "");
+    bs_g_drill_level++;
     bs_g_drilled_series[0] = '\0';
     bs_g_state.page = 0;
     bs_view_rebuild();
     bs_redraw_shelf();
 }
 
-/* Pop the group drill (top-bar back button / back key): back to the
- * grouped stack view. */
+/* Pop the group drill (top-bar back button / back key). */
 void
 bs_group_drill_back(void)
 {
-    bs_g_drill_value[0] = '\0';
+    if (bs_g_drill_level > 0) {
+        bs_g_drill_level--;
+        bs_g_drill_values[bs_g_drill_level][0] = '\0';
+    }
     bs_g_state.page = 0;
     bs_view_rebuild();
     bs_redraw_shelf();
 }
 
-/* 1 = a dimension grouping is active (not All books). */
+/* 1 = a grouping preset is active (not None). */
 int
 bs_group_active(void)
 {
-    return bs_g_group_dim != BS_GROUP_ALL;
+    return bs_g_group != BS_GROUP_NONE;
 }
 
 void

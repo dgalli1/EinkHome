@@ -179,8 +179,8 @@ bs_hit_pager(int x, int y)
 int
 bs_on_tap_overlay_group(int x, int y)
 {
-    BsGroupDim opts[1 + 4];
-    int n = bs_group_options(opts, 1 + 4);
+    BsGroupPreset opts[1 + 5];
+    int n = bs_group_options(opts, 1 + 5);
     int w = ScreenWidth();
     int pw = w * 3 / 4;
     int ph = 72 + n * 96 + 24;
@@ -196,8 +196,10 @@ bs_on_tap_overlay_group(int x, int y)
     if (r < 0 || r >= n)
         return 1;
     /* Single-select: choosing a row applies it and closes the sheet. */
-    bs_g_group_dim = opts[r];
-    bs_g_drill_value[0] = '\0';
+    bs_g_group = opts[r];
+    bs_g_drill_level = 0;
+    for (int L = 0; L < BS_GROUP_MAX_LEVELS; L++)
+        bs_g_drill_values[L][0] = '\0';
     bs_g_drilled_series[0] = '\0';
     bs_g_state.page = 0;
     bs_view_rebuild();
