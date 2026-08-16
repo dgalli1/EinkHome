@@ -1542,7 +1542,9 @@ static int grouped_active(void) {
 static const char *dim_sql(BsGroupDim dim, int q) {
   switch (dim) {
   case BS_GROUP_BY_SERIES:
-    return q ? "b.series COLLATE NOCASE" : "series COLLATE NOCASE";
+    /* Series grouping is the remote API's own identity (series_id), not
+     * an app-side derivation, so it keys on series_id. */
+    return q ? "b.series_id COLLATE NOCASE" : "series_id COLLATE NOCASE";
   case BS_GROUP_BY_AUTHOR:
     return q ? "b.author COLLATE NOCASE" : "author COLLATE NOCASE";
   case BS_GROUP_BY_YEAR:
@@ -1581,6 +1583,15 @@ int bs_view_dim_available(BsGroupDim dim) {
   const char *e = dim_sql(dim, 0);
   if (e == NULL)
     return 1;
+  /* Series grouping is only acceptable when the remote API supplies a
+     series identity — i.e. on the Kavita (remote) source.  The
+     local/folder sources derive series from filenames, which never
+     count, so the option is hidden there entirely. */
+  if (dim == BS_GROUP_BY_SERIES && bs_g_state.source != BS_SOURCE_KAVITA)
+    return 0;
+  const char *src = bs_g_state.source == BS_SOURCE_LOCAL    ? "local"
+                  : bs_g_state.source == BS_SOURCE_FOLDER ? "folder"
+                                                          : "kavita";
   sqlite3_stmt *st = NULL;
   char sql[256];
   snprintf(sql, sizeof sql,
@@ -1588,9 +1599,7 @@ int bs_view_dim_available(BsGroupDim dim) {
            " AND source=?1", e, e);
   if (sqlite3_prepare_v2(g_db, sql, -1, &st, NULL) != SQLITE_OK)
     return 0;
-  bind_text_trunc(st, 1, bs_g_state.source == BS_SOURCE_LOCAL    ? "local"
-                       : bs_g_state.source == BS_SOURCE_FOLDER ? "folder"
-                                                               : "kavita");
+  bind_text_trunc(st, 1, src);
   int n = 0;
   if (sqlite3_step(st) == SQLITE_ROW)
     n = sqlite3_column_int(st, 0);
@@ -1775,18 +1784,25 @@ void bs_view_rebuild(void) {
      * groups stay flat tiles.  Tapping a card drills into it (regroups
      * by the next dimension, or flat at the leaf). */
     const char *dim = dim_sql(bs_g_group_path[bs_g_drill_depth], 0);
+    /* The card label is the display value (series name for series,
+     * which groups by the API series_id). */
+    const char *lbl = (bs_g_group_path[bs_g_drill_depth] == BS_GROUP_BY_SERIES)
+                          ? "series"
+                          : dim;
     sqlite3_exec(g_db, "DROP TABLE IF EXISTS t_sorted", NULL, NULL, NULL);
     sqlite3_exec(g_db, "DROP TABLE IF EXISTS t_grp", NULL, NULL, NULL);
     sqlite3_exec(g_db, "DROP TABLE IF EXISTS t_out", NULL, NULL, NULL);
     rc = sqlite3_exec(g_db,
-                      "CREATE TEMP TABLE t_sorted(id TEXT NOT NULL, g TEXT)",
+                      "CREATE TEMP TABLE t_sorted(id TEXT NOT NULL, g TEXT,"
+                      " lbl TEXT)",
                       NULL, NULL, NULL);
     if (rc != SQLITE_OK)
       bs_LOG("[bookshelf] view_rebuild: t_sorted create rc=%d: %s\n", rc,
           sqlite3_errmsg(g_db));
     if (rc == SQLITE_OK) {
       snprintf(sql, sizeof sql,
-               "INSERT INTO t_sorted SELECT id, %s FROM books WHERE", dim);
+               "INSERT INTO t_sorted SELECT id, %s, %s FROM books WHERE", dim,
+               lbl);
       view_where(sql, sizeof sql, bs_g_drill_depth + 1);
       for (int L = 0; L < bs_g_drill_depth; L++) {
         const char *e = dim_sql(bs_g_group_path[L], 0);
@@ -1831,7 +1847,7 @@ void bs_view_rebuild(void) {
       /* Flat tiles: standalone books and single-member groups. */
       rc = sqlite3_exec(g_db,
                         "INSERT INTO t_out"
-                        " SELECT s.rowid, 0, s.id, '', s.g, COALESCE(g.c, 1)"
+                        " SELECT s.rowid, 0, s.id, '', s.lbl, COALESCE(g.c, 1)"
                         " FROM t_sorted s LEFT JOIN t_grp g ON g.sid=s.g"
                         " WHERE g.c IS NULL OR g.c=1",
                         NULL, NULL, NULL);
@@ -1846,7 +1862,7 @@ void bs_view_rebuild(void) {
                         " SELECT 1000000000 +"
                         "        (SELECT MIN(s2.rowid) FROM t_sorted s2"
                         "          WHERE s2.g=g.sid),"
-                        "        1, rep.id, g.sid, rep.g, g.c"
+                        "        1, rep.id, g.sid, rep.lbl, g.c"
                         " FROM t_grp g"
                         " JOIN t_sorted rep ON rep.g=g.sid AND rep.rowid="
                         "      (SELECT MIN(s3.rowid) FROM t_sorted s3"
