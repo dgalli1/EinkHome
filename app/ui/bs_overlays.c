@@ -196,41 +196,23 @@ bs_draw_overlay_more(void)
     FillArea(px, 0, pw, bs_content_bottom(), WHITE);
     DrawLine(px, 0, px, bs_content_bottom(), BLACK);
 
-    ifont *f = OpenFont(DEFAULTFONTB, 32, 0);
-    if (f != NULL) {
-        SetFont(f, BLACK);
-        DrawString(px + 24, 32, bs_i18n("action.more"));
-        CloseFont(f);
-    }
-    /* The right drawer carries the group and sort chooser buttons (the
-     * individual group/sort rows used to live in the removed left
-     * drawer); each shows its current value and opens its chooser sheet. */
+    /* No title header: the drawer is a plain row list starting at the
+     * first button. */
     char gpath[BS_MAX_TITLE_LEN + 32];
     group_path_summary(gpath, sizeof gpath);
 
     const char *labels[BS_MORE_N_ITEMS] = {
-        "action.sync",
         "action.group_by",
         "action.sort_by",
-        "view.grid",
-        "view.list",
         "action.download_all",
         "action.settings",
         "action.apps",
     };
-    const char *vals[BS_MORE_N_ITEMS] = { NULL, gpath, bs_i18n(sort_label()) };
+    const char *vals[BS_MORE_N_ITEMS] = { gpath, bs_i18n(sort_label()) };
     int y0 = BS_MORE_Y0;
     ifont *tf = OpenFont(DEFAULTFONTB, 28, 0);
     for (int i = 0; i < BS_MORE_N_ITEMS; i++) {
-        int sel = 0;
-        if (i == BS_MORE_SYNC_IDX && bs_g_state.sync_state == 1)
-            sel = 1;
-        if (i == BS_MORE_GROUP_IDX && bs_g_group_depth > 0)
-            sel = 1;
-        if (i == BS_MORE_GRID_IDX && bs_g_state.view_mode == BS_VIEW_GRID)
-            sel = 1;
-        if (i == BS_MORE_LIST_IDX && bs_g_state.view_mode == BS_VIEW_LIST)
-            sel = 1;
+        int sel = (i == BS_MORE_GROUP_IDX && bs_g_group_depth > 0);
         FillArea(px + 12, y0 + i * BS_MORE_ITEM_H, pw - 24, BS_MORE_ITEM_H - 12, sel ? BLACK : WHITE);
         if (tf != NULL) {
             SetFont(tf, sel ? WHITE : BLACK);

@@ -22,9 +22,6 @@ from pathlib import Path
 import pytest
 
 from tests.support.bookshelf import (
-    MORE_GRID,
-    MORE_LIST,
-    MORE_SYNC,
     MORE_GROUP,
     MORE_SORT,
     MORE_SETTINGS,
@@ -411,12 +408,12 @@ def test_menu_button_opens_more_overlay(fresh_bookshelf):
 # ── More overlay ───────────────────────────────────────────────────────
 
 
-def test_more_overlay_sync(fresh_bookshelf):
-    """Open More, tap Sync, verify framebuffer changes (re-sync)."""
+def test_sync_button_taps_sync(fresh_bookshelf):
+    """Tap the top-bar sync icon, verify a re-sync runs (the drawer no
+    longer carries a Sync row)."""
     bs = fresh_bookshelf
-    bs.tap_menu_and_verify()
     before = bs.current_log()
-    bs.tap_more_item_and_verify(MORE_SYNC)
+    bs.tap_sync_button()
     # After sync, log should show do_sync from this tap (not the boot one).
     _wait_log_slice(bs, before, "do_sync", timeout=20.0)
 
@@ -459,18 +456,14 @@ def test_more_overlay_sort_recent(fresh_bookshelf):
     bs.assert_no_crash()
 
 
-def test_more_overlay_grid_button(fresh_bookshelf):
-    """Open More, tap Grid, verify framebuffer changes."""
+def test_layout_toggle_button(fresh_bookshelf):
+    """The top-bar layout icon toggles grid/list (the drawer no longer
+    carries separate Grid/List rows)."""
     bs = fresh_bookshelf
-    bs.tap_menu_and_verify()
-    bs.tap_more_item_and_verify(MORE_GRID)
-
-
-def test_more_overlay_list_button(fresh_bookshelf):
-    """Open More, tap List, verify framebuffer changes."""
-    bs = fresh_bookshelf
-    bs.tap_menu_and_verify()
-    bs.tap_more_item_and_verify(MORE_LIST)
+    h = bs.frame_hash()
+    bs.tap_at(*bs._g.layout_icon_center())
+    assert bs.frame_hash() != h, "layout toggle did not change the view"
+    bs.assert_no_crash()
 
 
 def test_more_overlay_dismiss_outside_tap(fresh_bookshelf):
@@ -1074,15 +1067,16 @@ def test_back_key_noop_on_shelf(fresh_bookshelf):
 def test_no_crash_after_all_interactions(fresh_bookshelf):
     """Exercise all interactive elements, verify no crash markers in log."""
     bs = fresh_bookshelf
-    # Tap menu, tap each More item
+    # Open the drawer, dismiss it (back + outside) — the drawer now holds
+    # only chooser buttons (group/sort) and modal rows (download-all,
+    # settings, apps), so it is simply opened and closed here.
     bs.tap_menu_and_verify()
-    for item_idx in (MORE_SYNC, MORE_GRID, MORE_LIST):
-        bs.tap_more_item(item_idx)
-        time.sleep(0.3)
-    # Reopen menu, dismiss with back
+    time.sleep(0.3)
+    bs.send_back_key()
+    time.sleep(0.5)
     bs.tap_menu()
     time.sleep(0.5)
-    bs.send_back_key()
+    bs.tap_outside_more()
     time.sleep(0.5)
     # Tap search
     bs.tap_search()

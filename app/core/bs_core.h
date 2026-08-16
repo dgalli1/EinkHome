@@ -135,15 +135,12 @@
  * Applications.  (Title Z-A was removed per user request.) */
 #define BS_MORE_Y0 96
 #define BS_MORE_ITEM_H 88
-#define BS_MORE_N_ITEMS 8
-#define BS_MORE_SYNC_IDX 0
-#define BS_MORE_GROUP_IDX 1
-#define BS_MORE_SORT_IDX 2
-#define BS_MORE_GRID_IDX 3
-#define BS_MORE_LIST_IDX 4
-#define BS_MORE_DLALL_IDX 5
-#define BS_MORE_SETTINGS_IDX 6
-#define BS_MORE_APPS_IDX 7
+#define BS_MORE_N_ITEMS 5
+#define BS_MORE_GROUP_IDX 0
+#define BS_MORE_SORT_IDX 1
+#define BS_MORE_DLALL_IDX 2
+#define BS_MORE_SETTINGS_IDX 3
+#define BS_MORE_APPS_IDX 4
 
 /* Cover rendering.  Real covers (loaded via LoadPNGStretch) are fetched
  * one per weak-timer tick so the event loop never blocks; until then a

@@ -301,12 +301,6 @@ bs_on_tap_overlay_more(int x, int y)
         FullUpdate();
         return 1;
     }
-    if (y >= y0 + BS_MORE_SYNC_IDX * BS_MORE_ITEM_H &&
-        y < y0 + (BS_MORE_SYNC_IDX + 1) * BS_MORE_ITEM_H) {
-        bs_g_state.overlay = BS_OV_NONE;
-        bs_do_sync();
-        return 0;
-    }
     /* Settings row opens the full-screen settings page. */
     if (y >= y0 + BS_MORE_SETTINGS_IDX * BS_MORE_ITEM_H &&
         y < y0 + (BS_MORE_SETTINGS_IDX + 1) * BS_MORE_ITEM_H) {
@@ -330,20 +324,6 @@ bs_on_tap_overlay_more(int x, int y)
         bs_g_state.overlay = BS_OV_NONE;
         bs_download_all_start();
         return 1;
-    }
-    /* View grid/list rows. */
-    for (int i = BS_MORE_GRID_IDX; i < BS_MORE_DLALL_IDX; i++) {
-        if (y >= y0 + i * BS_MORE_ITEM_H && y < y0 + i * BS_MORE_ITEM_H + BS_MORE_ITEM_H) {
-            bs_g_state.overlay = BS_OV_NONE;
-            if (i == BS_MORE_GRID_IDX) {
-                bs_g_state.view_mode = BS_VIEW_GRID;
-                bs_g_state.page = 0;
-            } else if (i == BS_MORE_LIST_IDX) {
-                bs_g_state.view_mode = BS_VIEW_LIST;
-                bs_g_state.page = 0;
-            }
-            return 0;
-        }
     }
     bs_g_state.overlay = BS_OV_NONE;
     return 0;

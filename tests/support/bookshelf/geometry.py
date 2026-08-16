@@ -25,15 +25,12 @@ CELL_MAX_W = 420
 CELL_MIN_H = 280
 CELL_MIN_W = 280
 
-# ── More overlay item indices (right-anchored panel) ───────────────────
-MORE_SYNC = 0
-MORE_GROUP = 1
-MORE_SORT = 2
-MORE_GRID = 3
-MORE_LIST = 4
-MORE_DOWNLOAD_ALL = 5
-MORE_SETTINGS = 6
-MORE_APPS = 7
+# ── More overlay item indices (right-anchored drawer) ─────────────────
+MORE_GROUP = 0
+MORE_SORT = 1
+MORE_DOWNLOAD_ALL = 2
+MORE_SETTINGS = 3
+MORE_APPS = 4
 
 # ── Settings overlay layout (full-screen page) ────────────────────────
 OVERLAY_HEADER_H = TOP_BAR_H  # overlay header == top bar height (Back chevron + title)
@@ -65,11 +62,8 @@ __all__ = [
     "CTX_TITLE_H",
     "MORE_DOWNLOAD_ALL",
     "MORE_SETTINGS",
-    "MORE_GRID",
-    "MORE_LIST",
     "MORE_GROUP",
     "MORE_SORT",
-    "MORE_SYNC",
     "PAGER_H",
     "PAGESIZE",
     "SEARCH_ROW_H",
