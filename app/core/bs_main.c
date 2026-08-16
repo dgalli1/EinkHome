@@ -929,7 +929,8 @@ int bs_on_event(int type, int par1, int par2) {
         bs_launcher_close();
         return 1;
       }
-      if (bs_g_state.overlay == BS_OV_MORE) {
+      if (bs_g_state.overlay == BS_OV_MORE || bs_g_state.overlay == BS_OV_GROUP ||
+          bs_g_state.overlay == BS_OV_SORT) {
         bs_g_state.overlay = BS_OV_NONE;
         bs_redraw_shelf();
         return 1;
