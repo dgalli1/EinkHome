@@ -38,7 +38,10 @@ OUT_ARMHF := $(CURDIR)/build/bookshelf.armhf.app
 BUILD_PC := $(CURDIR)/sdk/build_pc.sh
 OUT_PC := $(CURDIR)/build/bookshelf.pc
 # App sources excluding the PocketBook backend (replaced by the SDL one).
-PC_SOURCES := $(filter-out platform/bs_plat_pb.c,$(SOURCES))
+# Recursive (=) so this stays empty-proof: a `:=` here would expand before
+# SOURCES is defined below and silently make `make pc` skip rebuilding when
+# app sources change (bookshelf.pc would then never track edits).
+PC_SOURCES = $(filter-out platform/bs_plat_pb.c,$(SOURCES))
 
 SOURCES := \
 	core/bs_main.c \

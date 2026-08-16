@@ -1876,14 +1876,16 @@ void bs_view_rebuild(void) {
                         NULL, NULL, NULL);
     }
     if (rc == SQLITE_OK) {
-      /* One stack card per multi-book group, after all flat tiles, in
-       * first-seen order.  Representative = the group's first book in
-       * the active sort.  series_id carries the raw group value so a
-       * card tap can drill into scope. */
+      /* One stack card per multi-book group, at its first member's
+       * sort position so cards interleave with the flat tiles instead
+       * of all landing after them (a multi-member group's rows are
+       * never emitted flat, so the MIN(rowid) fk collides with no flat
+       * tile — distinct groups also get distinct fks).  Representative
+       * = the group's first book in the active sort; series_id carries
+       * the raw group value so a card tap can drill into scope. */
       rc = sqlite3_exec(g_db,
                         "INSERT INTO t_out"
-                        " SELECT 1000000000 +"
-                        "        (SELECT MIN(s2.rowid) FROM t_sorted s2"
+                        " SELECT (SELECT MIN(s2.rowid) FROM t_sorted s2"
                         "          WHERE s2.g=g.sid),"
                         "        1, rep.id, g.sid, rep.lbl, g.c"
                         " FROM t_grp g"

@@ -469,6 +469,9 @@ bs_group_drill(const char *value)
 {
     if (bs_g_drill_level < 0 || bs_g_drill_level >= BS_GROUP_MAX_LEVELS)
         return;
+    /* Remember the page of the level we're leaving, so drill-back lands
+     * the user back where they were instead of page 0. */
+    bs_g_saved_pages[bs_g_drill_level] = bs_g_state.page;
     snprintf(bs_g_drill_values[bs_g_drill_level],
              sizeof bs_g_drill_values[0], "%s", value ? value : "");
     bs_g_drill_level++;
@@ -486,7 +489,10 @@ bs_group_drill_back(void)
         bs_g_drill_level--;
         bs_g_drill_values[bs_g_drill_level][0] = '\0';
     }
-    bs_g_state.page = 0;
+    /* Restore the page of the level we return into (saved when its
+     * group card was tapped), so back from a deep drill continues
+     * where the user left off. */
+    bs_g_state.page = bs_g_saved_pages[bs_g_drill_level];
     bs_view_rebuild();
     bs_redraw_shelf();
 }
@@ -660,14 +666,20 @@ cover_job_done(BsJob *job)
     bs_cover_schedule_next();
 }
 
-/* Fetch one not-yet-loaded visible cover per tick.  Local (EPUB/PDF)
- * covers are extracted and decoded here on the main thread as before;
- * a remote cover that misses the on-disk cache is fetched by a
- * one-shot job on the shared background worker (bs_worker.c) — the
- * old code called QuickDownload() directly on the event loop, freezing
- * the UI for up to the 8 s HTTP timeout.  The job fn only downloads
- * and writes the PNG files; its done_cb decodes on the main thread
- * (libinkview is not thread-safe) and blits just that tile. */
+/* Fetch the not-yet-loaded visible covers.  All covers that need no
+ * network round-trip (a PNG already in the on-disk cache, an embedded
+ * EPUB/PDF cover, or an offline miss that just lands in the failed
+ * state) are decoded in ONE tick and presented with a single combined
+ * partial update — the old code decoded and blitted one cover per
+ * 60 ms weak-timer tick, so a cached page popped in one tile at a time
+ * (on SDL each tile partial update repaints the whole window).  Only a
+ * cover that must be downloaded from the server is deferred to a
+ * one-shot job on the shared background worker (bs_worker.c), one in
+ * flight at a time; its done_cb decodes on the main thread (libinkview
+ * is not thread-safe) and blits just that tile, then reschedules.  The
+ * batched decodes stay on the main thread too; they are short on a
+ * cached page and bounded by one event-loop slice rather than a busy
+ * loop. */
 void
 bs_cover_tick(void *ctx)
 {
@@ -684,25 +696,139 @@ bs_cover_tick(void *ctx)
     if (g_cover_job != NULL)
         return;
 
-    int top, bot, cell_w, cell_h;
-    (void)top;
-    (void)bot;
-    (void)cell_w;
-    (void)cell_h;
     int page_start = bs_g_state.page * bs_view_pagesize();
 
-    int target = -1;
+    int        processed = 0; /* a pending cover was classified this tick */
+    int        submitted = 0; /* a remote fetch was handed to the worker */
+    BsGridFonts gf;
+    grid_fonts_open(&gf);
+    int  min_x = 0, min_y = 0, max_x = 0, max_y = 0;
+    int  nblit = 0;
     for (int k = 0; k < bs_g_row_count; k++) {
-        const char *id = page_row_id(k);
-        if (id == NULL)
+        const char *bid = page_row_id(k);
+        if (bid == NULL)
             break;
-        BsCoverSlot *s = bs_cover_slot(id, 1);
-        if (s != NULL && s->state == 0) {
-            target = page_start + k;
-            break;
+        int         idx = page_start + k;
+        BsCoverSlot *s = bs_cover_slot(bid, 1);
+        if (s == NULL || s->state != 0)
+            continue; /* already loaded / in flight / failed */
+        processed = 1;
+
+        /* Local (filesystem) books have no remote cover: extract the
+         * embedded cover image (EPUB) when the format has one,
+         * otherwise the tile keeps the placeholder. */
+        BsBook   cbook;
+        int      local_book = !bs_store_get_book(bid, &cbook) || strcmp(cbook.source, "kavita") != 0;
+        ibitmap *bmp = NULL;
+        if (local_book) {
+            /* The raw extracted cover is cached on disk next to the
+             * PNG cache; only unknown books hit the zip parser. */
+            char cover_path[BS_MAX_PATH_LEN];
+            bs_cover_raw_path(bid, cover_path, sizeof cover_path);
+            if (access(cover_path, R_OK) != 0 && cbook.local_path[0] != '\0') {
+                if (bs_extract_book_cover(cbook.local_path, cbook.ext, cover_path, sizeof cover_path) != 0)
+                    cover_path[0] = '\0'; /* extraction failed; no cover */
+            }
+            if (cover_path[0] != '\0' && access(cover_path, R_OK) == 0) {
+                bmp = bs_load_image_scaled(cover_path);
+                bs_LOG("[bookshelf] cover_tick cover id=%s bmp=%p\n", bid, (void *)bmp);
+            }
+        } else if (bs_cover_cache_load(bid, &bmp) == 0) {
+            bs_LOG("[bookshelf] cover_tick cache hit id=%s\n", bid);
+        } else if (!(QueryNetwork() & 0xf00)) {
+            /* No active connection: skip the fetch silently and let
+             * the slot land in the failed state below so the next
+             * sync — the only place the app may ask for WiFi —
+             * retries it.  An unguarded QuickDownload() here would
+             * pop the firmware's "Turn on WiFi" dialog whenever an
+             * offline launch shows books whose covers are not in the
+             * on-disk cache. */
+            bs_LOG("[bookshelf] cover_tick offline, skipping cover fetch id=%s\n", bid);
+        } else if (!submitted) {
+            /* Remote cover, not cached, online: hand the fetch to the
+             * shared worker; the done_cb decodes and blits and then
+             * reschedules the tick.  At most one remote job per tick. */
+            char url[BS_MAX_URL_LEN + 128];
+            snprintf(url,
+                     sizeof url,
+                     "%s/api/v1/books/%s/cover?access_token=%s",
+                     bs_g_state.api_base,
+                     bid,
+                     bs_g_state.api_token);
+            bs_LOG("[bookshelf] cover_tick submitting fetch url=%s\n", url);
+            BsCoverJobArg *a = calloc(1, sizeof *a);
+            if (a != NULL) {
+                snprintf(a->url, sizeof a->url, "%s", url);
+                snprintf(a->id, sizeof a->id, "%s", bid);
+                bs_cover_cache_path(bid, a->cache_path, sizeof a->cache_path);
+                BsJob *j = bs_worker_submit(cover_fetch_job, cover_job_done, a);
+                if (j != NULL) {
+                    s->state = 1; /* in flight until the done_cb lands */
+                    g_cover_job = j;
+                    submitted = 1;
+                    continue; /* the done_cb blits + schedules the next */
+                }
+                free(a);
+            }
+            /* Cannot submit: fall through to the failed state. */
+        } else {
+            /* A second remote cover past the one already submitted
+             * stays pending (state 0); the done_cb reschedule chain
+             * picks it up one at a time. */
+            continue;
+        }
+
+        if (bmp != NULL) {
+            if (s->cover_bmp) {
+                bs_LOG("[bookshelf] cover_tick free(old cover_bmp) begin\n");
+                free(s->cover_bmp);
+                bs_LOG("[bookshelf] cover_tick free(old cover_bmp) done\n");
+            }
+            s->cover_bmp = bmp;
+            s->state = 2;
+        } else {
+            s->state = 3;
+        }
+        /* The cached bitmap is stored on the slot regardless; only the
+         * on-screen blit is skipped while a modal owns the framebuffer
+         * or the shelf is not the live view, so a partial update can't
+         * punch a hole through an overlay's dim mask or paint over the
+         * wrong page (the full redraw then shows the now-cached
+         * cover). */
+        int tx, ty, tw, th;
+        if (shelf_active_view() && bs_tile_rect_for_index(idx, &tx, &ty, &tw, &th)) {
+            FillArea(tx, ty, tw, th, WHITE);
+            draw_thumbnail_fonts(tx, ty, tw, th, &bs_g_rows[k], idx, &gf);
+            if (!nblit) {
+                min_x = tx;
+                min_y = ty;
+                max_x = tx + tw;
+                max_y = ty + th;
+            } else {
+                if (tx < min_x)
+                    min_x = tx;
+                if (ty < min_y)
+                    min_y = ty;
+                if (tx + tw > max_x)
+                    max_x = tx + tw;
+                if (ty + th > max_y)
+                    max_y = ty + th;
+            }
+            nblit++;
         }
     }
-    if (target < 0) {
+    grid_fonts_close(&gf);
+
+    int modal = bs_modal_open();
+    if (nblit) {
+        bs_LOG("[bookshelf] cover_tick blit %d tiles modal=%d\n", nblit, modal);
+        PartialUpdate(min_x, min_y, max_x - min_x, max_y - min_y);
+    }
+
+    if (submitted)
+        return; /* the in-flight job's done_cb blits and reschedules */
+
+    if (!processed) {
         /* Nothing pending on this page.  A manual sync that opened the
          * progress popup ends here: the covers have drained, so move
          * the popup to its "done" state (it auto-closes shortly). */
@@ -714,97 +840,6 @@ bs_cover_tick(void *ctx)
         return; /* nothing pending on this page */
     }
 
-    const char *bid = page_row_id(target - page_start);
-    if (bid == NULL)
-        return;
-    BsCoverSlot *s = bs_cover_slot(bid, 1);
-    bs_LOG("[bookshelf] cover_tick target=%d id=%s slot=%p\n", target, bid, (void *)s);
-
-    /* Local (filesystem) books have no remote cover: extract the
-     * embedded cover image (EPUB) when the format has one, otherwise
-     * the tile keeps the placeholder. */
-    BsBook cbook;
-    int  local_book = !bs_store_get_book(bid, &cbook) || strcmp(cbook.source, "kavita") != 0;
-    s->state = local_book ? 3 : 1;
-
-    ibitmap *bmp = NULL;
-    if (local_book) {
-        /* The raw extracted cover is cached on disk next to the PNG
-         * cache; only unknown books hit the zip parser. */
-        char cover_path[BS_MAX_PATH_LEN];
-        bs_cover_raw_path(bid, cover_path, sizeof cover_path);
-        if (access(cover_path, R_OK) != 0 && cbook.local_path[0] != '\0') {
-            if (bs_extract_book_cover(cbook.local_path, cbook.ext, cover_path, sizeof cover_path) != 0)
-                cover_path[0] = '\0'; /* extraction failed; no cover */
-        }
-        if (cover_path[0] != '\0' && access(cover_path, R_OK) == 0) {
-            bmp = bs_load_image_scaled(cover_path);
-            bs_LOG("[bookshelf] cover_tick cover id=%s bmp=%p\n", bid, (void *)bmp);
-        }
-    } else if (bs_cover_cache_load(bid, &bmp) == 0) {
-        bs_LOG("[bookshelf] cover_tick cache hit id=%s\n", bid);
-    } else if (!(QueryNetwork() & 0xf00)) {
-        /* No active connection: skip the fetch silently and let the
-         * slot land in the failed state below so the next sync — the
-         * only place the app may ask for WiFi — retries it.  An
-         * unguarded QuickDownload() here would pop the firmware's
-         * "Turn on WiFi" dialog whenever an offline launch shows
-         * books whose covers are not in the on-disk cache. */
-        bs_LOG("[bookshelf] cover_tick offline, skipping cover fetch id=%s\n", bid);
-    } else {
-        /* Remote cover, not cached, online: hand the fetch to the
-         * shared worker; the done_cb decodes and blits. */
-        char url[BS_MAX_URL_LEN + 128];
-        snprintf(url,
-                 sizeof url,
-                 "%s/api/v1/books/%s/cover?access_token=%s",
-                 bs_g_state.api_base,
-                 bid,
-                 bs_g_state.api_token);
-        bs_LOG("[bookshelf] cover_tick submitting fetch url=%s\n", url);
-        BsCoverJobArg *a = calloc(1, sizeof *a);
-        if (a != NULL) {
-            snprintf(a->url, sizeof a->url, "%s", url);
-            snprintf(a->id, sizeof a->id, "%s", bid);
-            bs_cover_cache_path(bid, a->cache_path, sizeof a->cache_path);
-            BsJob *j = bs_worker_submit(cover_fetch_job, cover_job_done, a);
-            if (j != NULL) {
-                g_cover_job = j;
-                return; /* the done_cb blits and schedules the next */
-            }
-            free(a);
-        }
-        /* Cannot submit: fall through to the failed state. */
-    }
-
-    if (bmp != NULL) {
-        if (s->cover_bmp) {
-            bs_LOG("[bookshelf] cover_tick free(old cover_bmp) begin\n");
-            free(s->cover_bmp);
-            bs_LOG("[bookshelf] cover_tick free(old cover_bmp) done\n");
-        }
-        s->cover_bmp = bmp;
-        s->state = 2;
-    } else {
-        s->state = 3;
-    }
-    /* The cached bitmap is stored on the slot regardless; only the
-     * on-screen blit is skipped while a modal owns the framebuffer or
-     * the shelf is not the live view, so a single-tile PartialUpdate
-     * can't punch a hole through an overlay's dim mask or paint over
-     * the wrong page (the full redraw then shows the now-cached
-     * cover). */
-    int modal = bs_modal_open();
-    bs_LOG("[bookshelf] cover_tick blit begin modal=%d\n", modal);
-
-    int tx, ty, tw, th;
-    if (shelf_active_view() && bs_tile_rect_for_index(target, &tx, &ty, &tw, &th)) {
-        FillArea(tx, ty, tw, th, WHITE);
-        bs_draw_thumbnail(tx, ty, tw, th, &bs_g_rows[target - page_start], target);
-        PartialUpdate(tx, ty, tw, th);
-    }
-    bs_LOG("[bookshelf] cover_tick blit done, scheduling next\n");
-    bs_cover_schedule_next();
     bs_LOG("[bookshelf] cover_tick EXIT\n");
 }
 

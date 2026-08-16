@@ -72,8 +72,11 @@ import itertools as _it
 _sdl_env_seq = _it.count()
 
 
-def _sdl_env():
+def _sdl_env(*, config: str | None = None):
     """Headless SDL (native PC) environment: API server + bookshelf.pc
+
+    *config* overrides the mock server config (a synthetic ``count``
+    builds a multi-author/multi-group library for the group-by tests).
     driven over the IPC socket.  Fast, no emulator, parallel-safe: the
     binary is built once (lock-guarded, shared), and each instance runs
     from its own build/bs-<uniq> dir with its own API port, socket, cfg,
@@ -106,7 +109,7 @@ def _sdl_env():
     with _sock.socket(_sock.AF_INET, _sock.SOCK_STREAM) as s:
         s.bind(("127.0.0.1", 0))
         port = s.getsockname()[1]
-    api_proc = _start_api_server(port=port, log_path=run_dir / "api.log")
+    api_proc = _start_api_server(port=port, log_path=run_dir / "api.log", config=config)
 
     (run_dir / "bookshelf.cfg").write_text(
         f"api_url=http://127.0.0.1:{port}\napi_token=pbemu-dev-token\n",
@@ -176,6 +179,68 @@ def bookshelf_env():
         return
         return
     yield from _emulator_env()
+
+
+@pytest.fixture(scope="module")
+def synth_bookshelf_env(tmp_path_factory):
+    """SDL-only environment with a deterministic multi-group library.
+
+    The default SDL mock is a single author (every books-dir file is
+    attributed to "pbemu mock library"), so author grouping collapses to
+    one card — it cannot exercise multi-page grouped views or the
+    card/flat sort interleave.  This fixture serves a mock corpus of 24
+    authors: even-numbered authors have two books (multi-member → a stack
+    card), odd-numbered authors one book (flat tile), titled "Book 00"..
+    "Book 23".  Under "By author" + title sort the view alternates
+    [card, flat, card, flat, ...] — 24 tiles across 4 pages, with stack
+    cards on page 2 to drill into from a nonzero page.  Even authors'
+    books carry a series, so the Author > Series preset is offered too.
+    Only available on the SDL backend.
+    """
+    if os.environ.get("BS_TEST_BACKEND", "emulator") != "sdl":
+        pytest.skip("synthetic group fixtures need SDL")
+
+    books_dir = tmp_path_factory.mktemp("synth-books")  # empty dir scan
+    corpus: list[dict] = []
+    for i in range(24):
+        author = f"Author {i:02d}"
+        corpus.append({
+            "id": f"corp_b{i:03d}a",
+            "title": f"Book {i:02d}",
+            "authors": [author],
+            "added_at": "2023-01-01T00:00:00Z",
+        })
+        if i % 2 == 0:
+            corpus.append({
+                "id": f"corp_b{i:03d}b",
+                "title": f"Book {i:02d} (vol 2)",
+                "authors": [author],
+                "series": f"Series {i:02d}",
+                "added_at": "2023-01-01T00:00:01Z",
+            })
+    corpus_path = tmp_path_factory.mktemp("synth-corpus") / "books.jsonl"
+    corpus_path.write_text(
+        "\n".join(json.dumps(r) for r in corpus) + "\n", encoding="utf-8"
+    )
+    cfg = json.loads(
+        (EINKHOME_ROOT / "tests" / "support" / "server-test.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    cfg["providers"]["mock"].update(
+        books_dir=str(books_dir), count=len(corpus), corpus=str(corpus_path)
+    )
+    # The default ledger + cover cache live at build/pbemu-test-cover-cache
+    # and are shared with the default-config servers — a server pointing
+    # there would replay the catalogued 16 shipped books instead of this
+    # fixture's library.  Give it its own durable paths in the temp tree
+    # so the walk folds this catalogue fresh.
+    cfg_dir = tmp_path_factory.mktemp("synth-cfg")
+    cfg["cover_cache"]["dir"] = str(cfg_dir / "cache")
+    cfg["ledger"]["path"] = str(cfg_dir / "sync-ledger.db")
+    cfg_path = cfg_dir / "server.json"
+    cfg_path.write_text(json.dumps(cfg), encoding="utf-8")
+    yield from _sdl_env(config=str(cfg_path))
 
 
 def _emulator_env():
@@ -338,6 +403,23 @@ def fresh_bookshelf(bookshelf_env, request):
     bs.assert_no_crash()
 
 
+@pytest.fixture(autouse=True)
+def fresh_synth(synth_bookshelf_env, request):
+    """Restart bookshelf before each synthetic-library test for a clean
+    state (mirrors fresh_bookshelf for the synth env)."""
+    bs, _ = synth_bookshelf_env
+    request.node._bs_log_open_start = bs.invocation_count()  # type: ignore[attr-defined]
+    bs.begin_snapshots(request.node.name)
+    bs.backend.restart()
+    bs.snapshot("boot")
+    yield bs
+    request.node._bs_log_open_end = bs.invocation_count()  # type: ignore[attr-defined]
+    report = getattr(request.node, "_bs_call_report", None)
+    bs.snapshot("FAILED" if report is not None and report.failed else "teardown")
+    bs.finish_snapshots()
+    bs.assert_no_crash()
+
+
 # ── launch & initial state ─────────────────────────────────────────────
 
 
@@ -418,42 +500,50 @@ def test_sync_button_taps_sync(fresh_bookshelf):
     _wait_log_slice(bs, before, "do_sync", timeout=20.0)
 
 
-def test_more_overlay_sort_title_az(fresh_bookshelf):
-    """Open More, tap Title A-Z, verify framebuffer changes."""
-    bs = fresh_bookshelf
+# Sort rows in the more-overlay chooser (0..3: title/author/series/recent).
+_SORT_TITLE, _SORT_AUTHOR, _SORT_SERIES, _SORT_RECENT = range(4)
+
+
+def _sort_changes_shelf(bs, target_row: int, baseline_row: int) -> None:
+    """Assert that choosing sort *target_row* re-renders the shelf
+    differently than sort *baseline_row*.
+
+    Deterministic against the mock library, whose every book shares
+    author='pbemu mock library' and whose default sort is Title A-Z —
+    so tapping "Title A-Z" (or "By author", which orders identically)
+    from the default is a genuine no-op.  Such a no-op used to
+    "pass" only because the old one-cover-per-tick loader changed the
+    frame mid-test; once covers load in a single batch, a settled
+    frame never changes.  So settle the covers first and drive through
+    a differing sort before capturing the baseline, guaranteeing the
+    target row really repaints."""
+    bs.wait_for_stable()          # let the boot cover batch land
+    bs.choose_sort(baseline_row)  # a sort known to reorder from the default
+    bs.wait_for_stable()
     h = bs.frame_hash()
-    bs.choose_sort(0)
-    assert bs.frame_hash() != h, "sort did not change the shelf"
+    bs.choose_sort(target_row)
+    assert bs.frame_hash() != h, f"sort row {target_row} did not change the shelf"
     bs.assert_no_crash()
 
 
+def test_more_overlay_sort_title_az(fresh_bookshelf):
+    """Open More, tap Title A-Z, verify framebuffer changes."""
+    _sort_changes_shelf(fresh_bookshelf, _SORT_TITLE, _SORT_SERIES)
 
 
 def test_more_overlay_sort_author(fresh_bookshelf):
     """Open More, tap By author, verify framebuffer changes."""
-    bs = fresh_bookshelf
-    h = bs.frame_hash()
-    bs.choose_sort(1)
-    assert bs.frame_hash() != h, "sort did not change the shelf"
-    bs.assert_no_crash()
+    _sort_changes_shelf(fresh_bookshelf, _SORT_AUTHOR, _SORT_SERIES)
 
 
 def test_more_overlay_sort_series(fresh_bookshelf):
     """Open More, tap By series, verify framebuffer changes."""
-    bs = fresh_bookshelf
-    h = bs.frame_hash()
-    bs.choose_sort(2)
-    assert bs.frame_hash() != h, "sort did not change the shelf"
-    bs.assert_no_crash()
+    _sort_changes_shelf(fresh_bookshelf, _SORT_SERIES, _SORT_RECENT)
 
 
 def test_more_overlay_sort_recent(fresh_bookshelf):
     """Open More, tap Recent, verify framebuffer changes."""
-    bs = fresh_bookshelf
-    h = bs.frame_hash()
-    bs.choose_sort(3)
-    assert bs.frame_hash() != h, "sort did not change the shelf"
-    bs.assert_no_crash()
+    _sort_changes_shelf(fresh_bookshelf, _SORT_RECENT, _SORT_SERIES)
 
 
 def test_layout_toggle_button(fresh_bookshelf):
@@ -1035,6 +1125,139 @@ def test_group_by_sort_buttons_and_choosers(fresh_bookshelf):
     bs.choose_sort(1)  # 1 = By author
     bs.assert_no_crash()
     _wait_log_slice(bs, before, "sort=1")
+
+
+S_PAGESIZE = 6  # COLS * ROWS, must match geometry.PAGESIZE
+
+
+def _synth_view_kinds(bs) -> list[int]:
+    """On-screen tile kinds of the projected view, top-to-bottom, read
+    straight from the app's store.  The view rebuild INSERT orders by the
+    group fk, so SQLite rowid order == on-screen order: 0 = flat tile,
+    1 = stack card."""
+    import sqlite3
+    path = bs.backend.store_path
+    deadline = time.monotonic() + 10.0
+    last_err = None
+    while time.monotonic() < deadline:
+        try:
+            con = sqlite3.connect(str(path), timeout=2.0)
+            try:
+                rows = con.execute(
+                    "SELECT kind FROM view ORDER BY rowid"
+                ).fetchall()
+            finally:
+                con.close()
+            if rows:
+                return [int(r[0]) for r in rows]
+        except Exception as exc:  # noqa: BLE001 - store may be mid-sync
+            last_err = exc
+        time.sleep(0.2)
+    raise AssertionError(f"could not read the projected view: {last_err}")
+
+
+def test_synth_group_cards_interleave_by_sort(fresh_synth):
+    """A multi-member group card sits at its first member's sort position,
+    interleaved with single-member flat tiles — never all shoved after
+    them.
+
+    The old build emitted every flat tile first, then all stack cards
+    (``fk = 1e9 + first-seen``), so a card could never precede a flat and
+    the flats always led the shelf.  The fix keys each card on its first
+    member's fk, so a card whose earliest book sorts among the flats
+    appears before them.
+
+    The corpus alternates author cards and single-book flats under "By
+    author" ("Author 00" has two books → the first tile is a card), so
+    the view is [card, flat, card, flat, ...] and the leading card proves
+    the interleave.
+    """
+    bs = fresh_synth
+    bs.choose_group('author')
+    bs.wait_for_stable()
+    kinds = _synth_view_kinds(bs)
+    if not (0 in kinds and 1 in kinds):
+        import sqlite3
+        con = sqlite3.connect(str(bs.backend.store_path), timeout=2.0)
+        try:
+            rows = con.execute(
+                "SELECT author, COUNT(*) FROM books GROUP BY author"
+            ).fetchall()
+            total = con.execute("SELECT COUNT(*) FROM books").fetchone()[0]
+        finally:
+            con.close()
+        raise AssertionError(
+            f"expected a mixed flat/card view, got kinds={kinds}; "
+            f"books total={total}, by author={rows}"
+        )
+    first_card = kinds.index(1)
+    last_flat = len(kinds) - 1 - kinds[::-1].index(0)
+    assert first_card < last_flat, (
+        "a multi-book card sorted after every flat tile; cards should "
+        "interleave at their first member's sort position"
+    )
+    # "Author 00" has two books → its card must lead the shelf.
+    assert first_card == 0, f"expected a card first in the view, got {kinds}"
+
+
+def test_synth_group_drill_back_restores_page_and_back_icon(fresh_synth):
+    """Drill-back from a group returns to the page it was opened from (not
+    page 0), and while drilled the top-bar left button is the back chevron
+    instead of the house.
+
+    Reproduces the reported flow: group by Author > Series, go to page 2,
+    open an author group, then leave it — the shelf must land back on
+    page 2, not page 1 (or page 0).
+    """
+    bs = fresh_synth
+    bs.choose_group('author_series')
+    bs.wait_for_stable()
+    kinds = _synth_view_kinds(bs)
+    target_page = 2
+    assert len(kinds) > (target_page + 1) * S_PAGESIZE, (
+        f"expected the grouped view to span more than page {target_page}, "
+        f"got {len(kinds)} tiles"
+    )
+    # Pick a stack card on the target page to drill into.
+    page_kinds = kinds[target_page * S_PAGESIZE:(target_page + 1) * S_PAGESIZE]
+    card_pos = next((i for i, k in enumerate(page_kinds) if k == 1), None)
+    assert card_pos is not None, (
+        f"expected a stack card on page {target_page}, got {page_kinds}"
+    )
+
+    # Go to the target page of the grouped view.
+    _goto_view_tile(bs, target_page * S_PAGESIZE)  # lands on page target_page
+    before_drill = bs.frame_hash()
+
+    # Not drilled: the left top-bar button is the house (ink at the roof
+    # apex).  Sample the roof-apex pixel inside the icon box.
+    ppm = _settled_dump(bs, "grp_house")
+    assert _ppm_ink_xs(ppm, 55, 22, 59, 26), "expected house roof apex before drill"
+
+    # Drill into the card.
+    bs.tap_book(card_pos)
+    bs.wait_hash_change(before_drill)
+    _wait_log_slice(bs, before_drill, "drill=1")
+
+    # Drilled: the left button is the back chevron — the roof-apex spot is
+    # blank (the chevron is confined to the button's left-centre) while
+    # the chevron's own stroke is present.
+    ppm = _settled_dump(bs, "grp_back")
+    assert not _ppm_ink_xs(ppm, 55, 22, 59, 26), (
+        "house roof apex still drawn while drilled into a group"
+    )
+    assert _ppm_ink_xs(ppm, 48, 20, 86, 84), "no back chevron ink while drilled"
+
+    # Back pops the drill and restores the pre-drill page, not page 0.
+    before_back = bs.current_log()
+    bs.tap_home()  # the left top-bar button = back while drilled
+    _wait_log_slice(bs, before_back, "drill=0")
+    pages = re.findall(r"draw_grid view=\d+ page=(\d+)", bs.current_log())
+    assert pages and int(pages[-1]) == target_page, (
+        f"group drill-back jumped page: expected {target_page}, "
+        f"got {pages[-1] if pages else None}"
+    )
+    bs.assert_no_crash()
 
 
 # ── back key (no overlay) ──────────────────────────────────────────────

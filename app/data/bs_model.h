@@ -17,6 +17,12 @@ extern BsGroupPreset bs_g_group;
 extern int bs_g_drill_level;
 extern char bs_g_drill_values[BS_GROUP_MAX_LEVELS][BS_MAX_TITLE_LEN];
 
+/* The library page to restore when popping drill-back INTO each level
+ * (saved_pages[L] = page of level L's view, remembered right before
+ * drilling deeper into L+1).  Nested so a level-2 leaf pops back
+ * through the intermediate group level at its own page, not page 0. */
+extern int bs_g_saved_pages[BS_GROUP_MAX_LEVELS];
+
 extern char bs_g_search_kb_buf[BS_MAX_QUERY_LEN];
 
 /* Live suggestion band state: filled by the debounce tick in

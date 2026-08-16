@@ -34,6 +34,7 @@ int     bs_g_view_total = 0;
 BsGroupPreset bs_g_group = BS_GROUP_NONE;
 int       bs_g_drill_level = 0;
 char      bs_g_drill_values[BS_GROUP_MAX_LEVELS][BS_MAX_TITLE_LEN];
+int       bs_g_saved_pages[BS_GROUP_MAX_LEVELS];
 
 /* Dirty flag for the materialised view: set by any sync/local apply
  * path that changed rows, cleared by finish_sync, which then rebuilds

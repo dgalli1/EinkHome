@@ -89,13 +89,16 @@ def _api_env() -> dict[str, str]:
 def _start_api_server(
     port: int | None = None,
     log_path: Path | str | None = None,
+    config: Path | str | None = None,
 ) -> subprocess.Popen:  # type: ignore[type-arg]
     """Start the mock API server on the test port. Returns the Popen.
 
     *port* defaults to the module-wide API_PORT.  Parallel backends
     (SDL/xdist workers) pass a per-process port so concurrent servers
     don't fight over one listener, and *log_path* so each server's log
-    (dumped on failure) isn't clobbered by the next worker.
+    (dumped on failure) isn't clobbered by the next worker.  *config*
+    overrides the mock server config (e.g. a synthetic ``count`` for
+    multi-author/multi-group fixtures); it defaults to server-test.json.
     """
     port = API_PORT if port is None else port
     log_path = Path(
@@ -104,6 +107,11 @@ def _start_api_server(
     )
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log_fh = open(log_path, "w", encoding="utf-8")  # noqa: SIM115
+    cfg_path = (
+        Path(config)
+        if config is not None
+        else (EINKHOME_ROOT / "tests" / "support" / "server-test.json")
+    )
     proc = subprocess.Popen(
         [
             sys.executable,
@@ -116,7 +124,7 @@ def _start_api_server(
             "--provider",
             "mock",
             "--config",
-            str(EINKHOME_ROOT / "tests" / "support" / "server-test.json"),
+            str(cfg_path),
         ],
         # The server code lives in this repo (api/ on PYTHONPATH), but it
         # runs with the submodule as cwd so the config's firmware-relative
