@@ -1118,6 +1118,16 @@ bs_plat_device_profile(BsLcProfile *out, const char *lang)
            out->device, out->has_audio, out->language);
 }
 
+/* PC build has no device config (/mnt/ext1 does not exist); the caller
+ * falls back to the LANG environment variable. */
+int
+bs_plat_device_language(char *out, unsigned cap)
+{
+    (void)out;
+    (void)cap;
+    return -1;
+}
+
 void
 bs_plat_log_identity(void)
 {

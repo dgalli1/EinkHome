@@ -100,6 +100,14 @@ void bs_plat_stamp_panel(int self_panel);
  * based: device_number / device_has_touchpanel / device_has_audio). */
 void bs_plat_device_profile(struct BsLcProfile *out, const char *lang);
 
+/* Resolve the on-device system language.  PocketBook stores it in
+ * /mnt/ext1/system/config/global.cfg ("language=de") and does NOT export
+ * it via the environment, so the PB backend parses that file.  Returns 0
+ * with *out set to a 2-letter code (en/de/fr/it) when a known device
+ * language is configured, non-zero when there is none (the PC backend
+ * has no device config; callers fall back to LANG). */
+int bs_plat_device_language(char *out, unsigned cap);
+
 /* Log device model + firmware version once at boot. */
 void bs_plat_log_identity(void);
 

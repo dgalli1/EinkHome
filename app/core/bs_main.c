@@ -288,17 +288,26 @@ int bs_on_event(int type, int par1, int par2) {
     bs_LOG("[bookshelf] reader_pref=%d (cfg `%s`)\n", bs_g_state.reader_pref,
         bs_g_cfg_reader);
 
-    /* Try firmware language env (PB sets LANG=en_US.utf8 etc). */
-    const char *env_lang = getenv("LANG");
-    if (env_lang != NULL && env_lang[0] != '\0') {
-      if (strncmp(env_lang, "de", 2) == 0)
-        snprintf(bs_g_lang, sizeof bs_g_lang, "de");
-      else if (strncmp(env_lang, "fr", 2) == 0)
-        snprintf(bs_g_lang, sizeof bs_g_lang, "fr");
-      else if (strncmp(env_lang, "it", 2) == 0)
-        snprintf(bs_g_lang, sizeof bs_g_lang, "it");
-      else
-        snprintf(bs_g_lang, sizeof bs_g_lang, "en");
+    /* Device language.  On PocketBook the firmware keeps the system
+     * language in /mnt/ext1/system/config/global.cfg (language=de) and
+     * does NOT export it via the environment, so the PB backend parses
+     * that file.  Fall back to LANG (the SDL/PC host), then the app's
+     * own config loaded above. */
+    char plat_lang[8] = "";
+    if (bs_plat_device_language(plat_lang, sizeof plat_lang) == 0) {
+        snprintf(bs_g_lang, sizeof bs_g_lang, "%.3s", plat_lang);
+    } else {
+      const char *env_lang = getenv("LANG");
+      if (env_lang != NULL && env_lang[0] != '\0') {
+        if (strncmp(env_lang, "de", 2) == 0)
+          snprintf(bs_g_lang, sizeof bs_g_lang, "de");
+        else if (strncmp(env_lang, "fr", 2) == 0)
+          snprintf(bs_g_lang, sizeof bs_g_lang, "fr");
+        else if (strncmp(env_lang, "it", 2) == 0)
+          snprintf(bs_g_lang, sizeof bs_g_lang, "it");
+        else
+          snprintf(bs_g_lang, sizeof bs_g_lang, "en");
+      }
     }
 
     /* Device identity: fill the launcher profile from runtime probes

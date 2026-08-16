@@ -9,6 +9,9 @@
 #include "bs_core.h"
 #include "bs_ui.h"
 #include "bs_launcher.h"
+#include "bs_config.h"
+
+#include <ctype.h>
 
 /* Exported by the firmware's libinkview but absent from this SDK
  * vintage's headers (and its bundled lib).  Weak so the link succeeds
@@ -111,6 +114,50 @@ bs_plat_stamp_panel(int self_panel)
 void
 bs_plat_cover_flush(void)
 {
+}
+
+/* Device language: the firmware stores it in /mnt/ext1/system/config/
+ * global.cfg ("language=de") and does not export it through the
+ * environment, so we parse that file.  The extractor callback captures
+ * the first "language=" value into a static slot (bs_read_kv_file feeds
+ * keys/values in file order, unknown keys ignored). */
+static char g_plat_lang[8] = "";
+
+static void
+plat_lang_kv_cb(const char *key, const char *value, void *user)
+{
+    (void)user;
+    if (g_plat_lang[0] != '\0' || strcmp(key, "language") != 0)
+        return;
+    /* Normalise "de" / "de_DE" / "de-DE" / "de_DE.utf8" -> "de".  Only
+     * the languages the i18n table ships are accepted; anything else is
+     * left to the caller's fallback. */
+    char base[8];
+    unsigned n = 0;
+    for (const char *p = value; *p != '\0' && *p != '.' && *p != '_' && *p != '-';
+         p++) {
+        if (n + 1 < sizeof base)
+            base[n++] = (char)tolower((unsigned char)*p);
+    }
+    if (n < 2)
+        return;
+    base[2] = '\0';
+    if (!(strcmp(base, "en") == 0 || strcmp(base, "de") == 0 ||
+          strcmp(base, "fr") == 0 || strcmp(base, "it") == 0))
+        return;
+    snprintf(g_plat_lang, sizeof g_plat_lang, "%.2s", base);
+}
+
+int
+bs_plat_device_language(char *out, unsigned cap)
+{
+    g_plat_lang[0] = '\0';
+    bs_read_kv_file("/mnt/ext1/system/config/global.cfg", plat_lang_kv_cb,
+                    NULL);
+    if (g_plat_lang[0] == '\0')
+        return -1;
+    snprintf(out, cap, "%s", g_plat_lang);
+    return 0;
 }
 
 /* Fill the launcher device profile from runtime probes.
