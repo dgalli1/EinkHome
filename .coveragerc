@@ -1,0 +1,29 @@
+# Coverage configuration for the EinkHome API server.
+#
+# The gate measures the API production modules via the api/tests suite.
+# Two exclusions carry documentation:
+#   - api/providers/kavita.py is exercised only by the live-provider e2e
+#     suite (api/tests/e2e, needs a real Kavita server, skipped in unit
+#     CI).  Excluding it keeps the unit gate honest rather than failing
+#     the whole run because one live-only provider is 18% covered.
+#   - module-level code is counted via relative_files so a clean `pytest`
+#     invocation from the repo root attributes correctly.
+#
+# Usage (also `make lint-py`):
+#   python3 -m pytest api/tests -q --cov=api/api --cov=api/providers \
+#       --cov=api/storage --cov-report=term
+
+[run]
+relative_files = True
+omit =
+    api/providers/kavita.py
+
+[report]
+# Gate on the unit-testable API surface.  Raise this floor as provider
+# and server tests land.
+fail_under = 70
+show_missing = True
+exclude_lines =
+    pragma: no cover
+    if TYPE_CHECKING:
+    class .*\bProtocol\b:

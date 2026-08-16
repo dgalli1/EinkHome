@@ -433,6 +433,7 @@ js_epoch(const cJSON *obj, const char *key)
         return 0;
     int y = 0, mo = 0, d = 0, h = 0, mi = 0;
     double sec = 0.0;
+    // NOLINTNEXTLINE(cert-err34-c) — fields are width-bounded (%4d/%2d) and the return count is checked; replaces a fragile strptime.
     if (sscanf(v->valuestring, "%4d-%2d-%2dT%2d:%2d:%lf",
                &y, &mo, &d, &h, &mi, &sec) < 6)
         return 0;
@@ -646,7 +647,7 @@ sync_fetch_round(BsJob *job)
         job->result = r;
         job->rc = rc;
     }
-    __atomic_store_n(&job->done, 1, __ATOMIC_RELEASE);
+    atomic_store_explicit(&job->done, 1, memory_order_release);
 }
 
 /* Submit one round job (main thread only). */
@@ -925,7 +926,7 @@ sync_finish_post(BsJob *job)
     if (resp)
         free(resp);
     job->rc = 0; /* best-effort; the outcome is not used */
-    __atomic_store_n(&job->done, 1, __ATOMIC_RELEASE);
+    atomic_store_explicit(&job->done, 1, memory_order_release);
 }
 
 /* done_cb for the finish job: the terminal bookkeeping.  A stale
@@ -1027,7 +1028,8 @@ sync_round_done(BsJob *job)
         outcome = SYNC_ROUND_BAD_RESP;
     } else if (r == NULL || !r->parse_ok) {
         /* Bad JSON or a malformed delta, diagnosed on the worker. */
-        cJSON_Delete(r->root);
+        if (r != NULL)
+            cJSON_Delete(r->root);
         outcome = SYNC_ROUND_BAD_RESP;
     } else {
         outcome = sync_apply_round(r->root, g_sync_cursor, &next, &more);
@@ -1384,7 +1386,7 @@ bs_cover_cache_save(const char *id, const char *png_data, int len)
     if ((++g_cover_saves % BS_COVER_SWEEP_EVERY) == 0) {
         cover_bucket_of(safe, bucket);
         snprintf(g_cover_sweep_bucket, sizeof g_cover_sweep_bucket, "%s", bucket);
-        __atomic_store_n(&g_cover_sweep_pending, 1, __ATOMIC_RELEASE);
+        atomic_store_explicit(&g_cover_sweep_pending, 1, memory_order_release);
     }
 }
 
@@ -1394,7 +1396,7 @@ bs_cover_cache_save(const char *id, const char *png_data, int len)
 void
 bs_cover_cache_sweep_if_pending(void)
 {
-    if (__atomic_exchange_n(&g_cover_sweep_pending, 0, __ATOMIC_ACQ_REL)) {
+    if (atomic_exchange_explicit(&g_cover_sweep_pending, 0, memory_order_acq_rel)) {
         char bucket[3];
         snprintf(bucket, sizeof bucket, "%s", g_cover_sweep_bucket);
         cover_cache_sweep_bucket(bucket);

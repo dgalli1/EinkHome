@@ -27,18 +27,6 @@ Authorization.
 
 from __future__ import annotations
 
-"""pbemu bookshelf REST API server.
-
-This module lives at ``api/api/server.py``.  Its sibling subpackages are
-``api.providers`` and ``api.storage``, but the module-level imports
-below are written as ``providers``/``storage`` (not ``api.providers``)
-so the file reads top-to-bottom without package-relative boilerplate.
-To make that style work regardless of where the script is invoked
-from — ``python -m api.api.server`` from the repo root, or
-``python api/api/server.py`` directly — we prepend the ``api/``
-directory to ``sys.path`` before importing the providers.
-"""
-
 import os
 import sys
 
@@ -53,14 +41,14 @@ import argparse  # noqa: E402
 import concurrent.futures  # noqa: E402
 import hmac  # noqa: E402
 import http.server  # noqa: E402
-import json  # noqa: E402
 import itertools  # noqa: E402
+import json  # noqa: E402
 import re  # noqa: E402
 import socketserver  # noqa: E402
 import sqlite3  # noqa: E402
 import tempfile  # noqa: E402
-import time  # noqa: E402
 import threading  # noqa: E402
+import time  # noqa: E402
 import traceback  # noqa: E402
 from dataclasses import dataclass, field  # noqa: E402
 from typing import Any  # noqa: E402
@@ -222,7 +210,7 @@ def _safe_filename(name: str) -> str:
     return name[:80] or "book"
 
 
-def _mime_for(app: "PbemuAPIServer", book_id: str, filename: str) -> str:
+def _mime_for(app: PbemuAPIServer, book_id: str, filename: str) -> str:
     ext = os.path.splitext(filename)[1].lower().lstrip(".")
     if ext in ("epub", "fb2", "mobi", "azw", "azw3"):
         return f"application/{ext}+zip"
@@ -235,6 +223,13 @@ def _mime_for(app: "PbemuAPIServer", book_id: str, filename: str) -> str:
     if ext == "png":
         return "image/png"
     return "application/octet-stream"
+
+
+def _query_arg(q: dict[str, list[str]], key: str) -> str | None:
+    """First value for ``key`` in a parsed query dict, or None when the
+    key is absent or holds an empty list."""
+    vals = q.get(key)
+    return vals[0] if vals else None
 
 
 # -- server --------------------------------------------------------------
@@ -272,7 +267,7 @@ class PbemuAPIServer(http.server.BaseHTTPRequestHandler):
             f"[{time.strftime('%H:%M:%S')}] {self.client_address[0]} - {format % args}\n"
         )
 
-    def log_request(self, code: int = -1, size: int = -1) -> None:
+    def log_request(self, code: int | str = -1, size: int | str = -1) -> None:
         """Log method + path + status, dropping the query string so an
         embedded ``?access_token=...`` never reaches stderr."""
         path = self.path.split("?", 1)[0]
@@ -405,7 +400,7 @@ class PbemuAPIServer(http.server.BaseHTTPRequestHandler):
         self._safe_handle(self._dispatch_get)
 
     def _dispatch_get(self) -> None:
-        path, q = self._split_path()
+        path, _ = self._split_path()
         endpoint, full = self._route(path)
         if endpoint is None:
             self._send(*_json(404, {"error": "not found", "path": full}))
@@ -537,22 +532,22 @@ class PbemuAPIServer(http.server.BaseHTTPRequestHandler):
 
     def _handle_list_books(self) -> None:
         _, q = self._split_path()
-        mode = (q.get("mode") or ["all"])[0]
-        library_id = (q.get("library") or [None])[0]
-        series_id = (q.get("series") or [None])[0]
-        author_id = (q.get("author") or [None])[0]
-        search = (q.get("search") or [None])[0]
+        mode = _query_arg(q, "mode") or "all"
+        library_id = _query_arg(q, "library")
+        series_id = _query_arg(q, "series")
+        author_id = _query_arg(q, "author")
+        search = _query_arg(q, "search")
         try:
-            limit = int((q.get("limit") or ["500"])[0])
+            limit = int(_query_arg(q, "limit") or "500")
         except (TypeError, ValueError):
             limit = 500
         limit = max(1, min(limit, 2000))
         try:
-            offset = int((q.get("offset") or ["0"])[0])
+            offset = int(_query_arg(q, "offset") or "0")
         except (TypeError, ValueError):
             offset = 0
         offset = max(0, offset)
-        since = (q.get("since") or [None])[0]
+        since = _query_arg(q, "since")
         provider = self.app.provider
         # Fetch one extra row to distinguish an exactly-full page from a
         # truncated one (same trick the delta sync uses).
@@ -958,6 +953,27 @@ def build_default_app(
     return state
 
 
+class _ThreadBag:
+    """append()/join() request-thread bag.
+
+    Minimal stand-in for the private ``socketserver._Threads`` so
+    :class:`_ThreadingHTTPServer` can honour ThreadingMixIn's
+    block-on-close contract (``server_close()`` waits on in-flight
+    request threads) without reaching into socketserver internals that
+    mypy's stubs do not expose.
+    """
+
+    def __init__(self) -> None:
+        self._threads: list[threading.Thread] = []
+
+    def append(self, t: threading.Thread) -> None:
+        self._threads.append(t)
+
+    def join(self, timeout: float | None = None) -> None:
+        for t in list(self._threads):
+            t.join(timeout=timeout)
+
+
 class _ThreadingHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
     daemon_threads = True
     allow_reuse_address = True
@@ -967,14 +983,16 @@ class _ThreadingHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
         # In-flight request threads, tracked so a graceful shutdown can
         # drain them with a bound.  ThreadingMixIn._threads drops
         # daemon threads (ours all are), so we track them ourselves.
+        # ``_threads`` mirrors ThreadingMixIn's block-on-close bag so
+        # server_close() waits on request threads too (stand-in for the
+        # private socketserver._Threads).
+        self._threads: _ThreadBag = _ThreadBag()
         self._request_threads: set[threading.Thread] = set()
         self._request_threads_lock = threading.Lock()
 
     def process_request(self, request: Any, client_address: Any) -> None:
         """Spawn the per-request thread exactly as ThreadingMixIn does,
         but also record it so :meth:`drain_requests` can join it."""
-        if self.block_on_close:
-            vars(self).setdefault("_threads", socketserver._Threads())
         t = threading.Thread(
             target=self.process_request_thread,
             args=(request, client_address),
@@ -1002,9 +1020,7 @@ class _ThreadingHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
                 break
             t.join(timeout=remaining)
         with self._request_threads_lock:
-            self._request_threads = {
-                t for t in self._request_threads if t.is_alive()
-            }
+            self._request_threads = {t for t in self._request_threads if t.is_alive()}
 
 
 def _apply_runtime_overrides(cfg: dict[str, Any], args: Any) -> dict[str, Any]:
@@ -1083,7 +1099,7 @@ class _CoverSlot:
     thread per book ever touches the provider or Pillow.
     """
 
-    __slots__ = ("event", "claimed")
+    __slots__ = ("claimed", "event")
 
     def __init__(self) -> None:
         self.event = threading.Event()
@@ -1136,7 +1152,7 @@ def _cover_png(app: Any, book_id: str) -> bytes | None:
             # Provider transport error (URLError / timeout / 5xx) — do
             # NOT negative-cache; a blip must not placeholder the book.
             return None
-        except Exception:
+        except Exception:  # noqa: BLE001 — any provider failure is transient
             # Any other provider failure is treated as a transport
             # error too: never negative-cache on a transient error.
             return None

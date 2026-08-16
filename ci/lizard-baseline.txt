@@ -1,0 +1,12 @@
+# Functions that exceeded the cyclomatic-complexity CI gate (CCN 28)
+# when the lizard gate was introduced (2026-08-16).  Each is the
+# pre-existing complexity debt to refactor down; keeping them in this
+# baseline keeps CI green today while new over-cap functions still fail.
+#
+# Format: app/path.c:function_name
+app/core/bs_main.c:bs_on_event
+app/data/bs_extract.c:zip_entry_read
+app/data/bs_store.c:bs_view_rebuild
+app/ui/bs_grid.c:bs_cover_tick
+app/action/bs_launcher.c:bs_launcher_build_pb
+app/ui/bs_browser.c:browser_load

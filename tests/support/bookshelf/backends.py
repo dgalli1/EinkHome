@@ -16,14 +16,14 @@ emulator those are `.live` host paths; on SDL they are local build dirs.
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
 from tests.support.runtime_common import REPO_ROOT  # noqa: F401  (re-exported)
 
 if TYPE_CHECKING:
-    from tests.support.runtime import Emulator
+    pass
 
 # IV key codes — PB/inkview values, backend-independent
 IV_KEY_BACK = 0x1B
@@ -342,7 +342,7 @@ class SdlBackend:
             self._ipc = None
     def _socket_ready(self):
         try:
-            c = self._conn()
+            self._conn()
             return True
         except (ConnectionError, OSError):
             return False

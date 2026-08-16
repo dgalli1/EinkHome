@@ -25,6 +25,9 @@ from collections.abc import Iterator
 from contextlib import suppress
 from typing import Any
 
+from storage.ledger import fingerprint_blob
+from storage.placeholder import PLACEHOLDER_PNG
+
 from .base import (
     AuthorInfo,
     BookMeta,
@@ -32,8 +35,6 @@ from .base import (
     Provider,
     SeriesInfo,
 )
-from storage.ledger import fingerprint_blob
-from storage.placeholder import PLACEHOLDER_PNG
 
 # Deterministic vocabulary for synthetic titles/authors.  Indexing by
 # (i mod len) keeps every synthetic book reproducible across runs.
@@ -102,7 +103,7 @@ class _Corpus:
     empty path yields an empty corpus (graceful when the configured
     file is missing on a fresh clone)."""
 
-    __slots__ = ("_path", "_offsets", "_len", "_fps", "_fps_key")
+    __slots__ = ("_fps", "_fps_key", "_len", "_offsets", "_path")
 
     def __init__(self, path: str) -> None:
         self._path = path
@@ -331,10 +332,7 @@ class MockProvider(Provider):
         genuinely changed books dir is reflected within a second or
         two."""
         now = time.monotonic()
-        if (
-            self._scan_cache is not None
-            and now - self._scan_cache_ts < _SCAN_TTL
-        ):
+        if self._scan_cache is not None and now - self._scan_cache_ts < _SCAN_TTL:
             return self._scan_cache
         entries = self._scan()
         self._scan_cache = entries
@@ -387,9 +385,7 @@ class MockProvider(Provider):
         else:
             # Corpus file unreadable: fall back to a streaming pass
             # (identical to the pre-cache behaviour).
-            self._corpus_index = {
-                rec["id"]: i for i, rec in enumerate(self.corpus)
-            }
+            self._corpus_index = {rec["id"]: i for i, rec in enumerate(self.corpus)}
         self._corpus_index_key = self._corpus_key()
         return self._corpus_index
 
@@ -536,8 +532,7 @@ class MockProvider(Provider):
                 series_name = stem[:dash_pos].replace("_", " ").strip()
                 return (
                     series_name,
-                    "mock_ser_"
-                    + hashlib.sha1(series_name.encode()).hexdigest()[:12],
+                    "mock_ser_" + hashlib.sha1(series_name.encode()).hexdigest()[:12],
                     float(tail),
                 )
         return None, None, None
@@ -634,11 +629,7 @@ class MockProvider(Provider):
             out: list[BookMeta] = []
             scanned = self._scan()
             n_dir = len(scanned)
-            n_corpus = (
-                min(self.synthetic_count, len(self.corpus))
-                if self.corpus
-                else 0
-            )
+            n_corpus = min(self.synthetic_count, len(self.corpus)) if self.corpus else 0
             start = offset
             end = offset + limit
             # dir layer: [0, n_dir)
@@ -662,7 +653,7 @@ class MockProvider(Provider):
                 for i in range(lo, hi):
                     out.append(self._synthetic(i))
             return out
-        out: list[BookMeta] = []
+        out = []
         skipped = 0
         for meta in self._all(series_id, search, since):
             if skipped < offset:
@@ -733,12 +724,10 @@ class MockProvider(Provider):
             for i in range(limit):
                 yield ids[i], fps[i], added_ats[i]
             return
-        i = 0
-        for rec in self.corpus:
+        for i, rec in enumerate(self.corpus):
             if i >= limit:
                 break
             yield _corpus_fp(i, rec)
-            i += 1
 
     def _dir_fp(self, entry: dict[str, Any]) -> tuple[str, str, str]:
         """(id, fp, added_at) for a books-dir entry — derives exactly

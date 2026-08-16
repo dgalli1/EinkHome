@@ -89,10 +89,9 @@ def _corpus(uniq: str) -> list[dict]:
 
 def _last_draw_grid(log: str) -> tuple[int, int]:
     """(view_count, page) from the last draw_grid line in *log*."""
-    m = None
-    for m in re.finditer(r"draw_grid view=(\d+) page=(\d+)", log):
-        pass
-    assert m, "no draw_grid line in log"
+    matches = list(re.finditer(r"draw_grid view=(\d+) page=(\d+)", log))
+    assert matches, "no draw_grid line in log"
+    m = matches[-1]
     return int(m.group(1)), int(m.group(2))
 
 
@@ -414,7 +413,7 @@ def test_offline_sort_reorders_shelf(offline_bookshelf):
     The corpus's interleaved authors mean by-author and title-A-Z order
     differ, so applying each sort must change the frame — all projected
     from the local store, with no network on the path."""
-    bs, meta = offline_bookshelf
+    bs, _ = offline_bookshelf
     _wait_offline_boot(bs)
 
     bs.choose_sort(_SORT_TITLE_AZ)  # title A-Z
@@ -429,7 +428,7 @@ def test_offline_sort_reorders_shelf(offline_bookshelf):
 def test_offline_group_by_author_and_drill(offline_bookshelf):
     """Group-by-author collapses the cached library into stack cards
     offline, and drilling in/back works."""
-    bs, meta = offline_bookshelf
+    bs, _ = offline_bookshelf
     _wait_offline_boot(bs)
 
     before = bs.frame_hash()
@@ -444,7 +443,7 @@ def test_offline_group_by_author_and_drill(offline_bookshelf):
     # Drill into a group card, then back — both stay offline.
     before = bs.current_log()
     bs.tap_group_header()
-    _wait_log_slice(bs, before, "view_rebuild: view=%d sort=" % 7, timeout=10.0)
+    _wait_log_slice(bs, before, f"view_rebuild: view={7} sort=", timeout=10.0)
     before = bs.frame_hash()
     bs.send_back_key()  # pop the drill back to the 2-card shelf
     bs.wait_hash_change(before)
@@ -462,7 +461,7 @@ def test_offline_search_filters_grid(offline_bookshelf):
     RETURN press.  The filter is a client-side SQL projection over the
     cached store — no network.
     """
-    bs, meta = offline_bookshelf
+    bs, _ = offline_bookshelf
     _wait_offline_boot(bs)
 
     bs.tap_search()

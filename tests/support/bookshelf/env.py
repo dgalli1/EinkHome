@@ -22,14 +22,15 @@ import sys
 import time
 from pathlib import Path
 
+from tests.support.reader.session import Session
+from tests.support.runtime import Emulator, container_running, container_sh
+from tests.support.runtime_common import REPO_ROOT
+
 from tests.support.bookshelf.session import (
     count_log_openings,
     latest_invocation_log,
     read_bookshelf_log,
 )
-from tests.support.reader.session import Session
-from tests.support.runtime import Emulator, container_running, container_sh
-from tests.support.runtime_common import REPO_ROOT
 
 # The pbemu submodule provides the firmware tree, the emulator tooling
 # (tools/ + api/), the container and the test support framework
@@ -146,7 +147,7 @@ def _start_api_server(
             )
             with urllib.request.urlopen(req, timeout=2) as resp:
                 body = json.loads(resp.read().decode("utf-8"))
-        except Exception:
+        except Exception:  # noqa: BLE001 — server not up yet; keep polling
             time.sleep(0.3)
             continue
         # The reply must come from the process we just spawned: a server

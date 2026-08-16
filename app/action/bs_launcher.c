@@ -165,6 +165,7 @@ bs_read_text_file(const char *path)
     }
     size_t nr = fread(buf, 1, (size_t)sz, f);
     fclose(f);
+    // NOLINTNEXTLINE(clang-analyzer-security.ArrayBound) — nr <= sz (fread caps) and buf is sz+1 bytes.
     buf[nr] = '\0';
     return buf;
 }

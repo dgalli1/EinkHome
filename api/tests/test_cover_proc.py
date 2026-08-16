@@ -78,7 +78,7 @@ def test_wide_image_letterboxed():
         assert check.size == (240, 360)
 
         def close(a, b, tol=10):
-            return all(abs(x - y) <= tol for x, y in zip(a, b))
+            return all(abs(x - y) <= tol for x, y in zip(a, b, strict=True))
 
         rgb = check.convert("RGB")
         # Bars are uniform and identical top/bottom… (JPEG is lossy, so

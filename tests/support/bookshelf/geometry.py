@@ -56,29 +56,29 @@ __all__ = [
     "CELL_MIN_H",
     "CELL_MIN_W",
     "COLS",
-    "BookshelfGeometry",
     "CTX_ITEM_H",
     "CTX_PAD",
     "CTX_TITLE_H",
+    "LAUNCHER_CELL_H",
+    "LAUNCHER_COLS",
+    "LAUNCHER_GROUP_H",
+    "LAUNCHER_ICON_SZ",
+    "LAUNCHER_MARGIN",
+    "MORE_APPS",
     "MORE_DOWNLOAD_ALL",
-    "MORE_SETTINGS",
     "MORE_GROUP",
+    "MORE_SETTINGS",
     "MORE_SORT",
+    "OVERLAY_HEADER_H",
     "PAGER_H",
     "PAGESIZE",
-    "SEARCH_ROW_H",
     "SEARCH_HISTORY_ROW_H",
-    "TOP_BAR_H",
+    "SEARCH_ROW_H",
     "SETTINGS_BTN_H",
     "SETTINGS_ROW1_Y",
     "SETTINGS_ROW_H",
-    "MORE_APPS",
-    "OVERLAY_HEADER_H",
-    "LAUNCHER_COLS",
-    "LAUNCHER_GROUP_H",
-    "LAUNCHER_CELL_H",
-    "LAUNCHER_ICON_SZ",
-    "LAUNCHER_MARGIN",
+    "TOP_BAR_H",
+    "BookshelfGeometry",
 ]
 
 
@@ -101,18 +101,18 @@ class BookshelfGeometry:
     # ── top bar ────────────────────────────────────────────────────────
 
     def home_button_center(self) -> tuple[int, int]:
-        """Centre of the 96×96 home (house) button, left side of top bar."""
+        """Centre of the 96x96 home (house) button, left side of top bar."""
         return (8 + 48, TOP_BAR_H // 2)
 
     def menu_button_center(self) -> tuple[int, int]:
-        """Centre of the 96×96 More (hamburger) button, right side of top
+        """Centre of the 96x96 More (hamburger) button, right side of top
         bar."""
         return (self.screen_w - 8 - 48, TOP_BAR_H // 2)
 
     # ── search (top-bar icon + Search sub-page) ───────────────────────
 
     def search_icon_center(self) -> tuple[int, int]:
-        """Centre of the 96×96 magnifying-glass icon in the top bar,
+        """Centre of the 96x96 magnifying-glass icon in the top bar,
         left of the layout-switch icon."""
         if self.screen_w == 0:
             return (0, 0)
@@ -120,7 +120,7 @@ class BookshelfGeometry:
         return (x, TOP_BAR_H // 2)
 
     def layout_icon_center(self) -> tuple[int, int]:
-        """Centre of the 96×96 layout-switch icon (grid/list), between
+        """Centre of the 96x96 layout-switch icon (grid/list), between
         the search and sync icons."""
         if self.screen_w == 0:
             return (0, 0)
@@ -180,19 +180,19 @@ class BookshelfGeometry:
         return self.content_bottom() - PAGER_H
 
     def pager_prev_center(self) -> tuple[int, int]:
-        """Centre of the 96×64 prev-page button."""
+        """Centre of the 96x64 prev-page button."""
         return (12 + 48, self.pager_y() + PAGER_H // 2)
 
     def pager_next_center(self) -> tuple[int, int]:
-        """Centre of the 96×64 next-page button."""
+        """Centre of the 96x64 next-page button."""
         return (self.screen_w - 12 - 48, self.pager_y() + PAGER_H // 2)
 
     def pager_first_center(self) -> tuple[int, int]:
-        """Centre of the 96×64 first-page button (second from left)."""
+        """Centre of the 96x64 first-page button (second from left)."""
         return (116 + 48, self.pager_y() + PAGER_H // 2)
 
     def pager_last_center(self) -> tuple[int, int]:
-        """Centre of the 96×64 last-page button (second from right)."""
+        """Centre of the 96x64 last-page button (second from right)."""
         return (self.screen_w - 212 + 48, self.pager_y() + PAGER_H // 2)
 
     # ── More overlay (right-anchored, 75 % width) ─────────────────────
@@ -298,7 +298,7 @@ class BookshelfGeometry:
     # ── top-bar right-corner buttons ──────────────────────────────────
 
     def sync_button_center(self) -> tuple[int, int]:
-        """Centre of the 96×96 sync button, left of the More button.
+        """Centre of the 96x96 sync button, left of the More button.
         Runs a library sync."""
         return (self.screen_w - 152, TOP_BAR_H // 2)
 

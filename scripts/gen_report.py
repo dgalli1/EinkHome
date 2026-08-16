@@ -149,7 +149,7 @@ def _slice_lines(src: Path, start_sod: int, end_sod: int) -> list[str] | None:
     if wrapped:
         end_sod += DAY_S
     out = []
-    for line, sod in zip(lines, sods):
+    for line, sod in zip(lines, sods, strict=True):
         if sod is None:
             continue
         if wrapped and sod < start_sod:

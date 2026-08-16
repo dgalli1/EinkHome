@@ -187,7 +187,7 @@ local_scan_walk(BsJob *job)
     BsLocalScanResult *res = calloc(1, sizeof *res);
     if (res == NULL) {
         job->rc = -1;
-        __atomic_store_n(&job->done, 1, __ATOMIC_RELEASE);
+        atomic_store_explicit(&job->done, 1, memory_order_release);
         return;
     }
     snprintf(res->src, sizeof res->src, "local");
@@ -197,7 +197,7 @@ local_scan_walk(BsJob *job)
             BS_LOCAL_SCAN_CAP);
     job->result = res;
     job->rc = 0;
-    __atomic_store_n(&job->done, 1, __ATOMIC_RELEASE);
+    atomic_store_explicit(&job->done, 1, memory_order_release);
 }
 
 /* Apply-chain argument: the shared result plus the next index to
@@ -250,7 +250,7 @@ static void
 local_apply_nop(BsJob *job)
 {
     (void)job;
-    __atomic_store_n(&job->done, 1, __ATOMIC_RELEASE);
+    atomic_store_explicit(&job->done, 1, memory_order_release);
 }
 
 static void local_apply_slice(BsJob *job);

@@ -121,13 +121,13 @@ def test_provider_env_only_affects_active_provider(monkeypatch):
 
 
 def test_coerce_env_value():
-    assert _coerce_env_value("true") == True
-    assert _coerce_env_value("True") == True
-    assert _coerce_env_value("yes") == True
-    assert _coerce_env_value("1") == True
-    assert _coerce_env_value("false") == False
-    assert _coerce_env_value("0") == False
-    assert _coerce_env_value("no") == False
+    assert _coerce_env_value("true") is True
+    assert _coerce_env_value("True") is True
+    assert _coerce_env_value("yes") is True
+    assert _coerce_env_value("1") is True
+    assert _coerce_env_value("false") is False
+    assert _coerce_env_value("0") is False
+    assert _coerce_env_value("no") is False
     assert _coerce_env_value("42") == 42
     assert _coerce_env_value("-7") == -7
     assert _coerce_env_value("hello") == "hello"

@@ -20,8 +20,8 @@ REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 sys.path.insert(0, REPO_ROOT)
 sys.path.insert(0, os.path.join(REPO_ROOT, "api"))
 
-from providers.base import BookMeta
-from storage.ledger import SyncLedger, fingerprint_blob
+from providers.base import BookMeta  # noqa: E402
+from storage.ledger import SyncLedger, fingerprint_blob  # noqa: E402
 
 
 def _meta(book_id, title="T", fmt="epub", size=10, series=None):
@@ -108,17 +108,21 @@ def test_fingerprint_walker_fast_path_skips_books_and_finds_changes(ledger):
             # Real providers derive fp without building metas; the fake
             # delegates to the fingerprint_blob under test.
             for meta in self.metas:
-                yield meta.id, fingerprint_blob(
-                    meta.title,
-                    meta.authors,
-                    meta.series,
-                    meta.series_id,
-                    meta.series_index,
-                    meta.file_format,
-                    meta.file_name,
-                    meta.file_size,
+                yield (
+                    meta.id,
+                    fingerprint_blob(
+                        meta.title,
+                        meta.authors,
+                        meta.series,
+                        meta.series_id,
+                        meta.series_index,
+                        meta.file_format,
+                        meta.file_name,
+                        meta.file_size,
+                        meta.added_at,
+                    ),
                     meta.added_at,
-                ), meta.added_at
+                )
 
     prov = FpFakeProvider([_meta("a"), _meta("b")])
     assert ledger.refresh(prov, max_age_s=0) is True
@@ -345,9 +349,7 @@ def test_delta_during_refresh_smoke(ledger):
     ledger.refresh(prov, max_age_s=0)  # initial fill (warms the walk)
     walked.clear()
 
-    t = threading.Thread(
-        target=ledger.refresh, args=(prov,), kwargs={"max_age_s": 0}
-    )
+    t = threading.Thread(target=ledger.refresh, args=(prov,), kwargs={"max_age_s": 0})
     t.start()
     assert walked.wait(2.0), "refresh thread never entered the provider walk"
     # The refresh holds the write lock, but delta reads the committed

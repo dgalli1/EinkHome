@@ -30,7 +30,7 @@ import urllib.error
 import urllib.request
 from collections import OrderedDict
 from collections.abc import Iterator
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -41,7 +41,6 @@ from .base import (
     Provider,
     SeriesInfo,
 )
-
 
 # ── env helpers (mirrors pbcloud-override/proxy/kavita_client.py) ───────────
 
@@ -79,8 +78,8 @@ def _iso_utc(s: str) -> str:
     """
     dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
     if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        dt = dt.replace(tzinfo=UTC)
+    return dt.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _filename_from_content_disposition(cd: str) -> str | None:
@@ -194,9 +193,9 @@ class _KavitaClient:
         # cover_bytes) bypass it.  LRU-evicted; the cap adapts to the
         # catalogue size (the provider raises _resp_cache_max after
         # each walk).
-        self._resp_cache: OrderedDict[
-            tuple[str, str, str], tuple[float, int, Any]
-        ] = OrderedDict()
+        self._resp_cache: OrderedDict[tuple[str, str, str], tuple[float, int, Any]] = (
+            OrderedDict()
+        )
         self._resp_cache_max = _RESP_CACHE_MAX
 
         # Persistent HTTP(S) connection, reused across requests so a
@@ -344,7 +343,7 @@ class _KavitaClient:
         if not body_bytes:
             return status, None
         try:
-            parsed: Any = json.loads(body_bytes.decode("utf-8"))
+            parsed = json.loads(body_bytes.decode("utf-8"))
         except (json.JSONDecodeError, UnicodeDecodeError):
             parsed = body_bytes.decode("utf-8", errors="replace")
         # Don't cache auth failures (401) or transient server errors
@@ -552,8 +551,7 @@ class _KavitaClient:
             return None  # chapter gone — absent resource, not an error
         if status != 200:
             raise RuntimeError(
-                f"Kavita GET /api/Chapter (chapter {chapter_id}) "
-                f"failed: HTTP {status}"
+                f"Kavita GET /api/Chapter (chapter {chapter_id}) failed: HTTP {status}"
             )
         if not isinstance(body, dict):
             return None
@@ -577,8 +575,7 @@ class _KavitaClient:
             return []  # chapter gone — absent resource, not an error
         if status != 200:
             raise RuntimeError(
-                f"Kavita GET /api/Chapter (chapter {chapter_id}) "
-                f"failed: HTTP {status}"
+                f"Kavita GET /api/Chapter (chapter {chapter_id}) failed: HTTP {status}"
             )
         if not isinstance(body, dict):
             return []
@@ -656,9 +653,7 @@ class _KavitaClient:
             f"/api/Image/series-cover?seriesId={series_id}",
         ):
             if self.api_key:
-                req = urllib.request.Request(
-                    self._url(f"{base}&apiKey={self.api_key}")
-                )
+                req = urllib.request.Request(self._url(f"{base}&apiKey={self.api_key}"))
             else:
                 req = urllib.request.Request(
                     self._url(base), headers=self._headers(with_jwt=True)
@@ -692,7 +687,7 @@ class KavitaProvider(Provider):
     # Kavita only knows a handful of file types we can deliver. Anything
     # else we report in `file_format` but the open-with picker will not
     # be able to route it.
-    _SUPPORTED_FORMATS = {"epub", "pdf", "cbz", "cbr"}
+    _SUPPORTED_FORMATS = frozenset({"epub", "pdf", "cbz", "cbr"})
 
     def __init__(self, cfg: dict[str, Any]) -> None:
         self.cfg = cfg
@@ -937,12 +932,14 @@ class KavitaProvider(Provider):
             )
             fetched += len(items)
             for s in items:
+                if not isinstance(s, dict):
+                    continue
                 if target_id is not None and s.get("id") != target_id:
                     continue
                 out.append(s)
             if len(items) < page_size:
                 break  # last (partial) page
-            if total is not None and fetched >= total:
+            if isinstance(total, int) and fetched >= total:
                 break  # envelope's totalCount reached
             page += 1
         return out
@@ -988,9 +985,7 @@ class KavitaProvider(Provider):
             # catalogue (one (files, volume_id) per chapter).  The
             # response cache cap is kept in lockstep for series/volume
             # DTOs; chapter DTOs never enter it (cacheable=False).
-            self._chapter_files_cache_max = max(
-                8192, self._catalogue_size * 2
-            )
+            self._chapter_files_cache_max = max(8192, self._catalogue_size * 2)
             self._resp_cache_max = max(8192, self._catalogue_size * 2)
             # The response cache lives on the client; keep its cap in
             # lockstep with the provider's.
@@ -1005,7 +1000,7 @@ class KavitaProvider(Provider):
                 "ok": True,
                 "detail": f"connected to {self.client.base_url}",
             }
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — health probe reports any failure
             return {"ok": False, "detail": str(exc)}
 
     def list_libraries(self) -> list[LibraryInfo]:
@@ -1205,7 +1200,7 @@ class KavitaProvider(Provider):
             return None
         try:
             filename, resp = self.client.download_chapter(chapter_id)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — any download failure is an error
             sys.stderr.write(
                 f"kavita download failed for chapter {chapter_id}: {exc}\n"
             )

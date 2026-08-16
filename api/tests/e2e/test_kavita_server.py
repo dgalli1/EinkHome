@@ -41,7 +41,6 @@ from .conftest import (  # noqa: E402
     SKIP_UNREACHABLE,
 )
 
-
 API_TOKEN = "pbemu-e2e-token"
 
 
@@ -286,9 +285,7 @@ def test_cover_endpoint_returns_jpeg(live_server):
     url = f"{live_server}{cover_path}{sep}access_token={API_TOKEN}"
     status, body = _http_get(url, timeout=30)
     assert status == 200
-    assert body[:3] == b"\xff\xd8\xff", (
-        f"cover is not a JPEG (header={body[:3].hex()})"
-    )
+    assert body[:3] == b"\xff\xd8\xff", f"cover is not a JPEG (header={body[:3].hex()})"
     assert len(body) > 100
 
 
@@ -354,6 +351,6 @@ def test_sync_state_accepts_post(live_server):
         headers=_auth_headers(),
         timeout=30,
     )
-    assert status in {200, 202}, (status, body)  # noqa: C1803
+    assert status in {200, 202}, (status, body)
     data = _json_or(body, {})
     assert data.get("ok")

@@ -542,6 +542,7 @@ fb2_meta(const char *path, char *title, size_t title_cap, char *author, size_t a
         if (fn[0] != '\0' || ln[0] != '\0')
             snprintf(author, author_cap, "%s%s%s", fn, ln[0] ? " " : "", ln);
     }
+    free(buf);
     return 0;
 }
 

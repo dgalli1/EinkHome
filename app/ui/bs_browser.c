@@ -255,6 +255,7 @@ browser_load(void)
     int order[BS_BROWSE_MAX_ENTRIES];
     for (int i = 0; i < g_browse_count; i++)
         order[i] = i;
+    // cppcheck-suppress uninitvar -- order[0..g_browse_count) fully initialised above.
     qsort(order, (size_t)g_browse_count, sizeof order[0], browser_row_cmp);
     /* Write the rows into place once, following each sort cycle in
      * place: every row is moved exactly once (O(n) memcpys total). */

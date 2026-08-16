@@ -79,7 +79,7 @@ progress_copy_job(BsJob *job)
 {
     progress_snapshot();
     job->rc = 0;
-    __atomic_store_n(&job->done, 1, __ATOMIC_RELEASE);
+    atomic_store_explicit(&job->done, 1, memory_order_release);
 }
 
 /* Open the progress DB for reading.  The worker has already refreshed

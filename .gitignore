@@ -2,6 +2,9 @@ build/
 __pycache__/
 *.pyc
 .pytest_cache/
+.coverage
+htmlcov/
+.coverage.*
 # Local API config (may hold provider credentials) + caches.
 # server-100k.json is safe to share (no secrets) and REQUIRED by the
 # scale test suite, so it stays tracked.

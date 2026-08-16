@@ -40,6 +40,7 @@ log_tail_read(size_t cap)
         }
     }
     size_t n = (size_t)(size - start);
+    // NOLINTNEXTLINE(clang-analyzer-optin.portability.UnixAPI) — n >= 0 and the +1 guarantees a non-zero allocation.
     char  *buf = malloc(n + 1);
     if (buf == NULL) {
         fclose(f);
@@ -47,6 +48,7 @@ log_tail_read(size_t cap)
     }
     size_t got = fread(buf, 1, n, f);
     fclose(f);
+    // NOLINTNEXTLINE(clang-analyzer-security.ArrayBound) — got <= n (fread caps at n).
     buf[got] = '\0';
     return buf;
 }
@@ -66,6 +68,7 @@ span_width(const char *p, int len)
     if (len > (int)sizeof tmp - 1)
         len = (int)sizeof tmp - 1;
     memcpy(tmp, p, (size_t)len);
+    // NOLINTNEXTLINE(clang-analyzer-security.ArrayBound) — len <= sizeof tmp - 1, indexed forward into tmp.
     tmp[len] = '\0';
     return StringWidth(tmp);
 }

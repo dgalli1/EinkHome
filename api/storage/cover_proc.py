@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import io
 import threading
-from typing import Optional
 
 # Cover JPEG is sized for the device's portrait cover box (~2:3).  240x360
 # is comfortably above the on-screen box (~220x330 on the 6" panel) so the
@@ -37,7 +36,7 @@ COVER_H = 360
 DECODE_SEMAPHORE = threading.Semaphore(2)
 
 
-def process(raw: bytes) -> Optional[bytes]:
+def process(raw: bytes) -> bytes | None:
     """Decode `raw` cover bytes -> resized_png_bytes.
 
     Returns None if the bytes cannot be decoded as an image (corrupt or
@@ -60,7 +59,9 @@ def process(raw: bytes) -> Optional[bytes]:
         img = Image.open(io.BytesIO(raw))
         if img.width * img.height > 20_000_000:
             return None
-    except Exception:
+    except OSError:
+        # Corrupt / unsupported / truncated cover image: PIL raises
+        # UnidentifiedImageError (an OSError subclass).  No cover.
         return None
 
     # Heavy decode + resize + PNG encode, gated by a semaphore so
@@ -83,7 +84,7 @@ def process(raw: bytes) -> Optional[bytes]:
             buf = io.BytesIO()
             cover.save(buf, format="JPEG", quality=85, optimize=True)
             return buf.getvalue()
-        except Exception:
+        except Exception:  # noqa: BLE001 — any decode/resize failure yields no cover
             return None
 
 
@@ -93,8 +94,8 @@ def _fit(img, target_w: int, target_h: int):
 
     src_w, src_h = img.size
     scale = min(target_w / src_w, target_h / src_h)
-    new_w = max(1, int(round(src_w * scale)))
-    new_h = max(1, int(round(src_h * scale)))
+    new_w = max(1, round(src_w * scale))
+    new_h = max(1, round(src_h * scale))
     resized = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
 
     # Average colour for the padding bars (quantised down to one value).

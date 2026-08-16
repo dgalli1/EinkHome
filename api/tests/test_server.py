@@ -399,7 +399,7 @@ def test_sync_delta_limit_clamped(server, tmp_path):
     hdr = {"Authorization": "Bearer test-token"}
     (tmp_path / "Two.epub").write_bytes(b"x")
     # Negative limit clamps to 1: exactly one entry per batch.
-    status, body = _http_post(
+    _, body = _http_post(
         server.url("/api/v1/sync/delta"), {"cursor": 0, "limit": -5}, headers=hdr
     )
     data = json.loads(body)
@@ -411,13 +411,13 @@ def test_books_limit_and_offset_clamped(server, tmp_path):
     hdr = {"Authorization": "Bearer test-token"}
     (tmp_path / "Two.epub").write_bytes(b"x")
     (tmp_path / "Three.epub").write_bytes(b"x")
-    status, body = _http_get(server.url("/api/v1/books?limit=99999"), headers=hdr)
+    _, body = _http_get(server.url("/api/v1/books?limit=99999"), headers=hdr)
     data = json.loads(body)
     assert data["limit"] == 2000  # huge limit clamped
     assert data["count"] == 3
-    status, body = _http_get(server.url("/api/v1/books?limit=-3"), headers=hdr)
+    _, body = _http_get(server.url("/api/v1/books?limit=-3"), headers=hdr)
     assert json.loads(body)["limit"] == 1
-    status, body = _http_get(server.url("/api/v1/books?offset=-5"), headers=hdr)
+    _, body = _http_get(server.url("/api/v1/books?offset=-5"), headers=hdr)
     data = json.loads(body)
     assert data["offset"] == 0
     assert data["count"] == 3
@@ -429,14 +429,14 @@ def test_books_hasmore_on_exact_last_page(server, tmp_path):
     hdr = {"Authorization": "Bearer test-token"}
     (tmp_path / "Two.epub").write_bytes(b"x")
     (tmp_path / "Three.epub").write_bytes(b"x")
-    status, body = _http_get(server.url("/api/v1/books?limit=3"), headers=hdr)
+    _, body = _http_get(server.url("/api/v1/books?limit=3"), headers=hdr)
     data = json.loads(body)
     assert data["count"] == 3
     assert data["hasMore"] is False
 
     # One more book than the page: hasMore flips, items stay bounded.
     (tmp_path / "Four.epub").write_bytes(b"x")
-    status, body = _http_get(server.url("/api/v1/books?limit=3"), headers=hdr)
+    _, body = _http_get(server.url("/api/v1/books?limit=3"), headers=hdr)
     data = json.loads(body)
     assert data["count"] == 3
     assert data["hasMore"] is True

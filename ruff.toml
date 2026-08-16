@@ -1,0 +1,43 @@
+# Ruff configuration for EinkHome — shared linter + formatter for the
+# Python codebase (api/, pbemu/, scripts/, tests/).
+#
+# Curated to surface real bugs and mechanical quality regressions without
+# drowning in style rules that fight the existing codebase.  This is the
+# single source of truth for `ruff check`; CI runs it with --fix so the
+# tree stays clean.  Exclusions mirror the repo layout:
+#   - tests/ uses noqa-style fixture reuse (intentional F811).
+#   - api/ is a client/server codebase; per-file ignores below.
+
+line-length = 88
+target-version = "py311"
+
+[lint]
+select = [
+    "E",   # pycodestyle errors (unused + import volume)
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes: unused imports/names, undefined names
+    "I",   # isort: import order
+    "UP",  # pyupgrade: modernise syntax
+    "B",   # flake8-bugbear: real bug patterns
+    "SIM", # flake8-simplify
+    "BLE", # flake8-blind-except
+    "RUF", # ruff-specific (unused-noqa, unique-enum-members)
+    "C4",  # flake8-comprehensions
+]
+# Quiet the noisiest low-signal subsets.
+ignore = [
+    "E501",   # line length enforced by ruff format
+    "E741",   # ambiguous variable names (existing code)
+    "SIM105", # suppressible-exception — often clearer to inline
+    "SIM108", # if-else-block-instead-of-if-exp — keep explicit branches
+    "B008",   # function-arg defaults (FastAPI Depends is idiomatic)
+    "RUF100", # unused-noqa — we keep the repo's intentional noqa directives
+]
+
+[lint.per-file-ignores]
+# Tests legitimately re-bind fixtures and assert on conditions.
+"tests/**/*.py" = ["F811", "S101"]
+"api/tests/**/*.py" = ["F811", "S101", "F401"]
+
+[format]
+quote-style = "double"

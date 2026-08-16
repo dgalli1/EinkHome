@@ -12,12 +12,11 @@ dir); scripts/capture-visual.sh copies them to tmp/screenshots/<fw>/.
 
 import time
 
-import pytest
-
 # The module fixture (same dir — pytest inserts tests/ on sys.path) does
 # the full environment bring-up: build (no-op when build/bookshelf.app is
 # fresh), API server, binary staging, emulator boot, geometry.
 import test_bookshelf
+
 from tests.support.bookshelf.geometry import MORE_SETTINGS
 
 bookshelf_env = test_bookshelf.bookshelf_env  # noqa: F811  (fixture reuse)

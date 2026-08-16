@@ -20,27 +20,29 @@ import time
 from pathlib import Path
 
 import pytest
+from tests.support.reader.session import Session
+from tests.support.runtime import Emulator, container_sh
+from tests.support.runtime_common import REPO_ROOT
 
+from tests.support import ui_input as _UI_INPUT
 from tests.support.bookshelf import (
-    MORE_GROUP,
-    MORE_SORT,
-    MORE_SETTINGS,
     MORE_APPS,
+    MORE_SETTINGS,
     BookshelfGeometry,
     BookshelfSession,
 )
 from tests.support.bookshelf.env import (
+    _OFFLINE_CFG,
+    _OFFLINE_COVERS,
+    _OFFLINE_DIR,
+    _OFFLINE_LEGACY,
+    _OFFLINE_STORE,
     API_PORT,
     API_TOKEN,
     EINKHOME_ROOT,
     FIRMWARE,
     PBEMU_ROOT,
     PODMAN,
-    _OFFLINE_CFG,
-    _OFFLINE_COVERS,
-    _OFFLINE_DIR,
-    _OFFLINE_LEGACY,
-    _OFFLINE_STORE,
     _api_env,
     _build_bookshelf,
     _ensure_sdl_test_binary,
@@ -56,10 +58,6 @@ from tests.support.bookshelf.env import (
     _stop_api_server,
     _wait_bookshelf_active,
 )
-from tests.support.reader.session import Session
-from tests.support.runtime import Emulator, container_sh
-from tests.support.runtime_common import REPO_ROOT
-from tests.support import ui_input as _UI_INPUT
 
 pytestmark = pytest.mark.bookshelf
 
@@ -68,7 +66,8 @@ pytestmark = pytest.mark.bookshelf
 
 # Uniquifies each _sdl_env() instance (pid alone collides when two
 # modules in one worker each bring up their own environment).
-import itertools as _it
+import itertools as _it  # noqa: E402
+
 _sdl_env_seq = _it.count()
 
 
@@ -131,7 +130,7 @@ def _sdl_env(*, config: str | None = None):
         _held["proc"] = p
         return p
 
-    proc = _launch()
+    _launch()
     backend = SdlBackend(
         sock, str(logpath), api_url=f"http://127.0.0.1:{port}",
         run_dir=run_dir, relaunch=_launch)
@@ -342,7 +341,7 @@ def _emulator_env():
             screen_h=screen_h,
             panel_h=panel_h,
         )
-        session = Session(emulator)
+        Session(emulator)
         from tests.support.bookshelf.backends import EmulatorBackend
 
         backend = EmulatorBackend(
@@ -388,7 +387,7 @@ def _emulator_env():
 @pytest.fixture(autouse=True)
 def fresh_bookshelf(bookshelf_env, request):
     """Restart bookshelf before each test for a clean state."""
-    bs, emulator = bookshelf_env
+    bs, _ = bookshelf_env
     # Invocation ordinal range of this test in the accumulated
     # bookshelf log: the per-test log slicer cuts exactly here (the
     # restart below opens the test's own invocation).
@@ -1613,7 +1612,7 @@ def _wait_log_count(bs: BookshelfSession, needle: str, count: int, *, timeout: f
             return
         time.sleep(0.5)
     got = bs.current_log().count(needle)
-    raise AssertionError(f"log contains {needle!r} {got}×, expected >= {count}")
+    raise AssertionError(f"log contains {needle!r} {got}x, expected >= {count}")
 
 
 def _wait_log_slice(bs: BookshelfSession, before: str, needle: str, *, timeout: float = 8.0) -> None:
@@ -2031,10 +2030,9 @@ def _wait_offline_log(bs: BookshelfSession) -> str:
 
 def _last_draw_grid(log: str) -> tuple[int, int]:
     """Return (view_count, page) from the last draw_grid line in *log*."""
-    m = None
-    for m in re.finditer(r"draw_grid view=(\d+) page=(\d+)", log):
-        pass
-    assert m, "no draw_grid line in log"
+    matches = list(re.finditer(r"draw_grid view=(\d+) page=(\d+)", log))
+    assert matches, "no draw_grid line in log"
+    m = matches[-1]
     return int(m.group(1)), int(m.group(2))
 
 

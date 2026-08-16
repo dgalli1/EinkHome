@@ -19,9 +19,11 @@ The socket path must match the running app's $BS_SOCKET.  Parallel test
 runs each launch their own app with a distinct socket → no collision.
 """
 
+import os
+import pathlib
 import socket
+import subprocess
 import time
-from typing import Optional, Tuple
 
 # Same IV_KEY codes as the emulator's ui_input.py
 IV_KEY_MENU = 0x17
@@ -123,7 +125,7 @@ class IpcBookshelf:
             f"seen={seen}"
         )
 
-    def state(self) -> Tuple[int, int, int]:
+    def state(self) -> tuple[int, int, int]:
         """Return (overlay, tab, page)."""
         reply = self.cmd("state")
         # state=overlay:tab:page
@@ -143,10 +145,10 @@ class IpcBookshelf:
 
     # -- convenience (mirror BookshelfSession geom helpers) ------------
 
-    def _center_of(self, x0, y0, x1, y1) -> Tuple[int, int]:
+    def _center_of(self, x0, y0, x1, y1) -> tuple[int, int]:
         return (x0 + x1) // 2, (y0 + y1) // 2
 
-    def sync_button(self) -> Tuple[int, int]:
+    def sync_button(self) -> tuple[int, int]:
         """Top bar sync (refresh) icon — the 3rd icon from the right
         (search, layout, sync, menu).  Right stack starts at
         w-(8+4*96)=680, each 96px wide: sync is 872-968 → center (920,48)."""
@@ -154,7 +156,7 @@ class IpcBookshelf:
         first = w - (8 + 4 * 96)
         return self._center_of(first + 2 * 96, 0, first + 3 * 96, 96)
 
-    def menu_button(self) -> Tuple[int, int]:
+    def menu_button(self) -> tuple[int, int]:
         """Top bar '...' button (rightmost, 4th from right)."""
         w = 1072
         first = w - (8 + 4 * 96)
@@ -170,17 +172,12 @@ def launch_headless(
 ) -> "subprocess.Popen":
     """Launch bookshelf.pc headless with a control socket; returns the
     Popen.  Caller owns cleanup (proc.terminate())."""
-    import os
-    import subprocess
-
     env = os.environ.copy()
     env["BS_SOCKET"] = sock_path
     env["SDL_VIDEODRIVER"] = "dummy"  # no window/display needed
     env.setdefault("BS_API_URL", api_url)
     proc = subprocess.Popen([binary], env=env)
     # Wait for the socket to appear.
-    import pathlib
-
     deadline = time.monotonic() + wait_ready
     while time.monotonic() < deadline:
         if pathlib.Path(sock_path).exists():

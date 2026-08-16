@@ -18,15 +18,14 @@ import hashlib
 
 import pytest
 
-from api.providers.kavita import KavitaProvider
 from api.providers.base import BookMeta, LibraryInfo
+from api.providers.kavita import KavitaProvider
 
 from .conftest import (
     SKIP_NO_AUTH,
     SKIP_NO_URL,
     SKIP_UNREACHABLE,
 )
-
 
 # -- fixtures ---------------------------------------------------------------
 

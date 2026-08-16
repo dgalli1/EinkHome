@@ -20,21 +20,13 @@ import shutil
 import socket
 import socketserver
 import subprocess
-import sys
 import threading
 import time
 import uuid
 from pathlib import Path
 
 import pytest
-
-from tests.support.bookshelf import BookshelfGeometry, BookshelfSession
-from tests.support.bookshelf.backends import SdlBackend, wait_for
-from tests.support.bookshelf.env import (
-    API_TOKEN,
-    EINKHOME_ROOT,
-    _ensure_sdl_test_binary,
-)
+from providers.mock import MockProvider
 
 # The api package lives in repo_root/api; importing api.api.server first
 # inserts that dir on sys.path (it does so at import time), which then
@@ -43,7 +35,13 @@ from tests.support.bookshelf.env import (
 # PC build, a subprocess) — so a code change to either side must keep
 # both compiling.
 from api.api.server import PbemuAPIServer, build_default_app
-from providers.mock import MockProvider
+from tests.support.bookshelf import BookshelfGeometry, BookshelfSession
+from tests.support.bookshelf.backends import SdlBackend
+from tests.support.bookshelf.env import (
+    API_TOKEN,
+    EINKHOME_ROOT,
+    _ensure_sdl_test_binary,
+)
 
 pytestmark = pytest.mark.bookshelf
 

@@ -1178,7 +1178,7 @@ void bs_store_suggest_set(const char *book_id,
       bind_text_trunc(rf, 1, old[i]);
       sqlite3_step(rf);
     }
-    for (int i = 0; i < n; i++) {
+    for (int i = 0; i < n && terms != NULL; i++) {
       if (terms[i][0] == '\0')
         continue;
       int dup = 0;
@@ -1868,7 +1868,7 @@ void bs_view_rebuild(void) {
                "INSERT INTO t_sorted SELECT id, %s, %s FROM books WHERE", dim,
                lbl);
       view_where(sql, sizeof sql, bs_g_drill_level + 1);
-      for (int L = 0; L < bs_g_drill_level; L++) {
+      for (int L = 0; L < bs_g_drill_level && L < BS_GROUP_MAX_LEVELS; L++) {
         const char *e = dim_sql(dim_at(bs_g_group, L), 0);
         if (bs_g_drill_values[L][0])
           snprintf(sql + strlen(sql), sizeof sql - strlen(sql),
@@ -1956,7 +1956,7 @@ void bs_view_rebuild(void) {
              " series_count) SELECT 0, id, series_id, series, 0"
              " FROM books WHERE");
     view_where(sql, sizeof sql, bs_g_drill_level + 1);
-    for (int L = 0; L < bs_g_drill_level; L++) {
+    for (int L = 0; L < bs_g_drill_level && L < BS_GROUP_MAX_LEVELS; L++) {
       const char *e = dim_sql(dim_at(bs_g_group, L), 0);
       if (bs_g_drill_values[L][0])
         snprintf(sql + strlen(sql), sizeof sql - strlen(sql),

@@ -723,7 +723,7 @@ cover_fetch_job(BsJob *job)
     int          ok = 0;
     a->is_placeholder = 0;
     if (data != NULL && rsize > 8 &&
-        !__atomic_load_n(&job->cancel, __ATOMIC_ACQUIRE)) {
+        !atomic_load_explicit(&job->cancel, memory_order_acquire)) {
         /* A warm fetch that lands on a 1x1 placeholder flags the result
          * so cover_job_done can abort the pass early — but the bytes are
          * still persisted below (a placeholder is a cover's absence, not
@@ -745,7 +745,7 @@ cover_fetch_job(BsJob *job)
     }
     free(data);
     job->rc = ok ? 0 : -1;
-    __atomic_store_n(&job->done, 1, __ATOMIC_RELEASE);
+    atomic_store_explicit(&job->done, 1, memory_order_release);
 }
 
 /* 1 = the cover grid is the live on-screen view, so a per-tile cover

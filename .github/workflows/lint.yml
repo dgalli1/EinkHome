@@ -1,0 +1,74 @@
+name: Lint
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: lint-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+# Static-analysis gate: clang-tidy + cppcheck + lizard (complexity/dup)
+# on the C app; ruff + mypy + coverage on the Python.  Everything here
+# runs on a plain hosted runner — no firmware, no emulator boot.
+#
+# clang-tidy needs a compile DB for the SDL (host) backend; the
+# generator (scripts/gen-compile-commands.py) resolves -I/defines via
+# pkg-config, so the SDL dev headers + libcurl/sqlite/zlib dev packages
+# must be installed (and the `clang` driver, which clang-tidy uses to
+# parse).  cppcheck runs inside the pbdev container, so podman + the
+# pbdev image are required; lizard runs in a throwaway venv (ubuntu's
+# system python is externally managed, so pip needs the venv).
+jobs:
+  c:
+    name: C (clang-tidy, cppcheck, lizard)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: true
+      - name: Install clang-tidy + SDL dev headers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang clang-tidy \
+            libsdl2-dev libsdl2-ttf-dev libsdl2-image-dev \
+            libcurl4-openssl-dev libsqlite3-dev zlib1g-dev
+      - name: Install podman
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends podman catatonit slirp4netns fuse-overlayfs uidmap
+      - name: Set up pbemu venv (for pbdev image build)
+        run: cd pbemu && ./setup-venv.sh
+      - name: Build pbdev image (for cppcheck)
+        run: cd pbemu && .venv/bin/python -m pbemu image
+      - name: Lizard in a venv (system python is externally managed)
+        run: |
+          python3 -m venv /tmp/lizardvenv
+          /tmp/lizardvenv/bin/pip -q install lizard
+          echo "/tmp/lizardvenv/bin" >> "$GITHUB_PATH"
+      - name: Run make lint-c
+        run: make lint-c
+
+  python:
+    name: Python (ruff, mypy, coverage)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: true
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install tooling
+        run: python3 -m pip install ruff mypy pytest pytest-cov
+      - name: Run make lint-py
+        # mypy + coverage need api/providers/storage importable as
+        # top-level packages (see mypy.ini); MYPYPATH is set by the target.
+        run: make lint-py

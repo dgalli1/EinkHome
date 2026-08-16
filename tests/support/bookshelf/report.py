@@ -17,7 +17,7 @@ import json
 import os
 import subprocess
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -205,7 +205,7 @@ def _harvest_steps(test_name: str) -> list[dict]:
 def _write_results(session) -> None:
     _REPORT_DIR.mkdir(parents=True, exist_ok=True)
     payload = {
-        "generated_at": datetime.now(timezone.utc)
+        "generated_at": datetime.now(UTC)
         .replace(microsecond=0)
         .isoformat(),
         "total_time_s": round(time.monotonic() - _session_started, 1),

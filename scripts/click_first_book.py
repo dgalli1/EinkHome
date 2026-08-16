@@ -45,7 +45,6 @@ sys.path.insert(0, str(_PBEMU / "tools"))  # tests.support.* + the pbemu CLI liv
 from tests.support.reader_flow import ReaderSession, Session  # noqa: E402
 from tests.support.runtime import Emulator  # noqa: E402
 
-
 FIRMWARE = os.environ.get("PBEMU_FIRMWARE", "U633_6.8.2817")
 SHOT_DIR = _REPO_ROOT / "screenshots"
 SHOT_DIR.mkdir(exist_ok=True)

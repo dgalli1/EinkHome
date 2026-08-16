@@ -196,6 +196,7 @@ bs_draw_licenses_view(void)
             if (len > 480)
                 len = 480;
             char tmp[512];
+            // NOLINTNEXTLINE(clang-analyzer-core.NonNullParamChecker) — r->blank rows are skipped above, so r->p is non-NULL here.
             memcpy(tmp, r->p, (size_t)len);
             tmp[len] = '\0';
             bs_utf8_fit_width(tmp, sizeof tmp, w - 48);

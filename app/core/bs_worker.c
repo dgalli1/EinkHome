@@ -71,20 +71,20 @@ bs_worker_main(void *unused)
 static void
 bs_worker_ensure(void)
 {
-    if (__atomic_load_n(&g_worker_started, __ATOMIC_ACQUIRE))
+    if (atomic_load_explicit(&g_worker_started, memory_order_acquire))
         return;
     pthread_mutex_lock(&g_mu);
-    if (!__atomic_load_n(&g_worker_started, __ATOMIC_ACQUIRE)) {
+    if (!atomic_load_explicit(&g_worker_started, memory_order_acquire)) {
         pthread_t t;
         if (pthread_create(&t, NULL, bs_worker_main, NULL) == 0) {
             pthread_detach(t);
-            __atomic_store_n(&g_worker_started, 1, __ATOMIC_RELEASE);
+            atomic_store_explicit(&g_worker_started, 1, memory_order_release);
         } else {
             while (g_queue != NULL) {
                 BsJob *job = g_queue;
                 g_queue = job->qnext;
                 job->rc = -1;
-                __atomic_store_n(&job->done, 1, __ATOMIC_RELEASE);
+                atomic_store_explicit(&job->done, 1, memory_order_release);
             }
             g_queue_tail = NULL;
         }
@@ -123,14 +123,14 @@ void
 bs_worker_cancel(BsJob *job)
 {
     if (job != NULL)
-        __atomic_store_n(&job->cancel, 1, __ATOMIC_RELEASE);
+        atomic_store_explicit(&job->cancel, 1, memory_order_release);
 }
 
 void
 bs_worker_cancel_all(void)
 {
     for (BsJob *j = g_jobs; j != NULL; j = j->next)
-        __atomic_store_n(&j->cancel, 1, __ATOMIC_RELEASE);
+        atomic_store_explicit(&j->cancel, 1, memory_order_release);
 }
 
 /* Main thread: run the done_cb of every finished job and free the job
@@ -145,7 +145,7 @@ bs_worker_tick(void)
     BsJob **pp = &g_jobs;
     while (*pp != NULL) {
         BsJob *job = *pp;
-        if (__atomic_load_n(&job->done, __ATOMIC_ACQUIRE)) {
+        if (atomic_load_explicit(&job->done, memory_order_acquire)) {
             *pp = job->next; /* unlink */
             job->done_cb(job);
             free(job);

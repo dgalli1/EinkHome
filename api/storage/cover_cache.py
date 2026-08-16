@@ -22,7 +22,6 @@ import sys
 import threading
 import time
 from collections import OrderedDict
-from typing import Optional
 
 from storage.placeholder import PLACEHOLDER_PNG
 
@@ -106,7 +105,7 @@ class CoverCache:
 
     # --- reads -----------------------------------------------------------
 
-    def read_cover(self, book_id: str) -> Optional[bytes]:
+    def read_cover(self, book_id: str) -> bytes | None:
         path = self.cover_path(book_id)
         if not self._fresh(path):
             return None
@@ -174,7 +173,7 @@ class CoverCache:
     def store_cover(self, book_id: str, cover: bytes) -> None:
         self._atomic(self.cover_path(book_id), cover)
 
-    def process_and_store(self, book_id: str, raw: bytes) -> Optional[bytes]:
+    def process_and_store(self, book_id: str, raw: bytes) -> bytes | None:
         """Decode `raw`, cache the resized JPEG, return the JPEG bytes.
 
         Returns None (and caches nothing) if the bytes are not a decodable

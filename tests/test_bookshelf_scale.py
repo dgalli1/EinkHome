@@ -22,17 +22,21 @@ import sys
 import time
 
 import pytest
+from tests.support.reader.session import Session
+from tests.support.runtime import container_running, container_sh
 
+from tests.support import ui_input as _UI_INPUT
 from tests.support.bookshelf import BookshelfGeometry, BookshelfSession
+from tests.support.bookshelf.backends import EmulatorBackend
 from tests.support.bookshelf.env import (
+    _OFFLINE_DIR,
+    _OFFLINE_STORE,
     API_TOKEN,
     CONTAINER,
     EINKHOME_ROOT,
     FIRMWARE,
     PBEMU_ROOT,
     PODMAN,
-    _OFFLINE_DIR,
-    _OFFLINE_STORE,
     _build_bookshelf,
     _parse_panel_h,
     _restore_cfg_file,
@@ -42,10 +46,6 @@ from tests.support.bookshelf.env import (
     _stop_api_server,
     _wait_bookshelf_active,
 )
-from tests.support.reader.session import Session
-from tests.support.runtime import container_running, container_sh
-from tests.support import ui_input as _UI_INPUT
-from tests.support.bookshelf.backends import EmulatorBackend
 
 SCALE_PORT = 18766
 SCALE_COUNT = 100_000
@@ -282,10 +282,10 @@ def scale_env(request):
 
 
 def _last_view(log: str) -> int:
-    m = None
-    for m in re.finditer(r"view_rebuild: view=(\d+)", log):
-        pass
-    return int(m.group(1)) if m else 0
+    matches = list(re.finditer(r"view_rebuild: view=(\d+)", log))
+    if not matches:
+        return 0
+    return int(matches[-1].group(1))
 
 
 def _proc_rss_kb(pid: int) -> int:

@@ -37,8 +37,7 @@ def _stream_lines(url: str):
     resp = urllib.request.urlopen(req, timeout=120)
     f = gzip.GzipFile(fileobj=resp)
     try:
-        for line in f:
-            yield line
+        yield from f
     finally:
         resp.close()
 
@@ -207,7 +206,7 @@ def main() -> int:
 
     out: list[dict] = []
     dropped = 0
-    for rec, skeys in zip(works, work_series_keys):
+    for rec, skeys in zip(works, work_series_keys, strict=True):
         seen: set[str] = set()
         authors: list[str] = []
         for k in _work_author_keys(rec):

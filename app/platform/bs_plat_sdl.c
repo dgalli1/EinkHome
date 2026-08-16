@@ -1340,6 +1340,7 @@ ipc_reply(const char *fmt, const char *arg)
 {
     if (g_ipc_client < 0) return;
     char buf[256];
+    // cppcheck-suppress wrongPrintfScanfArgNum -- fmt carries exactly one %s for the single arg.
     snprintf(buf, sizeof buf, fmt, arg ? arg : "");
     (void)write(g_ipc_client, buf, strlen(buf));
 }

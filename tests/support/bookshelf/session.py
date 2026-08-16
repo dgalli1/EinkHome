@@ -16,6 +16,8 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from tests.support.runtime_common import REPO_ROOT
+
 from tests.support.bookshelf.backends import Backend
 from tests.support.bookshelf.geometry import (
     MORE_APPS,
@@ -25,7 +27,6 @@ from tests.support.bookshelf.geometry import (
     MORE_SORT,
 )
 from tests.support.bookshelf.snapshots import SnapshotRecorder
-from tests.support.runtime_common import REPO_ROOT
 
 if TYPE_CHECKING:
     from tests.support.bookshelf.geometry import BookshelfGeometry
@@ -437,8 +438,7 @@ class BookshelfSession:
     ) -> int:
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
-            if self.invocation_count() > before:
-                if ready_marker in self.current_log():
+            if self.invocation_count() > before and ready_marker in self.current_log():
                     self.snapshot("respawned")
                     return self.invocation_count()
             time.sleep(0.3)

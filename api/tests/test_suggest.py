@@ -16,9 +16,7 @@ from storage.suggest import search_text, suggest_terms  # noqa: E402
 
 
 def test_words_and_suffix_phrases():
-    terms = suggest_terms(
-        "Harry Potter Order of the Phoenix", ["Joanne Rowling"], None
-    )
+    terms = suggest_terms("Harry Potter Order of the Phoenix", ["Joanne Rowling"], None)
     for want in (
         "harry",
         "potter",

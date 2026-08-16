@@ -413,7 +413,7 @@ dl_fetch(BsJob *job)
     char  *data = QuickDownload(a->url, &rsize, 60);
     int    ok = 0;
     if (data != NULL && rsize > 0) {
-        if (__atomic_load_n(&job->cancel, __ATOMIC_ACQUIRE)) {
+        if (atomic_load_explicit(&job->cancel, memory_order_acquire)) {
             bs_LOG("[bookshelf] download_book_file CANCELED id=%s\n", a->id);
         } else {
             char tmp[BS_MAX_PATH_LEN + 8]; /* room for ".part" suffix */
@@ -447,7 +447,7 @@ dl_fetch(BsJob *job)
             a->id, a->url, rsize, errno);
     }
     job->rc = ok ? 0 : -1;
-    __atomic_store_n(&job->done, 1, __ATOMIC_RELEASE);
+    atomic_store_explicit(&job->done, 1, memory_order_release);
 }
 
 /* Launch the configured reader on an already-downloaded book.
@@ -758,7 +758,7 @@ static void
 dl_kick_fn(BsJob *job)
 {
     (void)job;
-    __atomic_store_n(&job->done, 1, __ATOMIC_RELEASE);
+    atomic_store_explicit(&job->done, 1, memory_order_release);
 }
 
 static void
@@ -786,7 +786,7 @@ int
 bs_dl_fetch_idle(void)
 {
     return g_dl_inflight == NULL ||
-           __atomic_load_n(&g_dl_inflight->done, __ATOMIC_ACQUIRE);
+           atomic_load_explicit(&g_dl_inflight->done, memory_order_acquire);
 }
 
 /* 1 = a download job is in flight whose settle has not run yet (the
@@ -1105,7 +1105,7 @@ bs_draw_context_menu(void)
     }
     DrawLine(px + BS_CTX_PAD, py + BS_CTX_TITLE_H - 1, px + pw - BS_CTX_PAD, py + BS_CTX_TITLE_H - 1, LGRAY);
 
-    const char *labels[3];
+    const char *labels[3] = {0};
     if (bs_g_state.ctx_is_series) {
         labels[0] = bs_i18n("ctx.download_all");
         labels[1] = bs_i18n("ctx.delete_series");

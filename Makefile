@@ -73,7 +73,7 @@ SOURCES := \
 
 SRC_PATHS := $(addprefix $(CURDIR)/app/,$(SOURCES))
 
-.PHONY: all clean test armhf pc
+.PHONY: all clean test armhf pc lint lint-c lint-py compile-commands
 
 all: $(OUT)
 
@@ -83,6 +83,39 @@ pc: $(OUT_PC)
 
 test:
 	scripts/test.sh
+
+# Static analysis.  `make lint` runs everything; the -c/-py suffixed
+# targets isolate one half.  Each emits a non-zero exit when the tool
+# reports above its (strict) threshold, which is what CI gates on.
+lint: lint-c lint-py
+
+# C: generate the compile DB, then clang-tidy over every app source,
+# cppcheck (disposable pbdev container), and lizard (complexity +
+# duplication gates).
+lint-c:
+	@python3 scripts/gen-compile-commands.py --output build/compile_commands.json
+	@scripts/run-cppcheck.sh
+	@python3 scripts/lint-lizard.py
+
+# Python: ruff (lint over the main repo's Python; format-check over api/
+# only — the tests/scripts suite is not formatter-normalised and forcing
+# a mass reformat is unwanted churn).  mypy over the API production
+# modules, and a coverage gate on the API.
+lint-py:
+	@ruff check --fix api scripts tests
+	@ruff format --check api
+	@MYPYPATH="$(CURDIR)/api" mypy --config-file mypy.ini \
+		--explicit-package-bases api/api api/providers api/storage
+	@rm -f .coverage
+	@python3 -m pytest api/tests -q --cov=api/api --cov=api/providers \
+		--cov=api/storage --cov-report=term; rc=$$?; rm -f .coverage; exit $$rc
+
+# Regenerate build/compile_commands.json (clang-tidy -p target).
+compile-commands:
+	@python3 scripts/gen-compile-commands.py --output build/compile_commands.json
+
+clean:
+	rm -f $(OUT) $(OUT_ARMHF) $(OUT_PC)
 
 $(OUT): $(SRC_PATHS) $(wildcard $(CURDIR)/app/*/*.h) $(BUILD_ARMEL)
 	mkdir -p $(CURDIR)/build

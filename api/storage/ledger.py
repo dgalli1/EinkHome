@@ -68,7 +68,8 @@ import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from storage.suggest import search_text as _search_text, suggest_terms as _suggest_terms
+from storage.suggest import search_text as _search_text
+from storage.suggest import suggest_terms as _suggest_terms
 
 if TYPE_CHECKING:
     from providers.base import BookMeta
@@ -345,7 +346,8 @@ class SyncLedger:
         finally:
             with self._lock:
                 self._walking = False
-                self._walk_done.set()
+                if self._walk_done is not None:
+                    self._walk_done.set()
 
     def walk_in_progress(self) -> bool:
         """True while a background walk is running.  Plain GIL-atomic
@@ -381,7 +383,10 @@ class SyncLedger:
                         ).fetchall()
                     if not rows:
                         return
-                    updates = []
+                    # Both update shapes are legal below: the backfill
+                    # writes (search_text, suggest, id) when suggestions
+                    # are enabled and (search_text, id) otherwise.
+                    updates: list[tuple[Any, ...]] = []
                     for bid, title, authors, series in rows:
                         names = json.loads(authors) if authors else []
                         if self._suggestions_enabled:
@@ -389,9 +394,7 @@ class SyncLedger:
                                 (
                                     _search_text(title or "", names, series),
                                     json.dumps(
-                                        _suggest_terms(
-                                            title or "", names, series
-                                        ),
+                                        _suggest_terms(title or "", names, series),
                                         separators=(",", ":"),
                                         ensure_ascii=False,
                                     ),
@@ -442,7 +445,7 @@ class SyncLedger:
                 self._walk_fingerprints(provider, fp_walker, stored, seen)
             except RuntimeError:
                 raise  # empty-catalogue refusal — never masked by a fallback
-            except Exception:
+            except Exception:  # noqa: BLE001 — any walker failure falls back
                 # Fingerprint index unusable (provider error mid-walk):
                 # the plain pass is self-contained and re-validates
                 # everything, so fall back to it verbatim.
@@ -530,7 +533,7 @@ class SyncLedger:
         seen in the first pass)."""
         need_meta: dict[str, int] = {}
         first_page = True
-        for i, (bid, fp, added_at) in enumerate(fp_walker()):
+        for i, (bid, fp, _added_at) in enumerate(fp_walker()):
             first_page = False
             seen.add(bid)
             row = stored.get(bid)
@@ -752,9 +755,7 @@ class SyncLedger:
     def min_device_rev(self) -> int | None:
         """Smallest ``last_rev`` any device has reported, or None when
         no device has ever posted a cursor."""
-        row = self.rdcon.execute(
-            "SELECT MIN(last_rev) FROM device_cursors"
-        ).fetchone()
+        row = self.rdcon.execute("SELECT MIN(last_rev) FROM device_cursors").fetchone()
         return int(row[0]) if row and row[0] is not None else None
 
     def compact_tombstones(self, min_rev: int | None = None) -> int:

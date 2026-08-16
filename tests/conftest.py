@@ -108,7 +108,6 @@ def pytest_collection_modifyitems(config, items):
         "test_search_commit_filters_grid",
         "test_search_history_persists_and_reruns",
         "test_search_keyboard_outside_tap_stays_on_search",
-        "test_search_suggestions_live_and_commit",
         "test_no_crash_after_all_interactions",
     }
     sel = []
