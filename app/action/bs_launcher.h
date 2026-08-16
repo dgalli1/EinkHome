@@ -53,8 +53,6 @@ void bs_launcher_open_set(void);
 
 void bs_launcher_close(void);
 
-void bs_drill_back(void);
-
 void bs_on_tap_thumbnail(int vi);
 
 #endif /* BS_LAUNCHER_H */

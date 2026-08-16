@@ -649,10 +649,6 @@ static int bs_pu_handle_chrome_which(int x, int y) {
         bs_redraw_shelf();
         return 1;
       }
-      if (bs_g_drilled_series[0] != '\0') {
-        bs_drill_back();
-        return 1;
-      }
       /* Group drill-in: the back affordance pops one level toward the
        * All-books top. */
       if (bs_g_drill_level > 0) {
@@ -923,10 +919,6 @@ static int bs_evt_back_search_drill(int par1) {
         bs_g_state.page = 0;
         bs_g_state.search_kb = 0;
         bs_redraw_shelf();
-        return 1;
-      }
-      if (bs_g_drilled_series[0] != '\0') {
-        bs_drill_back();
         return 1;
       }
       /* Group drill-in: back pops one level toward All books. */

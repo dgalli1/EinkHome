@@ -1829,114 +1829,6 @@ static int view_emit_from_tout(int *inserted) {
   return rc;
 }
 
-/* Drill-down: emit the drilled series' members under the active filter
- * and sort. */
-static int view_rebuild_drill(int *inserted) {
-  char sql[2048];
-  snprintf(sql, sizeof sql,
-           "INSERT INTO view(kind, book_id, series_id, series_name,"
-           " series_count) SELECT 0, id, series_id, series, 0"
-           " FROM books WHERE series_id=?1 AND");
-  view_where(sql, sizeof sql, 2);
-  snprintf(sql + strlen(sql), sizeof sql - strlen(sql), " ORDER BY %s",
-           view_order());
-  sqlite3_stmt *st = NULL;
-  int rc = sqlite3_prepare_v2(g_db, sql, -1, &st, NULL);
-  if (rc == SQLITE_OK) {
-    bind_text_trunc(st, 1, bs_g_drilled_series);
-    view_bind_query(st, 2);
-    rc = sqlite3_step(st);
-    *inserted = sqlite3_changes(g_db);
-    sqlite3_finalize(st);
-  }
-  return rc;
-}
-
-/* Collapse (All books): order the filtered set once into a temp table
- * (rowid = sort position), then emit flats and series cards keyed by
- * first-seen position. */
-static int view_rebuild_collapse(int *inserted) {
-  view_drop_temps();
-  int rc = sqlite3_exec(g_db,
-                        "CREATE TEMP TABLE t_sorted(id TEXT, series_id TEXT,"
-                        " series_idx REAL, series TEXT)",
-                        NULL, NULL, NULL);
-  if (rc != SQLITE_OK)
-    bs_LOG("[bookshelf] view_rebuild: t_sorted create rc=%d: %s\n", rc,
-        sqlite3_errmsg(g_db));
-  if (rc == SQLITE_OK) {
-    char sql[2048];
-    snprintf(sql, sizeof sql,
-             "INSERT INTO t_sorted SELECT id, series_id, series_idx, series"
-             " FROM books WHERE");
-    view_where(sql, sizeof sql, 1);
-    snprintf(sql + strlen(sql), sizeof sql - strlen(sql), " ORDER BY %s",
-             view_order());
-    sqlite3_stmt *st = NULL;
-    rc = sqlite3_prepare_v2(g_db, sql, -1, &st, NULL);
-    if (rc == SQLITE_OK) {
-      view_bind_query(st, 1);
-      rc = sqlite3_step(st);
-      /* step reports SQLITE_DONE on success; the exec chain
-       * below gates on SQLITE_OK, so normalise. */
-      if (rc == SQLITE_DONE)
-        rc = SQLITE_OK;
-      sqlite3_finalize(st);
-    }
-  }
-  if (rc == SQLITE_OK)
-    rc = view_make_tout();
-  if (rc == SQLITE_OK) {
-    /* Per-series aggregates plus an index on the temp sort
-     * table keep the collapse linear in the library size: every
-     * correlated lookup below hits t_sorted_sid instead of
-     * scanning t_sorted once per output row. */
-    rc = sqlite3_exec(g_db,
-                      "CREATE TEMP TABLE t_grp AS"
-                      " SELECT series_id AS sid, COUNT(*) AS c,"
-                      "        MAX(series_idx) AS mx"
-                      " FROM t_sorted WHERE series_id IS NOT NULL"
-                      "  AND series_id!='' GROUP BY series_id;"
-                      "CREATE INDEX t_sorted_sid ON t_sorted(series_id)",
-                      NULL, NULL, NULL);
-  }
-  if (rc == SQLITE_OK) {
-    /* Flat tiles: standalone books and single-member series,
-     * each at its own sort position. */
-    rc = sqlite3_exec(g_db,
-                      "INSERT INTO t_out"
-                      " SELECT s.rowid, 0, s.id, s.series_id, s.series,"
-                      "        COALESCE(g.c, 1)"
-                      " FROM t_sorted s LEFT JOIN t_grp g"
-                      "  ON g.sid=s.series_id"
-                      " WHERE g.c IS NULL OR g.c=1",
-                      NULL, NULL, NULL);
-  }
-  if (rc == SQLITE_OK) {
-    /* One card per multi-book series, after all flat tiles,
-     * ordered by first-seen position.  Representative = highest
-     * volume (ties: earliest sort position). */
-    rc = sqlite3_exec(g_db,
-                      "INSERT INTO t_out"
-                      " SELECT 1000000000 +"
-                      "        (SELECT MIN(s2.rowid) FROM t_sorted s2"
-                      "          WHERE s2.series_id=g.sid),"
-                      "        1, rep.id, g.sid, rep.series, g.c"
-                      " FROM t_grp g"
-                      " JOIN t_sorted rep ON rep.series_id=g.sid"
-                      "  AND rep.series_idx=g.mx"
-                      "  AND rep.rowid=(SELECT MIN(s3.rowid) FROM t_sorted s3"
-                      "                  WHERE s3.series_id=g.sid"
-                      "                    AND s3.series_idx=g.mx)"
-                      " WHERE g.c>1",
-                      NULL, NULL, NULL);
-  }
-  if (rc == SQLITE_OK)
-    rc = view_emit_from_tout(inserted);
-  view_drop_temps();
-  return rc;
-}
-
 /* Dimension grouping: collapse into stack cards (like the series
  * stacks) keyed by the active dimension's value; single-member groups
  * stay flat tiles.  Tapping a card drills into it (regroups by the next
@@ -2027,13 +1919,12 @@ static int view_rebuild_leaf(int *inserted) {
 }
 
 /* Rebuild the materialised view table for the current filter/sort/
- * group/drill.  Collapse modes (All books) emit standalone books as
- * flat tiles and multi-book series as single cards, interleaved in
- * first-seen order of the active sort; single-member series stay flat.
- * Dimension groupings (series/author/year/genre) order the books by the
- * current dimension and materialise a group index for header rendering
- * and drill-in.  All ordering and grouping happens in SQL so RAM never
- * holds the whole library. */
+ * group/drill.  "None" (All books) and the leaf of a drill emit every
+ * book as a flat tile in the active sort order — nothing is ever
+ * auto-collapsed.  Dimension groupings (series/author/year/genre)
+ * collapse into stack cards while a non-leaf drill level is active.
+ * All ordering and grouping happens in SQL so RAM never holds the whole
+ * library. */
 void bs_view_rebuild(void) {
   if (g_db == NULL)
     return;
@@ -2073,11 +1964,12 @@ void bs_view_rebuild(void) {
    * or the COMMIT — both reset the counter). */
   int inserted = 0;
 
-  if (bs_g_drilled_series[0] != '\0')
-    rc = view_rebuild_drill(&inserted);
-  else if (bs_g_group == BS_GROUP_NONE)
-    rc = view_rebuild_collapse(&inserted);
-  else if (grouped_active())
+  /* Grouped (By series/author/year/genre/Author>Series) at a non-leaf
+   * drill level collapses into stack cards; everything else — "None"
+   * (All books, flat) and the leaf of a drill — shows every book as an
+   * individual tile.  "None" never auto-collapses series: books only
+   * stack when the user picks an explicit grouping. */
+  if (grouped_active())
     rc = view_rebuild_group(&inserted);
   else
     rc = view_rebuild_leaf(&inserted);

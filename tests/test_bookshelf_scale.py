@@ -2,8 +2,9 @@
 bookshelf without unbounded RAM, and the paged grid stays navigable.
 
 The mock provider layers ``PBEMU_MOCK_COUNT`` deterministic synthetic
-books over the books dir (every 5th book joins its block's series), so
-the collapsed view holds ~2 tiles per 5 books.  The guest store is
+books over the books dir.  The default "None" (All books) view is flat —
+every book is its own tile — so a complete sync projects at least
+``SCALE_COUNT`` tiles.  The guest store is
 wiped before the run so the sync ingests the full library from
 cursor 0; afterwards the guest's VmRSS must stay far below what an
 in-memory 100k-book model would need, and the pager must reach the
@@ -50,9 +51,8 @@ from tests.support.bookshelf.env import (
 SCALE_PORT = 18766
 SCALE_COUNT = 100_000
 SERIES_SIZE = 5
-# Collapsed tiles: one flat tile per block's standalone book plus one
-# series card per block (books-dir books add a few more).
-EXPECTED_TILES = SCALE_COUNT // SERIES_SIZE * 2
+# Flat (None) view: one tile per book (books-dir files add a few more).
+EXPECTED_TILES = SCALE_COUNT
 _PAGESIZE = 6  # COLS * ROWS, must match the app geometry
 
 pytestmark = pytest.mark.bookshelf
@@ -306,7 +306,7 @@ def test_scale_100k_sync_paging_memory(scale_env):
     bs, _, api = scale_env
 
     # The sync ingests 100k rows in 500-row rounds; wait for the final
-    # view_rebuild to report the collapsed tile count.
+    # view_rebuild to report the flat, one-tile-per-book count.
     deadline = time.monotonic() + 600
     view = 0
     while time.monotonic() < deadline:

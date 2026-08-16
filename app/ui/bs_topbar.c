@@ -223,18 +223,17 @@ bs_draw_top_bar(void)
     FillArea(0, y0, w, BS_TOP_BAR_H, WHITE);
     DrawLine(0, y0 + BS_TOP_BAR_H, w, y0 + BS_TOP_BAR_H, col);
 
-    /* Left button: back-arrow when drilled into a series or a
-     * dimension group, or on the Search page; the stock house icon
-     * otherwise (i.e. the plain shelf / grouped top level, where the
-     * tap is a no-op).  Both are drawn inside the common TOP_ICON_SIZE
-     * icon box centred in the button, matching the other top-bar icons. */
+    /* Left button: back-arrow when drilled into a dimension group, or
+     * on the Search page; the stock house icon otherwise (i.e. the
+     * plain shelf / grouped top level, where the tap is a no-op).
+     * Both are drawn inside the common TOP_ICON_SIZE icon box centred
+     * in the button, matching the other top-bar icons. */
     int home_w = BS_TOP_BTN_SIZE;
     int home_x = BS_TOP_BTN_PAD;
     int home_y = y0 + (BS_TOP_BAR_H - home_w) / 2;
     int hcx = home_x + home_w / 2;
     int hcy = home_y + home_w / 2;
-    if (bs_g_drilled_series[0] != '\0' || bs_g_drill_level > 0 ||
-        bs_g_state.tab == BS_TAB_SEARCH) {
+    if (bs_g_drill_level > 0 || bs_g_state.tab == BS_TAB_SEARCH) {
         bs_draw_back_icon(hcx, hcy, col);
     } else {
         /* house outline (pentagon + floor break for door), scaled to

@@ -108,7 +108,6 @@ void bs_draw_thumbnail(int x, int y, int w, int h, const BsTileRow *tr, int vi);
 /* Dimension-group drill actions (bs_grid.c). */
 void bs_group_drill(const char *value);
 void bs_group_drill_back(void);
-int bs_group_active(void);
 
 int bs_history_pagesize(void);
 

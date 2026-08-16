@@ -436,7 +436,6 @@ typedef struct {
   int source; /* SOURCE_KAVITA / SOURCE_LOCAL / SOURCE_FOLDER */
 
   int page;       /* current page (0-based) */
-  int saved_page; /* library page to restore on drill-back */
 
 } BsState;
 typedef struct {

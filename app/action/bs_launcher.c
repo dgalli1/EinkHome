@@ -1030,21 +1030,6 @@ bs_launcher_close(void)
     bs_redraw_shelf();
 }
 
-/* Pop out of a drilled-in series back to the collapsed top-level grid. */
-void
-bs_drill_back(void)
-{
-    bs_g_drilled_series[0] = '\0';
-    bs_g_state.page = bs_g_state.saved_page;
-    bs_view_rebuild();
-    bs_LOG("[bookshelf] drilled back to top level (view=%d)\n", bs_g_view_total);
-    FillArea(0, 0, ScreenWidth(), bs_content_bottom(), WHITE);
-    bs_draw_top_bar();
-    bs_draw_grid();
-    bs_draw_pager();
-    bs_flush_content();
-}
-
 void
 bs_on_tap_thumbnail(int vi)
 {
@@ -1052,23 +1037,11 @@ bs_on_tap_thumbnail(int vi)
     if (!bs_view_fetch_row(vi, &tr))
         return;
 
-    /* A card is either a series stack (All books) or a dimension-group
-     * stack.  Both drill in. */
+    /* A stack card only ever appears in a dimension-grouped view (None
+     * stays flat, so a card always drills within the active grouping).
+     * Tapping one drills into the group. */
     if (tr.is_series) {
-        if (bs_group_active()) {
-            bs_group_drill(tr.series_id); /* series_id = raw group value */
-            return;
-        }
-        snprintf(bs_g_drilled_series, sizeof bs_g_drilled_series, "%s", tr.series_id);
-        bs_g_state.saved_page = bs_g_state.page;
-        bs_g_state.page = 0;
-        bs_view_rebuild();
-        bs_LOG("[bookshelf] drilled into series '%s' (%d books)\n", tr.series_name, bs_g_view_total);
-        FillArea(0, 0, ScreenWidth(), bs_content_bottom(), WHITE);
-        bs_draw_top_bar();
-        bs_draw_grid();
-        bs_draw_pager();
-        bs_flush_content();
+        bs_group_drill(tr.series_id); /* series_id = raw group value */
         return;
     }
 

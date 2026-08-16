@@ -612,7 +612,6 @@ bs_group_drill(const char *value)
     snprintf(bs_g_drill_values[bs_g_drill_level],
              sizeof bs_g_drill_values[0], "%s", value ? value : "");
     bs_g_drill_level++;
-    bs_g_drilled_series[0] = '\0';
     bs_g_state.page = 0;
     bs_view_rebuild();
     bs_redraw_shelf();
@@ -632,13 +631,6 @@ bs_group_drill_back(void)
     bs_g_state.page = bs_g_saved_pages[bs_g_drill_level];
     bs_view_rebuild();
     bs_redraw_shelf();
-}
-
-/* 1 = a grouping preset is active (not None). */
-int
-bs_group_active(void)
-{
-    return bs_g_group != BS_GROUP_NONE;
 }
 
 void

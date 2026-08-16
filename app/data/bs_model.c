@@ -15,13 +15,12 @@
 
 /* ── book record ─────────────────────────────────────────────────────── */
 
-/* A tile in the projected grid view.  At the top level (not drilled),
- * series with >1 book collapse into a single card (is_series=1) showing
- * the newest volume's cover + a triple border + count badge.  Standalone
- * books and drilled-in series members are individual tiles (is_series=0).
+/* A tile in the projected grid view.  In a dimension-grouped view, each
+ * multi-book group collapses into a single stack card (is_series=1)
+ * showing the representative cover + a triple border + count badge.
+ * Standalone books and "None" (All books, flat) are individual tiles
+ * (is_series=0) — series only stack under an explicit grouping.
  */
-
-char bs_g_drilled_series[BS_MAX_ID_LEN]; /* "" = top level */
 
 /* Current page of view rows, shared by the draw loop and the cover
  * fetcher.  Single-threaded event loop, so one static page buffer is

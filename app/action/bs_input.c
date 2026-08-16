@@ -223,7 +223,6 @@ bs_on_tap_overlay_group(int x, int y)
     bs_g_drill_level = 0;
     for (int L = 0; L < BS_GROUP_MAX_LEVELS; L++)
         bs_g_drill_values[L][0] = '\0';
-    bs_g_drilled_series[0] = '\0';
     bs_g_state.page = 0;
     bs_view_rebuild();
     bs_g_state.overlay = BS_OV_NONE;

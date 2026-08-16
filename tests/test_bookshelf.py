@@ -1414,13 +1414,14 @@ def test_no_crash_after_all_interactions(fresh_bookshelf):
     bs.assert_no_crash()
 
 
-# ── series drill-down ──────────────────────────────────────────────────
+# ── series grouping helpers ───────────────────────────────────────────
 # The mock provider derives a series from a "Name - NN" filename convention
 # (see api/providers/mock.py).  The shipped books are all standalone, so the
-# collapsed top-level grid shows no series card by default.  These tests inject
-# a two-book series, restart bookshelf so the fresh launch syncs it, then
-# exercise the drill-in (tap the series card) and the two drill-back paths
-# (top-bar left button + BACK key).  Injected files are always removed so the
+# default (None/All books) view shows no series card — it is flat and the
+# injected series' volumes appear as individual tiles.  Tests that need a
+# series stack card (the long-press context menus) inject a two-book series,
+# restart bookshelf so the fresh launch syncs it, then pick "By series" to
+# collapse it into one card.  Injected files are always removed so the
 # shared books dir is clean for the other tests in this module.
 
 _SERIES_STEM = "Drill_Test"
@@ -1428,12 +1429,6 @@ _SERIES_FILES = [f"{_SERIES_STEM} - 01.epub", f"{_SERIES_STEM} - 02.epub"]
 _ALLOWED_EXT = (".epub", ".pdf", ".fb2", ".djvu", ".txt", ".cbz", ".cbr")
 _BOOKS_DIR = PBEMU_ROOT / FIRMWARE / ".live" / "mnt" / "ext1" / "books"
 _PAGESIZE = 6  # COLS * ROWS, must match geometry.PAGESIZE
-
-
-def _stem_is_series(stem: str) -> bool:
-    """Replicate the mock provider's series-name rule."""
-    dp = stem.rfind(" - ")
-    return dp > 0 and stem[dp + 3 :].strip().isdigit()
 
 
 def _inject_series() -> list[Path]:
@@ -1468,20 +1463,48 @@ def _inject_bulk_books(count: int, stem: str = "BatchStress") -> list[Path]:
     return paths
 
 
-def _standalone_view_count() -> int:
-    """Count books the collapsed view emits as flat tiles (no series tail).
+def _grouped_series_index(bs: BookshelfSession, series_title: str) -> int:
+    """Index (0-based on-screen tile) of the multi-book *series_title* stack
+    card in a 'By series' grouped view, read straight from the store.
 
-    In GROUP_ALL collapse mode build_view() emits every standalone book first,
-    then one card per multi-book series, so the (single) series card lands at
-    view index == this count.
+    "None" stays flat — series only stack under an explicit grouping — so
+    tests reach a series card (and its long-press context menu / drill) by
+    choosing "By series" first.  Books with no series group under a single
+    "No series" card too, so match by the card's series name (the store's
+    series_name is empty for the no-series bucket, the real name otherwise).
+    The view rows ORDER BY rowid == on-screen order.
     """
-    n = 0
-    for p in sorted(_BOOKS_DIR.iterdir()):
-        if not p.is_file() or not p.name.lower().endswith(_ALLOWED_EXT):
-            continue
-        if not _stem_is_series(p.stem):
-            n += 1
-    return n
+    import sqlite3
+
+    deadline = time.monotonic() + 10.0
+    last_err = None
+    while time.monotonic() < deadline:
+        try:
+            con = sqlite3.connect(str(bs.backend.store_path), timeout=2.0)
+            try:
+                rows = con.execute(
+                    "SELECT kind, series_name FROM view ORDER BY rowid").fetchall()
+            finally:
+                con.close()
+            if rows:
+                for i, (kind, name) in enumerate(rows):
+                    if kind == 1 and (name or "") == series_title:
+                        return i
+                last_err = AssertionError(
+                    f"no '{series_title}' series card in grouped view: "
+                    f"{[(k, n) for k, n in rows]}")
+        except Exception as exc:  # noqa: BLE001 - store may be mid-sync
+            last_err = exc
+        time.sleep(0.2)
+    raise AssertionError(f"could not read the grouped view: {last_err}")
+
+
+def _group_by_series(bs: BookshelfSession) -> None:
+    """Inject a series first, then switch the shelf to 'By series' so the
+    multi-book series appears as a single stack card (the default 'None'
+    view is flat and shows its volumes individually)."""
+    bs.choose_group("series")
+    bs.wait_for_stable()
 
 
 def _goto_view_tile(bs: BookshelfSession, view_idx: int) -> int:
@@ -1520,66 +1543,16 @@ def _goto_view_tile(bs: BookshelfSession, view_idx: int) -> int:
     return pos
 
 
-def test_series_card_drill_in_and_back(fresh_bookshelf):
-    """Collapsed grid shows a series card; tap drills in, back pops out.
-
-    The left top-bar button and the BACK key must both pop the drill without
-    closing the app (no monitor.app respawn cycle).
-    """
-    bs = fresh_bookshelf
-    injected = _inject_series()
-    try:
-        _restart_bookshelf(bs.emulator)
-        bs.wait_for_stable()
-
-        standalone = _standalone_view_count()
-        series_idx = standalone  # one multi-book series, appended after flats
-
-        # The collapsed grid must contain exactly one series card.
-        bs.assert_log_contains(f"draw_grid view={standalone + 1}")
-
-        # Drill in: tap the series card.
-        pos = _goto_view_tile(bs, series_idx)
-        before = bs.frame_hash()
-        bs.tap_book(pos)
-        bs.wait_hash_change(before)
-        bs.assert_log_contains("drilled into series 'Drill Test'")
-
-        # Top-bar left button = Back while drilled: pops, does NOT close.
-        inv_before = bs.invocation_count()
-        before2 = bs.frame_hash()
-        bs.tap_home()
-        bs.wait_hash_change(before2)
-        bs.assert_log_contains("drilled back to top level")
-        # Poll briefly that the drill-back did not CloseApp/respawn.
-        deadline = time.monotonic() + 2.0
-        while time.monotonic() < deadline:
-            assert bs.invocation_count() == inv_before, (
-                "drill-back must not trigger CloseApp/respawn"
-            )
-            time.sleep(0.1)
-
-        # BACK key also pops the drill.
-        pos = _goto_view_tile(bs, series_idx)
-        before3 = bs.frame_hash()
-        bs.tap_book(pos)
-        bs.wait_hash_change(before3)
-        before4 = bs.frame_hash()
-        bs.send_back_key()
-        bs.wait_hash_change(before4)
-        assert bs.current_log().count("drilled back to top level") >= 2, (
-            "BACK key did not pop the drilled series"
-        )
-    finally:
-        _remove_series(injected)
-
-
-# ── tabs, downloads, context menus ─────────────────────────────────────
+# ── tabs, downloads, context menus ─────────────────────────────────
 # The Downloads tab, Download-all action, and the long-press context menus
 # (book: download/delete; series: download-all/delete) are exercised here.
 # In the emulator the guest runs non-root and cannot write /mnt/ext1/system/bin,
 # so bookshelf.c falls back to /tmp (resolve_downloads_dir); guest /tmp maps to
 # .live/tmp on the host.  The helpers below inspect/clean that dir.
+#
+# Series cards only appear under an explicit "By series" grouping — the
+# default "None"/All-books view is flat — so the series long-press menus
+# below group first, then address the single multi-book series card.
 
 _DOWNLOADS_DIR = PBEMU_ROOT / FIRMWARE / ".live" / "mnt" / "ext1" / "Downloads"
 
@@ -1948,15 +1921,19 @@ def test_book_longpress_delete(fresh_bookshelf):
 
 
 def test_series_longpress_download_all(fresh_bookshelf):
-    """Long-press a series card → Download all fetches every member."""
+    """Long-press a series card → Download all fetches every member.
+
+    The default (None/All books) view is flat, so the multi-book series
+    is grouped into one card only after choosing "By series".
+    """
     bs = fresh_bookshelf
     injected = _inject_series()
     try:
         _clear_downloads()
         _restart_bookshelf(bs.emulator)
         bs.wait_for_stable()
-        standalone = _standalone_view_count()
-        series_idx = standalone
+        _group_by_series(bs)
+        series_idx = _grouped_series_index(bs, _SERIES_STEM.replace("_", " "))
         pos = _goto_view_tile(bs, series_idx)
         before = bs.frame_hash()
         bs.long_press_book(pos)
@@ -1981,8 +1958,8 @@ def test_series_longpress_delete(fresh_bookshelf):
         _clear_downloads()
         _restart_bookshelf(bs.emulator)
         bs.wait_for_stable()
-        standalone = _standalone_view_count()
-        series_idx = standalone
+        _group_by_series(bs)
+        series_idx = _grouped_series_index(bs, _SERIES_STEM.replace("_", " "))
         pos = _goto_view_tile(bs, series_idx)
         # Download the series first so delete has files to remove.
         before = bs.current_log()
@@ -2072,40 +2049,6 @@ def _store_books() -> list[dict]:
     ]
 
 
-def _wait_store_series(series_title: str) -> list[dict]:
-    """Wait until the on-disk store holds >=2 books of *series_title*."""
-    deadline = time.monotonic() + 20
-    store: list[dict] = []
-    while time.monotonic() < deadline:
-        store = _store_books()
-        if sum(1 for b in store if b.get("series") == series_title) >= 2:
-            break
-        time.sleep(1.0)
-    books = [b for b in store if b.get("series") == series_title]
-    assert len(books) >= 2, "online sync never stored the series"
-    return books
-
-
-def _wait_cover_file(member_id: str) -> None:
-    """Wait for the online cover cache to gain *member_id* (in any bucket)."""
-    deadline = time.monotonic() + 15
-    while time.monotonic() < deadline:
-        if next(_OFFLINE_COVERS.rglob(f"{member_id}.png"), None) is not None:
-            return
-        time.sleep(0.5)
-    raise AssertionError(f"cover cache never written for series member {member_id}")
-
-
-def _wait_cover_log(bs, member_id: str) -> None:
-    """Wait for a cache-hit blit of *member_id* in the guest log."""
-    deadline = time.monotonic() + 10
-    while time.monotonic() < deadline:
-        if f"cover_tick cache hit id={member_id}" in bs.current_log():
-            return
-        time.sleep(0.5)
-    raise AssertionError("series card did not render its cached thumbnail offline")
-
-
 def _loaded_book_count(log: str) -> int:
     """Tiles the offline boot projected from the on-disk store."""
     m = re.search(r"view_rebuild: view=(\d+)", log)
@@ -2114,35 +2057,23 @@ def _loaded_book_count(log: str) -> int:
 
 
 def _pager_roundtrip(bs, pages: int) -> None:
-    """<< / >> jump to the ends, < / > step one page at a time."""
-    targets = (
-        ("page=0", bs.tap_pager_first),
-        (f"page={pages - 1}", bs.tap_pager_last),
-        ("page=0", bs.tap_pager_first),
-        ("page=1", bs.tap_pager_next),
-    )
-    for want, tap in targets:
+    """<< / >> jump to the ends, < / > step one page at a time.
+
+    Jumps to the last page first so every subsequent tap actually moves
+    a page (tapping << while already on page 0 is a no-op), then sweeps
+    << -> > — each step verified by its draw_grid page= marker."""
+    if pages <= 1:
+        return
+    cur = _last_draw_grid(bs.current_log())[1]
+    steps = []
+    if cur != pages - 1:
+        steps.append((f"page={pages - 1}", bs.tap_pager_last))
+    steps.append(("page=0", bs.tap_pager_first))
+    steps.append(("page=1", bs.tap_pager_next))
+    for want, tap in steps:
         snap = bs.current_log()
-        before = bs.frame_hash()
         tap()
-        bs.wait_hash_change(before)
         _wait_log_slice(bs, snap, want)
-
-
-def _offline_drill_back(bs, pos, page_before: int) -> None:
-    """Drill into the offline series card; back must restore the page."""
-    before = bs.frame_hash()
-    bs.tap_book(pos)
-    bs.wait_hash_change(before)
-    bs.assert_log_contains("drilled into series 'Drill Test'")
-    snap = bs.current_log()
-    before = bs.frame_hash()
-    bs.tap_home()
-    bs.wait_hash_change(before)
-    _wait_log_slice(bs, snap, "drilled back to top level")
-    assert _last_draw_grid(bs.current_log())[1] == page_before, (
-        "offline drill-back did not restore the previous page"
-    )
 
 
 def _offline_pager_check(bs) -> None:
@@ -2172,25 +2103,6 @@ def _offline_downloads_roundtrip(bs, invocations: int) -> None:
     assert bs.invocation_count() == invocations, (
         "offline navigation triggered CloseApp/respawn"
     )
-def _seed_online_series(bs, emulator) -> str:
-    """Seed a two-book series online so the store carries a collapsed
-    series card and cover_tick caches its member cover; return the id."""
-    injected = _inject_series()
-    try:
-        _restart_bookshelf(emulator)
-        bs.wait_for_stable()
-        _ensure_offline_assets(emulator)
-        series_books = _wait_store_series(_SERIES_STEM.replace("_", " "))
-        member_id = max(
-            series_books, key=lambda b: (b.get("seriesIdx") or 0, b.get("addedAt") or 0)
-        )["id"]
-        _goto_view_tile(bs, _standalone_view_count())
-        _wait_cover_file(member_id)
-    finally:
-        _remove_series(injected)
-    return member_id
-
-
 def _offline_boot_asserts(log: str) -> None:
     """The offline boot must fail sync but render the cached library."""
     assert "do_sync FAILED" in log
@@ -2255,25 +2167,18 @@ def test_download_all_failures_finish_not_loop(fresh_bookshelf):
 
 def test_offline_boot_renders_cached_library(bookshelf_env):
     """Full offline e2e: with the API unreachable, bookshelf boots from the
-    on-disk library store + cover cache and stays fully navigable — series
-    cards keep their cached thumbnail, drill-in/back restores the page, the
-    pager jumps first/last, and the downloads view opens via the sync icon
-    and closes via its back arrow."""
+    on-disk library store + cover cache and stays fully navigable — covers
+    blit from the cache, the pager jumps first/last, and the search page
+    opens via the top-bar icon and closes via its back arrow."""
     bs, emulator = bookshelf_env
-    member_id = _seed_online_series(bs, emulator)
+    # Sync online first so the store + on-disk cover cache are populated.
+    _ensure_offline_assets(emulator)
 
     saved_cfg = _set_dead_cfg()
     try:
         _restart_bookshelf(emulator)
         _offline_boot_asserts(_wait_offline_log(bs))
         invocations = bs.invocation_count()
-
-        # Page to the series card offline: its member thumbnail must blit
-        # from the on-disk cache (there is no network to fall back to).
-        pos = _goto_view_tile(bs, _standalone_view_count())
-        page_before = _last_draw_grid(bs.current_log())[1]
-        _wait_cover_log(bs, member_id)
-        _offline_drill_back(bs, pos, page_before)
         _offline_pager_check(bs)
         _offline_downloads_roundtrip(bs, invocations)
     finally:
