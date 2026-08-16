@@ -55,6 +55,7 @@ SOURCES := \
 	data/bs_local.c \
 	data/bs_extract.c \
 	data/bs_progress.c \
+	data/bs_licenses.c \
 	ui/bs_screen.c \
 	ui/bs_grid.c \
 	ui/bs_topbar.c \
@@ -62,6 +63,7 @@ SOURCES := \
 	ui/bs_popups.c \
 	ui/bs_overlays.c \
 	ui/bs_logview.c \
+	ui/bs_licenses.c \
 	ui/bs_browser.c \
 	action/bs_downloads.c \
 	action/bs_input.c \

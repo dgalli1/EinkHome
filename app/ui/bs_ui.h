@@ -129,6 +129,8 @@ void bs_sync_popup_fail(void);   /* sync failed: show the error, then close */
 
 void bs_draw_log_view(void);
 
+void bs_draw_licenses_view(void);
+
 void bs_draw_scroll_buttons(int up_ok, int down_ok);
 
 void bs_draw_scroll_buttons_at(int up_ok, int down_ok, int y0);

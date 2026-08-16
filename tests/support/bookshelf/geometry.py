@@ -232,6 +232,25 @@ class BookshelfGeometry:
         y = SETTINGS_ROW1_Y + 4 * SETTINGS_ROW_H + 24 + SETTINGS_BTN_H
         return (self.screen_w // 2, y + (SETTINGS_BTN_H - 12) // 2)
 
+    def settings_licenses_center(self) -> tuple[int, int]:
+        """Centre of the Licenses button (below Show logs)."""
+        y = SETTINGS_ROW1_Y + 4 * SETTINGS_ROW_H + 24 + 2 * SETTINGS_BTN_H
+        return (self.screen_w // 2, y + (SETTINGS_BTN_H - 12) // 2)
+
+    # ── third-party licenses viewer (full-screen) ─────────────────────
+    # The list body starts at the shared overlay header (the top bar's
+    # own 96 px, BS_OVERLAY_HEADER_H) plus 16 — i.e. BS_LIC_LIST_TOP in
+    # bs_core.h — with BS_LIC_LIST_H (110) per row.
+
+    def licenses_list_row_center(self, index: int) -> tuple[int, int]:
+        """Centre of license-list row *index* (0-based)."""
+        y = 96 + 16 + index * 110
+        return (self.screen_w // 2, y + (110 - 12) // 2)
+
+    def licenses_back_center(self) -> tuple[int, int]:
+        """Centre of the licenses viewer's Back chevron (same as settings)."""
+        return (8 + 48, TOP_BAR_H // 2)
+
     # ── Log viewer (full-screen) ─────────────────────────────────────
 
     def log_back_center(self) -> tuple[int, int]:

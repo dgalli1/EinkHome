@@ -378,6 +378,11 @@ int bs_on_event(int type, int par1, int par2) {
       FullUpdate();
       return 1;
     }
+    if (bs_g_state.overlay == BS_OV_LICENSES) {
+      bs_draw_licenses_view();
+      FullUpdate();
+      return 1;
+    }
     bs_draw_top_bar();
     if (bs_g_state.tab == BS_TAB_SEARCH)
       bs_draw_search_tab();
@@ -525,6 +530,11 @@ int bs_on_event(int type, int par1, int par2) {
     /* The log viewer owns all taps while open. */
     if (bs_g_state.overlay == BS_OV_LOG) {
       bs_on_tap_log_view(x, y);
+      return 1;
+    }
+    /* The licenses viewer owns all taps while open. */
+    if (bs_g_state.overlay == BS_OV_LICENSES) {
+      bs_on_tap_licenses_view(x, y);
       return 1;
     }
     /* The sync-progress sheet is modal during the sync (which is
@@ -916,6 +926,21 @@ int bs_on_event(int type, int par1, int par2) {
       }
       if (bs_g_state.overlay == BS_OV_SETTINGS) {
         bs_settings_close();
+        return 1;
+      }
+      if (bs_g_state.overlay == BS_OV_LICENSES) {
+        /* Back pops a license detail to its list, then closes the
+         * viewer (mirrors the on-screen Back chevron). */
+        if (bs_g_state.lic_sel >= 0) {
+          bs_g_state.lic_sel = -1;
+          bs_g_state.lic_scroll = 0;
+          bs_draw_licenses_view();
+          FullUpdate();
+        } else {
+          bs_g_state.overlay = BS_OV_NONE;
+          bs_g_state.lic_scroll = 0;
+          bs_redraw_shelf();
+        }
         return 1;
       }
       if (bs_g_state.overlay == BS_OV_LAUNCHER) {

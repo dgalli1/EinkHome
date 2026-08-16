@@ -385,6 +385,8 @@ bs_draw_overlay_settings(void)
     bs_settings_draw_button(y, bs_i18n("settings.save"), 1, bf);
     y += BS_SETTINGS_BTN_H;
     bs_settings_draw_button(y, bs_i18n("settings.logs"), 0, bf);
+    y += BS_SETTINGS_BTN_H;
+    bs_settings_draw_button(y, bs_i18n("settings.licenses"), 0, bf);
     if (bf != NULL)
         CloseFont(bf);
     if (vf != NULL)

@@ -71,6 +71,7 @@ if [ -z "${SRCS}" ]; then
 		${REPO_ROOT}/app/data/bs_local.c \
 		${REPO_ROOT}/app/data/bs_extract.c \
 		${REPO_ROOT}/app/data/bs_progress.c \
+		${REPO_ROOT}/app/data/bs_licenses.c \
 		${REPO_ROOT}/app/ui/bs_screen.c \
 		${REPO_ROOT}/app/ui/bs_grid.c \
 		${REPO_ROOT}/app/ui/bs_topbar.c \
@@ -78,6 +79,7 @@ if [ -z "${SRCS}" ]; then
 		${REPO_ROOT}/app/ui/bs_popups.c \
 		${REPO_ROOT}/app/ui/bs_overlays.c \
 		${REPO_ROOT}/app/ui/bs_logview.c \
+		${REPO_ROOT}/app/ui/bs_licenses.c \
 		${REPO_ROOT}/app/ui/bs_browser.c \
 		${REPO_ROOT}/app/action/bs_downloads.c \
 		${REPO_ROOT}/app/action/bs_input.c \

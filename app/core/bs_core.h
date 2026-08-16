@@ -221,6 +221,15 @@
 #define BS_LOG_FONT_PX 20
 #define BS_LOG_BODY_TOP (BS_OVERLAY_HEADER_H + 42)
 
+/* Licenses viewer (Settings → Licenses) geometry.  A list of the
+ * bundled third-party licenses, each of which opens to a full-text
+ * detail page.  The list rows carry the component name + licence
+ * type; the detail page word-wraps the licence text with the same
+ * row metrics as the log viewer. */
+#define BS_LIC_LIST_H 110
+#define BS_LIC_LIST_TOP (BS_OVERLAY_HEADER_H + 16)
+#define BS_LIC_MAX_ROWS 512 /* wrapped detail rows (any licence fits) */
+
 /* Stock up/down scroll buttons (the pattern firmware apps use, e.g.
  * the coloring app): an up chevron at the bottom-left corner, a down
  * chevron at the bottom-right, overlaid on the scrollable surface. */
@@ -291,6 +300,7 @@ typedef enum {
   BS_OV_SORT,     /* sort chooser sheet */
   BS_OV_SETTINGS, /* full-screen settings */
   BS_OV_LOG,      /* full-screen log viewer */
+  BS_OV_LICENSES, /* full-screen third-party licenses viewer */
   BS_OV_LAUNCHER, /* full-screen launcher */
   BS_OV_FOLDER,   /* download-folder picker (opens ON TOP of settings) */
   BS_OV_CTX,      /* context (long-press) menu */
@@ -387,6 +397,14 @@ typedef struct {
    * "tail", otherwise the index of the first visible line (0 =
    * oldest). */
   int log_scroll;
+
+  /* Full-screen licenses viewer (Settings → Licenses; its open state
+   * lives in g_state.overlay as OV_LICENSES).  lic_sel < 0 shows the
+   * entry LIST; otherwise it is the 0-based index of the licence whose
+   * full text is shown.  lic_scroll is the first visible entry (list)
+   * or wrapped row (detail). */
+  int lic_sel;
+  int lic_scroll;
 
   /* Reader selection.  reader_pref == 0 means "Auto" (honour the
    * server's open-with resolution); otherwise it is a 1-based index

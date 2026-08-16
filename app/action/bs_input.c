@@ -5,6 +5,7 @@
 #include "bs_downloads.h"
 #include "bs_input.h"
 #include "bs_launcher.h"
+#include "bs_licenses.h"
 #include "bs_model.h"
 #include "bs_net.h"
 #include "bs_store.h"
@@ -444,6 +445,19 @@ bs_on_tap_overlay_settings(int x, int y)
         FullUpdate();
         return;
     }
+    int y_lic = y_logs + BS_SETTINGS_BTN_H;
+    if (y >= y_lic && y < y_lic + BS_SETTINGS_BTN_H - 12) {
+        /* Open the third-party licenses viewer (Settings → Licenses).
+         * Like the log viewer it owns the screen while open; its Back
+         * returns to the shelf (via the list). */
+        bs_g_settings_edit = 0;
+        bs_g_state.overlay = BS_OV_LICENSES;
+        bs_g_state.lic_sel = -1; /* start on the entry list */
+        bs_g_state.lic_scroll = 0;
+        bs_draw_licenses_view();
+        FullUpdate();
+        return;
+    }
 }
 
 /* Taps on the full-screen log viewer: Back (top-left) or the corner
@@ -482,4 +496,71 @@ bs_on_tap_log_view(int x, int y)
             PartialUpdate(0, body_top, ScreenWidth(), h - body_top);
         }
     }
+}
+
+/* Taps on the full-screen licenses viewer.  The header Back chevron
+ * changes with depth: from a license's detail it returns to the entry
+ * list; from the list it closes to the shelf (mirroring the log
+ * viewer).  The corner scroll buttons page-scroll the current view; a
+ * tap on a list row opens that license's full text. */
+void
+bs_on_tap_licenses_view(int x, int y)
+{
+    int n = bs_license_count();
+    int bx, by, bw, bh;
+    bs_overlay_back_rect(&bx, &by, &bw, &bh);
+    if (x >= bx && x < bx + bw && y >= by && y < by + bh) {
+        if (bs_g_state.lic_sel >= 0) {
+            /* detail → back to the list */
+            bs_g_state.lic_sel = -1;
+            bs_g_state.lic_scroll = 0;
+            bs_draw_licenses_view();
+            FullUpdate();
+        } else {
+            bs_g_state.overlay = BS_OV_NONE;
+            bs_g_state.lic_scroll = 0;
+            bs_redraw_shelf();
+        }
+        return;
+    }
+
+    int h = bs_content_bottom();
+    int btn_y = h - 8 - BS_SCROLL_BTN_H;
+
+    int dir = bs_hit_scroll_button(x, y);
+    if (dir != 0) {
+        int body_top = bs_g_state.lic_sel < 0 ? BS_LIC_LIST_TOP : BS_LOG_BODY_TOP;
+        int page = bs_g_state.lic_sel < 0
+                       ? (btn_y - body_top - 8) / BS_LIC_LIST_H
+                       : (btn_y - body_top) / BS_LOG_ROW_H;
+        if (page < 1)
+            page = 1;
+        bs_g_state.lic_scroll += dir * page;
+        if (bs_g_state.lic_scroll < 0)
+            bs_g_state.lic_scroll = 0;
+        bs_draw_licenses_view();
+        /* Only the body moves on a scroll; the header is unchanged. */
+        PartialUpdate(0, body_top, ScreenWidth(), h - body_top);
+        return;
+    }
+
+    /* List view: a tap on a row opens that license's full text. */
+    if (bs_g_state.lic_sel < 0) {
+        int body_h = btn_y - BS_LIC_LIST_TOP - 8;
+        int rows_vis = body_h / BS_LIC_LIST_H;
+        if (rows_vis < 1)
+            rows_vis = 1;
+        int rel = (y - BS_LIC_LIST_TOP) / BS_LIC_LIST_H;
+        if (y >= BS_LIC_LIST_TOP && rel >= 0 && rel < rows_vis) {
+            int idx = bs_g_state.lic_scroll + rel;
+            if (idx >= 0 && idx < n) {
+                bs_g_state.lic_sel = idx;
+                bs_g_state.lic_scroll = 0;
+                bs_draw_licenses_view();
+                FullUpdate();
+            }
+        }
+        return;
+    }
+    /* Detail: taps in the body are ignored (only Back / scroll). */
 }

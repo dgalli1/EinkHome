@@ -706,6 +706,45 @@ def test_settings_show_logs_opens_log_viewer(fresh_bookshelf):
     assert bs.invocation_count() == before_invocations
 
 
+def test_settings_licenses_opens_viewer_and_drills(fresh_bookshelf):
+    """Settings → Licenses shows the license list; a row opens its
+    full text; Back returns to the list, then to the shelf.  No crash
+    on any transition."""
+    bs = fresh_bookshelf
+    bs.open_settings()
+    time.sleep(0.5)
+    before_invocations = bs.invocation_count()
+
+    # Open the licenses viewer: the list replaces the settings page.
+    before_list = bs.frame_hash()
+    bs.tap_settings_licenses()
+    bs.wait_hash_change(before_list)
+    time.sleep(0.5)
+    assert bs.invocation_count() == before_invocations, (
+        "bookshelf respawned after the Licenses tap (crash)"
+    )
+
+    # Tap the first license (cJSON): its detail text replaces the list.
+    before_detail = bs.frame_hash()
+    bs.tap_licenses_list_row(0)
+    bs.wait_hash_change(before_detail)
+    time.sleep(0.5)
+    assert bs.invocation_count() == before_invocations
+
+    # Back from a detail returns to the list (a distinct frame).
+    before_back = bs.frame_hash()
+    bs.tap_licenses_back()
+    bs.wait_hash_change(before_back)
+    time.sleep(0.5)
+    assert bs.invocation_count() == before_invocations
+
+    # Back from the list returns to the shelf.
+    before_shelf = bs.frame_hash()
+    bs.tap_licenses_back()
+    bs.wait_hash_change(before_shelf)
+    assert bs.invocation_count() == before_invocations
+
+
 def test_settings_api_host_row_opens_keyboard(fresh_bookshelf):
     """Tap the API host row, verify the on-screen keyboard appears."""
     bs = fresh_bookshelf
