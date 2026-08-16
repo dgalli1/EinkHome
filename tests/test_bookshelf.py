@@ -2009,7 +2009,7 @@ def _ensure_offline_assets(emulator: Emulator) -> None:
     """Wait for (or force) a populated library store + >=6 cached covers."""
     deadline = time.monotonic() + 30
     while time.monotonic() < deadline:
-        covers = len(list(_OFFLINE_COVERS.glob("*.png")))
+        covers = len(list(_OFFLINE_COVERS.rglob("*.png")))
         if _OFFLINE_STORE.is_file() and covers >= 6:
             return
         _restart_bookshelf(emulator)
@@ -2076,10 +2076,10 @@ def _wait_store_series(series_title: str) -> list[dict]:
 
 
 def _wait_cover_file(member_id: str) -> None:
-    """Wait for the online cover cache to gain *member_id*.png."""
+    """Wait for the online cover cache to gain *member_id* (in any bucket)."""
     deadline = time.monotonic() + 15
     while time.monotonic() < deadline:
-        if (_OFFLINE_COVERS / f"{member_id}.png").is_file():
+        if next(_OFFLINE_COVERS.rglob(f"{member_id}.png"), None) is not None:
             return
         time.sleep(0.5)
     raise AssertionError(f"cover cache never written for series member {member_id}")

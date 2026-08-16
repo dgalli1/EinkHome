@@ -82,6 +82,15 @@ void bs_draw_system_strip(void);
 
 void bs_cover_schedule_next(void);
 
+/* Post-sync cover warm-up: fetch every remote book's cover into the
+ * on-disk cache in the background so the library renders offline. */
+void bs_cover_warm_start(void);
+/* 1 while the warm pass is running (drives the sync-popup progress bar /
+ * keep-open decision). */
+int bs_cover_warm_active(void);
+/* Fill *done/*total with the warm pass's progress; returns whether active. */
+int bs_cover_warm_progress(int *done, int *total);
+
 void bs_blit_cover(int cx, int cy, int cw, int ch, const BsBook *b);
 
 void bs_draw_series_stack_back(int cx, int cy, int cw, int ch);

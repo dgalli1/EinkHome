@@ -174,6 +174,94 @@ bs_resolve_downloads_dir(void)
  * (writable app dir on device, /tmp in the emulator). */
 char bs_g_covers_dir[BS_COVERS_DIR_CAP];
 
+/* Sanitise an id for use as a filename: '/' to '_' (the only char that
+ * would cross a path boundary). */
+static void
+cover_sanitize(const char *id, char *safe, size_t cap)
+{
+    snprintf(safe, cap, "%s", id);
+    for (char *p = safe; *p; p++)
+        if (*p == '/')
+            *p = '_';
+}
+
+/* Bucket name (2 lowercase hex chars) for a cover id: the low byte of a
+ * cheap FNV-1a hash of the sanitised id.  Sharding the cache into 256
+ * small dirs keeps a many-thousand-cover library from piling every file
+ * in one directory — slow to scan on e-ink flash — and gives the sweep
+ * a bounded, independently-capped population per directory. */
+static void
+cover_bucket_of(const char *safe, char out[3])
+{
+    unsigned int        h = 2166136261u;
+    const unsigned char *p;
+    for (p = (const unsigned char *)safe; *p; p++) {
+        h ^= *p;
+        h *= 16777619u;
+    }
+    static const char hex[] = "0123456789abcdef";
+    out[0] = hex[(h >> 4) & 0xf];
+    out[1] = hex[h & 0xf];
+    out[2] = '\0';
+}
+
+/* Bucket directory (creating it if needed) for a sanitised id.  Returns
+ * 0 on success.  Writers call this before fopen so the sharded dir
+ * exists. */
+static int
+cover_make_bucket(const char *safe)
+{
+    char bucket[3], dir[BS_COVERS_DIR_CAP + 4];
+    cover_bucket_of(safe, bucket);
+    snprintf(dir, sizeof dir, "%s/%s", bs_g_covers_dir, bucket);
+    if (mkdir(dir, 0777) != 0 && errno != EEXIST)
+        return -1;
+    return 0;
+}
+
+/* Create the bucket dir for an id (used before writing a local cover's
+ * extracted ".raw"). */
+void
+bs_cover_ensure_bucket(const char *id)
+{
+    char safe[BS_MAX_ID_LEN];
+    cover_sanitize(id, safe, sizeof safe);
+    cover_make_bucket(safe);
+}
+
+/* One-time migration: pre-sharding builds kept covers/<safe>.png|.raw
+ * flat in the covers dir.  Move any such entries into their bucket so
+ * nothing is left behind (and the per-bucket sweep can account for
+ * them).  Renames are same-volume and cheap; an entry that cannot move
+ * is simply left for a later run / re-fetch. */
+static void
+cover_migrate_flat(void)
+{
+    DIR *d = opendir(bs_g_covers_dir);
+    if (d == NULL)
+        return;
+    struct dirent *e;
+    while ((e = readdir(d)) != NULL) {
+        size_t len = strlen(e->d_name);
+        if (len <= 4 || len > BS_MAX_ID_LEN + 4)
+            continue;
+        const char *ext = e->d_name + len - 4;
+        if (strcmp(ext, ".png") != 0 && strcmp(ext, ".raw") != 0)
+            continue;
+        char safe[BS_MAX_ID_LEN], bucket[3];
+        char src[BS_MAX_PATH_LEN], dir[BS_COVERS_DIR_CAP + 4], dst[BS_MAX_PATH_LEN];
+        snprintf(safe, sizeof safe, "%.*s", (int)(len - 4), e->d_name);
+        cover_bucket_of(safe, bucket);
+        snprintf(src, sizeof src, "%s/%s", bs_g_covers_dir, e->d_name);
+        snprintf(dir, sizeof dir, "%s/%s", bs_g_covers_dir, bucket);
+        mkdir(dir, 0777);
+        snprintf(dst, sizeof dst, "%s/%s", dir, e->d_name);
+        if (rename(src, dst) != 0 && errno != EEXIST)
+            continue; /* keep it flat; the sweep may reclaim it later */
+    }
+    closedir(d);
+}
+
 void
 bs_resolve_covers_dir(void)
 {
@@ -186,6 +274,8 @@ bs_resolve_covers_dir(void)
      * case where mkdir ignores the mode. */
     if (mkdir(bs_g_covers_dir, 0777) != 0)
         chmod(bs_g_covers_dir, 0777);
+    /* Fold any pre-sharding flat cache into buckets, once, at boot. */
+    cover_migrate_flat();
     bs_LOG("[bookshelf] covers dir = %s\n", bs_g_covers_dir);
 }
 
@@ -804,6 +894,13 @@ finish_sync(void)
 
     bs_g_state.sync_state = 0;
     sync_ui_active(0);
+    /* A remote sync pulled the library in: warm every cover into the
+     * on-disk cache in the background so the shelf still shows real
+     * covers offline — not just the pages the user happened to view.
+     * Local/folder sources have no server covers (local covers extract
+     * from the files on view), so there is nothing to warm there. */
+    if (bs_g_state.source == BS_SOURCE_KAVITA)
+        bs_cover_warm_start();
     /* do_sync is async now: the callers' redraw runs before the sync
      * lands, so the shelf repaints itself here. */
     sync_ui_repaint();
@@ -1049,44 +1146,71 @@ bs_sync_local_finish(void)
 
 /* ── cover PNG cache ─────────────────────────────────────────────────── */
 
-/* Build the on-disk path for a cached cover PNG. */
+/* Build the on-disk path for a cached cover PNG: covers/<bucket>/<safe>.png. */
 void
 bs_cover_cache_path(const char *id, char *out, size_t cap)
 {
-    /* Sanitise id: replace '/' with '_' so it's safe as a filename. */
-    char safe[BS_MAX_ID_LEN];
-    snprintf(safe, sizeof safe, "%s", id);
-    for (char *p = safe; *p; p++)
-        if (*p == '/')
-            *p = '_';
-    snprintf(out, cap, "%s/%s.png", bs_g_covers_dir, safe);
+    char safe[BS_MAX_ID_LEN], bucket[3];
+    cover_sanitize(id, safe, sizeof safe);
+    cover_bucket_of(safe, bucket);
+    snprintf(out, cap, "%s/%s/%s.png", bs_g_covers_dir, bucket, safe);
 }
 
 /* Path of the raw extracted cover for a local book (the exact bytes the
- * extractor pulled from the file — PNG or JPEG).  Persisting it makes
- * cover_tick skip the zip parse on every later view. */
+ * extractor pulled from the file — PNG or JPEG): covers/<bucket>/<safe>.raw.
+ * Persisting it makes cover_tick skip the zip parse on every later view. */
 void
 bs_cover_raw_path(const char *id, char *out, size_t cap)
 {
-    char safe[BS_MAX_ID_LEN];
-    snprintf(safe, sizeof safe, "%s", id);
-    for (char *p = safe; *p; p++)
-        if (*p == '/')
-            *p = '_';
-    snprintf(out, cap, "%s/%s.raw", bs_g_covers_dir, safe);
+    char safe[BS_MAX_ID_LEN], bucket[3];
+    cover_sanitize(id, safe, sizeof safe);
+    cover_bucket_of(safe, bucket);
+    snprintf(out, cap, "%s/%s/%s.raw", bs_g_covers_dir, bucket, safe);
 }
 
-/* Decode a cover PNG scaled to 240x360.  On a colour display the decode
+/* 1 when `path` holds PNG bytes rather than JPEG.  The processed cover
+ * cache now holds JPEG (the server emits JPEG — ~5x smaller and faster
+ * for libinkview to decode on the ARM); caches written by older builds
+ * hold PNG, and the 1x1 placeholder is a PNG too.  Dispatch on the magic
+ * bytes, never the (cache-slot) ".png" filename, so a stale cache still
+ * decodes.  libinkview decodes PNG and JPEG only — no WebP/AV1 — so the
+ * server must never emit those codecs. */
+static int
+cover_bytes_are_png(const char *path)
+{
+    FILE         *f = fopen(path, "rb");
+    unsigned char magic[4] = {0};
+    if (f != NULL) {
+        fread(magic, 1, sizeof magic, f);
+        fclose(f);
+    }
+    return magic[0] == 0x89 && magic[1] == 'P' && magic[2] == 'N' && magic[3] == 'G';
+}
+
+/* Decode a cover image scaled to 240x360.  On a colour display the decode
  * stays RGB24 — the same choice the stock bookshelf.app makes via
  * device_display_colormask() — so covers keep their colour; on a
- * greyscale display the 8-bit decode is used as before.  The caller
- * frees the returned bitmap. */
+ * greyscale display the 8-bit decode is used.  The caller frees the
+ * returned bitmap. */
 ibitmap *
 bs_load_cover_scaled(const char *path)
 {
-    if (!bs_g_display_color)
-        return LoadPNGStretch(path, 240, 360, 0, 0);
-    ibitmap *full = LoadPNGToFormat(path, kFmtRGB24);
+    int is_png = cover_bytes_are_png(path);
+    if (!bs_g_display_color) {
+        /* Greyscale: PNGs use the fast single-call stretch. */
+        if (is_png)
+            return LoadPNGStretch(path, 240, 360, 0, 0);
+        ibitmap *full = LoadJPEGToFormat(path, kFmtGrayscale8);
+        if (full == NULL)
+            return NULL;
+        bs_LOG("[bookshelf] load_cover_scaled grey full depth=%d %dx%d\n",
+            full->depth, full->width, full->height);
+        ibitmap *small = BitmapStretchCopy(full, 0, 0, full->width, full->height, 240, 360);
+        free(full);
+        return small;
+    }
+    ibitmap *full = is_png ? LoadPNGToFormat(path, kFmtRGB24)
+                           : LoadJPEGToFormat(path, kFmtRGB24);
     if (full == NULL)
         return NULL;
     bs_LOG("[bookshelf] load_cover_scaled RGB24 full depth=%d %dx%d\n",
@@ -1105,13 +1229,7 @@ bs_load_cover_scaled(const char *path)
 ibitmap *
 bs_load_image_scaled(const char *path)
 {
-    FILE         *f = fopen(path, "rb");
-    unsigned char magic[8] = {0};
-    if (f != NULL) {
-        fread(magic, 1, sizeof magic, f);
-        fclose(f);
-    }
-    int         is_png = magic[0] == 0x89 && magic[1] == 'P' && magic[2] == 'N' && magic[3] == 'G';
+    int         is_png = cover_bytes_are_png(path);
     PixelFormat fmt = bs_g_display_color ? kFmtRGB24 : kFmtGrayscale8;
     ibitmap    *full = is_png ? LoadPNGToFormat(path, fmt) : LoadJPEGToFormat(path, fmt);
     if (full == NULL)
@@ -1121,7 +1239,7 @@ bs_load_image_scaled(const char *path)
     return small;
 }
 
-/* Try to load a cached cover PNG from disk.  Returns 0 on success
+/* Try to load a cached cover image from disk.  Returns 0 on success
  * (bitmap written to *out_bmp), -1 if no cache exists. */
 int
 bs_cover_cache_load(const char *id, ibitmap **out_bmp)
@@ -1141,14 +1259,18 @@ bs_cover_cache_load(const char *id, ibitmap **out_bmp)
     return 0;
 }
 
-/* Bounded cover-cache sweep.  Every COVER_SWEEP_EVERY saves, if the
- * covers directory holds more than COVER_CACHE_MAX entries (.png and
- * .raw both count), the oldest by mtime are deleted until the cache
- * is back under the cap, so a huge library cannot grow the on-disk
- * cache without bound.  Same bounded single-pass directory pattern as
- * sweep_stale_parts in bs_downloads.c. */
+/* Bounded cover-cache sweep, per bucket.  The cache is sharded into 256
+ * bucket dirs (see cover_bucket_of), each independently capped at
+ * BS_COVER_BUCKET_MAX cover files so a huge library never fills one
+ * directory past a small bound — that is what makes a flat cache slow to
+ * scan on e-ink flash.  Every BS_COVER_SWEEP_EVERY saves the worker
+ * flags the just-written bucket; the main thread then evicts that one
+ * bucket's oldest entries down to the cap.  Same bounded single-pass
+ * directory pattern as sweep_stale_parts in bs_downloads.c. */
 #define BS_COVER_SWEEP_EVERY 64
-#define BS_COVER_CACHE_MAX 4096
+/* Cover files (.png/.raw) kept per bucket; 256 buckets => <= ~4k covers
+ * held on disk, each directory scan bounded to <= this many entries. */
+#define BS_COVER_BUCKET_MAX 16
 
 typedef struct {
     char name[BS_MAX_ID_LEN + 8]; /* id + ".png"/".raw" */
@@ -1164,17 +1286,25 @@ cover_mtime_cmp(const void *a, const void *b)
 }
 
 static int g_cover_saves; /* saves since the last sweep decision (worker thread only) */
-/* Set by the worker when a sweep is due, consumed on the main thread by
+/* Bucket dir the next sweep should trim (2 hex chars + NUL), written by
+ * the worker before it raises g_cover_sweep_pending. */
+static char g_cover_sweep_bucket[3];
+/* Set by the worker when a bucket sweep is due, consumed on the main thread by
  * cover_cache_sweep_if_pending.  Atomic so the worker's flag write and
  * the main thread's exchange never race, keeping all directory mutation
- * (unlink in cover_cache_sweep vs the .raw extraction in bs_grid.c's
+ * (unlink in cover_cache_sweep_bucket vs the .raw extraction in bs_grid.c's
  * cover_tick) on the main thread. */
 static _Atomic int g_cover_sweep_pending;
 
+/* Trim one bucket dir down to BS_COVER_BUCKET_MAX (.png/.raw) entries,
+ * oldest by mtime first.  Each bucket is small (<= the cap plus the
+ * writes since its last trim), so the scan is cheap. */
 static void
-cover_cache_sweep(void)
+cover_cache_sweep_bucket(const char *bucket)
 {
-    DIR *d = opendir(bs_g_covers_dir);
+    char dir[BS_COVERS_DIR_CAP + 4];
+    snprintf(dir, sizeof dir, "%s/%s", bs_g_covers_dir, bucket);
+    DIR *d = opendir(dir);
     if (d == NULL)
         return;
     int       cap = 0, n = 0;
@@ -1187,7 +1317,7 @@ cover_cache_sweep(void)
         if (!is_png && !is_raw)
             continue;
         if (n >= cap) {
-            int       newcap = cap == 0 ? 512 : cap * 2;
+            int       newcap = cap == 0 ? 16 : cap * 2;
             BsCoverEnt *nn = realloc(ents, (size_t)newcap * sizeof *nn);
             if (nn == NULL)
                 break; /* grow failed: keep what we have */
@@ -1195,7 +1325,7 @@ cover_cache_sweep(void)
             cap = newcap;
         }
         char path[BS_MAX_PATH_LEN];
-        snprintf(path, sizeof path, "%s/%s", bs_g_covers_dir, e->d_name);
+        snprintf(path, sizeof path, "%s/%s", dir, e->d_name);
         struct stat st;
         ents[n].mtime = 0;
         if (iv_stat(path, &st) == 0)
@@ -1204,30 +1334,35 @@ cover_cache_sweep(void)
         n++;
     }
     closedir(d);
-    if (n <= BS_COVER_CACHE_MAX) {
+    if (n <= BS_COVER_BUCKET_MAX) {
         free(ents);
         return;
     }
     qsort(ents, (size_t)n, sizeof *ents, cover_mtime_cmp);
-    int remove_n = n - BS_COVER_CACHE_MAX;
+    int remove_n = n - BS_COVER_BUCKET_MAX;
     for (int i = 0; i < remove_n; i++) {
         char path[BS_MAX_PATH_LEN];
-        snprintf(path, sizeof path, "%s/%s", bs_g_covers_dir, ents[i].name);
+        snprintf(path, sizeof path, "%s/%s", dir, ents[i].name);
         unlink(path);
     }
-    bs_LOG("[bookshelf] covers: swept %d oldest entries (%d remain)\n",
-        remove_n, n - remove_n);
+    bs_LOG("[bookshelf] covers: swept %d oldest in bucket %s (%d remain)\n",
+        remove_n, bucket, n - remove_n);
     free(ents);
 }
 
-/* Write raw PNG bytes to the cover cache.  Creates the covers
- * directory if needed. */
+/* Write raw cover bytes to the cover cache.  Server covers are JPEG (the
+ * server emits JPEG; the filename keeps the ".png" slot label so caches
+ * from older builds still align, and the loader sniffs the real format —
+ * the placeholder is a 1x1 PNG).  Creates the bucket directory if
+ * needed. */
 void
 bs_cover_cache_save(const char *id, const char *png_data, int len)
 {
     if (png_data == NULL || len <= 0)
         return;
-    char path[BS_MAX_PATH_LEN];
+    char safe[BS_MAX_ID_LEN], bucket[3], path[BS_MAX_PATH_LEN];
+    cover_sanitize(id, safe, sizeof safe);
+    bs_cover_ensure_bucket(id);
     bs_cover_cache_path(id, path, sizeof path);
     FILE *f = fopen(path, "wb");
     if (f == NULL) {
@@ -1236,26 +1371,32 @@ bs_cover_cache_save(const char *id, const char *png_data, int len)
     }
     size_t wr = fwrite(png_data, 1, (size_t)len, f);
     if (wr != (size_t)len || fclose(f) != 0) {
-        /* A truncated or corrupt PNG must never linger in the cache:
+        /* A truncated or corrupt cover must never linger in the cache:
          * it would fail to decode on every later view.  Drop it. */
         unlink(path);
         bs_LOG("[bookshelf] cover_cache_save: write failed for %s\n", path);
         return;
     }
-    /* Bounded cache: flag a sweep every 64th save.  The sweep itself
-     * runs on the main thread (cover_cache_sweep_if_pending) to keep
-     * directory mutation off the worker — the worker's unlink here
+    /* Bounded cache: every 64th save flags the just-written bucket for a
+     * trim.  The trim runs on the main thread (cover_cache_sweep_if_pending)
+     * to keep directory mutation off the worker — the worker's unlink here
      * would otherwise race cover_tick's .raw extraction. */
-    if ((++g_cover_saves % BS_COVER_SWEEP_EVERY) == 0)
+    if ((++g_cover_saves % BS_COVER_SWEEP_EVERY) == 0) {
+        cover_bucket_of(safe, bucket);
+        snprintf(g_cover_sweep_bucket, sizeof g_cover_sweep_bucket, "%s", bucket);
         __atomic_store_n(&g_cover_sweep_pending, 1, __ATOMIC_RELEASE);
+    }
 }
 
-/* Main-thread sweep hook: run the bounded cover-cache sweep when the
- * worker flagged it due.  Called from the periodic cover_tick so the
- * sweep happens on the main thread, never the worker. */
+/* Main-thread sweep hook: trim the flagged bucket when the worker
+ * signalled it.  Called from the periodic cover_tick so the sweep happens
+ * on the main thread, never the worker. */
 void
 bs_cover_cache_sweep_if_pending(void)
 {
-    if (__atomic_exchange_n(&g_cover_sweep_pending, 0, __ATOMIC_ACQ_REL))
-        cover_cache_sweep();
+    if (__atomic_exchange_n(&g_cover_sweep_pending, 0, __ATOMIC_ACQ_REL)) {
+        char bucket[3];
+        snprintf(bucket, sizeof bucket, "%s", g_cover_sweep_bucket);
+        cover_cache_sweep_bucket(bucket);
+    }
 }

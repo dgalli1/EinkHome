@@ -1,10 +1,13 @@
 """
 storage/cover_proc.py — turn a raw upstream cover into what the device needs.
 
-The e-ink bookshelf shows the real cover, fetched as a small PNG.  The
-PNG is derived here from the provider's raw (often multi-megabyte JPEG)
+The e-ink bookshelf shows the real cover, fetched as a small JPEG.  The
+JPEG is derived here from the provider's raw (often multi-megabyte JPEG)
 cover bytes, exactly once, then cached on disk.  Doing the heavy Pillow
-work server-side keeps the ARM guest dumb: it just stretches a small PNG.
+work server-side keeps the ARM guest dumb: it just stretches a small
+JPEG.  PNG and JPEG are the only formats the device's libinkview can
+decode, and JPEG wins on both size (~5x smaller for photographs) and
+decode speed, so the processed cover is server-side JPEG.
 
 (BlurHash placeholders were removed entirely — the device is too slow to
 usefully display them.)
@@ -19,10 +22,10 @@ import io
 import threading
 from typing import Optional
 
-# Cover PNG is sized for the device's portrait cover box (~2:3).  240x360
+# Cover JPEG is sized for the device's portrait cover box (~2:3).  240x360
 # is comfortably above the on-screen box (~220x330 on the 6" panel) so the
 # guest's stretch is a mild downscale, never an upscale, and the file
-# stays tiny (a few KB of PNG).
+# stays tiny (a few KB of JPEG).
 COVER_W = 240
 COVER_H = 360
 
@@ -68,13 +71,17 @@ def process(raw: bytes) -> Optional[bytes]:
             img.load()
             rgb = img.convert("RGB")
 
-            # Resized cover PNG.  contain=True keeps the aspect ratio (letterbox)
-            # so a tall cover is never squashed; the letterbox bars are filled with
-            # the cover's own average colour so they read as part of the image on a
-            # 1-bit panel rather than as a hard white frame.
+            # Resized cover JPEG.  contain keeps the aspect ratio (letterbox)
+            # so a tall cover is never squashed; the letterbox bars are filled
+            # with the cover's own average colour so they read as part of the
+            # image on a 1-bit panel rather than as a hard white frame.  JPEG
+            # is ~5x smaller and faster to decode on the ARM server-side cache
+            # and device than PNG for these photographic covers.  The device
+            # decodes via libinkview's LoadJPEGToFormat (PNG and JPEG are the
+            # only codecs libinkview ships — never emit WebP/AV1 here).
             cover = _fit(rgb, COVER_W, COVER_H)
             buf = io.BytesIO()
-            cover.save(buf, format="PNG", optimize=True)
+            cover.save(buf, format="JPEG", quality=85, optimize=True)
             return buf.getvalue()
         except Exception:
             return None

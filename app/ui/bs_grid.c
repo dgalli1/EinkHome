@@ -13,6 +13,146 @@
 
 static long cover_lru = 0;
 
+/* ── post-sync cover warm-up ───────────────────────────────────────────
+ * After a remote sync the app walks the whole library in the
+ * background, fetching every book's cover into the on-disk cache so the
+ * shelf still shows real covers when the network is gone — not just the
+ * pages the user happened to view.  Reuses the one-at-a-time
+ * single-flight fetch (g_cover_job), so it never competes with the
+ * user's on-page cover loading; the fetch chain self-drives via
+ * cover_job_done → bs_cover_schedule_next until the library is
+ * exhausted.  Providers that serve only 1x1 placeholders (the mock) are
+ * detected by probing the first warm covers and the pass aborts early —
+ * a mirror of the server's own placeholder skip. */
+static int       g_cover_warm_enabled = 0;    /* a sync queued a warm pass */
+static long long g_cover_warm_rowid = 0;      /* next remote-rowid to probe */
+static char      g_cover_warm_id[BS_MAX_ID_LEN] = ""; /* next uncached candidate */
+static int       g_cover_warm_probe_ph = 0;   /* consecutive placeholder warm fetch */
+static int       g_cover_warm_seen_real = 0;  /* any real cover warmed */
+static int       g_cover_warm_total = 0;      /* remote books this run (progress bar) */
+static int       g_cover_warm_done = 0;       /* examined (fetched or skipped) so far */
+
+/* Cap of already-cached books the warm scan hops over in one event-loop
+ * slice, so a huge all-cached library never stalls a frame while seeking
+ * the next real gap; the keyset cursor persists and the next arm
+ * resumes. */
+#define BS_COVER_WARM_SKIP 256
+
+/* 1 = the network is up, so a warm fetch would not pop the firmware's
+ * "Turn on WiFi" dialog.  Same guard the on-page fetcher uses. */
+static int
+cover_warm_online(void)
+{
+    return (QueryNetwork() & 0xf00) ? 1 : 0;
+}
+
+/* A fetched cover is a useless 1x1 placeholder when the raw PNG is
+ * exactly 1px x 1px (placeholder-serving providers and books with no
+ * cover).  A real processed cover from the server is a 240x360 PNG, so
+ * 1x1 never occurs for a genuine book.  Used by the warm pass to detect
+ * a placeholder-only provider and stop early. */
+static int
+cover_is_1x1_png(const unsigned char *p, int len)
+{
+    if (p == NULL || len < 24)
+        return 0;
+    if (p[0] != 0x89 || p[1] != 'P' || p[2] != 'N' || p[3] != 'G')
+        return 0; /* not PNG */
+    /* PNG signature (8) + chunk length (4) + "IHDR" (4): the dimensions
+     * sit at offset 16 (width) and 20 (height), big-endian. */
+    unsigned long w = ((unsigned long)p[16] << 24) | ((unsigned long)p[17] << 16) |
+                      ((unsigned long)p[18] << 8) | (unsigned long)p[19];
+    unsigned long h = ((unsigned long)p[20] << 24) | ((unsigned long)p[21] << 16) |
+                      ((unsigned long)p[22] << 8) | (unsigned long)p[23];
+    return w == 1 && h == 1;
+}
+
+/* Fill g_cover_warm_id with the next remote book whose cover is not yet
+ * on disk, keying forward over the store past already-cached books.
+ * Bounded per call (BS_COVER_WARM_SKIP hops) so a large library is
+ * scanned across ticks without a frame stall; a paused (offline) pass
+ * leaves the cursor put and resumes on the next sync.  Disables the pass
+ * once the library is exhausted. */
+static void
+cover_warm_fill(void)
+{
+    if (!g_cover_warm_enabled || g_cover_warm_id[0] != '\0' || !cover_warm_online())
+        return;
+    int   hops = 0;
+    char  id[BS_MAX_ID_LEN];
+    char  safe[BS_MAX_PATH_LEN];
+    while (bs_store_next_warm_book(id, (int)sizeof id, &g_cover_warm_rowid)) {
+        g_cover_warm_done++; /* a book passed on the shelf (fetch or skip) */
+        bs_cover_cache_path(id, safe, sizeof safe);
+        if (access(safe, R_OK) != 0) {
+            snprintf(g_cover_warm_id, sizeof g_cover_warm_id, "%s", id);
+            return;
+        }
+        if (++hops >= BS_COVER_WARM_SKIP)
+            return; /* resume from g_cover_warm_rowid on the next arm */
+    }
+    /* Library exhausted: nothing left to warm. */
+    g_cover_warm_enabled = 0;
+    g_cover_warm_id[0] = '\0';
+}
+
+/* 1 = the warm pass still has a cover to fetch (fills the candidate
+ * first).  Called on the main thread when deciding whether to arm the
+ * cover tick. */
+static int
+cover_warm_pending(void)
+{
+    if (!g_cover_warm_enabled || !cover_warm_online())
+        return 0;
+    cover_warm_fill();
+    return g_cover_warm_id[0] != '\0';
+}
+
+/* Public: a remote sync finished, so start warming the library's covers
+ * into the on-disk cache in the background.  Idempotent and self-
+ * terminating: each start re-scans from the first book, skipping covers
+ * already on disk, and the pass disables itself when it finds nothing
+ * left (or a placeholder-only provider). */
+void
+bs_cover_warm_start(void)
+{
+    g_cover_warm_enabled = 1;
+    g_cover_warm_rowid = 0;
+    g_cover_warm_id[0] = '\0';
+    g_cover_warm_probe_ph = 0;
+    g_cover_warm_seen_real = 0;
+    /* Denominator for the sync-popup progress bar: the whole remote
+     * library this pass walks (covers are all remote books on this
+     * source). */
+    g_cover_warm_total = bs_store_count();
+    g_cover_warm_done = 0;
+}
+
+/* 1 = the warm pass is running right now (used to keep the sync popup
+ * open and to draw its progress bar).  Offline the pass pauses and is
+ * reported inactive so the popup is not stuck on a frozen bar. */
+int
+bs_cover_warm_active(void)
+{
+    return g_cover_warm_enabled && cover_warm_online();
+}
+
+/* Progress of the active warm pass: fills *done (books examined) and
+ * *total (remote books this run), clamped so done never exceeds total;
+ * returns 1 when the pass is active. */
+int
+bs_cover_warm_progress(int *done_out, int *total_out)
+{
+    int done = g_cover_warm_done;
+    if (done > g_cover_warm_total)
+        done = g_cover_warm_total;
+    if (done_out)
+        *done_out = done;
+    if (total_out)
+        *total_out = g_cover_warm_total;
+    return bs_cover_warm_active();
+}
+
 BsCoverSlot *
 bs_cover_slot(const char *id, int create)
 {
@@ -219,6 +359,14 @@ bs_cover_schedule_next(void)
             SetWeakTimerEx("bcov", bs_cover_tick, NULL, BS_COVER_FETCH_MS);
             return;
         }
+    }
+    /* Nothing pending on the visible page — the post-sync warm pass may
+     * still have off-page covers to fetch.  Arm for it so the
+     * one-at-a-time chain keeps filling the on-disk cache (offline the
+     * shelf then shows those covers too). */
+    if (cover_warm_pending()) {
+        bs_g_cover_armed = 1;
+        SetWeakTimerEx("bcov", bs_cover_tick, NULL, BS_COVER_FETCH_MS);
     }
 }
 
@@ -562,6 +710,8 @@ typedef struct {
     char url[BS_MAX_URL_LEN + 128];
     char id[BS_MAX_ID_LEN];
     char cache_path[BS_MAX_PATH_LEN];
+    int  warm;           /* submitted by the post-sync warm pass */
+    int  is_placeholder; /* fetched bytes were a 1x1 PNG (warm only) */
 } BsCoverJobArg;
 
 static void
@@ -571,8 +721,16 @@ cover_fetch_job(BsJob *job)
     int          rsize = 0;
     char        *data = QuickDownload(a->url, &rsize, BS_HTTP_TIMEOUT);
     int          ok = 0;
+    a->is_placeholder = 0;
     if (data != NULL && rsize > 8 &&
         !__atomic_load_n(&job->cancel, __ATOMIC_ACQUIRE)) {
+        /* A warm fetch that lands on a 1x1 placeholder flags the result
+         * so cover_job_done can abort the pass early — but the bytes are
+         * still persisted below (a placeholder is a cover's absence, not
+         * a transient error), so the warm keyset scans past this book
+         * instead of re-fetching it. */
+        if (a->warm)
+            a->is_placeholder = cover_is_1x1_png((const unsigned char *)data, rsize);
         /* Stage the decode source in COVER_TMP (always writable) and
          * best-effort persist the raw PNG so the next launch can skip
          * the network entirely. */
@@ -613,6 +771,20 @@ cover_job_done(BsJob *job)
 {
     BsCoverJobArg *a = job->arg;
     g_cover_job = NULL;
+
+    /* Warm pass result: if the provider serves only 1x1 placeholders,
+     * stop warming — downloading hundreds of thousands of empty images
+     * is pointless.  A single real cover at any point rules out the
+     * placeholder-only provider permanently, so scattered coverless
+     * books never abort the pass. */
+    if (a->warm) {
+        if (a->is_placeholder) {
+            if (!g_cover_warm_seen_real && ++g_cover_warm_probe_ph >= 5)
+                g_cover_warm_enabled = 0;
+        } else {
+            g_cover_warm_seen_real = 1;
+        }
+    }
 
     BsCoverSlot *s = bs_cover_slot(a->id, 1);
     ibitmap   *bmp = NULL;
@@ -726,6 +898,7 @@ bs_cover_tick(void *ctx)
             char cover_path[BS_MAX_PATH_LEN];
             bs_cover_raw_path(bid, cover_path, sizeof cover_path);
             if (access(cover_path, R_OK) != 0 && cbook.local_path[0] != '\0') {
+                bs_cover_ensure_bucket(bid); /* sharded dir must exist to write the .raw */
                 if (bs_extract_book_cover(cbook.local_path, cbook.ext, cover_path, sizeof cover_path) != 0)
                     cover_path[0] = '\0'; /* extraction failed; no cover */
             }
@@ -827,6 +1000,46 @@ bs_cover_tick(void *ctx)
 
     if (submitted)
         return; /* the in-flight job's done_cb blits and reschedules */
+
+    /* Visible page drained with nothing in flight.  If the post-sync
+     * warm pass still has an off-page cover queued, hand it to the
+     * worker here — same single-flight g_cover_job; its done_cb re-arms
+     * and the chain continues until the whole library is warm.  Off-page
+     * so there is no blit: the PNG is persisted to the on-disk cache,
+     * which is what offline rendering needs. */
+    if (cover_warm_pending()) {
+        const char *bid = g_cover_warm_id;
+        char        url[BS_MAX_URL_LEN + 128];
+        snprintf(url,
+                 sizeof url,
+                 "%s/api/v1/books/%s/cover?access_token=%s",
+                 bs_g_state.api_base,
+                 bid,
+                 bs_g_state.api_token);
+        BsCoverJobArg *a = calloc(1, sizeof *a);
+        if (a != NULL) {
+            snprintf(a->url, sizeof a->url, "%s", url);
+            snprintf(a->id, sizeof a->id, "%s", bid);
+            bs_cover_cache_path(bid, a->cache_path, sizeof a->cache_path);
+            a->warm = 1;
+            BsCoverSlot *s = bs_cover_slot(bid, 1);
+            if (s != NULL)
+                s->state = 1; /* in flight until the done_cb lands */
+            BsJob *j = bs_worker_submit(cover_fetch_job, cover_job_done, a);
+            if (j != NULL) {
+                g_cover_job = j;
+                g_cover_warm_id[0] = '\0'; /* consumed; fill finds the next */
+                bs_LOG("[bookshelf] cover_tick warm fetch id=%s\n", bid);
+                return; /* the done_cb decodes, persists and reschedules */
+            }
+            free(a);
+            if (s != NULL)
+                s->state = 0;
+        }
+        /* Could not submit: drop the candidate; the next arm picks up
+         * from the cursor. */
+        g_cover_warm_id[0] = '\0';
+    }
 
     if (!processed) {
         /* Nothing pending on this page.  A manual sync that opened the

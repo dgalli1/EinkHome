@@ -1,14 +1,16 @@
 """
 storage/cover_cache.py — on-disk cache for processed covers.
 
-For each book we keep the small resized cover PNG derived (once) from the
-provider's raw cover bytes by :mod:`storage.cover_proc`:
+For each book we keep the small resized cover JPEG derived (once) from
+the provider's raw cover bytes by :mod:`storage.cover_proc`:
 
-  * ``<key>.png``  — the small resized cover the device fetches and blits.
+  * ``<key>.jpg``  — the small resized cover the device fetches and blits.
 
 ``<key>`` is ``sha256(book_id)`` so ids with slashes/colons are safe as
 filenames.  Writes go through a ``.tmp`` + ``os.replace`` so a reader
-never sees a half-written file.
+never sees a half-written file.  (Caches written by builds that used PNG
+hold ``<key>.png``; those are simply re-processed on first miss — the
+format lives entirely in the bytes, keyed by book id.)
 """
 
 from __future__ import annotations
@@ -34,7 +36,7 @@ _MISSING_TTL = 3600.0
 
 
 class CoverCache:
-    """Disk-backed cache for processed cover PNGs."""
+    """Disk-backed cache for processed cover images (JPEG)."""
 
     def __init__(
         self,
@@ -77,8 +79,8 @@ class CoverCache:
     def _key(book_id: str) -> str:
         return hashlib.sha256(book_id.encode("utf-8")).hexdigest()
 
-    def png_path(self, book_id: str) -> str:
-        return os.path.join(self.directory, self._key(book_id) + ".png")
+    def cover_path(self, book_id: str) -> str:
+        return os.path.join(self.directory, self._key(book_id) + ".jpg")
 
     def etag_for(self, book_id: str) -> str:
         return self._key(book_id)[:16]
@@ -99,13 +101,13 @@ class CoverCache:
             mtime = now
         return (now - mtime) < self.max_age
 
-    def has_png(self, book_id: str) -> bool:
-        return self._fresh(self.png_path(book_id))
+    def has_cover(self, book_id: str) -> bool:
+        return self._fresh(self.cover_path(book_id))
 
     # --- reads -----------------------------------------------------------
 
-    def read_png(self, book_id: str) -> Optional[bytes]:
-        path = self.png_path(book_id)
+    def read_cover(self, book_id: str) -> Optional[bytes]:
+        path = self.cover_path(book_id)
         if not self._fresh(path):
             return None
         try:
@@ -169,11 +171,11 @@ class CoverCache:
                 if os.path.exists(tmp):
                     os.unlink(tmp)
 
-    def store_png(self, book_id: str, png: bytes) -> None:
-        self._atomic(self.png_path(book_id), png)
+    def store_cover(self, book_id: str, cover: bytes) -> None:
+        self._atomic(self.cover_path(book_id), cover)
 
     def process_and_store(self, book_id: str, raw: bytes) -> Optional[bytes]:
-        """Decode `raw`, cache the resized PNG, return the PNG bytes.
+        """Decode `raw`, cache the resized JPEG, return the JPEG bytes.
 
         Returns None (and caches nothing) if the bytes are not a decodable
         image; the caller then serves a 1x1 placeholder.  Placeholder
@@ -186,10 +188,10 @@ class CoverCache:
         # Imported lazily so a missing Pillow never breaks cache reads.
         from storage import cover_proc
 
-        png = cover_proc.process(raw)
-        if png is None:
+        cover = cover_proc.process(raw)
+        if cover is None:
             return None
-        if png == PLACEHOLDER_PNG:
-            return png  # decoded to the placeholder: serve, don't store
-        self.store_png(book_id, png)
-        return png
+        if cover == PLACEHOLDER_PNG:
+            return cover  # decoded to the placeholder: serve, don't store
+        self.store_cover(book_id, cover)
+        return cover

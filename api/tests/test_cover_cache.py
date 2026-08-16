@@ -2,7 +2,7 @@
 
 Covers the atomic write/read roundtrip, the startup sweep of orphaned
 ``.tmp`` files, freshness expiry, the future-mtime clamp, the
-placeholder-skip in ``process_and_store`` and the has_png/read_png
+placeholder-skip in ``process_and_store`` and the has_cover/read_cover
 read side.  All hermetic — no network, no Pillow needed.
 """
 
@@ -30,8 +30,8 @@ def test_atomic_write_read_roundtrip(tmp_path):
     cache = _cache(tmp_path)
     payload = b"\x89PNG\r\n\x1a\n" + b"\x00" * 512
     # Book ids may contain slashes/colons; the cache keys them by sha256.
-    cache.store_png("book/with:slash", payload)
-    assert cache.read_png("book/with:slash") == payload
+    cache.store_cover("book/with:slash", payload)
+    assert cache.read_cover("book/with:slash") == payload
     # The atomic write leaves no half-written tmp files behind.
     leftovers = [n for n in os.listdir(cache.directory) if n.endswith(".tmp")]
     assert leftovers == []
@@ -57,34 +57,34 @@ def test_startup_sweep_removes_orphaned_tmp(tmp_path):
 
 def test_freshness_expiry(tmp_path):
     cache = _cache(tmp_path, max_age_seconds=60)
-    cache.store_png("b1", b"png-data")
-    assert cache.has_png("b1")
-    assert cache.read_png("b1") == b"png-data"
+    cache.store_cover("b1", b"png-data")
+    assert cache.has_cover("b1")
+    assert cache.read_cover("b1") == b"png-data"
 
     old = time.time() - 120  # older than max_age
-    os.utime(cache.png_path("b1"), (old, old))
-    assert not cache.has_png("b1")
-    assert cache.read_png("b1") is None
+    os.utime(cache.cover_path("b1"), (old, old))
+    assert not cache.has_cover("b1")
+    assert cache.read_cover("b1") is None
 
 
 def test_future_mtime_counts_as_fresh(tmp_path):
     """A file with a future mtime (clock skew / restored fs) must not be
     treated as stale forever — it is clamped and reads as fresh."""
     cache = _cache(tmp_path, max_age_seconds=60)
-    cache.store_png("b1", b"png-data")
+    cache.store_cover("b1", b"png-data")
     future = time.time() + 3600
-    os.utime(cache.png_path("b1"), (future, future))
-    assert cache.has_png("b1") is True
-    assert cache.read_png("b1") == b"png-data"
+    os.utime(cache.cover_path("b1"), (future, future))
+    assert cache.has_cover("b1") is True
+    assert cache.read_cover("b1") == b"png-data"
 
 
-def test_has_png_missing_vs_present(tmp_path):
+def test_has_cover_missing_vs_present(tmp_path):
     cache = _cache(tmp_path)
-    assert not cache.has_png("missing")
-    assert cache.read_png("missing") is None
-    cache.store_png("present", b"png")
-    assert cache.has_png("present")
-    assert cache.read_png("present") == b"png"
+    assert not cache.has_cover("missing")
+    assert cache.read_cover("missing") is None
+    cache.store_cover("present", b"png")
+    assert cache.has_cover("present")
+    assert cache.read_cover("present") == b"png"
 
 
 def test_process_and_store_skips_placeholder(tmp_path):
@@ -93,10 +93,10 @@ def test_process_and_store_skips_placeholder(tmp_path):
     cache = _cache(tmp_path)
     out = cache.process_and_store("no-cover", PLACEHOLDER_PNG)
     assert out == PLACEHOLDER_PNG
-    assert not cache.has_png("no-cover")
-    assert not os.path.exists(cache.png_path("no-cover"))
+    assert not cache.has_cover("no-cover")
+    assert not os.path.exists(cache.cover_path("no-cover"))
     # A subsequent read still misses — nothing was stored.
-    assert cache.read_png("no-cover") is None
+    assert cache.read_cover("no-cover") is None
 
 
 def test_negative_cache_ttl(tmp_path):

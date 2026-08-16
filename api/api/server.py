@@ -593,7 +593,7 @@ class PbemuAPIServer(http.server.BaseHTTPRequestHandler):
                 304, {"ETag": etag, "Cache-Control": "public, max-age=3600"}, b""
             )
             return
-        png = cache.read_png(book_id)
+        png = cache.read_cover(book_id)
         if png is None and not cache.is_missing(book_id):
             # Not pre-heated yet: process synchronously now so the device
             # still gets a real (small) cover instead of the raw multi-MB
@@ -602,11 +602,16 @@ class PbemuAPIServer(http.server.BaseHTTPRequestHandler):
             png = _cover_png(self.app, book_id)
         if not png:
             png = PLACEHOLDER_PNG
+        # Real processed covers are JPEG; the 1x1 placeholder is a PNG —
+        # pick the Content-Type from the bytes we are about to serve so a
+        # client's decoder sniff (and the device's cache loader) always
+        # agrees with the header.
+        is_jpeg = png[:3] == b"\xff\xd8\xff"
         self._send(
             *_bytes(
                 200,
                 png,
-                "image/png",
+                "image/jpeg" if is_jpeg else "image/png",
                 {"ETag": etag, "Cache-Control": "public, max-age=3600"},
             )
         )
@@ -1103,7 +1108,7 @@ def _cover_png(app: Any, book_id: str) -> bytes | None:
     stored, not negative-cached).
     """
     cache = app.cover_cache
-    png = cache.read_png(book_id)
+    png = cache.read_cover(book_id)
     if png is not None:
         return png
     inflight = app.inflight
@@ -1122,7 +1127,7 @@ def _cover_png(app: Any, book_id: str) -> bytes | None:
         # Someone else owns the slot; wait bounded, then re-read the
         # cache.  Never re-enter as owner on timeout.
         slot.event.wait(timeout=20.0)
-        return cache.read_png(book_id)
+        return cache.read_cover(book_id)
     # Owner of the slot: download + decode exactly once, then release.
     try:
         try:
@@ -1209,7 +1214,7 @@ def _warm_covers(app: Any) -> None:
         chunks = itertools.chain([first], chunks)
 
         def _warm_one(meta: Any) -> None:
-            if cache.has_png(meta.id) or cache.is_missing(meta.id):
+            if cache.has_cover(meta.id) or cache.is_missing(meta.id):
                 return
             _cover_png(app, meta.id)
 

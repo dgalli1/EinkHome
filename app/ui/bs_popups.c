@@ -277,6 +277,7 @@ sync_popup_line(int *sub)
         *sub = 2;
         return bs_i18n("sync.scan");
     case BS_SYNC_STAGE_COVERS:
+        *sub = 3;
         return bs_i18n("sync.covers");
     case BS_SYNC_STAGE_FAIL:
         return bs_i18n("status.fail");
@@ -323,12 +324,47 @@ draw_sync_popup_sheet(void)
         case 2:
             snprintf(subline, sizeof subline, bs_i18n("sync.books"), bs_g_state.sync_scan);
             break;
+        case 3: {
+            int done = 0, total = 0;
+            bs_cover_warm_progress(&done, &total);
+            if (total > 0)
+                snprintf(subline, sizeof subline, bs_i18n("sync.cover_count"), done, total);
+            else
+                snprintf(subline, sizeof subline, "%s", bs_i18n("sync.covers"));
+            break;
+        }
         default:
             snprintf(subline, sizeof subline, bs_i18n("sync.books"), bs_view_total());
             break;
         }
         DrawString(px + BS_CTX_PAD, py + BS_CTX_TITLE_H + 68, subline);
         CloseFont(sf);
+    }
+
+    /* Covers stage: a progress bar under the "N / M" line, filled by the
+     * warm pass's examined/total, with a striped overlay while still
+     * downloading.  It sits inside the 190px sheet (bar top 168, h 12),
+     * sized to leave ~10px of padding below so it does not crowd the
+     * bottom edge. */
+    if (sub == 3) {
+        int done = 0, total = 0;
+        bs_cover_warm_progress(&done, &total);
+        int bar_x = px + BS_CTX_PAD;
+        int bar_w = pw - 2 * BS_CTX_PAD;
+        int bar_y = py + BS_CTX_TITLE_H + 96;
+        int bar_h = 12;
+        /* Clear any earlier bar (the sheet is repainted each refresh). */
+        FillArea(bar_x, bar_y, bar_w, bar_h, WHITE);
+        DrawRect(bar_x, bar_y, bar_w, bar_h, BLACK);
+        if (total > 0) {
+            int fill = (done * bar_w) / total;
+            if (fill > 2)
+                FillArea(bar_x + 1, bar_y + 1, fill - 2, bar_h - 2, BLACK);
+            if (done < total && bs_cover_warm_active()) {
+                for (int sx = bar_x + 1 + fill; sx < bar_x + bar_w - 1; sx += 6)
+                    DrawLine(sx, bar_y + 1, sx + 2, bar_y + bar_h - 2, DGRAY);
+            }
+        }
     }
 }
 
@@ -382,17 +418,28 @@ bs_sync_popup_close(void)
 }
 
 /* Close the popup shortly after the sync finished (or failed).  While
- * covers are still loading the popup stays on the COVERS line and the
- * timer re-arms; the 15s cap guarantees it closes even on a slow link
- * (covers then finish in the background). */
+ * covers are still loading or the post-sync warm pass is downloading the
+ * library, the popup stays on the COVERS stage and this timer re-arms,
+ * repainting the sheet each second so the progress bar advances; when
+ * the covers finish it flashes "Sync complete" before closing. */
 static void
 sync_popup_close_tick(void *ctx)
 {
     (void)ctx;
     if (!bs_g_state.sync_popup)
         return;
-    if (bs_g_state.sync_stage == BS_SYNC_STAGE_COVERS && bs_g_cover_armed) {
-        SetWeakTimerEx("bsyncp", sync_popup_close_tick, NULL, 1000);
+    if (bs_g_state.sync_stage == BS_SYNC_STAGE_COVERS) {
+        if (bs_g_cover_armed || bs_cover_warm_active()) {
+            /* Still downloading: keep it up and refresh the bar. */
+            bs_sync_popup_refresh();
+            SetWeakTimerEx("bsyncp", sync_popup_close_tick, NULL, 1000);
+            return;
+        }
+        /* Covers drained (visible page + full-library warm): show the
+         * "done" line for a beat, then close. */
+        bs_g_state.sync_stage = BS_SYNC_STAGE_DONE;
+        bs_sync_popup_refresh();
+        SetWeakTimerEx("bsyncp", sync_popup_close_tick, NULL, 900);
         return;
     }
     bs_sync_popup_close();
@@ -412,8 +459,11 @@ bs_sync_popup_finish(void)
     bs_g_state.sync_stage = BS_SYNC_STAGE_COVERS;
     bs_sync_popup_refresh();
     bs_cover_schedule_next();
-    if (bs_g_cover_armed)
-        bs_sync_popup_auto_close(15000); /* safety cap; covers closing sooner is the norm */
+    /* Arm the close/rearm tick promptly (1s) so it both keeps the popup
+     * up while covers or the warm pass are running and repaints the
+     * progress bar; a short link that is not warm-active closes soon. */
+    if (bs_g_cover_armed || bs_cover_warm_active())
+        bs_sync_popup_auto_close(1000);
     else
         bs_sync_popup_auto_close(900);
 }

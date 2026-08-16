@@ -2,7 +2,7 @@
 
 Pure byte-in/byte-out image processing: corrupt input -> None,
 oversized input (decompression-bomb backstop) -> None, valid input ->
-a 240x360 letterboxed PNG, and a graceful None when Pillow is absent.
+a 240x360 letterboxed JPEG, and a graceful None when Pillow is absent.
 Hermetic — no network; the oversized image is built at 5500x5500 in
 1-bit mode so the test stays allocation-safe.
 """
@@ -51,9 +51,10 @@ def test_valid_image_resized_to_cover_dims():
     img.save(buf, format="PNG")
     out = cover_proc.process(buf.getvalue())
     assert out is not None
-    assert out.startswith(b"\x89PNG\r\n\x1a\n")
+    assert out.startswith(b"\xff\xd8\xff")  # JPEG magic
     with Image.open(io.BytesIO(out)) as check:
         assert check.size == (240, 360)
+        assert check.format == "JPEG"
 
 
 def test_wide_image_letterboxed():
@@ -75,15 +76,21 @@ def test_wide_image_letterboxed():
     assert out is not None
     with Image.open(io.BytesIO(out)) as check:
         assert check.size == (240, 360)
+
+        def close(a, b, tol=10):
+            return all(abs(x - y) <= tol for x, y in zip(a, b))
+
         rgb = check.convert("RGB")
-        # Bars are uniform and identical top/bottom…
-        assert rgb.getpixel((0, 0)) == rgb.getpixel((239, 0))
-        assert rgb.getpixel((0, 0)) == rgb.getpixel((239, 359))
+        # Bars are uniform and identical top/bottom… (JPEG is lossy, so
+        # drift by a few LSBs is expected).
+        assert close(rgb.getpixel((0, 0)), rgb.getpixel((239, 0)))
+        assert close(rgb.getpixel((0, 0)), rgb.getpixel((239, 359)))
         # …and differ from the centred band, which holds the scaled
-        # source: red on the left, blue on the right.
-        assert rgb.getpixel((5, 180)) == (255, 0, 0)
-        assert rgb.getpixel((234, 180)) == (0, 0, 255)
-        assert rgb.getpixel((5, 180)) != rgb.getpixel((0, 0))
+        # source: red on the left, blue on the right.  The bars are the
+        # mean of the two halves (~mid red/mid blue), far from either edge.
+        assert close(rgb.getpixel((5, 180)), (255, 0, 0))
+        assert close(rgb.getpixel((234, 180)), (0, 0, 255))
+        assert not close(rgb.getpixel((5, 180)), rgb.getpixel((0, 0)), tol=40)
 
 
 def test_process_without_pillow_returns_none(monkeypatch):

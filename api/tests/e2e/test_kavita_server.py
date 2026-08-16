@@ -272,7 +272,7 @@ def test_sync_delta_cursor_protocol(live_server):
 
 @SKIP_NO_AUTH
 @SKIP_UNREACHABLE
-def test_cover_endpoint_returns_png(live_server):
+def test_cover_endpoint_returns_jpeg(live_server):
     status, body = _http_get(
         f"{live_server}/api/v1/books?limit=1",
         headers=_auth_headers(),
@@ -286,8 +286,8 @@ def test_cover_endpoint_returns_png(live_server):
     url = f"{live_server}{cover_path}{sep}access_token={API_TOKEN}"
     status, body = _http_get(url, timeout=30)
     assert status == 200
-    assert body[:8] == b"\x89PNG\r\n\x1a\n", (
-        f"cover is not a PNG (header={body[:8].hex()})"
+    assert body[:3] == b"\xff\xd8\xff", (
+        f"cover is not a JPEG (header={body[:3].hex()})"
     )
     assert len(body) > 100
 

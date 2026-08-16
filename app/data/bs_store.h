@@ -49,6 +49,11 @@ int bs_store_count_undownloaded(void);
 
 int bs_store_next_undownloaded(char ids[][BS_MAX_ID_LEN], int cap);
 
+/* Cover warm-up: the next remote (kavita) book id in rowid order
+ * (keyset on *after_rowid, 0 to start).  Returns 1 and writes one id
+ * when a row remains, 0 when exhausted. */
+int bs_store_next_warm_book(char *id, int id_cap, long long *after_rowid);
+
 /* One row of the boot download-flag probe: the four fields the scan
  * needs, fetched in one paged query (see store_next_dl_probes). */
 typedef struct {

@@ -116,6 +116,10 @@ void bs_sync_local_finish(void);
 
 void bs_cover_cache_path(const char *id, char *out, size_t cap);
 
+/* Create the sharded bucket dir for an id (call before writing a cover's
+ * ".png"/".raw" so the subdir exists). */
+void bs_cover_ensure_bucket(const char *id);
+
 void bs_cover_raw_path(const char *id, char *out, size_t cap);
 
 int bs_cover_cache_load(const char *id, ibitmap **out_bmp);

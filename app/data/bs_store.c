@@ -51,6 +51,7 @@ static sqlite3_stmt *g_st_suggest_ins;   /* INSERT OR IGNORE INTO suggest */
 static sqlite3_stmt *g_st_get_book;      /* SELECT ... FROM books WHERE id */
 static sqlite3_stmt *g_st_set_downloaded; /* UPDATE books SET downloaded ... */
 static sqlite3_stmt *g_st_next_dl_probes;      /* rowid-keyset id scan */
+static sqlite3_stmt *g_st_cover_warm;          /* cover warm: rowid-keyset remote id scan */
 static sqlite3_stmt *g_st_suggest_rank_refresh; /* recompute one term's rank */
 static sqlite3_stmt *g_st_suggest_rank_zero;    /* drop zero-count rank rows */
 static sqlite3_stmt *g_st_fts_rowid;  /* SELECT rowid FROM books WHERE id */
@@ -413,6 +414,7 @@ void bs_store_close(void) {
   sqlite3_finalize(g_st_get_book);
   sqlite3_finalize(g_st_set_downloaded);
   sqlite3_finalize(g_st_next_dl_probes);
+  sqlite3_finalize(g_st_cover_warm);
   sqlite3_finalize(g_st_suggest_rank_refresh);
   sqlite3_finalize(g_st_suggest_rank_zero);
   sqlite3_finalize(g_st_fts_rowid);
@@ -425,6 +427,7 @@ void bs_store_close(void) {
   g_st_get_book = NULL;
   g_st_set_downloaded = NULL;
   g_st_next_dl_probes = NULL;
+  g_st_cover_warm = NULL;
   g_st_suggest_rank_refresh = NULL;
   g_st_suggest_rank_zero = NULL;
   g_st_fts_rowid = NULL;
@@ -879,6 +882,44 @@ int bs_store_next_dl_probes(BsDownloadProbe *out, int cap,
    * its read cursor so a later write to books is not locked out. */
   sqlite3_reset(st);
   return n;
+}
+
+/* Paged cover-warm scan: the next remote (server) book id in rowid
+ * order, for the post-sync pass that fetches every cover to the on-disk
+ * cache so the library renders offline.  Rowid keyset pagination (same
+ * pattern as bs_store_next_dl_probes): the caller keeps *after_rowid
+ * (0 to start); each call is one bounded b-tree scan with no OFFSET
+ * re-walk, and the raw cover PNG lives outside the DB so the caller
+ * skips already-cached rows via a filesystem check.  Local/folder books
+ * carry no server cover and are excluded.  Returns 1 and writes one id
+ * when a row remains, 0 when exhausted (in which case *after_rowid is
+ * left unchanged). */
+int bs_store_next_warm_book(char *id, int id_cap, long long *after_rowid) {
+  if (g_db == NULL || after_rowid == NULL || id == NULL)
+    return 0;
+  sqlite3_stmt *st = st_prep_once(
+      &g_st_cover_warm,
+      "SELECT rowid, id FROM books"
+      " WHERE rowid > ?1 AND COALESCE(source,'kavita')='kavita'"
+      " ORDER BY rowid LIMIT 1");
+  if (st == NULL)
+    return 0;
+  sqlite3_reset(st);
+  sqlite3_clear_bindings(st);
+  sqlite3_bind_int64(st, 1, *after_rowid);
+  int found = 0;
+  if (sqlite3_step(st) == SQLITE_ROW) {
+    *after_rowid = sqlite3_column_int64(st, 0);
+    const char *t = (const char *)sqlite3_column_text(st, 1);
+    if (t != NULL && t[0] != '\0') {
+      snprintf(id, id_cap, "%s", t);
+      found = 1;
+    }
+  }
+  /* Reset releases the read cursor so a later books write (a sync
+   * round on the main thread) is not locked out. */
+  sqlite3_reset(st);
+  return found;
 }
 
 /* Delete a book's local file and mark it not downloaded.  The metadata

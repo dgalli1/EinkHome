@@ -152,7 +152,8 @@
 #define BS_MORE_SETTINGS_IDX 3
 #define BS_MORE_APPS_IDX 4
 
-/* Cover rendering.  Real covers (loaded via LoadPNGStretch) are fetched
+/* Cover rendering.  Real covers (loaded via the sniffed PNG/JPEG
+ * decoder — libinkview's LoadPNGStretch/LoadJPEGToFormat) are fetched
  * one per weak-timer tick so the event loop never blocks; until then a
  * hatch placeholder is drawn.  (Blurhash placeholders were removed — the
  * device is too slow to usefully display them.) */

@@ -301,7 +301,9 @@ def test_cover_endpoint(server):
     full = f"{server.url(cover_url)}?access_token=test-token"
     status, body_bytes = _http_get_bytes(full)
     assert status == 200
-    assert body_bytes.startswith(b"\x89PNG")  # PNG magic
+    # Mock provider serves the 1x1 PNG placeholder, so the cover endpoint
+    # returns PNG here (real providers serve the processed JPEG).
+    assert body_bytes.startswith(b"\x89PNG")  # placeholder PNG magic
 
 
 def test_file_download(server):
