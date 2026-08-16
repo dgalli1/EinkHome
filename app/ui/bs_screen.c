@@ -344,6 +344,13 @@ bs_draw_shelf_nofb(void)
         bs_draw_browse();
     else
         bs_draw_grid();
+    /* Composite the colour-cover overlay into the base buffer BEFORE
+     * drawing any popup above it.  On backends with a separate cover
+     * overlay (SDL's RGB24 canvas) the grid covers are staged there;
+     * if they were left for the final flush they would re-stamp on top
+     * of the sync/download popup's sheet.  Merging here lets the popup
+     * drawn below paint above the covers.  No-op on the device. */
+    bs_plat_cover_flush();
     if (bs_g_state.source != BS_SOURCE_FOLDER)
         bs_draw_pager();
     if (bs_g_state.dl_popup)

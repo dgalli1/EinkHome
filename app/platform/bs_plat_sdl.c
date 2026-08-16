@@ -722,33 +722,59 @@ dump_frame(const char *path)
     fprintf(stderr, "[pc] frame dumped to %s\n", path);
 }
 
+/* Composite the RGB24 colour-cover overlay (GetCanvas /
+ * blit_cover_color24) into the display buffer g_px and clear it.
+ * The canvas defaults to white; only pixels actually written by a
+ * cover blit are non-white, so this overlays covers without touching
+ * the 8-bit/grey drawn content.
+ *
+ * The clear matters: without it, covers accumulate in the overlay
+ * across frames and get stamped back on top of every redraw —
+ * navigation (page flip, menu, launcher) redraws the shelf in g_px
+ * but the stale cover pixels re-merge over it, so the window looks
+ * frozen even though the app is reacting.
+ *
+ * IMPORTANT: compositing EARLY (before a modal is drawn over the
+ * grid) is what keeps a popup on top of the covers.  bs_redraw_shelf
+ * draws the grid covers into the overlay and THEN the sync/download
+ * popup into g_px, then flushes once — if the covers were only merged
+ * at that final flush, they would stamp back over the popup's sheet.
+ * bs_plat_cover_flush() (called by the app between the body and the
+ * popups) forces the merge at the right point. */
+static void
+sdl_merge_covers(void)
+{
+    if (g_canvas24 == NULL)
+        return;
+    for (size_t j = 0; j < PC_H; j++) {
+        for (size_t i = 0; i < PC_W; i++) {
+            const uint8_t *c = g_canvas24 + (j * PC_W + i) * 3;
+            if (c[0] == 0xff && c[1] == 0xff && c[2] == 0xff)
+                continue; /* untouched: leave the 8-bit pixel */
+            g_px[j * PC_W + i] = 0xff000000u |
+                ((uint32_t)c[0] << 0) | ((uint32_t)c[1] << 8) |
+                ((uint32_t)c[2] << 16);
+        }
+    }
+    memset(g_canvas24, 0xff, (size_t)PC_W * PC_H * 3);
+}
+
+/* Platform seam: composite + clear the cover overlay now (see
+ * sdl_merge_covers).  The app calls this after drawing the shelf body
+ * and before any modal/popup that may overlap the grid, so the popup
+ * is drawn above the covers instead of being re-covered by them at the
+ * next flush. */
+void
+bs_plat_cover_flush(void)
+{
+    sdl_merge_covers();
+}
+
 void
 FullUpdate(void)
 {
     if (!g_ren || !g_tex || !g_px) return;
-    /* Merge the RGB24 colour canvas (GetCanvas / blit_cover_color24)
-     * into the display buffer.  The canvas defaults to white; only
-     * pixels actually written by the cover blit are non-white, so this
-     * overlays covers without touching the 8-bit/grey drawn content. */
-    if (g_canvas24 != NULL) {
-        for (size_t j = 0; j < PC_H; j++) {
-            for (size_t i = 0; i < PC_W; i++) {
-                const uint8_t *c = g_canvas24 + (j * PC_W + i) * 3;
-                if (c[0] == 0xff && c[1] == 0xff && c[2] == 0xff)
-                    continue; /* untouched: leave the 8-bit pixel */
-                g_px[j * PC_W + i] = 0xff000000u |
-                    ((uint32_t)c[0] << 0) | ((uint32_t)c[1] << 8) |
-                    ((uint32_t)c[2] << 16);
-            }
-        }
-        /* IMPORTANT: clear the RGB24 canvas so it holds ONLY covers
-         * drawn since the last FullUpdate.  Without this, covers
-         * accumulate across frames and get stamped back on top of every
-         * redraw — navigation (page flip, menu, launcher) redraws the
-         * shelf in g_px but the stale cover pixels re-merge over it, so
-         * the window looks frozen even though the app is reacting. */
-        memset(g_canvas24, 0xff, (size_t)PC_W * PC_H * 3);
-    }
+    sdl_merge_covers();
     /* Debug: BS_DUMP_FRAME=path writes one PPM of the canvas (for
      * headless visual verification — e.g. in CI / docs).  The very
      * first FullUpdate fires before covers load; use BS_DUMP_AFTER_MS

@@ -104,6 +104,15 @@ bs_plat_stamp_panel(int self_panel)
         iv_update_panel(0);
 }
 
+/* PocketBook covers are drawn with blit_cover_color24 directly into the
+ * shared inkview framebuffer (GetCanvas == the fb), so there is no
+ * separate cover overlay to composite: a modal drawn after the grid
+ * already paints above the covers.  No-op for parity with the seam. */
+void
+bs_plat_cover_flush(void)
+{
+}
+
 /* Fill the launcher device profile from runtime probes.
  *
  * The shipped view.json/apps_db.json "device" conditionals are

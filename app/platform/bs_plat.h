@@ -81,6 +81,17 @@ int bs_plat_panel_height(int *self_panel);
  * (DrawPanel + stamp + Repaint). */
 void bs_plat_panel_init(void);
 
+/* Composite the colour-cover overlay into the base framebuffer and
+ * clear it, so subsequently drawn 8-bit content (modal popups, dim
+ * sheets) paints ABOVE covers.  No-op on platforms where covers are
+ * drawn directly into the shared framebuffer (the PocketBook device) —
+ * there later draws already win.  Backends with a separate cover
+ * overlay (SDL's RGB24 canvas) must implement this so a modal drawn
+ * over the grid does not get cover pixels re-stamped on top of it at
+ * the next flush.  Call AFTER drawing the shelf body but BEFORE
+ * drawing any modal/popup that may overlap it. */
+void bs_plat_cover_flush(void);
+
 /* Stamp the bottom status strip: firmware-painted when the panel
  * painter is active, self-drawn when the app owns it. */
 void bs_plat_stamp_panel(int self_panel);
