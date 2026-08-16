@@ -120,9 +120,6 @@
 #define BS_CELL_MAX_W 420
 #define BS_CELL_MIN_H 280
 #define BS_CELL_MIN_W 280
-/* Height of a dimension-group header band (grouped view).  One grid row
- * is reserved for it per grouped page, so it is always <= cell height. */
-#define BS_GROUP_HEADER_H 48
 
 /* List-view row height.  A list row is a single full-width band holding a
  * small cover + title + author, so it is much shorter than a grid cell and

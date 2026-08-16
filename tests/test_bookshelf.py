@@ -993,37 +993,38 @@ def test_pager_prev_returns_page(fresh_bookshelf):
 
 # ── group drawer / multi-level grouping ───────────────────────────────
 
-def test_group_by_multi_level_headers_and_drill(fresh_bookshelf):
-    """Two-level grouping: rendered group headers, and tapping a header
-    drills into the group, down to the leaf books.
+def test_group_by_multi_level_stacks_and_drill(fresh_bookshelf):
+    """Two-level grouping collapses into stack cards and taps drill into
+    them, down to the leaf books.
 
-    The left group drawer (Menu key) now holds two buttons -- Group by /
-    Sort by -- each opening a source-chooser-style sheet.  The picks are
-    data-driven (index 2 and 1 are the second and third offered grouping
-    rows -- e.g. Author/Year for the mock library); any two distinct
-    dimensions build a two-level path.
+    The right drawer's Group by button opens a chooser; picking two
+    dimensions builds a two-level path.  The shelf then re-collapses into
+    one stack card per group (the same stack look the series cards use);
+    the mock library is a single author/year, so the top level is one
+    card.  Tapping it drills to the next level (a card again), then to
+    the flat leaf.
     """
     bs = fresh_bookshelf
     bs.choose_group_options(['year', 'author'])
     bs.assert_no_crash()
-    # A two-level path (depth 2, no drill) with a header rendered.
+    # A two-level path (depth 2, no drill) collapsed to a single stack
+    # card (the whole mock library is one year/author group).
     bs.assert_log_contains("depth=2 drill=0")
-    bs.assert_log_contains("group_header=")
+    bs.assert_log_contains("view=1")
 
-    # Tap the first-level header -> regroup by the second dimension.
+    # Tap the top-level stack card -> regroup by the second dimension.
     before = bs.current_log()
-    bs.tap_group_header()
-    bs.assert_no_crash()
+    h = bs.frame_hash()
+    bs.tap_book(0)  # tile 0 is the year stack card
+    assert bs.frame_hash() != h, "stack card tap did not change the view"
     _wait_log_slice(bs, before, "depth=2 drill=1")
-    _wait_log_slice(bs, before, "group_header=")
 
-    # Tap the leaf header -> that group's books, flat.
+    # Tap the next stack card -> the group's books, flat.
     before = bs.current_log()
-    bs.tap_group_header()
-    bs.assert_no_crash()
+    bs.tap_book(0)
     _wait_log_slice(bs, before, "depth=2 drill=2")
 
-    # Back twice unwinds the drill, then back to All books.
+    # Back twice unwinds the drill back to the Author/Year grouping.
     bs.send_back_key()
     _wait_log_slice(bs, before, "depth=2 drill=1")
     bs.send_back_key()

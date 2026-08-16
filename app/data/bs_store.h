@@ -90,10 +90,7 @@ int bs_view_fetch_page(int page, BsTileRow *rows, int cap);
 
 int bs_view_fetch_row(int idx, BsTileRow *out);
 
-/* Dimension-grouped view API (see bs_store.c). */
-int bs_view_group_pages(void);         /* pages when grouped, else 0 */
-int bs_view_page_lo(void);             /* exclusive pos bound of current page */
-int bs_view_page_n(void);              /* tile count of current page */
+/* Dimension-grouped view support (see bs_store.c). */
 int bs_view_dim_available(BsGroupDim dim); /* 1 when the source has data for it */
 
 int bs_view_total(void);

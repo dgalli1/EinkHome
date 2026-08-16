@@ -919,8 +919,13 @@ bs_on_tap_thumbnail(int vi)
     if (!bs_view_fetch_row(vi, &tr))
         return;
 
-    /* Series card → drill into the series. */
+    /* A card is either a series stack (All books) or a dimension-group
+     * stack.  Both drill in. */
     if (tr.is_series) {
+        if (bs_group_active()) {
+            bs_group_drill(tr.series_id); /* series_id = raw group value */
+            return;
+        }
         snprintf(bs_g_drilled_series, sizeof bs_g_drilled_series, "%s", tr.series_id);
         bs_g_state.saved_page = bs_g_state.page;
         bs_g_state.page = 0;

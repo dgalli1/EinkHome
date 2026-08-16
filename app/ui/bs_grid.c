@@ -155,16 +155,15 @@ bs_tile_rect_for_index(int idx, int *x, int *y, int *w, int *h)
     (void)bot;
     bs_grid_geom(&top, &bot, &cell_w, &cell_h);
     int cols = bs_view_cols();
-    int hdr = bs_g_group_has_header ? BS_GROUP_HEADER_H : 0;
-    int page_start = bs_view_page_lo(); /* grouped-aware exclusive lo */
-    int ps = bs_view_page_n();
+    int ps = bs_view_pagesize();
+    int page_start = bs_g_state.page * ps;
     int rel = idx - page_start;
     if (rel < 0 || rel >= ps || idx >= bs_g_view_total)
         return 0;
     int row = rel / cols;
     int col = rel % cols;
     *x = bs_grid_x0() + col * cell_w;
-    *y = top + 4 + hdr + row * cell_h;
+    *y = top + 4 + row * cell_h;
     *w = cell_w - 8;
     *h = cell_h - 6;
     return 1;
@@ -459,24 +458,12 @@ bs_draw_thumbnail(int x, int y, int w, int h, const BsTileRow *tr, int vi)
     grid_fonts_close(&gf);
 }
 
-/* A dimension-group header band: the group value (tappable → drill-in). */
-void
-bs_draw_group_header(const char *label, int x, int y, int w, int h)
-{
-    ifont *f = OpenFont(DEFAULTFONTB, 26, 0);
-    if (f != NULL) {
-        SetFont(f, BLACK);
-        DrawString(x + 14, y + (h - 26) / 2 - 2, label);
-        /* A small drill-in chevron on the right. */
-        DrawString(x + w - 34, y + (h - 26) / 2 - 2, "\u203a");
-        CloseFont(f);
-    }
-}
 
 /* ── dimension-group drill actions ──────────────────────────────────── */
 
-/* Tap a group header: push its value onto the drill path and regroup by
- * the next level (or show the leaf's books when every level is used). */
+/* Tap a group card: push its value onto the drill path and regroup by
+ * the next dimension (or show the leaf's books when every level is
+ * used). */
 void
 bs_group_drill(const char *value)
 {
@@ -535,26 +522,19 @@ bs_draw_grid(void)
     bs_g_row_count = bs_view_fetch_page(bs_g_state.page, bs_g_rows, BS_MAX_ROWS * BS_COLS);
     int cols = bs_view_cols();
     int rows = bs_view_rows();
-    int hdr = bs_g_group_has_header ? BS_GROUP_HEADER_H : 0;
-    /* Group header band: dimension-group pages reserve the top row. */
-    if (hdr > 0) {
-        FillArea(0, top, ScreenWidth(), hdr, LGRAY);
-        bs_draw_group_header(bs_g_group_label, 0, top, ScreenWidth(), hdr);
-        bs_LOG("[bookshelf] group_header=%s has_header=%d\n",
-            bs_g_group_label, bs_g_group_has_header);
-    }
+    int ps = bs_view_pagesize();
     int drawn = 0;
     /* Open the tile fonts once for the whole page pass instead of once
      * per tile (each draw_thumbnail used to open/close 4 fonts). */
     BsGridFonts gf;
     grid_fonts_open(&gf);
-    int lo = bs_view_page_lo();
+    int lo = bs_g_state.page * ps;
     for (int row = 0; row < rows; row++) {
         for (int col = 0; col < cols; col++) {
             if (drawn >= bs_g_row_count)
                 goto done;
             int tx = bs_grid_x0() + col * cell_w;
-            int ty = top + 4 + hdr + row * cell_h;
+            int ty = top + 4 + row * cell_h;
             int tw = cell_w - 8;
             int th = cell_h - 6;
             draw_thumbnail_fonts(tx, ty, tw, th, &bs_g_rows[drawn], lo + drawn, &gf);
@@ -661,7 +641,7 @@ cover_job_done(BsJob *job)
     int tx, ty, tw, th;
     int target = -1;
     if (shelf_active_view()) {
-        int page_start = bs_view_page_lo();
+        int page_start = bs_g_state.page * bs_view_pagesize();
         for (int k = 0; k < bs_g_row_count; k++) {
             const char *id = page_row_id(k);
             if (id != NULL && strcmp(id, a->id) == 0) {
@@ -709,7 +689,7 @@ bs_cover_tick(void *ctx)
     (void)bot;
     (void)cell_w;
     (void)cell_h;
-    int page_start = bs_view_page_lo();
+    int page_start = bs_g_state.page * bs_view_pagesize();
 
     int target = -1;
     for (int k = 0; k < bs_g_row_count; k++) {

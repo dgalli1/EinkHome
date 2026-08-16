@@ -826,14 +826,7 @@ int bs_on_event(int type, int par1, int par2) {
       return 1;
     }
 
-    /* A dimension-group header tap drills into the group instead of
-     * selecting a tile. */
-    if (bs_hit_group_header(x, y) && bs_g_group_has_header) {
-      bs_group_drill(bs_g_group_value);
-      return 1;
-    }
-
-    /* Book tap */
+    /* Book / card tap */
     int idx = bs_hit_thumbnail(x, y);
     if (idx >= 0) {
       bs_on_tap_thumbnail(idx);

@@ -22,7 +22,6 @@ int bs_hit_history(int x, int y);
 
 int bs_hit_thumbnail(int x, int y);
 
-int bs_hit_group_header(int x, int y);
 
 int bs_hit_pager(int x, int y);
 

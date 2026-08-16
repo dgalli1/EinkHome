@@ -130,9 +130,8 @@ bs_hit_thumbnail(int x, int y)
     bs_grid_geom(&top, &bot, &cell_w, &cell_h);
     int cols = bs_view_cols();
     int rows = bs_view_rows();
-    int hdr = bs_g_group_has_header ? BS_GROUP_HEADER_H : 0;
-    int page_start = bs_view_page_lo(); /* grouped-aware exclusive lo */
-    int last = page_start + bs_view_page_n();
+    int page_start = bs_g_state.page * bs_view_pagesize();
+    int last = page_start + bs_view_pagesize();
     if (last > bs_g_view_total)
         last = bs_g_view_total;
     for (int row = 0; row < rows; row++) {
@@ -141,7 +140,7 @@ bs_hit_thumbnail(int x, int y)
             if (idx >= last)
                 return -1;
             int tx = bs_grid_x0() + col * cell_w;
-            int ty = top + 4 + hdr + row * cell_h;
+            int ty = top + 4 + row * cell_h;
             int tw = cell_w - 8;
             int th = cell_h - 6;
             if (x >= tx && x < tx + tw && y >= ty && y < ty + th)
@@ -152,20 +151,6 @@ bs_hit_thumbnail(int x, int y)
 }
 
 /* 1 = the tap is on the current page's dimension-group header band. */
-int
-bs_hit_group_header(int x, int y)
-{
-    (void)x;
-    if (!bs_g_group_has_header)
-        return 0;
-    int top, bot, cell_w, cell_h;
-    (void)bot;
-    (void)cell_w;
-    (void)cell_h;
-    bs_grid_geom(&top, &bot, &cell_w, &cell_h);
-    return (y >= top && y < top + BS_GROUP_HEADER_H);
-}
-
 int
 bs_hit_pager(int x, int y)
 {

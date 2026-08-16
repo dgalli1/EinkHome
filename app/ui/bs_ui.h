@@ -90,8 +90,7 @@ void bs_draw_series_stack_badge(int cx, int cy, int cw, int ch, int count, ifont
 
 void bs_draw_thumbnail(int x, int y, int w, int h, const BsTileRow *tr, int vi);
 
-/* Dimension-group header band + drill actions (bs_grid.c). */
-void bs_draw_group_header(const char *label, int x, int y, int w, int h);
+/* Dimension-group drill actions (bs_grid.c). */
 void bs_group_drill(const char *value);
 void bs_group_drill_back(void);
 int bs_group_active(void);

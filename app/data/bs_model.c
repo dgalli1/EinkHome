@@ -35,9 +35,6 @@ int       bs_g_group_depth = 0;
 BsGroupDim bs_g_group_path[BS_GROUP_MAX_LEVELS];
 int       bs_g_drill_depth = 0;
 char      bs_g_drill_values[BS_GROUP_MAX_LEVELS][BS_MAX_TITLE_LEN];
-char      bs_g_group_label[BS_MAX_TITLE_LEN] = "";
-char      bs_g_group_value[BS_MAX_TITLE_LEN] = "";
-int       bs_g_group_has_header = 0;
 
 /* Dirty flag for the materialised view: set by any sync/local apply
  * path that changed rows, cleared by finish_sync, which then rebuilds
