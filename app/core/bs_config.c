@@ -44,29 +44,23 @@ bs_log_open(const char *argv0)
     } else {
         snprintf(path, sizeof path, "/tmp/bookshelf.log");
     }
-    snprintf(g_log_path, sizeof g_log_path, "%s", path);
     bs_g_log = fopen(path, "a");
     if (bs_g_log == NULL) {
         /* The app dir may not be writable (emulator guest); the log
-         * then lives in /tmp.  Record the path that actually took so
-         * the log viewer shows the real file. */
+         * then lives in /tmp.  Only record the fallback path once its
+         * fopen actually succeeds, so g_log_path never claims a file
+         * that was not opened. */
         snprintf(path, sizeof path, "/tmp/bookshelf.log");
         bs_g_log = fopen(path, "a");
+        if (bs_g_log != NULL)
+            snprintf(g_log_path, sizeof g_log_path, "%s", path);
+    } else {
+        snprintf(g_log_path, sizeof g_log_path, "%s", path);
     }
-    snprintf(g_log_path, sizeof g_log_path, "%s", path);
     if (bs_g_log != NULL) {
         setvbuf(bs_g_log, NULL, _IOLBF, 0);
         stamp(bs_g_log);
         fprintf(bs_g_log, "--- bookshelf.app log opened (argv0=%s) ---\n", argv0 ? argv0 : "(null)");
-    }
-}
-
-void
-bs_log_close(void)
-{
-    if (bs_g_log != NULL) {
-        fclose(bs_g_log);
-        bs_g_log = NULL;
     }
 }
 
@@ -88,7 +82,7 @@ bs_LOG(const char *fmt, ...)
 
 /* ── config file reader ──────────────────────────────────────────────── */
 
-char *
+static char *
 bs_trim_ws(char *s)
 {
     if (s == NULL)

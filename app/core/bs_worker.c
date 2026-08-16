@@ -4,7 +4,7 @@
  * pushes the job on a small queue and signals a condvar; the worker
  * pops jobs one at a time and runs each fn; fn stores done=1
  * (release) as its last action.  One shared weak timer 'wkr' polls
- * the in-flight list every 100ms; a finished job's done_cb runs on
+ * the in-flight list every 30ms; a finished job's done_cb runs on
  * the main thread (the tick after fn set done).  The timer is
  * re-armed while any job is still in flight and stays disarmed
  * otherwise.

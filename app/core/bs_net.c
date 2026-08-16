@@ -6,20 +6,6 @@
 /* ── HTTP helpers ────────────────────────────────────────────────────── */
 
 int
-bs_http_post_timeout(const char *url, const char *body, int timeout, char **resp_out, int *resp_len)
-{
-    int   retsize = 0;
-    char *resp = QuickDownloadExt(url, &retsize, timeout, NULL, (char *)body);
-    if (resp_out)
-        *resp_out = resp;
-    if (resp_len)
-        *resp_len = retsize;
-    if (!resp)
-        return -1;
-    return 0;
-}
-
-int
 bs_http_post_timeout_status(const char *url, const char *body, int timeout,
                          char **resp_out, int *resp_len, int *status_out)
 {
@@ -45,7 +31,16 @@ bs_http_post_timeout_status(const char *url, const char *body, int timeout,
 int
 bs_http_post(const char *url, const char *body, char **resp_out, int *resp_len)
 {
-    return bs_http_post_timeout(url, body, BS_HTTP_TIMEOUT, resp_out, resp_len);
+    int   retsize = 0;
+    char *resp = QuickDownloadExt(url, &retsize, BS_HTTP_TIMEOUT, NULL,
+                                  (char *)body);
+    if (resp_out)
+        *resp_out = resp;
+    if (resp_len)
+        *resp_len = retsize;
+    if (!resp)
+        return -1;
+    return 0;
 }
 
 void

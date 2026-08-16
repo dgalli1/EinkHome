@@ -59,20 +59,6 @@ typedef struct {
     int         len;
 } BsLogRow;
 
-/* Width of a non-NUL-terminated span (the SDK only measures C
- * strings). */
-static int
-span_width(const char *p, int len)
-{
-    char tmp[1024];
-    if (len > (int)sizeof tmp - 1)
-        len = (int)sizeof tmp - 1;
-    memcpy(tmp, p, (size_t)len);
-    // NOLINTNEXTLINE(clang-analyzer-security.ArrayBound) — len <= sizeof tmp - 1, indexed forward into tmp.
-    tmp[len] = '\0';
-    return StringWidth(tmp);
-}
-
 /* Place one word of a line starting at *ws into dst, advancing *ws.
  * Returns:
  *   1  space run skipped (*ws advanced past it, no word placed)
@@ -89,8 +75,8 @@ log_wrap_word(const char *line_end, int maxw, BsLogRow *dst, int mcap,
         (*ws)++;
         return 1;
     }
-    int wordw = span_width(*ws, (int)(we - *ws));
-    int curw = dst[*count].len > 0 ? span_width(dst[*count].p, dst[*count].len) : 0;
+    int wordw = bs_span_width(*ws, (int)(we - *ws));
+    int curw = dst[*count].len > 0 ? bs_span_width(dst[*count].p, dst[*count].len) : 0;
     if (dst[*count].len > 0 && curw + wordw + 6 > maxw) {
         (*count)++;
         if (*count >= mcap)

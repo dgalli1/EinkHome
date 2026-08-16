@@ -114,9 +114,6 @@ lint-py:
 compile-commands:
 	@python3 scripts/gen-compile-commands.py --output build/compile_commands.json
 
-clean:
-	rm -f $(OUT) $(OUT_ARMHF) $(OUT_PC)
-
 $(OUT): $(SRC_PATHS) $(wildcard $(CURDIR)/app/*/*.h) $(BUILD_ARMEL)
 	mkdir -p $(CURDIR)/build
 	PBEMU_FIRMWARE_DIR="$(PBEMU_FIRMWARE_DIR)" \

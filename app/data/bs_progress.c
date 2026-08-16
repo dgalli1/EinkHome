@@ -66,10 +66,21 @@ progress_snapshot(void)
         }
         char   buf[16384];
         size_t n;
-        while ((n = fread(buf, 1, sizeof buf, in)) > 0)
-            fwrite(buf, 1, n, out);
+        int    write_err = 0;
+        while ((n = fread(buf, 1, sizeof buf, in)) > 0) {
+            if (fwrite(buf, 1, n, out) != n) {
+                write_err = 1;
+                break;
+            }
+        }
         fclose(in);
-        fclose(out);
+        if (fclose(out) != 0)
+            write_err = 1;
+        if (write_err) {
+            /* A truncated snapshot must never be read back as valid:
+             * drop it so the next reload copies afresh. */
+            remove(dst);
+        }
     }
 }
 

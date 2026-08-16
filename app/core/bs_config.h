@@ -15,10 +15,6 @@ extern char bs_g_config_path[600];
 
 void bs_log_open(const char *argv0);
 
-void bs_log_close(void);
-
-char *bs_trim_ws(char *s);
-
 int bs_read_kv_file(const char *path, bs_cfg_kv_cb cb, void *user);
 
 void bs_cfg_set_kv(const char *key, const char *value, void *user);

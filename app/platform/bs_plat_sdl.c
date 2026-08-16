@@ -1202,6 +1202,14 @@ sdl_boot_auto_launcher(void)
 static void
 sdl_teardown(void)
 {
+    /* Release any still-armed timer entries (their names were
+     * strdup'd), mirroring ClearTimerByName. */
+    while (g_timers != NULL) {
+        struct pc_timer *gone = g_timers;
+        g_timers = gone->next;
+        free((void *)gone->name);
+        free(gone);
+    }
     SDL_DestroyTexture(g_tex);
     SDL_DestroyRenderer(g_ren);
     SDL_DestroyWindow(g_win);

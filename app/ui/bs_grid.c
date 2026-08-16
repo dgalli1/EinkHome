@@ -726,7 +726,8 @@ cover_fetch_job(BsJob *job)
         FILE *f = fopen(BS_COVER_TMP, "wb");
         if (f != NULL) {
             size_t w = fwrite(data, 1, (size_t)rsize, f);
-            if (w == (size_t)rsize && fclose(f) == 0) {
+            int    fc = fclose(f);
+            if (w == (size_t)rsize && fc == 0) {
                 ok = 1;
                 bs_cover_cache_save(a->id, data, rsize);
             }

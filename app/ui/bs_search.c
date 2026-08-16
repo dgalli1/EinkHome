@@ -12,18 +12,7 @@ static void
 draw_search_magnifier(int bx, int by, int bh, int col)
 {
     int gx = bx + 30, gy = by + bh / 2;
-    int px = 0, py = 0;
-    for (int s = 0; s <= 16; s++) {
-        double a = s * 2 * M_PI / 16.0;
-        int    x = gx + (int)(13 * cos(a));
-        int    yy = gy + (int)(13 * sin(a));
-        if (s > 0) {
-            DrawLine(px, py, x, yy, col);
-            DrawLine(px, py + 1, x, yy + 1, col);
-        }
-        px = x;
-        py = yy;
-    }
+    bs_draw_circle_outline(gx, gy, 13, col);
     DrawLine(gx + 9, gy + 10, gx + 22, gy + 23, col);
     DrawLine(gx + 10, gy + 9, gx + 23, gy + 22, col);
 }

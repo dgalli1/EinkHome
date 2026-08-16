@@ -19,8 +19,6 @@ void bs_on_tap_licenses_view(int x, int y);
 
 int bs_hit_top_bar(int x, int y);
 
-int bs_hit_search_icon(int x, int y);
-
 int bs_hit_search_input(int x, int y);
 
 int bs_hit_history(int x, int y);

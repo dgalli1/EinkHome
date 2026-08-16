@@ -40,17 +40,9 @@ static void
 draw_globe_icon(int x, int y, int col)
 {
     int cx = x + BS_TOP_ICON_HALF, cy = y + BS_TOP_ICON_HALF, r = 24;
-    int px = 0, py = 0;
-    for (int s = 0; s <= 16; s++) {
-        double a = s * 2 * M_PI / 16.0;
-        int    xx = cx + (int)(r * cos(a));
-        int    yy = cy + (int)(r * sin(a));
-        globe_arc_piece(px, py, xx, yy, col, s);
-        px = xx;
-        py = yy;
-    }
+    bs_draw_circle_outline(cx, cy, r, col);
     /* equator */
-    px = py = 0;
+    int px = 0, py = 0;
     for (int s = 0; s <= 16; s++) {
         double a = s * 2 * M_PI / 16.0;
         int    xx = cx + (int)(r * cos(a));
@@ -405,10 +397,6 @@ bs_draw_sync_icon(void)
     }
 }
 
-/* Magnifying-glass icon in the top bar.  Replaces the old separate
- * search row: tapping it opens the Search sub-page (see on_event).
- * Line-art style matching home/sync.  Position: left of the sync
- * button. */
 /* Layout-switch button, between the search and sync icons: toggles
  * the cover grid / list view.  The glyph reflects the CURRENT layout —
  * a 2x2 grid of cells in grid mode, three rows with leading squares
@@ -442,6 +430,10 @@ bs_draw_layout_icon(void)
     }
 }
 
+/* Magnifying-glass icon in the top bar.  Replaces the old separate
+ * search row: tapping it opens the Search sub-page (see on_event).
+ * Line-art style matching home/sync.  Position: left of the sync
+ * button. */
 void
 bs_draw_search_icon(void)
 {
@@ -457,18 +449,7 @@ bs_draw_search_icon(void)
     int r = 20; /* ring + handle fit the common TOP_ICON_SIZE icon box */
 
     /* Outlined ring (polyline; DrawCircle fills). */
-    int px = 0, py = 0;
-    for (int s = 0; s <= 16; s++) {
-        double a = s * 2 * M_PI / 16.0;
-        int    x = cx + (int)(r * cos(a));
-        int    yy = cy + (int)(r * sin(a));
-        if (s > 0) {
-            DrawLine(px, py, x, yy, col);
-            DrawLine(px, py + 1, x, yy + 1, col);
-        }
-        px = x;
-        py = yy;
-    }
+    bs_draw_circle_outline(cx, cy, r, col);
     /* Handle: double-width diagonal from the ring edge out to the
      * corner of the icon box. */
     DrawLine(cx + r - 4, cy + r - 4, cx + r + 10, cy + r + 10, col);

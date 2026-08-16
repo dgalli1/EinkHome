@@ -2,7 +2,7 @@
  *
  * Submit from the main thread; fn runs on a detached pthread and may
  * do blocking I/O (HTTP, file writes); when the job finishes, done_cb
- * runs on the main event loop, driven by one shared 100ms weak timer
+ * runs on the main event loop, driven by one shared 30ms weak timer
  * 'wkr'.  SQLite and libinkview are only ever touched from done_cb,
  * never from fn.
  *

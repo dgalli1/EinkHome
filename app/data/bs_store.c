@@ -57,6 +57,8 @@ static sqlite3_stmt *g_st_suggest_rank_zero;    /* drop zero-count rank rows */
 static sqlite3_stmt *g_st_fts_rowid;  /* SELECT rowid FROM books WHERE id */
 static sqlite3_stmt *g_st_fts_del;    /* DELETE FROM search_fts WHERE rowid */
 static sqlite3_stmt *g_st_fts_ins;    /* INSERT INTO search_fts(...) */
+static sqlite3_stmt *g_st_meta_get;   /* SELECT title, author FROM local_meta */
+static sqlite3_stmt *g_st_meta_put;   /* INSERT OR REPLACE INTO local_meta */
 /* 1 when the firmware SQLite lacks the FTS5 module; routes committed
  * search to the LIKE fallback and makes every FTS write a no-op. */
 static int g_no_fts;
@@ -177,8 +179,6 @@ static void store_migrate_columns(void) {
   int changed = 0;
   for (size_t i = 0; i < sizeof mig / sizeof mig[0]; i++) {
     int has = store_has_column("books", mig[i].col);
-    bs_LOG("[bookshelf] store: dbg col=%s has=%d err=%s\n", mig[i].col, has,
-        g_db ? sqlite3_errmsg(g_db) : "?");
     if (has)
       continue;
     char sql[128];
@@ -432,6 +432,8 @@ void bs_store_close(void) {
   sqlite3_finalize(g_st_fts_rowid);
   sqlite3_finalize(g_st_fts_del);
   sqlite3_finalize(g_st_fts_ins);
+  sqlite3_finalize(g_st_meta_get);
+  sqlite3_finalize(g_st_meta_put);
   g_st_upsert_lookup = NULL;
   g_st_upsert = NULL;
   g_st_suggest_del = NULL;
@@ -445,6 +447,8 @@ void bs_store_close(void) {
   g_st_fts_rowid = NULL;
   g_st_fts_del = NULL;
   g_st_fts_ins = NULL;
+  g_st_meta_get = NULL;
+  g_st_meta_put = NULL;
   /* A close/reopen re-probes FTS availability and re-decides the
    * search cache from scratch. */
   g_no_fts = 0;
@@ -664,11 +668,12 @@ int bs_store_local_meta_get(const char *id, char *title, size_t title_cap,
                          char *author, size_t author_cap) {
   if (g_db == NULL)
     return 0;
-  sqlite3_stmt *st = NULL;
-  if (sqlite3_prepare_v2(g_db,
-                         "SELECT title, author FROM local_meta WHERE id=?1", -1,
-                         &st, NULL) != SQLITE_OK)
+  sqlite3_stmt *st = st_prep_once(
+      &g_st_meta_get, "SELECT title, author FROM local_meta WHERE id=?1");
+  if (st == NULL)
     return 0;
+  sqlite3_reset(st);
+  sqlite3_clear_bindings(st);
   bind_text_trunc(st, 1, id);
   int hit = sqlite3_step(st) == SQLITE_ROW;
   if (hit) {
@@ -679,7 +684,7 @@ int bs_store_local_meta_get(const char *id, char *title, size_t title_cap,
     if (author != NULL && author_cap > 0)
       snprintf(author, author_cap, "%s", a != NULL ? a : "");
   }
-  sqlite3_finalize(st);
+  sqlite3_reset(st); /* drop the read cursor so a later write is not locked out */
   return hit;
 }
 
@@ -687,17 +692,19 @@ void bs_store_local_meta_put(const char *id, const char *title,
                           const char *author) {
   if (g_db == NULL)
     return;
-  sqlite3_stmt *st = NULL;
-  if (sqlite3_prepare_v2(g_db,
-                         "INSERT OR REPLACE INTO local_meta(id, title, author)"
-                         " VALUES(?1, ?2, ?3)",
-                         -1, &st, NULL) != SQLITE_OK)
+  sqlite3_stmt *st = st_prep_once(
+      &g_st_meta_put,
+      "INSERT OR REPLACE INTO local_meta(id, title, author) VALUES(?1, ?2, ?3)");
+  if (st == NULL)
     return;
+  sqlite3_reset(st);
+  sqlite3_clear_bindings(st);
   bind_text_trunc(st, 1, id);
   bind_text_trunc(st, 2, title != NULL ? title : "");
   bind_text_trunc(st, 3, author != NULL ? author : "");
-  sqlite3_step(st);
-  sqlite3_finalize(st);
+  int rc = sqlite3_step(st);
+  if (rc != SQLITE_DONE)
+    bs_LOG("[bookshelf] store_local_meta_put failed: %s\n", sqlite3_errmsg(g_db));
 }
 
 void bs_store_set_downloaded(const char *id, int downloaded,
@@ -1303,7 +1310,8 @@ int bs_store_suggest_list(const char *prefix, char out[][BS_SUGGEST_TERM_MAX],
   suggest_lower(norm, prefix, len);
   char bound[BS_SUGGEST_TERM_MAX + 4];
   int has_bound = suggest_upper_bound(norm, len, bound, sizeof bound);
-  const char *sql = suggest_scan_sql(suggest_rank_ready(), has_bound);
+  int ranked = suggest_rank_ready();
+  const char *sql = suggest_scan_sql(ranked, has_bound);
   sqlite3_stmt *st = NULL;
   if (sqlite3_prepare_v2(g_db, sql, -1, &st, NULL) != SQLITE_OK)
     return 0;
@@ -1318,6 +1326,26 @@ int bs_store_suggest_list(const char *prefix, char out[][BS_SUGGEST_TERM_MAX],
     n++;
   }
   sqlite3_finalize(st);
+  if (n == 0 && ranked) {
+    /* The rank latch is sticky (set once any rank row was seen), so a
+     * rank table emptied wholesale would stick the caller on a ranked
+     * scan that now returns nothing.  Degrade to the edge-table GROUP-BY
+     * scan for this call — the same fallback an un-latched caller gets. */
+    sqlite3_stmt *g = NULL;
+    if (sqlite3_prepare_v2(g_db, suggest_scan_sql(0, has_bound), -1, &g,
+                           NULL) == SQLITE_OK) {
+      bind_text_trunc(g, 1, norm);
+      if (has_bound)
+        bind_text_trunc(g, 2, bound);
+      sqlite3_bind_int(g, has_bound ? 3 : 2, cap);
+      while (n < cap && sqlite3_step(g) == SQLITE_ROW) {
+        const char *t = (const char *)sqlite3_column_text(g, 0);
+        snprintf(out[n], BS_SUGGEST_TERM_MAX, "%s", t ? t : "");
+        n++;
+      }
+      sqlite3_finalize(g);
+    }
+  }
   return n;
 }
 
@@ -1369,7 +1397,7 @@ int bs_store_begin(void) {
   return 0;
 }
 
-void bs_store_commit(void) {
+int bs_store_commit(void) {
   if (g_db != NULL) {
     char *msg = NULL;
     if (sqlite3_exec(g_db, "COMMIT", NULL, NULL, &msg) != SQLITE_OK) {
@@ -1378,10 +1406,14 @@ void bs_store_commit(void) {
       /* A failed COMMIT leaves the transaction open; abort it so the
        * next store_begin starts from a clean state. */
       sqlite3_exec(g_db, "ROLLBACK", NULL, NULL, NULL);
+      if (msg)
+        sqlite3_free(msg);
+      return -1;
     }
     if (msg)
       sqlite3_free(msg);
   }
+  return 0;
 }
 
 /* Abort the current transaction, discarding every write since the
@@ -1709,9 +1741,7 @@ int bs_view_dim_available(BsGroupDim dim) {
      count, so the option is hidden there entirely. */
   if (dim == BS_GROUP_BY_SERIES && bs_g_state.source != BS_SOURCE_KAVITA)
     return 0;
-  const char *src = bs_g_state.source == BS_SOURCE_LOCAL    ? "local"
-                  : bs_g_state.source == BS_SOURCE_FOLDER ? "folder"
-                                                          : "kavita";
+  const char *src = view_source();
   sqlite3_stmt *st = NULL;
   char sql[256];
   snprintf(sql, sizeof sql,
@@ -2088,9 +2118,9 @@ int bs_view_total(void) {
   return bs_g_view_total;
 }
 
-/* Fill one TileRow from a joined view+books row.  BOOK_COLS_Q is 13
- * columns (0..12), then v.kind=13, v.book_id=14, v.series_id=15,
- * v.series_name=16, v.series_count=17. */
+/* Fill one TileRow from a joined view+books row.  BOOK_COLS_Q is 14
+ * columns (0..13), then v.kind=14, v.book_id=15, v.series_id=16,
+ * v.series_name=17, v.series_count=18. */
 static void fill_row_from_stmt(sqlite3_stmt *st, BsTileRow *tr) {
   memset(tr, 0, sizeof *tr);
   fill_book_from_stmt(st, &tr->book); /* book cols first: 0..13 */
