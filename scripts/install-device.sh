@@ -3,7 +3,7 @@
 # install-device.sh — push the pbemu bookshelf.app to a real PocketBook.
 #
 # Usage:
-#   scripts/install-device.sh <device-ip> [api-url]
+#   scripts/install-device.sh [flags] <device-ip> [api-url]
 #
 # Arguments:
 #   <device-ip>  SSH target for the PocketBook (root@<ip>).  Passwordless
@@ -15,18 +15,37 @@
 #                explicit api-url if the device is on a different subnet
 #                than the host running the API.
 #
+# Flags:
+#   --mock / --real  Pick which API backend the device ends up on.  Both
+#                bind the same LAN host:port, so the api_url below is
+#                identical whatever you choose — the server config is
+#                what decides.  --mock (re)starts the host pbemu-api with
+#                api/config/server-100k.json (mock provider, 100k OL
+#                corpus); --real with api/config/server.json (kavita, the
+#                real data source).  Mutually exclusive.
+#   --reset-db  Completely reset the on-device library store before
+#                installing: deletes bookshelf_lib.db, the pre-sqlite
+#                bookshelf_lib.json and the covers/ cache under
+#                /mnt/ext1/system/bin/, so the app re-syncs from scratch
+#                on next launch.  Leaves the firmware reader's
+#                explorer-3.db progress untouched.
+#
 # What it does:
-#   1. Builds the ARM binary if `build/bookshelf.app` is missing.
-#   2. Writes a fresh `build/bookshelf.cfg` with the resolved api_url
+#   1. Builds the ARM binary if `build/bookshelf.app` is missing
+#      (--build forces it).
+#   2. Optionally (--mock/--real) restarts the host pbemu-api server with
+#      the matching config.
+#   3. Optionally (--reset-db) wipes the on-device library store.
+#   4. Writes a fresh `build/bookshelf.cfg` with the resolved api_url
 #      and api_token=pbemu-dev-token (matches api/config/server.json).
-#   3. SCPs both into `/mnt/ext1/system/bin/` on the device, named
+#   5. SCPs both into `/mnt/ext1/system/bin/` on the device, named
 #      `bookshelf.app` / `bookshelf.cfg`.
-#   4. The binary IS the home task: monitor.app checks
+#   6. The binary IS the home task: monitor.app checks
 #      /mnt/ext1/system/bin/bookshelf.app before the firmware's
 #      /ebrmain/bin/bookshelf.app, so Home opens OUR app.  Installed
 #      directly (no wrapper script) so the reader's book-open handshake
 #      keeps working.
-#   5. chmod +x and restarts any already-running copy.
+#   7. chmod +x and restarts any already-running copy.
 #
 # This script intentionally does NOT auto-rebuild the binary — `run.sh`
 # already handles building.  Pass `--build` to force a rebuild here too.
@@ -50,17 +69,33 @@ HERE=$(
 )
 # Shared helpers (lan_ip) — must stay POSIX sh.
 . "${HERE}/lib.sh"
-REPO_ROOT=$(
-	unset CDPATH
-	cd "${HERE}/.." && pwd
-)
-API_PORT="${PBEMU_API_PORT:-8765}"
+# lib-run.sh provides bs_run_env (common paths + a python interpreter)
+# and bs_run_api_start, the (re)start logic for the pbemu-api server —
+# reused for --mock/--real below.  All of lib-run.sh is POSIX-sh.
+. "${HERE}/lib-run.sh"
+bs_run_env
 
 usage() {
 	cat >&2 <<EOF
-usage: $(basename "$0") <device-ip> [api-url]
+usage: $(basename "$0") [flags] <device-ip> [api-url]
        $(basename "$0") --abi armhf <device-ip> [api-url]
        $(basename "$0") --build [--abi armhf] <device-ip> [api-url]
+       $(basename "$0") --mock[|--real] [--reset-db] <device-ip> [api-url]
+
+Flags (combinable, any order before the positional args):
+  --build      rebuild the binary first (default: build only when missing).
+  --abi armhf  use the build/bookshelf.armhf.app hard-float build.
+  --mock       use the 100k mock server: (re)start the host pbemu-api
+               with api/config/server-100k.json (mock provider, 100k OL
+               corpus) before installing.
+  --real       use the real data endpoint: (re)start the host pbemu-api
+               with api/config/server.json (kavita provider).
+  --reset-db   completely reset the on-device library store before
+               installing: removes bookshelf_lib.db, the pre-sqlite
+               bookshelf_lib.json and the covers/ cache under
+               /mnt/ext1/system/bin/.  Does NOT touch explorer-3.db
+               (the firmware reader's progress) or the binary/config
+               (those are reinstalled anyway).
 
 Pushes build/bookshelf.app (or build/bookshelf.armhf.app with --abi
 armhf, for the hard-float InkPad One) + a fresh config to
@@ -74,29 +109,54 @@ DEVICE=""
 API_URL=""
 DO_BUILD=0
 ABI="armel"
+# "" (leave the host server alone) | mock | real
+DATA_MODE=""
+DO_RESET_DB=0
 
-case "${1:-}" in
-"" | -h | --help) usage ;;
---build)
-	DO_BUILD=1
-	shift
-	;;
-esac
-case "${1:-}" in
---abi)
-	ABI="${2:-}"
-	case "${ABI}" in
-	armel | armhf) ;;
+while [ $# -gt 0 ]; do
+	case "${1}" in
+	-h | --help) usage ;;
+	--build)
+		DO_BUILD=1
+		;;
+	--abi)
+		ABI="${2:-}"
+		case "${ABI}" in
+		armel | armhf) ;;
+		*)
+			echo "ERROR: --abi must be armel or armhf (got: ${ABI})" >&2
+			exit 64
+			;;
+		esac
+		shift
+		;;
+	--mock | --real)
+		if [ -n "${DATA_MODE}" ] && [ "${DATA_MODE}" != "${1#--}" ]; then
+			echo "ERROR: --mock and --real are mutually exclusive" >&2
+			exit 64
+		fi
+		DATA_MODE="${1#--}"
+		;;
+	--reset-db)
+		DO_RESET_DB=1
+		;;
+	-*)
+		echo "ERROR: unknown option: ${1}" >&2
+		usage
+		;;
 	*)
-		echo "ERROR: --abi must be armel or armhf (got: ${ABI})" >&2
-		exit 64
+		if [ -z "${DEVICE}" ]; then
+			DEVICE="${1}"
+		elif [ -z "${API_URL}" ]; then
+			API_URL="${1}"
+		else
+			echo "ERROR: too many arguments: ${1}" >&2
+			usage
+		fi
 		;;
 	esac
-	shift 2
-	;;
-esac
-DEVICE="${1:-}"
-API_URL="${2:-}"
+	shift
+done
 
 if [ -z "${DEVICE}" ]; then
 	usage
@@ -124,6 +184,21 @@ fi
 if [ ! -f "${SRC_APP}" ]; then
 	echo "ERROR: ${SRC_APP} not found; pass --build or run ./scripts/run.sh first" >&2
 	exit 1
+fi
+
+# --mock / --real: (re)start the host pbemu-api with the matching config.
+# Both backends bind the same LAN host:port, so the api_url resolved
+# below is identical either way — the config is what selects the source.
+# bs_run_api_start passes --config and runs from REPO_ROOT (via
+# PBEMU_API_CONFIG) so the 100k config's repo-relative corpus/books paths
+# resolve.
+if [ -n "${DATA_MODE}" ]; then
+	case "${DATA_MODE}" in
+	mock) _API_CFG="${REPO_ROOT}/api/config/server-100k.json" ;;
+	real) _API_CFG="${REPO_ROOT}/api/config/server.json" ;;
+	esac
+	echo "==> (re)starting pbemu-api with ${DATA_MODE} config: ${_API_CFG}"
+	PBEMU_API_CONFIG="${_API_CFG}" bs_run_api_start
 fi
 
 # Resolve the api_url the device should hit.  When the user doesn't
@@ -166,6 +241,19 @@ echo "    api_url = ${API_URL}"
 # which the ssh user has.
 ssh ${SSH_COMMON} "root@${DEVICE}" rm -f \
 	/mnt/ext1/system/bin/bookshelf.app /mnt/ext1/system/bin/bookshelf.cfg
+
+# --reset-db: wipe the on-device library store so the app re-syncs from
+# scratch on next launch.  The store, covers and legacy json live next
+# to the config file in the app dir.  Deliberately leaves explorer-3.db
+# (the firmware reader's reading-progress DB) alone.
+if [ "${DO_RESET_DB}" = "1" ]; then
+	echo "==> resetting on-device library db + cover cache"
+	ssh ${SSH_COMMON} "root@${DEVICE}" sh -c '
+		rm -f /mnt/ext1/system/bin/bookshelf_lib.db \
+			/mnt/ext1/system/bin/bookshelf_lib.json
+		rm -rf /mnt/ext1/system/bin/covers
+	'
+fi
 
 # Push the binary and config.  The destination IS
 # /mnt/ext1/system/bin/bookshelf.app: monitor.app resolves the home app

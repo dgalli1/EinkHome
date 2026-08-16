@@ -73,6 +73,13 @@ bs_run_cleanup() {
 
 # (Re)start the pbemu-api server on 127.0.0.1:${API_PORT} and wait until
 # it answers /healthz.  Surface the LAN address for real devices.
+#
+# Optional env overrides:
+#   PBEMU_API_CONFIG — absolute path to a server config (e.g. the 100k
+#     mock in api/config/server-100k.json); passed as --config and the
+#     server runs from PBEMU_API_CWD (default ${REPO_ROOT}) so the
+#     config's repo-relative paths resolve.
+#   PBEMU_API_CWD    — working dir for the server when a config is set.
 bs_run_api_start() {
 	echo "==> (re)starting pbemu-api on 127.0.0.1:${API_PORT}"
 	# Kill any stale server first.  The run scripts share ${API_PIDFILE},
@@ -102,10 +109,21 @@ bs_run_api_start() {
 	fi
 	# Run from the pbemu submodule so the config's firmware-relative
 	# paths resolve correctly; the server code lives in this repo (api/).
-	cd "${PBEMU_DIR}"
+	#
+	# With PBEMU_API_CONFIG set (install-device.sh --mock/--real) we pick
+	# a non-default server config and run from PBEMU_API_CWD (default
+	# ${REPO_ROOT}) so that config's repo-relative corpus/books paths
+	# resolve — the firmware-relative default above only holds for the
+	# pbemu submodule cwd.
+	_SERVER_CWD="${PBEMU_DIR}"
+	if [ -n "${PBEMU_API_CONFIG:-}" ]; then
+		_SERVER_CWD="${PBEMU_API_CWD:-${REPO_ROOT}}"
+	fi
+	cd "${_SERVER_CWD}"
 	PYTHONPATH="${REPO_ROOT}:${REPO_ROOT}/api" \
 		"${PYTHON}" -m api.api.server \
 		--host 0.0.0.0 --port "${API_PORT}" \
+		${PBEMU_API_CONFIG:+--config "${PBEMU_API_CONFIG}"} \
 		>"${API_LOGFILE}" 2>&1 &
 	echo $! >"${API_PIDFILE}"
 	# Poll the healthz endpoint until it answers — a cold python import +
