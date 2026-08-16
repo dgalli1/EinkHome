@@ -129,7 +129,7 @@ $(OUT_ARMHF): $(SRC_PATHS) $(wildcard $(CURDIR)/app/*/*.h) $(BUILD_ARMHF)
 		-I/work/app/platform \
 		--output build/bookshelf.armhf.app
 
-$(OUT_PC): $(addprefix $(CURDIR)/app/,$(PC_SOURCES)) app/platform/bs_plat_sdl.c $(BUILD_PC)
+$(OUT_PC): $(addprefix $(CURDIR)/app/,$(PC_SOURCES)) app/platform/bs_plat_sdl.c $(wildcard $(CURDIR)/app/*/*.h) $(BUILD_PC)
 	mkdir -p $(CURDIR)/build
 	$(BUILD_PC) --output build/bookshelf.pc
 
