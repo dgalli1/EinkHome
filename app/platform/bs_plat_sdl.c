@@ -784,7 +784,17 @@ dump_frame(const char *path)
  * popup into g_px, then flushes once — if the covers were only merged
  * at that final flush, they would stamp back over the popup's sheet.
  * bs_plat_cover_flush() (called by the app between the body and the
- * popups) forces the merge at the right point. */
+ * popups) forces the merge at the right point.
+ *
+ * A cover only ever fills canvas pixels that are still untouched
+ * white.  The app draws per-tile overlays — the series/group count
+ * badge, the stack outline and the reading-progress bar — into g_px
+ * AFTER writing the cover to this overlay, and the cover must sit
+ * UNDER them (it is the tile's base art).  Stamping the cover over a
+ * non-white g_px pixel would erase that overlay, which is why the
+ * default shelf/group cards looked wrong (no badge, no progress) on
+ * the SDL build.  Merging only into white preserves both the overlays
+ * and any already-drawn popup. */
 static void
 sdl_merge_covers(void)
 {
@@ -795,7 +805,10 @@ sdl_merge_covers(void)
             const uint8_t *c = g_canvas24 + (j * (size_t)g_sw + i) * 3;
             if (c[0] == 0xff && c[1] == 0xff && c[2] == 0xff)
                 continue; /* untouched: leave the 8-bit pixel */
-            g_px[j * g_sw + i] = 0xff000000u |
+            size_t idx = j * (size_t)g_sw + i;
+            if (g_px[idx] != 0xffffffffu)
+                continue; /* app drew over the cover (badge/progress/js) */
+            g_px[idx] = 0xff000000u |
                 ((uint32_t)c[0] << 0) | ((uint32_t)c[1] << 8) |
                 ((uint32_t)c[2] << 16);
         }
