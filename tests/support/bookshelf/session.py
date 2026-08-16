@@ -17,7 +17,13 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from tests.support.bookshelf.backends import Backend
-from tests.support.bookshelf.geometry import MORE_APPS, MORE_DOWNLOAD_ALL, MORE_SETTINGS
+from tests.support.bookshelf.geometry import (
+    MORE_APPS,
+    MORE_DOWNLOAD_ALL,
+    MORE_GROUP,
+    MORE_SETTINGS,
+    MORE_SORT,
+)
 from tests.support.bookshelf.snapshots import SnapshotRecorder
 from tests.support.runtime_common import REPO_ROOT
 
@@ -139,21 +145,21 @@ class BookshelfSession:
     def tap_menu(self) -> None:
         self.tap_at(*self._g.menu_button_center())
 
-    def open_group_drawer(self) -> None:
-        """Open the left group drawer via the physical Menu key."""
-        from tests.support.bookshelf.backends import IV_KEY_MENU
-        self._backend.key(IV_KEY_MENU)
-        time.sleep(0.3)
-        self.snapshot("group_drawer")
+    def open_more_drawer(self) -> None:
+        """Open the right "..." drawer via the top-bar burger button."""
+        self.tap_menu_and_verify()
+        self.snapshot("more_drawer")
 
-    def tap_drawer_group_by(self) -> None:
-        """From the open drawer, tap the "Group by" row."""
-        self.tap_at(*self._g.menu_item_center(0))
+    def open_group_chooser(self) -> None:
+        """Open the right drawer and tap the "Group by" button."""
+        self.tap_menu_and_verify()
+        self.tap_more_item(MORE_GROUP)
         time.sleep(0.3)
 
-    def tap_drawer_sort_by(self) -> None:
-        """From the open drawer, tap the "Sort by" row."""
-        self.tap_at(*self._g.menu_item_center(1))
+    def open_sort_chooser(self) -> None:
+        """Open the right drawer and tap the "Sort by" button."""
+        self.tap_menu_and_verify()
+        self.tap_more_item(MORE_SORT)
         time.sleep(0.3)
 
     def group_rows(self) -> dict[str, int]:
@@ -198,19 +204,28 @@ class BookshelfSession:
         return rows
 
     def choose_group_options(self, dims: list[str]) -> None:
-        """Open the drawer -> Group by -> toggle the given dimensions
+        """Right drawer -> Group by -> toggle the given dimensions
         (e.g. ['year','author']) in order, then dismiss the sheet.
         Toggling stays open so a multi-level path can be built."""
         rows = self.group_rows()
         n = rows.get("_n", 5)
-        self.open_group_drawer()
-        self.tap_drawer_group_by()
+        self.open_group_chooser()
         self.wait_for_stable()
         for d in dims:
             self.tap_at(*self._g.group_option_center(rows[d], n))
             self.wait_for_stable()
         self.tap_at(*self._g.chooser_outside_point())
         self.wait_for_stable()
+
+    def choose_sort(self, option_row: int) -> None:
+        """Right drawer -> Sort by -> pick sort option *option_row*
+        (0 = title A-Z, 1 = author, 2 = series, 3 = recent); the sheet
+        applies and closes."""
+        before = self.current_log()
+        self.open_sort_chooser()
+        self.wait_for_stable()
+        self.tap_at(*self._g.sort_option_center(option_row))
+        return before
 
     def tap_group_header(self) -> None:
         """Tap the current page's group header (drills into the group)."""

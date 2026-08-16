@@ -27,27 +27,19 @@ CELL_MIN_W = 280
 
 # ── More overlay item indices (right-anchored panel) ───────────────────
 MORE_SYNC = 0
-MORE_TITLE_AZ = 1
-MORE_AUTHOR = 2
-MORE_SERIES = 3
-MORE_RECENT = 4
-MORE_GRID = 5
-MORE_LIST = 6
-MORE_DOWNLOAD_ALL = 7
-MORE_SETTINGS = 8
-MORE_APPS = 9
+MORE_GROUP = 1
+MORE_SORT = 2
+MORE_GRID = 3
+MORE_LIST = 4
+MORE_DOWNLOAD_ALL = 5
+MORE_SETTINGS = 6
+MORE_APPS = 7
 
 # ── Settings overlay layout (full-screen page) ────────────────────────
 OVERLAY_HEADER_H = TOP_BAR_H  # overlay header == top bar height (Back chevron + title)
 SETTINGS_ROW_H = 120
 SETTINGS_BTN_H = 96
 SETTINGS_ROW1_Y = 112
-
-# ── Menu / group overlay item indices (left-anchored panel) ────────────
-MENU_ALL = 0
-MENU_BY_AUTHOR = 1
-MENU_BY_SERIES = 2
-MENU_BY_RECENT = 3
 
 # ── Context (long-press) menu layout ──────────────────────────────────
 CTX_ITEM_H = 96
@@ -71,19 +63,13 @@ __all__ = [
     "CTX_ITEM_H",
     "CTX_PAD",
     "CTX_TITLE_H",
-    "MENU_ALL",
-    "MENU_BY_AUTHOR",
-    "MENU_BY_RECENT",
-    "MENU_BY_SERIES",
-    "MORE_AUTHOR",
     "MORE_DOWNLOAD_ALL",
     "MORE_SETTINGS",
     "MORE_GRID",
     "MORE_LIST",
-    "MORE_RECENT",
-    "MORE_SERIES",
+    "MORE_GROUP",
+    "MORE_SORT",
     "MORE_SYNC",
-    "MORE_TITLE_AZ",
     "PAGER_H",
     "PAGESIZE",
     "SEARCH_ROW_H",
@@ -231,17 +217,6 @@ class BookshelfGeometry:
         """A point guaranteed to be left of the right-anchored More panel."""
         return (4, self.screen_h // 2)
 
-    # ── Menu / group overlay (left-anchored, 75 % width) ──────────────
-
-    def menu_overlay_right(self) -> int:
-        """X coordinate just past the Menu panel's right edge."""
-        return self.screen_w * 3 // 4
-
-    def menu_item_center(self, index: int) -> tuple[int, int]:
-        """Centre of Menu-overlay item *index* (y0=96, item_h=88)."""
-        pw = self.screen_w * 3 // 4
-        return (pw // 2, 96 + index * 88 + 44)
-
     # ── Settings overlay (full-screen page) ───────────────────────────
 
     def settings_row_center(self, row: int) -> tuple[int, int]:
@@ -269,10 +244,6 @@ class BookshelfGeometry:
         """Centre of the log viewer's Back chevron (same as the search
         page's)."""
         return (8 + 48, TOP_BAR_H // 2)
-
-    def outside_menu_overlay(self) -> tuple[int, int]:
-        """A point guaranteed to be right of the left-anchored Menu panel."""
-        return (self.screen_w - 4, self.screen_h // 2)
 
     # ── group / sort chooser sheets (centered source-chooser style) ────
 

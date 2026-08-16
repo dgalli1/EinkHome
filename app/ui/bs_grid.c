@@ -73,7 +73,7 @@ bs_view_rows(void)
     if (bs_g_state.view_mode == BS_VIEW_LIST) {
         int t = BS_TOP_BAR_H + BS_TOP_BAR_PAD;
         int b = bs_content_bottom() - BS_PAGER_H;
-        if (bs_g_state.overlay == BS_OV_MENU || bs_g_state.overlay == BS_OV_MORE)
+        if (bs_g_state.overlay == BS_OV_MORE)
             b = bs_content_bottom();
         int rows = (b - t - 8) / BS_LIST_ROW_H;
         if (rows < 1)
@@ -103,7 +103,7 @@ bs_grid_geom(int *top, int *bot, int *cell_w, int *cell_h)
     int w = ScreenWidth();
     int t = BS_TOP_BAR_H + BS_TOP_BAR_PAD;
     int b = bs_content_bottom() - BS_PAGER_H;
-    if (bs_g_state.overlay == BS_OV_MENU || bs_g_state.overlay == BS_OV_MORE)
+    if (bs_g_state.overlay == BS_OV_MORE)
         b = bs_content_bottom();
     int avail_h = b - t - 8;
     int avail_w = w - 16;

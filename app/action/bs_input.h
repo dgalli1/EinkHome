@@ -26,7 +26,6 @@ int bs_hit_group_header(int x, int y);
 
 int bs_hit_pager(int x, int y);
 
-void bs_on_tap_overlay_menu(int x, int y);
 int bs_on_tap_overlay_group(int x, int y);
 int bs_on_tap_overlay_sort(int x, int y);
 

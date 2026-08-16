@@ -22,13 +22,11 @@ from pathlib import Path
 import pytest
 
 from tests.support.bookshelf import (
-    MORE_AUTHOR,
     MORE_GRID,
     MORE_LIST,
-    MORE_RECENT,
-    MORE_SERIES,
     MORE_SYNC,
-    MORE_TITLE_AZ,
+    MORE_GROUP,
+    MORE_SORT,
     MORE_SETTINGS,
     MORE_APPS,
     BookshelfGeometry,
@@ -426,8 +424,10 @@ def test_more_overlay_sync(fresh_bookshelf):
 def test_more_overlay_sort_title_az(fresh_bookshelf):
     """Open More, tap Title A-Z, verify framebuffer changes."""
     bs = fresh_bookshelf
-    bs.tap_menu_and_verify()
-    bs.tap_more_item_and_verify(MORE_TITLE_AZ)
+    h = bs.frame_hash()
+    bs.choose_sort(0)
+    assert bs.frame_hash() != h, "sort did not change the shelf"
+    bs.assert_no_crash()
 
 
 
@@ -435,22 +435,28 @@ def test_more_overlay_sort_title_az(fresh_bookshelf):
 def test_more_overlay_sort_author(fresh_bookshelf):
     """Open More, tap By author, verify framebuffer changes."""
     bs = fresh_bookshelf
-    bs.tap_menu_and_verify()
-    bs.tap_more_item_and_verify(MORE_AUTHOR)
+    h = bs.frame_hash()
+    bs.choose_sort(1)
+    assert bs.frame_hash() != h, "sort did not change the shelf"
+    bs.assert_no_crash()
 
 
 def test_more_overlay_sort_series(fresh_bookshelf):
     """Open More, tap By series, verify framebuffer changes."""
     bs = fresh_bookshelf
-    bs.tap_menu_and_verify()
-    bs.tap_more_item_and_verify(MORE_SERIES)
+    h = bs.frame_hash()
+    bs.choose_sort(2)
+    assert bs.frame_hash() != h, "sort did not change the shelf"
+    bs.assert_no_crash()
 
 
 def test_more_overlay_sort_recent(fresh_bookshelf):
     """Open More, tap Recent, verify framebuffer changes."""
     bs = fresh_bookshelf
-    bs.tap_menu_and_verify()
-    bs.tap_more_item_and_verify(MORE_RECENT)
+    h = bs.frame_hash()
+    bs.choose_sort(3)
+    assert bs.frame_hash() != h, "sort did not change the shelf"
+    bs.assert_no_crash()
 
 
 def test_more_overlay_grid_button(fresh_bookshelf):
@@ -1035,12 +1041,8 @@ def test_group_by_multi_level_headers_and_drill(fresh_bookshelf):
 def test_group_by_sort_buttons_and_choosers(fresh_bookshelf):
     """The drawer exposes Group by and Sort by; the sort sheet applies."""
     bs = fresh_bookshelf
-    bs.open_group_drawer()
-    bs.tap_drawer_sort_by()
     before = bs.current_log()
-    # Sort chooser row 1 = By author.
-    bs.tap_at(*bs._g.sort_option_center(1))
-    bs.wait_for_stable()
+    bs.choose_sort(1)  # 1 = By author
     bs.assert_no_crash()
     _wait_log_slice(bs, before, "sort=1")
 
@@ -1074,7 +1076,7 @@ def test_no_crash_after_all_interactions(fresh_bookshelf):
     bs = fresh_bookshelf
     # Tap menu, tap each More item
     bs.tap_menu_and_verify()
-    for item_idx in range(8):
+    for item_idx in (MORE_SYNC, MORE_GRID, MORE_LIST):
         bs.tap_more_item(item_idx)
         time.sleep(0.3)
     # Reopen menu, dismiss with back

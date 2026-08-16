@@ -159,7 +159,6 @@ void bs_cover_tick(void *ctx);
 
 void bs_draw_pager(void);
 
-void bs_draw_overlay_menu(void);
 
 void bs_draw_overlay_more(void);
 

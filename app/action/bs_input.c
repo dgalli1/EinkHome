@@ -191,33 +191,6 @@ bs_hit_pager(int x, int y)
 
 /* ── tap handlers ────────────────────────────────────────────────────── */
 
-void
-bs_on_tap_overlay_menu(int x, int y)
-{
-    /* Row geometry is shared with the More overlay (same 96/88 values
-     * — one name, one layout). */
-    int y0 = BS_MORE_Y0, item_h = BS_MORE_ITEM_H;
-    int pw = ScreenWidth() * 3 / 4;
-    if (x < 0 || x >= pw) {
-        bs_g_state.overlay = BS_OV_NONE;
-        return;
-    }
-    for (int i = 0; i < 2; i++) {
-        if (y >= y0 + i * item_h && y < y0 + i * item_h + item_h) {
-            bs_g_state.overlay = (i == 0) ? BS_OV_GROUP : BS_OV_SORT;
-            if (bs_g_state.overlay == BS_OV_GROUP)
-                bs_draw_overlay_group();
-            else
-                bs_draw_overlay_sort();
-            FullUpdate();
-            return;
-        }
-    }
-    bs_g_state.overlay = BS_OV_NONE;
-}
-
-/* A dimension tap?  See bs_group_options (bs_overlays.c) for the row
- * list shared with the draw path. */
 int
 bs_on_tap_overlay_group(int x, int y)
 {
@@ -311,14 +284,32 @@ bs_on_tap_overlay_more(int x, int y)
         bs_g_state.overlay = BS_OV_NONE;
         return 0;
     }
-    if (y >= BS_MORE_Y0 && y < BS_MORE_Y0 + BS_MORE_ITEM_H) {
+    int y0 = BS_MORE_Y0;
+    /* The right drawer (burger) hosts the group/sort chooser buttons;
+     * each opens its source-chooser-style sheet. */
+    if (y >= y0 + BS_MORE_GROUP_IDX * BS_MORE_ITEM_H &&
+        y < y0 + (BS_MORE_GROUP_IDX + 1) * BS_MORE_ITEM_H) {
+        bs_g_state.overlay = BS_OV_GROUP;
+        bs_draw_overlay_group();
+        FullUpdate();
+        return 1;
+    }
+    if (y >= y0 + BS_MORE_SORT_IDX * BS_MORE_ITEM_H &&
+        y < y0 + (BS_MORE_SORT_IDX + 1) * BS_MORE_ITEM_H) {
+        bs_g_state.overlay = BS_OV_SORT;
+        bs_draw_overlay_sort();
+        FullUpdate();
+        return 1;
+    }
+    if (y >= y0 + BS_MORE_SYNC_IDX * BS_MORE_ITEM_H &&
+        y < y0 + (BS_MORE_SYNC_IDX + 1) * BS_MORE_ITEM_H) {
         bs_g_state.overlay = BS_OV_NONE;
         bs_do_sync();
         return 0;
     }
     /* Settings row opens the full-screen settings page. */
-    if (y >= BS_MORE_Y0 + BS_MORE_SETTINGS_IDX * BS_MORE_ITEM_H &&
-        y < BS_MORE_Y0 + (BS_MORE_SETTINGS_IDX + 1) * BS_MORE_ITEM_H) {
+    if (y >= y0 + BS_MORE_SETTINGS_IDX * BS_MORE_ITEM_H &&
+        y < y0 + (BS_MORE_SETTINGS_IDX + 1) * BS_MORE_ITEM_H) {
         bs_g_state.overlay = BS_OV_SETTINGS;
         bs_g_settings_edit = 0;
         bs_draw_overlay_settings();
@@ -326,22 +317,23 @@ bs_on_tap_overlay_more(int x, int y)
         return 1;
     }
     /* Applications row opens the in-app launcher overlay. */
-    if (y >= BS_MORE_Y0 + BS_MORE_APPS_IDX * BS_MORE_ITEM_H &&
-        y < BS_MORE_Y0 + (BS_MORE_APPS_IDX + 1) * BS_MORE_ITEM_H) {
+    if (y >= y0 + BS_MORE_APPS_IDX * BS_MORE_ITEM_H &&
+        y < y0 + (BS_MORE_APPS_IDX + 1) * BS_MORE_ITEM_H) {
         bs_g_state.overlay = BS_OV_NONE;
         bs_launcher_open_set();
         return 1;
     }
     /* Download-all row queues every book in the library and opens the
-     * download-progress popup so the user watches the queue drain. */
-    if (y >= BS_MORE_Y0 + BS_MORE_DLALL_IDX * BS_MORE_ITEM_H &&
-        y < BS_MORE_Y0 + (BS_MORE_DLALL_IDX + 1) * BS_MORE_ITEM_H) {
+     * download-progress popup. */
+    if (y >= y0 + BS_MORE_DLALL_IDX * BS_MORE_ITEM_H &&
+        y < y0 + (BS_MORE_DLALL_IDX + 1) * BS_MORE_ITEM_H) {
         bs_g_state.overlay = BS_OV_NONE;
         bs_download_all_start();
         return 1;
     }
-    for (int i = 1; i < BS_MORE_DLALL_IDX; i++) {
-        if (y >= BS_MORE_Y0 + i * BS_MORE_ITEM_H && y < BS_MORE_Y0 + i * BS_MORE_ITEM_H + BS_MORE_ITEM_H) {
+    /* View grid/list rows. */
+    for (int i = BS_MORE_GRID_IDX; i < BS_MORE_DLALL_IDX; i++) {
+        if (y >= y0 + i * BS_MORE_ITEM_H && y < y0 + i * BS_MORE_ITEM_H + BS_MORE_ITEM_H) {
             bs_g_state.overlay = BS_OV_NONE;
             if (i == BS_MORE_GRID_IDX) {
                 bs_g_state.view_mode = BS_VIEW_GRID;
@@ -349,11 +341,6 @@ bs_on_tap_overlay_more(int x, int y)
             } else if (i == BS_MORE_LIST_IDX) {
                 bs_g_state.view_mode = BS_VIEW_LIST;
                 bs_g_state.page = 0;
-            } else {
-                /* i = 1..5 → the five sort modes (title↑/↓, author,
-                 * series, recent). */
-                bs_g_state.sort = (BsSortMode)(i - 1);
-                bs_view_rebuild();
             }
             return 0;
         }

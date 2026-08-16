@@ -391,9 +391,7 @@ int bs_on_event(int type, int par1, int par2) {
       bs_draw_dl_popup();
     if (bs_g_state.sync_popup)
       bs_draw_sync_popup();
-    if (bs_g_state.overlay == BS_OV_MENU)
-      bs_draw_overlay_menu();
-    else if (bs_g_state.overlay == BS_OV_MORE)
+    if (bs_g_state.overlay == BS_OV_MORE)
       bs_draw_overlay_more();
     else if (bs_g_state.overlay == BS_OV_GROUP)
       bs_draw_overlay_group();
@@ -585,15 +583,6 @@ int bs_on_event(int type, int par1, int par2) {
     }
 
     /* Overlay taps take priority; outside-of-panel taps close. */
-    if (bs_g_state.overlay == BS_OV_MENU) {
-      bs_on_tap_overlay_menu(x, y);
-      /* Clear entire screen then redraw.  The overlay drew a black
-       * mask across the whole screen, so we need to repaint
-       * everything underneath.
-       */
-      bs_redraw_shelf();
-      return 1;
-    }
     if (bs_g_state.overlay == BS_OV_MORE) {
       /* on_tap_overlay_more reports 1 when its action already
        * repainted (settings / launcher / download-all); without
@@ -865,21 +854,6 @@ int bs_on_event(int type, int par1, int par2) {
     int is_page_key = (par1 == IV_KEY_PREV || par1 == IV_KEY_NEXT ||
                        par1 == IV_KEY_PREV2 || par1 == IV_KEY_NEXT2);
 
-    /* Hamburger button toggles the group-filter drawer (the left
-     * overlay).  It stays inert while a full-screen or modal sheet
-     * is up so it can never fight the active surface. */
-    if (par1 == IV_KEY_MENU) {
-      if (bs_g_state.overlay == BS_OV_MENU) {
-        bs_g_state.overlay = BS_OV_NONE;
-        bs_redraw_shelf();
-      } else if (!bs_modal_open() && !bs_g_browse_open) {
-        bs_g_state.overlay = BS_OV_MENU;
-        bs_draw_overlay_menu();
-        bs_flush_content();
-      }
-      return 1;
-    }
-
     /* Home: this app is the home task (see bookshelf-wrapper.sh —
      * monitor.app launches it as "bookshelf.app"), so the
      * taskmanager foregrounds us globally when Home is pressed.
@@ -953,11 +927,6 @@ int bs_on_event(int type, int par1, int par2) {
       }
       if (bs_g_state.overlay == BS_OV_LAUNCHER) {
         bs_launcher_close();
-        return 1;
-      }
-      if (bs_g_state.overlay == BS_OV_MENU) {
-        bs_g_state.overlay = BS_OV_NONE;
-        bs_redraw_shelf();
         return 1;
       }
       if (bs_g_state.overlay == BS_OV_MORE) {

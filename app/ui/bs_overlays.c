@@ -52,47 +52,6 @@ group_path_summary(char *out, size_t cap)
     }
 }
 
-void
-bs_draw_overlay_menu(void)
-{
-    int w = ScreenWidth();
-    FillArea(0, 0, w, bs_content_bottom(), BLACK);
-    int pw = w * 3 / 4;
-    FillArea(0, 0, pw, bs_content_bottom(), WHITE);
-    DrawLine(pw, 0, pw, bs_content_bottom(), BLACK);
-
-    ifont *f = OpenFont(DEFAULTFONTB, 32, 0);
-    if (f != NULL) {
-        SetFont(f, BLACK);
-        DrawString(24, 32, bs_i18n("action.menu"));
-        CloseFont(f);
-    }
-
-    char gpath[BS_MAX_TITLE_LEN + 32];
-    group_path_summary(gpath, sizeof gpath);
-
-    const char *consttbl[] = { "action.group_by", "action.sort_by" };
-    const char *pval[] = { gpath, bs_i18n(sort_label()) };
-    int y0 = BS_MORE_Y0, item_h = BS_MORE_ITEM_H;
-    ifont *tf = OpenFont(DEFAULTFONTB, 28, 0);
-    for (int i = 0; i < 2; i++) {
-        FillArea(12, y0 + i * item_h, pw - 24, item_h - 12, WHITE);
-        DrawRect(12, y0 + i * item_h, pw - 24, item_h - 12, BLACK);
-        if (tf != NULL) {
-            SetFont(tf, BLACK);
-            DrawString(32, y0 + i * item_h + (item_h - 28) / 2 - 2,
-                       bs_i18n(consttbl[i]));
-            /* Right-aligned current value. */
-            int tw = StringWidth(pval[i]);
-            SetFont(tf, DGRAY);
-            DrawString(pw - 32 - tw, y0 + i * item_h + (item_h - 28) / 2 - 2,
-                       pval[i]);
-        }
-    }
-    if (tf != NULL)
-        CloseFont(tf);
-}
-
 /* ── group / sort choosers (source-chooser style sheets) ────────────── */
 
 /* Row list for the group chooser: All books + every dimension with data
@@ -243,26 +202,30 @@ bs_draw_overlay_more(void)
         DrawString(px + 24, 32, bs_i18n("action.more"));
         CloseFont(f);
     }
-    const char *labels[] = {
+    /* The right drawer carries the group and sort chooser buttons (the
+     * individual group/sort rows used to live in the removed left
+     * drawer); each shows its current value and opens its chooser sheet. */
+    char gpath[BS_MAX_TITLE_LEN + 32];
+    group_path_summary(gpath, sizeof gpath);
+
+    const char *labels[BS_MORE_N_ITEMS] = {
         "action.sync",
-        "sort.title_az",
-        "sort.author",
-        "sort.series",
-        "sort.recent",
+        "action.group_by",
+        "action.sort_by",
         "view.grid",
         "view.list",
         "action.download_all",
         "action.settings",
         "action.apps",
     };
-    int n = (int)(sizeof labels / sizeof labels[0]);
+    const char *vals[BS_MORE_N_ITEMS] = { NULL, gpath, bs_i18n(sort_label()) };
     int y0 = BS_MORE_Y0;
     ifont *tf = OpenFont(DEFAULTFONTB, 28, 0);
-    for (int i = 0; i < n; i++) {
+    for (int i = 0; i < BS_MORE_N_ITEMS; i++) {
         int sel = 0;
-        if (i == 0 && bs_g_state.sync_state == 1)
+        if (i == BS_MORE_SYNC_IDX && bs_g_state.sync_state == 1)
             sel = 1;
-        if (i >= 1 && i <= 4 && (i - 1) == (int)bs_g_state.sort)
+        if (i == BS_MORE_GROUP_IDX && bs_g_group_depth > 0)
             sel = 1;
         if (i == BS_MORE_GRID_IDX && bs_g_state.view_mode == BS_VIEW_GRID)
             sel = 1;
@@ -272,6 +235,11 @@ bs_draw_overlay_more(void)
         if (tf != NULL) {
             SetFont(tf, sel ? WHITE : BLACK);
             DrawString(px + 32, y0 + i * BS_MORE_ITEM_H + (BS_MORE_ITEM_H - 28) / 2 - 2, bs_i18n(labels[i]));
+            if (vals[i] != NULL) {
+                int tw = StringWidth(vals[i]);
+                SetFont(tf, sel ? WHITE : DGRAY);
+                DrawString(px + pw - 32 - tw, y0 + i * BS_MORE_ITEM_H + (BS_MORE_ITEM_H - 28) / 2 - 2, vals[i]);
+            }
         }
     }
     if (tf != NULL)
