@@ -92,6 +92,11 @@ int bs_reader_pref_from_path(const char *value);
 
 int bs_save_config_file(void);
 
+/* Write the current settings as a KV config to *path*.  Used for the
+ * main config (via bs_save_config_file) and for the promoted home task's
+ * cfg (bs_sysapp_promote). */
+int bs_write_config_file(const char *path);
+
 ibitmap *bs_load_image_scaled(const char *path);
 
 int bs_parse_book_obj(const cJSON *obj, BsBook *b, int probe_fs);

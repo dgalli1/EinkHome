@@ -9,6 +9,7 @@
 #include "bs_model.h"
 #include "bs_net.h"
 #include "bs_store.h"
+#include "bs_sysapp.h"
 #include "bs_ui.h"
 
 /* ── hit-testing ─────────────────────────────────────────────────────── */
@@ -373,6 +374,33 @@ bs_settings_apply(void)
     bs_redraw_shelf();
 }
 
+/* Settings → Install as system app: promote the RUNNING (verified)
+ * binary to the firmware's home-task override (EinkHome becomes the
+ * home screen) or remove it (stock home returns).  The toggle is the
+ * explicit "this version works" confirmation — a standard-folder copy
+ * is never silently promoted.  Detailed outcome goes to the log view. */
+void
+bs_settings_toggle_sysapp(void)
+{
+    int want = !bs_g_state.sys_app_on;
+    int rc = want ? bs_sysapp_promote() : bs_sysapp_unpromote();
+    if (rc != 0) {
+        bs_LOG("[bookshelf] sysapp: %s failed (target dir %s)\n",
+               want ? "promote" : "unpromote", bs_sysapp_dir());
+        return; /* keep showing the previous state */
+    }
+    bs_g_state.sys_app_on = want;
+    bs_draw_overlay_settings();
+    /* Only the toggle row changed; refresh it instead of a full-screen
+     * flash. */
+    PartialUpdate(0, 4 * BS_SETTINGS_ROW_H + 112, ScreenWidth(),
+                  BS_SETTINGS_ROW_H - 12);
+    bs_LOG("[bookshelf] sysapp: %s — %s\n",
+           want ? "installed as system app" : "removed from system",
+           want ? "reboot to boot EinkHome as the home screen"
+                : "stock home returns after reboot");
+}
+
 void
 bs_on_tap_overlay_settings(int x, int y)
 {
@@ -389,7 +417,8 @@ bs_on_tap_overlay_settings(int x, int y)
     int y_row2 = y_row1 + BS_SETTINGS_ROW_H;
     int y_row3 = y_row2 + BS_SETTINGS_ROW_H;
     int y_row4 = y_row3 + BS_SETTINGS_ROW_H;
-    int y_save = y_row4 + BS_SETTINGS_ROW_H + 24;
+    int y_row5 = y_row4 + BS_SETTINGS_ROW_H;
+    int y_save = y_row5 + BS_SETTINGS_ROW_H + 24;
     int y_logs = y_save + BS_SETTINGS_BTN_H;
 
     if (y >= y_row1 && y < y_row1 + BS_SETTINGS_ROW_H - 12) {
@@ -428,6 +457,10 @@ bs_on_tap_overlay_settings(int x, int y)
     if (y >= y_row4 && y < y_row4 + BS_SETTINGS_ROW_H - 12) {
         /* Download-folder picker (confined to /mnt/ext1). */
         bs_folder_open();
+        return;
+    }
+    if (y >= y_row5 && y < y_row5 + BS_SETTINGS_ROW_H - 12) {
+        bs_settings_toggle_sysapp();
         return;
     }
     if (y >= y_save && y < y_save + BS_SETTINGS_BTN_H - 12) {

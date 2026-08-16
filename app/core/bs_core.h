@@ -56,6 +56,19 @@
  * installed on the device. */
 #define BS_READER_STD_PATH "/ebrmain/bin/eink-reader.app"
 #define BS_READER_KO_PATH "/mnt/ext1/applications/koreader.app"
+
+/* Deployment.  The app is meant to be copied to the standard PocketBook
+ * application folder (BS_USER_APP_PATH), where it runs as an ordinary
+ * app tile without touching the boot path — that is the safe way to
+ * install and test.  "Promoting" it to a system app copies the running
+ * binary to the firmware's home-task override (BS_HOME_TASK_APP), which
+ * monitor.app boots in preference to the stock /ebrmain/bin/bookshelf.app.
+ * The user opts in via Settings → Install as system app, only after the
+ * safe copy has been verified to work.  See bs_sysapp.c. */
+#define BS_USER_APP_PATH "/mnt/ext1/applications/einkhome.app"
+#define BS_HOME_TASK_DIR "/mnt/ext1/system/bin"
+#define BS_HOME_TASK_APP BS_HOME_TASK_DIR "/bookshelf.app"
+#define BS_HOME_TASK_CFG BS_HOME_TASK_DIR "/bookshelf.cfg"
 #define BS_MAX_READERS 4
 
 #define BS_HTTP_TIMEOUT 8
@@ -405,6 +418,11 @@ typedef struct {
    * or wrapped row (detail). */
   int lic_sel;
   int lic_scroll;
+
+  /* Whether the home-task override is installed (Settings → Install as
+   * system app).  Derived from presence of BS_HOME_TASK_APP at startup;
+   * toggling promotes/unpromotes the running app (see bs_sysapp.c). */
+  int sys_app_on;
 
   /* Reader selection.  reader_pref == 0 means "Auto" (honour the
    * server's open-with resolution); otherwise it is a 1-based index

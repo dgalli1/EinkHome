@@ -381,6 +381,14 @@ bs_draw_overlay_settings(void)
     bs_settings_draw_row(y, bs_i18n("settings.reader"), bs_settings_reader_label(), 0, lf, vf);
     y += BS_SETTINGS_ROW_H;
     bs_settings_draw_row(y, bs_i18n("settings.dl_dir"), dl_shown, 0, lf, vf);
+    y += BS_SETTINGS_ROW_H;
+    /* Install as system app: copies the running binary to the firmware's
+     * home-task override path.  On = EinkHome boots as the home screen;
+     * off = plain app (stock home).  See bs_sysapp.c. */
+    bs_settings_draw_row(y, bs_i18n("settings.system_app"),
+                         bs_g_state.sys_app_on ? bs_i18n("settings.sysapp_on")
+                                               : bs_i18n("settings.sysapp_off"),
+                         0, lf, vf);
     y += BS_SETTINGS_ROW_H + 24;
     bs_settings_draw_button(y, bs_i18n("settings.save"), 1, bf);
     y += BS_SETTINGS_BTN_H;

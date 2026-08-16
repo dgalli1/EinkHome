@@ -120,6 +120,7 @@ def _sdl_env(*, config: str | None = None):
     env["BS_SOCKET"] = sock
     env["SDL_VIDEODRIVER"] = "dummy"
     env["PBEMU_LOG_DIR"] = str(run_dir)
+    env["BS_SYSAPP_DIR"] = str(run_dir / "sysapp")  # isolate home-task promote/demote
     _held = {"proc": None}
 
     def _launch():
@@ -755,6 +756,53 @@ def test_settings_api_host_row_opens_keyboard(fresh_bookshelf):
     bs.wait_hash_change(before)
 
 
+def test_settings_system_app_toggle_promotes_and_demotes(fresh_bookshelf):
+    """Install-as-system-app: toggling ON copies the running binary + a
+    fresh cfg to the home-task path; toggling OFF removes them again.
+    Runs with BS_SYSAPP_DIR pointing at the per-instance dir (see
+    _sdl_env), so the promote/demote mechanics are exercised without
+    touching a real /mnt/ext1/system/bin."""
+    def _exists(path: Path) -> bool:
+        return path.exists()
+
+    bs = fresh_bookshelf
+    run_dir = Path(bs.backend._run_dir)
+    sysapp = run_dir / "sysapp"
+    app = sysapp / "bookshelf.app"
+    cfg = sysapp / "bookshelf.cfg"
+    # Start from a clean slate.
+    app.unlink(missing_ok=True)
+    cfg.unlink(missing_ok=True)
+    assert not _exists(app)
+
+    bs.open_settings()
+    bs.wait_for_stable(timeout=8.0)
+
+    # Toggle ON → home-task override + cfg appear.
+    before = bs.frame_hash()
+    bs.tap_settings_sysapp()
+    bs.wait_hash_change(before, timeout=8.0)
+    deadline = time.monotonic() + 10.0
+    while time.monotonic() < deadline and not (_exists(app) and _exists(cfg)):
+        time.sleep(0.2)
+    assert _exists(app), "promote did not write bookshelf.app"
+    assert _exists(cfg), "promote did not write bookshelf.cfg"
+    assert app.stat().st_size > 1000, "promoted binary looks empty"
+    assert "api_url=" in cfg.read_text(encoding="utf-8"), \
+        "promoted cfg lost the API url"
+    assert bs.current_log().count("installed as home task") >= 1, \
+        "log missing promote result"
+
+    # Toggle OFF → override + cfg are removed again.
+    before2 = bs.frame_hash()
+    bs.tap_settings_sysapp()
+    bs.wait_hash_change(before2, timeout=8.0)
+    deadline = time.monotonic() + 10.0
+    while time.monotonic() < deadline and (_exists(app) or _exists(cfg)):
+        time.sleep(0.2)
+    assert not _exists(app), "demote left bookshelf.app behind"
+    assert not _exists(cfg), "demote left bookshelf.cfg behind"
+    assert bs.current_log().count("removed from system") >= 1
 
 
 # ── launcher (app grid) ───────────────────────────────────────────────

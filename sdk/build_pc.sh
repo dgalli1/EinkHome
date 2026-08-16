@@ -84,6 +84,7 @@ if [ -z "${SRCS}" ]; then
 		${REPO_ROOT}/app/action/bs_downloads.c \
 		${REPO_ROOT}/app/action/bs_input.c \
 		${REPO_ROOT}/app/action/bs_launcher.c \
+		${REPO_ROOT}/app/action/bs_sysapp.c \
 		${REPO_ROOT}/app/vendor/cJSON.c"
 fi
 if [ -z "${OUTPUT}" ]; then

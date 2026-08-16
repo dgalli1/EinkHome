@@ -39,6 +39,9 @@ void bs_settings_close(void);
 
 void bs_settings_apply(void);
 
+/* Settings → Install as system app toggle (see bs_sysapp.c). */
+void bs_settings_toggle_sysapp(void);
+
 void bs_on_tap_overlay_settings(int x, int y);
 
 #endif /* BS_INPUT_H */

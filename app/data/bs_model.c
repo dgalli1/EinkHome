@@ -258,11 +258,21 @@ bs_reader_pref_from_path(const char *value)
 int
 bs_save_config_file(void)
 {
-    FILE *f = fopen(bs_g_config_path, "w");
-    if (f == NULL) {
+    int rc = bs_write_config_file(bs_g_config_path);
+    if (rc != 0)
         bs_LOG("[bookshelf] settings: cannot write %s\n", bs_g_config_path);
+    else
+        bs_LOG("[bookshelf] settings: saved %s (reader_pref=%d)\n",
+               bs_g_config_path, bs_g_state.reader_pref);
+    return rc;
+}
+
+int
+bs_write_config_file(const char *path)
+{
+    FILE *f = fopen(path, "w");
+    if (f == NULL)
         return -1;
-    }
     fprintf(f, "api_url=%s\n", bs_g_state.api_base);
     fprintf(f, "api_token=%s\n", bs_g_state.api_token);
     const char *dl_dir = bs_g_settings_dl_dir[0] ? bs_g_settings_dl_dir : bs_g_cfg_downloads_dir;
@@ -278,7 +288,6 @@ bs_save_config_file(void)
     else
         fprintf(f, "reader=auto\n");
     fclose(f);
-    bs_LOG("[bookshelf] settings: saved %s (reader_pref=%d)\n", bs_g_config_path, bs_g_state.reader_pref);
     return 0;
 }
 

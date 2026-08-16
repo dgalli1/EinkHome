@@ -11,6 +11,7 @@
 #include "bs_net.h"
 #include "bs_progress.h"
 #include "bs_store.h"
+#include "bs_sysapp.h"
 #include "bs_ui.h"
 #include "bs_worker.h"
 
@@ -205,6 +206,9 @@ int bs_on_event(int type, int par1, int par2) {
     bs_sync_set_hooks(&g_sync_ui_hooks);
     bs_g_state.sort = BS_SORT_TITLE_ASC;
     bs_g_group = BS_GROUP_NONE;   /* All books (no grouping) */
+    /* Mirror whether the home-task override is installed so Settings
+     * shows the toggle in the correct state at launch. */
+    bs_g_state.sys_app_on = bs_sysapp_detect();
 
     /* Keep the system panel visible (battery / wifi / clock).
      * Calling SetPanelType(PANEL_DISABLED) or iv_fullscreen()

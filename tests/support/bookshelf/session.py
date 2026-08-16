@@ -322,6 +322,9 @@ class BookshelfSession:
     def tap_settings_logs(self) -> None:
         self.tap_at(*self._g.settings_logs_center())
 
+    def tap_settings_sysapp(self) -> None:
+        self.tap_at(*self._g.settings_sysapp_center())
+
     def tap_settings_licenses(self) -> None:
         self.tap_at(*self._g.settings_licenses_center())
 

@@ -68,6 +68,7 @@ SOURCES := \
 	action/bs_downloads.c \
 	action/bs_input.c \
 	action/bs_launcher.c \
+	action/bs_sysapp.c \
 	vendor/cJSON.c
 
 SRC_PATHS := $(addprefix $(CURDIR)/app/,$(SOURCES))
