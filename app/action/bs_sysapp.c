@@ -108,12 +108,26 @@ bs_sysapp_promote(void)
     snprintf(dst, sizeof dst, "%s/bookshelf.app", dir);
     snprintf(cfg, sizeof cfg, "%s/bookshelf.cfg", dir);
 
+    /* Ensure the install dir exists before writing the cfg.  A fresh
+     * promote creates it here; mkdir is a benign side effect (it IS the
+     * target dir) and lets a cfg-write failure be reported with no binary
+     * installed.  EEXIST is ignored; any other error surfaces on the
+     * fopen below. */
+    mkdir(dir, 0755);
+
+    /* A fresh cfg so the promoted home task talks to the same API with
+     * the same settings as the instance that was verified.  Written
+     * before the copy so a failure leaves no binary installed. */
+    if (bs_write_config_file(cfg) != 0) {
+        bs_LOG("[bookshelf] sysapp: promote cfg write %s failed\n", cfg);
+        return -1;
+    }
+
     /* If we are ALREADY the home task, the source IS the target —
      * copying would truncate the running executable.  Skip the copy. */
     int is_home = (strcmp(src, dst) == 0);
 
     if (!is_home) {
-        mkdir(dir, 0755); /* ignore EEXIST; any other error surfaces on fopen */
         if (sysapp_copy_file(src, dst) != 0) {
             bs_LOG("[bookshelf] sysapp: promote copy %s -> %s failed\n", src, dst);
             return -1;
@@ -121,11 +135,6 @@ bs_sysapp_promote(void)
         if (chmod(dst, 0755) != 0)
             bs_LOG("[bookshelf] sysapp: chmod %s: %s\n", dst, strerror(errno));
     }
-
-    /* A fresh cfg so the promoted home task talks to the same API with
-     * the same settings as the instance that was verified. */
-    if (bs_write_config_file(cfg) != 0)
-        bs_LOG("[bookshelf] sysapp: promote cfg write %s failed\n", cfg);
 
     bs_LOG("[bookshelf] sysapp: %s installed as home task (%s)\n",
            dst, is_home ? "was already" : "promoted");

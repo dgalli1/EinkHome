@@ -649,10 +649,6 @@ static int bs_pu_handle_chrome_which(int x, int y) {
         bs_redraw_shelf();
         return 1;
       }
-      if (bs_g_drilled_series[0] != '\0') {
-        bs_drill_back();
-        return 1;
-      }
       /* Group drill-in: the back affordance pops one level toward the
        * All-books top. */
       if (bs_g_drill_level > 0) {
@@ -727,6 +723,26 @@ static int bs_pu_handle_chrome(int x, int y) {
     }
   return 0;
 }
+/* A tap on a search-history row runs that stored query again.  Shared
+ * between the keyboard-band tap (search_kb) and the plain search page
+ * history list so the commit sequence stays in one place. */
+static void
+search_run_history(int hi)
+{
+  char terms[BS_SEARCH_HISTORY_MAX][BS_MAX_QUERY_LEN];
+  int got = bs_store_search_list(terms, BS_SEARCH_HISTORY_MAX, 0);
+  if (hi < got) {
+    snprintf(bs_g_state.query, sizeof bs_g_state.query, "%s", terms[hi]);
+    bs_store_search_add(bs_g_state.query);
+    bs_LOG("[bookshelf] search history tap: query=`%s`\n", bs_g_state.query);
+    bs_g_state.search_kb = 0;
+    bs_g_state.tab = BS_TAB_LIBRARY;
+    bs_g_state.page = 0;
+    bs_view_rebuild();
+    bs_redraw_shelf();
+  }
+}
+
 static int bs_pu_handle_search_kb(int x, int y) {
         if (bs_g_nsuggest > 0) {
           int si = bs_hit_suggestion(x, y);
@@ -754,20 +770,9 @@ static int bs_pu_handle_search_kb(int x, int y) {
            * there runs that search (keyboard closes first). */
           int hi = bs_hit_history(x, y);
           if (hi >= 0) {
-            char terms[BS_SEARCH_HISTORY_MAX][BS_MAX_QUERY_LEN];
-            int got = bs_store_search_list(terms, BS_SEARCH_HISTORY_MAX, 0);
-            if (hi < got) {
-              bs_LOG("[bookshelf] search history tap: query=`%s`\n", terms[hi]);
-              if (CloseKeyboard)
-                CloseKeyboard();
-              snprintf(bs_g_state.query, sizeof bs_g_state.query, "%s", terms[hi]);
-              bs_store_search_add(bs_g_state.query);
-              bs_g_state.search_kb = 0;
-              bs_g_state.tab = BS_TAB_LIBRARY;
-              bs_g_state.page = 0;
-              bs_view_rebuild();
-              bs_redraw_shelf();
-            }
+            if (CloseKeyboard)
+              CloseKeyboard();
+            search_run_history(hi);
             return 1;
           }
         }
@@ -784,7 +789,6 @@ static int bs_pu_handle_search_kb(int x, int y) {
           return 1;
         }
         return 0;
-  return 0;
 }
 static int bs_pu_handle_search(int x, int y) {
   if (bs_g_state.search_kb) return bs_pu_handle_search_kb(x, y);
@@ -799,18 +803,7 @@ static int bs_pu_handle_search(int x, int y) {
       }
       int hi = bs_hit_history(x, y);
       if (hi >= 0) {
-        char terms[BS_SEARCH_HISTORY_MAX][BS_MAX_QUERY_LEN];
-        int got = bs_store_search_list(terms, BS_SEARCH_HISTORY_MAX, 0);
-        if (hi < got) {
-          snprintf(bs_g_state.query, sizeof bs_g_state.query, "%s", terms[hi]);
-          bs_store_search_add(bs_g_state.query);
-          bs_LOG("[bookshelf] search history tap: query=`%s`\n", bs_g_state.query);
-          bs_g_state.search_kb = 0;
-          bs_g_state.tab = BS_TAB_LIBRARY;
-          bs_g_state.page = 0;
-          bs_view_rebuild();
-          bs_redraw_shelf();
-        }
+        search_run_history(hi);
       }
       return 1;
 }
@@ -826,7 +819,6 @@ static int bs_evt_page_key(int par1) {
         bs_flip_page();
       }
       return 1;
-  return 1;
 }
 static int bs_evt_back_browse(int par1, int is_page_key) {
   if (bs_g_browse_open && bs_g_state.source == BS_SOURCE_FOLDER) {
@@ -929,10 +921,6 @@ static int bs_evt_back_search_drill(int par1) {
         bs_redraw_shelf();
         return 1;
       }
-      if (bs_g_drilled_series[0] != '\0') {
-        bs_drill_back();
-        return 1;
-      }
       /* Group drill-in: back pops one level toward All books. */
       if (bs_g_drill_level > 0) {
         bs_group_drill_back();
@@ -942,7 +930,6 @@ static int bs_evt_back_search_drill(int par1) {
        * button above — closing the home replacement reads as a
        * crash on the live device. */
       return 1;
-  return 0;
 }
 static int bs_evt_back_key(int par1, int is_page_key) {
   if (bs_evt_back_modal(par1, is_page_key)) return 1;

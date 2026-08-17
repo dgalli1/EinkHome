@@ -22,10 +22,6 @@ extern int bs_g_launcher_body_h; /* total laid-out body height */
 
 extern int bs_g_launcher_built;
 
-const char *bs_lc_prof_val(const char *dim);
-
-const char *bs_lc_pick_key(const cJSON *obj, const char *want);
-
 void bs_lc_resolve(const cJSON *v, const char *cur_dim, char *out, size_t cap);
 
 int bs_lc_resolve_bool(const cJSON *v);
@@ -36,17 +32,11 @@ const char *bs_lc_token_en(const char *tok);
 
 void bs_lc_translate(const char *raw, char *out, size_t cap);
 
-void bs_launcher_layout(void);
-
-void bs_launcher_add_app(const cJSON *apps, const char *id);
-
 void bs_launcher_build(void);
 
 /* PocketBook data source for the launcher (view.json + apps_db.json +
  * /mnt/ext1/applications scan); called via bs_plat_launcher_build. */
 void bs_launcher_build_pb(void);
-
-void bs_launcher_scan_ext1_apps(void);
 
 void bs_draw_launcher_icon(int cx, int cy, const char *icon_name,
                         const char *title);
@@ -62,8 +52,6 @@ void bs_on_tap_overlay_launcher(int x, int y);
 void bs_launcher_open_set(void);
 
 void bs_launcher_close(void);
-
-void bs_drill_back(void);
 
 void bs_on_tap_thumbnail(int vi);
 

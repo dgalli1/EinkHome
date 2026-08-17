@@ -31,7 +31,17 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
+      - name: Record pbemu submodule revision
+        id: pbemu-rev
+        run: echo "sha=$(git -C pbemu rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - name: Cache pbemu venv
+        id: cache-venv
+        uses: actions/cache@v4
+        with:
+          path: pbemu/.venv
+          key: pbemu-venv-${{ steps.pbemu-rev.outputs.sha }}-${{ hashFiles('pbemu/pyproject.toml') }}
       - name: Set up pbemu venv
+        if: steps.cache-venv.outputs.cache-hit != 'true'
         run: cd pbemu && ./setup-venv.sh
       - name: Run api unit tests
         run: pbemu/.venv/bin/python -m pytest api/tests -q

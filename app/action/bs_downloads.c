@@ -92,21 +92,6 @@ bs_book_existing_path(const BsBook *b, char *out, size_t cap)
     bs_book_local_path(b, out, cap);
 }
 
-/* Sync a book's downloaded flag by probing its on-device file, in the
- * store and in the caller's copy.  The stored location counts as
- * downloaded too — see book_existing_path. */
-void
-bs_refresh_downloaded(BsBook *b)
-{
-    char path[BS_MAX_PATH_LEN];
-    bs_book_existing_path(b, path, sizeof path);
-    int dl = (access(path, F_OK) == 0);
-    bs_store_set_downloaded(b->id, dl, dl ? path : "");
-    b->downloaded = dl;
-    if (dl)
-        snprintf(b->local_path, sizeof b->local_path, "%s", path);
-}
-
 /* qsort/bsearch comparator for the downloads-dir listing. */
 static int
 dl_name_cmp(const void *a, const void *b)
@@ -268,7 +253,12 @@ bs_refresh_downloaded_flags_boot_step(void)
                 s->changed++;
             }
         }
-        bs_store_commit();
+        if (bs_store_commit() != 0) {
+            /* COMMIT failed and the store rolled the page back, so the
+             * flag changes were not persisted; do not report the scan
+             * finished — the next bootslice tick retries the probe. */
+            return 0;
+        }
         if (got < 64) {
             dl_flag_finish();
             return 1;
@@ -998,6 +988,12 @@ bs_cancel_downloads(void)
     bs_g_dl_batch_total = 0;
     bs_g_dl_batch_done = 0;
     bs_g_dl_batch_failed = 0;
+    /* Drop the failed-id set for symmetry with download_all_start so a
+     * canceled batch's failures don't survive into and grow across the
+     * next batch. */
+    free(g_dl_batch_failed_ids);
+    g_dl_batch_failed_ids = NULL;
+    g_dl_batch_failed_cap = 0;
     g_dl_batch_failed_count = 0;
     bs_g_download_count = 0;
     if (g_dl_inflight != NULL)
@@ -1006,6 +1002,55 @@ bs_cancel_downloads(void)
     bs_g_state.dl_popup_auto_open = 0;
     bs_sync_set_active(0);
     bs_redraw_shelf();
+}
+
+/* Shared bounded-slice walk over a series' member ids: pages through
+ * bs_store_series_ids() in chunks of 64 and invokes cb once per id, in
+ * order.  cb returns non-zero to stop the walk early (queue full); user
+ * is passed through untouched.  download_series / delete_series differ
+ * only in the per-id action, so this is their one pagination loop. */
+static void
+series_walk_ids(const char *series_id, int (*cb)(const char *, void *),
+                void *user)
+{
+    char ids[64][BS_MAX_ID_LEN];
+    int  off = 0, got;
+    while ((got = bs_store_series_ids(series_id, ids, 64, off)) > 0) {
+        for (int i = 0; i < got; i++) {
+            if (cb(ids[i], user) != 0)
+                return;
+        }
+        off += got;
+        if (got < 64)
+            break;
+    }
+}
+
+/* Enqueue one series member, pruning a finished entry when the bounded
+ * queue is full; returns non-zero to stop paging (queue still full). */
+static int
+series_cb_enqueue(const char *id, void *user)
+{
+    BsBook b;
+    if (!bs_store_get_book(id, &b))
+        return 0;
+    if (bs_g_download_count >= BS_MAX_DOWNLOADS) {
+        prune_finished_download();
+        if (bs_g_download_count >= BS_MAX_DOWNLOADS)
+            return 1;
+    }
+    bs_enqueue_download(&b);
+    (*(int *)user)++;
+    return 0;
+}
+
+/* Delete one series member's local file. */
+static int
+series_cb_delete(const char *id, void *user)
+{
+    bs_store_delete_book_file(id);
+    (*(int *)user)++;
+    return 0;
 }
 
 /* Queue every member of a series (by series_id), in bounded slices, and
@@ -1018,27 +1063,8 @@ bs_cancel_downloads(void)
 void
 bs_download_series(const char *series_id)
 {
-    char ids[64][BS_MAX_ID_LEN];
-    int  n = 0, off = 0, got, full = 0;
-    while (!full && (got = bs_store_series_ids(series_id, ids, 64, off)) > 0) {
-        for (int i = 0; i < got; i++) {
-            BsBook b;
-            if (!bs_store_get_book(ids[i], &b))
-                continue;
-            if (bs_g_download_count >= BS_MAX_DOWNLOADS) {
-                prune_finished_download();
-                if (bs_g_download_count >= BS_MAX_DOWNLOADS) {
-                    full = 1;
-                    break;
-                }
-            }
-            bs_enqueue_download(&b);
-            n++;
-        }
-        off += got;
-        if (got < 64)
-            break;
-    }
+    int n = 0;
+    series_walk_ids(series_id, series_cb_enqueue, &n);
     bs_g_state.dl_popup = 1;
     bs_g_state.dl_popup_auto_open = 0;
     bs_LOG("[bookshelf] download_series %s queued=%d\n", series_id, n);
@@ -1048,17 +1074,8 @@ bs_download_series(const char *series_id)
 void
 bs_delete_series(const char *series_id)
 {
-    char ids[64][BS_MAX_ID_LEN];
-    int  n = 0, off = 0, got;
-    while ((got = bs_store_series_ids(series_id, ids, 64, off)) > 0) {
-        for (int i = 0; i < got; i++) {
-            bs_store_delete_book_file(ids[i]);
-            n++;
-        }
-        off += got;
-        if (got < 64)
-            break;
-    }
+    int n = 0;
+    series_walk_ids(series_id, series_cb_delete, &n);
     bs_LOG("[bookshelf] delete_series %s removed=%d\n", series_id, n);
 }
 

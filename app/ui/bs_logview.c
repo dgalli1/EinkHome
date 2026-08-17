@@ -59,20 +59,6 @@ typedef struct {
     int         len;
 } BsLogRow;
 
-/* Width of a non-NUL-terminated span (the SDK only measures C
- * strings). */
-static int
-span_width(const char *p, int len)
-{
-    char tmp[1024];
-    if (len > (int)sizeof tmp - 1)
-        len = (int)sizeof tmp - 1;
-    memcpy(tmp, p, (size_t)len);
-    // NOLINTNEXTLINE(clang-analyzer-security.ArrayBound) — len <= sizeof tmp - 1, indexed forward into tmp.
-    tmp[len] = '\0';
-    return StringWidth(tmp);
-}
-
 /* Place one word of a line starting at *ws into dst, advancing *ws.
  * Returns:
  *   1  space run skipped (*ws advanced past it, no word placed)
@@ -89,8 +75,8 @@ log_wrap_word(const char *line_end, int maxw, BsLogRow *dst, int mcap,
         (*ws)++;
         return 1;
     }
-    int wordw = span_width(*ws, (int)(we - *ws));
-    int curw = dst[*count].len > 0 ? span_width(dst[*count].p, dst[*count].len) : 0;
+    int wordw = bs_span_width(*ws, (int)(we - *ws));
+    int curw = dst[*count].len > 0 ? bs_span_width(dst[*count].p, dst[*count].len) : 0;
     if (dst[*count].len > 0 && curw + wordw + 6 > maxw) {
         (*count)++;
         if (*count >= mcap)
@@ -259,6 +245,8 @@ bs_log_view_tail_first(void)
     if (body_h < BS_LOG_ROW_H)
         body_h = BS_LOG_ROW_H;
     int              rows_vis = body_h / BS_LOG_ROW_H;
+    if (rows_vis > 41)
+        rows_vis = 41;   /* U634k3 firmware crashes rendering 42+ rows */
     const BsLogWrapCache *wc = log_wrap_get(w - 48, rows_vis * 8);
     if (wc == NULL)
         return 0;
@@ -296,6 +284,16 @@ bs_draw_log_view(void)
     if (body_h < BS_LOG_ROW_H)
         body_h = BS_LOG_ROW_H;
     int rows_vis = body_h / BS_LOG_ROW_H;
+    /* U634k3's firmware (libinkview) crashes inside the text renderer when
+     * the log viewer issues 42 back-to-back DrawString calls in one frame
+     * (the guest segfaults via a corrupt jump and the watchdog respawns the
+     * app; observed only on the 1072x1448 U634k3, where body_h/BS_LOG_ROW_H
+     * reaches 42).  Cap the visible rows so the largest clear screen draws
+     * at most 41 rows — one fewer than the crash boundary.  Smaller screens
+     * (rows_vis < 42) are unaffected, and the missing last row sits within
+     * the fold next to the scroll buttons. */
+    if (rows_vis > 41)
+        rows_vis = 41;
 
     int   first = 0;
     int   max_first = 0;

@@ -149,14 +149,43 @@ bs_draw_button_font(
     }
 }
 
+/* Shared 16-segment circle outline (a polyline — DrawCircle fills).
+ * Each segment is drawn twice, the second one pixel lower, so the 1px
+ * stroke reads 2px thick — identical to the inline loops it replaces
+ * (the top-bar globe, the top-bar search-ring magnifier and the search
+ * tab's magnifier). */
 void
-bs_draw_button(
-    int x, int y, int w, int h, int selected, const char *label, int label_size, int label_color)
+bs_draw_circle_outline(int cx, int cy, int r, int col)
 {
-    ifont *f = OpenFont(DEFAULTFONTB, label_size, 0);
-    bs_draw_button_font(x, y, w, h, selected, label, label_size, f, label_color);
-    if (f != NULL)
-        CloseFont(f);
+    int px = 0, py = 0;
+    for (int s = 0; s <= 16; s++) {
+        double a = s * 2 * M_PI / 16.0;
+        int    x = cx + (int)(r * cos(a));
+        int    y = cy + (int)(r * sin(a));
+        if (s > 0) {
+            DrawLine(px, py, x, y, col);
+            DrawLine(px, py + 1, x, y + 1, col);
+        }
+        px = x;
+        py = y;
+    }
+}
+
+/* Width of a non-NUL-terminated span (the SDK only measures C strings).
+ * Shared by the log viewer (bs_logview.c) and the licenses viewer
+ * (bs_licenses.c); the word-wrap placers there stay local because they
+ * operate on their own row types (BsLogRow vs BsLicRow with its `blank`
+ * gap rows), so only the width primitive is deduplicated. */
+int
+bs_span_width(const char *p, int len)
+{
+    char tmp[1024];
+    if (len > (int)sizeof tmp - 1)
+        len = (int)sizeof tmp - 1;
+    memcpy(tmp, p, (size_t)len);
+    // NOLINTNEXTLINE(clang-analyzer-security.ArrayBound) — len <= sizeof tmp - 1, indexed forward into tmp.
+    tmp[len] = '\0';
+    return StringWidth(tmp);
 }
 
 /* 1 = the firmware's panel painter never activated (PanelHeight()==0 at

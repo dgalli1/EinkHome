@@ -10,9 +10,6 @@
 int bs_http_post(const char *url, const char *body, char **resp_out,
               int *resp_len);
 
-int bs_http_post_timeout(const char *url, const char *body, int timeout,
-                      char **resp_out, int *resp_len);
-
 /* POST and surface the firmware HTTP outcome separately: a non-200
  * status with a body is an error response, not a transport failure
  * (the sync engine keys its failure handling on this).  *status_out

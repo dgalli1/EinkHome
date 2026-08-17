@@ -395,7 +395,7 @@ def _start_emulator() -> Emulator:
     tries so a flaky boot does not fail the whole suite.
     """
     last_exc: Exception | None = None
-    for _attempt in range(5):
+    for _attempt in range(8):
         try:
             return _start_emulator_once()
         except Exception as exc:  # noqa: BLE001
@@ -407,7 +407,7 @@ def _start_emulator() -> Emulator:
                 check=False,
             )
             time.sleep(2.0)
-    raise RuntimeError(f"emulator did not boot after 5 attempts: {last_exc}")
+    raise RuntimeError(f"emulator did not boot after 8 attempts: {last_exc}")
 
 
 def _start_emulator_once() -> Emulator:
@@ -453,8 +453,8 @@ def _start_emulator_once() -> Emulator:
     )
 
     emulator = Emulator(firmware=FIRMWARE)
-    emulator.wait_for_monitor(timeout=30)
-    emulator.wait_for_hwevent(timeout=30)
+    emulator.wait_for_monitor(timeout=60)
+    emulator.wait_for_hwevent(timeout=60)
     return emulator
 
 

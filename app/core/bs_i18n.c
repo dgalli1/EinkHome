@@ -152,16 +152,34 @@ const BsI18n bs_g_i18n[] = {
 const char *
 bs_i18n(const char *key)
 {
+    /* Last-hit cache: the same keys are looked up on every frame
+     * (labels/pager rows), so a content-compared memo of the previous
+     * lookup avoids rescanning the ~80-entry table each call. */
+    static char       g_i18n_cache_key[96];
+    static char       g_i18n_cache_lang[8];
+    static const char *g_i18n_cache_res;
+
+    if (g_i18n_cache_res != NULL &&
+        strcmp(g_i18n_cache_key, key) == 0 &&
+        strcmp(g_i18n_cache_lang, bs_g_lang) == 0)
+        return g_i18n_cache_res;
+
+    const char *res = key;
     for (const BsI18n *e = bs_g_i18n; e->key != NULL; e++) {
         if (strcmp(e->key, key) == 0) {
             if (strcmp(bs_g_lang, "de") == 0 && e->de)
-                return e->de;
-            if (strcmp(bs_g_lang, "fr") == 0 && e->fr)
-                return e->fr;
-            if (strcmp(bs_g_lang, "it") == 0 && e->it)
-                return e->it;
-            return e->en;
+                res = e->de;
+            else if (strcmp(bs_g_lang, "fr") == 0 && e->fr)
+                res = e->fr;
+            else if (strcmp(bs_g_lang, "it") == 0 && e->it)
+                res = e->it;
+            else
+                res = e->en;
+            break;
         }
     }
-    return key;
+    snprintf(g_i18n_cache_key, sizeof g_i18n_cache_key, "%s", key);
+    snprintf(g_i18n_cache_lang, sizeof g_i18n_cache_lang, "%s", bs_g_lang);
+    g_i18n_cache_res = res;
+    return res;
 }

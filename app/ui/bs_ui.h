@@ -28,13 +28,19 @@ void bs_source_geom(int *px, int *py, int *pw, int *ph);
 
 void bs_draw_text_centered(ifont *f, int cx, int cy, const char *text, int color);
 
-void bs_draw_button(int x, int y, int w, int h, int selected, const char *label,
-                 int label_size, int label_color);
-
 /* draw_button variant that reuses a pre-opened font (caller owns the
  * OpenFont/CloseFont around the pass). */
 void bs_draw_button_font(int x, int y, int w, int h, int selected, const char *label,
                       int label_size, ifont *f, int label_color);
+
+/* Shared primitive (bs_screen.c): 16-segment circle outline with the
+ * 1px-down thickening used by the top-bar globe and the two magnifier
+ * icons. */
+void bs_draw_circle_outline(int cx, int cy, int r, int col);
+
+/* Shared width of a non-NUL-terminated span (bs_screen.c), used by the
+ * log viewer and licenses viewer word-wrap. */
+int bs_span_width(const char *p, int len);
 
 /* Dim the content area with the LGRAY hatch (modal-sheet backing).  `y0`
  * is where the dim starts: popups keep the top bar undimmed (its icons —
@@ -88,7 +94,7 @@ void bs_cover_warm_start(void);
 /* 1 while the warm pass is running (drives the sync-popup progress bar /
  * keep-open decision). */
 int bs_cover_warm_active(void);
-/* Fill *done/*total with the warm pass's progress; returns whether active. */
+/* Fill *done / *total with the warm pass's progress; returns whether active. */
 int bs_cover_warm_progress(int *done, int *total);
 
 void bs_blit_cover(int cx, int cy, int cw, int ch, const BsBook *b);
@@ -102,7 +108,6 @@ void bs_draw_thumbnail(int x, int y, int w, int h, const BsTileRow *tr, int vi);
 /* Dimension-group drill actions (bs_grid.c). */
 void bs_group_drill(const char *value);
 void bs_group_drill_back(void);
-int bs_group_active(void);
 
 int bs_history_pagesize(void);
 

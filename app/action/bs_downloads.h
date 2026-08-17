@@ -21,8 +21,6 @@ void bs_book_local_path(const BsBook *b, char *out, size_t cap);
 
 void bs_book_existing_path(const BsBook *b, char *out, size_t cap);
 
-void bs_refresh_downloaded(BsBook *b);
-
 void bs_refresh_downloaded_flags(void);
 
 /* Sliced boot variant of the flag probe (driven by bs_main's

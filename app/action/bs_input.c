@@ -65,14 +65,6 @@ bs_hit_top_bar(int x, int y)
     return bs_hit_top_bar_right(x, w);
 }
 
-/* 1 when (x, y) is inside the top-bar search icon (the hit region is
- * tab-dependent — see hit_top_bar). */
-int
-bs_hit_search_icon(int x, int y)
-{
-    return bs_hit_top_bar(x, y) == 5;
-}
-
 /* 1 when (x, y) is inside the search input row on the Search page. */
 int
 bs_hit_search_input(int x, int y)
@@ -231,7 +223,6 @@ bs_on_tap_overlay_group(int x, int y)
     bs_g_drill_level = 0;
     for (int L = 0; L < BS_GROUP_MAX_LEVELS; L++)
         bs_g_drill_values[L][0] = '\0';
-    bs_g_drilled_series[0] = '\0';
     bs_g_state.page = 0;
     bs_view_rebuild();
     bs_g_state.overlay = BS_OV_NONE;

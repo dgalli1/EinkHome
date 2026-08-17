@@ -15,13 +15,12 @@
 
 /* ── book record ─────────────────────────────────────────────────────── */
 
-/* A tile in the projected grid view.  At the top level (not drilled),
- * series with >1 book collapse into a single card (is_series=1) showing
- * the newest volume's cover + a triple border + count badge.  Standalone
- * books and drilled-in series members are individual tiles (is_series=0).
+/* A tile in the projected grid view.  In a dimension-grouped view, each
+ * multi-book group collapses into a single stack card (is_series=1)
+ * showing the representative cover + a triple border + count badge.
+ * Standalone books and "None" (All books, flat) are individual tiles
+ * (is_series=0) — series only stack under an explicit grouping.
  */
-
-char bs_g_drilled_series[BS_MAX_ID_LEN]; /* "" = top level */
 
 /* Current page of view rows, shared by the draw loop and the cover
  * fetcher.  Single-threaded event loop, so one static page buffer is
@@ -363,22 +362,31 @@ bs_write_config_file(const char *path)
     FILE *f = fopen(path, "w");
     if (f == NULL)
         return -1;
-    fprintf(f, "api_url=%s\n", bs_g_state.api_base);
-    fprintf(f, "api_token=%s\n", bs_g_state.api_token);
+    int rc = 0;
+    if (fprintf(f, "api_url=%s\n", bs_g_state.api_base) < 0)
+        rc = -1;
+    if (fprintf(f, "api_token=%s\n", bs_g_state.api_token) < 0)
+        rc = -1;
     const char *dl_dir = bs_g_settings_dl_dir[0] ? bs_g_settings_dl_dir : bs_g_cfg_downloads_dir;
-    if (dl_dir[0] != '\0')
-        fprintf(f, "downloads_dir=%s\n", dl_dir);
-    fprintf(f,
-            "source=%s\n",
-            bs_g_state.source == BS_SOURCE_LOCAL    ? "local"
-            : bs_g_state.source == BS_SOURCE_FOLDER ? "folder"
-                                              : "kavita");
-    if (bs_g_state.reader_pref > 0 && bs_g_state.reader_pref <= bs_g_reader_count)
-        fprintf(f, "reader=%s\n", bs_g_readers[bs_g_state.reader_pref - 1].path);
-    else
-        fprintf(f, "reader=auto\n");
-    fclose(f);
-    return 0;
+    if (!rc && dl_dir[0] != '\0')
+        if (fprintf(f, "downloads_dir=%s\n", dl_dir) < 0)
+            rc = -1;
+    if (!rc)
+        if (fprintf(f,
+                "source=%s\n",
+                bs_g_state.source == BS_SOURCE_LOCAL    ? "local"
+                : bs_g_state.source == BS_SOURCE_FOLDER ? "folder"
+                                                  : "kavita") < 0)
+            rc = -1;
+    if (!rc) {
+        if (bs_g_state.reader_pref > 0 && bs_g_state.reader_pref <= bs_g_reader_count)
+            rc = fprintf(f, "reader=%s\n", bs_g_readers[bs_g_state.reader_pref - 1].path) < 0 ? -1 : 0;
+        else
+            rc = fprintf(f, "reader=auto\n") < 0 ? -1 : 0;
+    }
+    if (fclose(f) != 0)
+        rc = -1;
+    return rc;
 }
 
 /* ── loader (parses /books and /sync/delta JSON via cJSON) ──────────── */
@@ -874,7 +882,13 @@ sync_apply_round(cJSON *root, long long cursor, long long *next_out,
     if (cJSON_IsBool(mk))
         *more_out = cJSON_IsTrue(mk);
     bs_store_set_cursor(*next_out);
-    bs_store_commit();
+    if (bs_store_commit() != 0) {
+        /* A failed COMMIT aborts the whole sync: the transaction was
+         * rolled back inside the store, so nothing applied; leave the
+         * cursor unchanged so the next sync retries from this delta. */
+        cJSON_Delete(root);
+        return SYNC_ROUND_STORE_FAIL;
+    }
     cJSON_Delete(root);
     return SYNC_ROUND_OK;
 }
@@ -1263,24 +1277,31 @@ cover_bytes_are_png(const char *path)
     return magic[0] == 0x89 && magic[1] == 'P' && magic[2] == 'N' && magic[3] == 'G';
 }
 
-/* Decode a cover image scaled to 240x360.  On a colour display the decode
- * stays RGB24 — the same choice the stock bookshelf.app makes via
- * device_display_colormask() — so covers keep their colour; on a
- * greyscale display the 8-bit decode is used.  The caller frees the
- * returned bitmap. */
-ibitmap *
-bs_load_cover_scaled(const char *path)
+/* Shared scaled-decode core for covers and local images: sniffs PNG vs
+ * JPEG, decodes to a 240x360 bitmap and stretches it down.  On a colour
+ * display the decode stays RGB24; on a greyscale display the 8-bit
+ * decode is used.  When `greyscale_fastpath` is set AND the image is a
+ * PNG on a greyscale display, use LoadPNGStretch's single-call stretch
+ * (the cover path's fast path); `log` toggles the diagnostic logging that
+ * bs_load_cover_scaled emits.  The caller frees the returned bitmap. */
+static ibitmap *
+load_scaled_internal(const char *path, int greyscale_fastpath, int log)
 {
     int is_png = cover_bytes_are_png(path);
     if (!bs_g_display_color) {
         /* Greyscale: PNGs use the fast single-call stretch. */
-        if (is_png)
+        if (greyscale_fastpath && is_png)
             return LoadPNGStretch(path, 240, 360, 0, 0);
-        ibitmap *full = LoadJPEGToFormat(path, kFmtGrayscale8);
+        /* Reached for non-PNG covers (fastpath set) and for every image
+         * (fastpath off); honour the sniff so an image_scaled PNG decodes
+         * through LoadPNGToFormat as it always did. */
+        ibitmap *full = is_png ? LoadPNGToFormat(path, kFmtGrayscale8)
+                               : LoadJPEGToFormat(path, kFmtGrayscale8);
         if (full == NULL)
             return NULL;
-        bs_LOG("[bookshelf] load_cover_scaled grey full depth=%d %dx%d\n",
-            full->depth, full->width, full->height);
+        if (log)
+            bs_LOG("[bookshelf] load_cover_scaled grey full depth=%d %dx%d\n",
+                full->depth, full->width, full->height);
         ibitmap *small = BitmapStretchCopy(full, 0, 0, full->width, full->height, 240, 360);
         free(full);
         return small;
@@ -1289,30 +1310,37 @@ bs_load_cover_scaled(const char *path)
                            : LoadJPEGToFormat(path, kFmtRGB24);
     if (full == NULL)
         return NULL;
-    bs_LOG("[bookshelf] load_cover_scaled RGB24 full depth=%d %dx%d\n",
-        full->depth,
-        full->width,
-        full->height);
+    if (log)
+        bs_LOG("[bookshelf] load_cover_scaled RGB24 full depth=%d %dx%d\n",
+            full->depth,
+            full->width,
+            full->height);
     ibitmap *small = BitmapStretchCopy(full, 0, 0, full->width, full->height, 240, 360);
     free(full);
-    if (small != NULL)
+    if (log && small != NULL)
         bs_LOG("[bookshelf] load_cover_scaled RGB24 small depth=%d\n", small->depth);
     return small;
 }
+
+/* Decode a cover image scaled to 240x360.  On a colour display the decode
+ * stays RGB24 — the same choice the stock bookshelf.app makes via
+ * device_display_colormask() — so covers keep their colour; on a
+ * greyscale display the 8-bit decode is used, with the PNG
+ * LoadPNGStretch fast path and diagnostic logging.  The caller frees the
+ * returned bitmap. */
+ibitmap *
+bs_load_cover_scaled(const char *path)
+{
+    return load_scaled_internal(path, 1, 1);
+}
+
 /* Decode a cover image scaled to 240x360.  Sniffs PNG vs JPEG; on a
  * colour display the decode stays RGB24 (same choice as
  * load_cover_scaled).  The caller frees the returned bitmap. */
 ibitmap *
 bs_load_image_scaled(const char *path)
 {
-    int         is_png = cover_bytes_are_png(path);
-    PixelFormat fmt = bs_g_display_color ? kFmtRGB24 : kFmtGrayscale8;
-    ibitmap    *full = is_png ? LoadPNGToFormat(path, fmt) : LoadJPEGToFormat(path, fmt);
-    if (full == NULL)
-        return NULL;
-    ibitmap *small = BitmapStretchCopy(full, 0, 0, full->width, full->height, 240, 360);
-    free(full);
-    return small;
+    return load_scaled_internal(path, 0, 0);
 }
 
 /* Try to load a cached cover image from disk.  Returns 0 on success
@@ -1446,7 +1474,8 @@ bs_cover_cache_save(const char *id, const char *png_data, int len)
         return;
     }
     size_t wr = fwrite(png_data, 1, (size_t)len, f);
-    if (wr != (size_t)len || fclose(f) != 0) {
+    int    fc = fclose(f);
+    if (wr != (size_t)len || fc != 0) {
         /* A truncated or corrupt cover must never linger in the cache:
          * it would fail to decode on every later view.  Drop it. */
         unlink(path);

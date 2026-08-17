@@ -400,7 +400,14 @@ local_apply_slice(BsJob *job)
             return;
         }
     }
-    bs_store_commit();
+    if (bs_store_commit() != 0) {
+        /* Commit failed: the transaction was rolled back inside the
+         * store, so the slice was not persisted; abort the import
+         * instead of silently truncating it. */
+        bs_LOG("[bookshelf] local: store_commit failed; aborting import\n");
+        local_apply_fail(a);
+        return;
+    }
     /* A full local import is also a long main-thread job: keep the
      * device awake across the slices (auto-expires after the last one). */
     bs_sync_keep_awake();

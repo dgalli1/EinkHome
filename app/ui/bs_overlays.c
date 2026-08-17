@@ -68,7 +68,7 @@ static void
 bs_group_geom(int *px, int *py, int *pw, int *ph)
 {
     BsGroupPreset opts[1 + 5];
-    int n = bs_group_options(opts, 1 + 4);
+    int n = bs_group_options(opts, 1 + 5);
     int w = ScreenWidth();
     *pw = w * 3 / 4;
     *ph = 72 + n * 96 + 24;
@@ -101,7 +101,7 @@ bs_draw_overlay_group(void)
     DrawLine(px + BS_CTX_PAD, py + 76, px + pw - BS_CTX_PAD, py + 76, LGRAY);
 
     BsGroupPreset opts[1 + 5];
-    int n = bs_group_options(opts, 1 + 4);
+    int n = bs_group_options(opts, 1 + 5);
     int y0 = py + 84;
     ifont *f = OpenFont(DEFAULTFONTB, 26, 0);
     for (int i = 0; i < n; i++) {
@@ -248,7 +248,7 @@ bs_draw_overlay_source(void)
     for (int i = 0; i < 3; i++) {
         int sel = (bs_g_state.source == i);
         FillArea(px + 12, y0 + i * 96, pw - 24, 96 - 12, sel ? BLACK : WHITE);
-        DrawRect(px + 12, y0 + i * 96, pw - 24, 96 - 12, sel ? BLACK : WHITE);
+        DrawRect(px + 12, y0 + i * 96, pw - 24, 96 - 12, BLACK);
         if (f != NULL) {
             SetFont(f, sel ? WHITE : BLACK);
             DrawString(px + 32, y0 + i * 96 + (96 - 28) / 2 - 2, labels[i]);

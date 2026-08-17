@@ -32,7 +32,7 @@ const char *const bs_lc_dims[] = {
     "globalcfg",
 };
 
-const char *
+static const char *
 bs_lc_prof_val(const char *dim)
 {
     if (strcmp(dim, "device") == 0)
@@ -50,7 +50,7 @@ bs_lc_prof_val(const char *dim)
     return NULL;
 }
 
-const char *
+static const char *
 bs_lc_pick_key(const cJSON *obj, const char *want)
 {
     const char *first = NULL;
@@ -161,7 +161,15 @@ bs_lc_resolve_bool(const cJSON *v)
         return cJSON_IsTrue(v);
     char buf[8];
     bs_lc_resolve(v, NULL, buf, sizeof buf);
-    return buf[0] != '0';
+    /* Explicit falsey spellings resolve to false; an empty value (a
+     * missing key) and any other value stay TRUE (present/visible),
+     * matching the old buf[0] != '0' default. */
+    static const char *const falsey[] = {"0", "false", "no", "off"};
+    for (size_t i = 0; i < sizeof falsey / sizeof falsey[0]; i++) {
+        if (strcasecmp(buf, falsey[i]) == 0)
+            return 0;
+    }
+    return 1;
 }
 
 /* -- file reader -------------------------------------------------------- */
@@ -282,7 +290,7 @@ int          bs_g_launcher_built;
  * width, app cells flow three per row).  The overlay scrolls this column
  * vertically; nothing is paginated, so a group heading can never clip
  * the last row of the previous group. */
-void
+static void
 bs_launcher_layout(void)
 {
     int w = ScreenWidth();
@@ -358,7 +366,7 @@ launcher_set_params(BsLauncherItem *it, const cJSON *def)
     }
 }
 
-void
+static void
 bs_launcher_add_app(const cJSON *apps, const char *id)
 {
     if (bs_g_launcher_count >= BS_LAUNCHER_MAX_ITEMS)
@@ -416,7 +424,7 @@ launcher_has_user_header(void)
  * "Users" group header (the firmware's "@Users" group).  Without this,
  * freshly installed apps never show up until the firmware's own
  * bookshelf has run and rewritten the desktop JSONs. */
-void
+static void
 bs_launcher_scan_ext1_apps(void)
 {
     DIR *d = opendir("/mnt/ext1/applications");
@@ -642,7 +650,7 @@ launcher_icon_get(const char *name)
     if (name != NULL && name[0] != '\0') {
         if (name[0] != '/')
             bm = GetResource(name, NULL);
-        if (bm == NULL && name[0] == '/')
+        if (bm == NULL)
             bm = LoadPNG(name, 0);
     }
     return bm;
@@ -1022,21 +1030,6 @@ bs_launcher_close(void)
     bs_redraw_shelf();
 }
 
-/* Pop out of a drilled-in series back to the collapsed top-level grid. */
-void
-bs_drill_back(void)
-{
-    bs_g_drilled_series[0] = '\0';
-    bs_g_state.page = bs_g_state.saved_page;
-    bs_view_rebuild();
-    bs_LOG("[bookshelf] drilled back to top level (view=%d)\n", bs_g_view_total);
-    FillArea(0, 0, ScreenWidth(), bs_content_bottom(), WHITE);
-    bs_draw_top_bar();
-    bs_draw_grid();
-    bs_draw_pager();
-    bs_flush_content();
-}
-
 void
 bs_on_tap_thumbnail(int vi)
 {
@@ -1044,23 +1037,11 @@ bs_on_tap_thumbnail(int vi)
     if (!bs_view_fetch_row(vi, &tr))
         return;
 
-    /* A card is either a series stack (All books) or a dimension-group
-     * stack.  Both drill in. */
+    /* A stack card only ever appears in a dimension-grouped view (None
+     * stays flat, so a card always drills within the active grouping).
+     * Tapping one drills into the group. */
     if (tr.is_series) {
-        if (bs_group_active()) {
-            bs_group_drill(tr.series_id); /* series_id = raw group value */
-            return;
-        }
-        snprintf(bs_g_drilled_series, sizeof bs_g_drilled_series, "%s", tr.series_id);
-        bs_g_state.saved_page = bs_g_state.page;
-        bs_g_state.page = 0;
-        bs_view_rebuild();
-        bs_LOG("[bookshelf] drilled into series '%s' (%d books)\n", tr.series_name, bs_g_view_total);
-        FillArea(0, 0, ScreenWidth(), bs_content_bottom(), WHITE);
-        bs_draw_top_bar();
-        bs_draw_grid();
-        bs_draw_pager();
-        bs_flush_content();
+        bs_group_drill(tr.series_id); /* series_id = raw group value */
         return;
     }
 

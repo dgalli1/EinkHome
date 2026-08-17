@@ -39,7 +39,7 @@ void bs_store_set_meta(const char *key, const char *value);
 
 int bs_store_meta_value(const char *key, char *out, size_t cap);
 
-void bs_store_commit(void);
+int bs_store_commit(void);
 
 void bs_store_rollback(void);
 

@@ -7,8 +7,6 @@
 #include "bs_core.h"
 #include "cJSON.h"
 
-extern char bs_g_drilled_series[BS_MAX_ID_LEN];
-
 /* The active grouping preset (BS_GROUP_NONE = All books) and the drill
  * state: bs_g_drill_level counts how many group cards have been tapped
  * into (0 = top), with the tapped group's value per level.  At

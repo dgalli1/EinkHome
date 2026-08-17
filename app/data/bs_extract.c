@@ -422,7 +422,7 @@ epub_cover_id(const char *xml, char *cid, size_t cap)
         char nv[64] = "";
         if (xml_attr(tag, "name", nv, sizeof nv) == 0 && strcmp(nv, "cover") == 0) {
             if (xml_attr(tag, "content", cid, cap) != 0)
-                xml_attr(tag, "content", cid, cap);
+                return -1;
             return 0;
         }
         p = gt + 1;
