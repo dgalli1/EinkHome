@@ -72,6 +72,15 @@ jobs:
         run: |
           mkdir -p .cache
           podman save pbdev -o .cache/pbdev-image.tar
+      - name: Cache PocketBook SDK
+        id: cache-sdk
+        uses: actions/cache@v4
+        with:
+          path: sdk/pocketbook-sdk-b288
+          key: pb-sdk-b288-${{ hashFiles('sdk/install-sdk.sh') }}
+      - name: Install PocketBook SDK (compile DB)
+        if: steps.cache-sdk.outputs.cache-hit != 'true'
+        run: ./sdk/install-sdk.sh
       - name: Lizard in a venv (system python is externally managed)
         run: |
           python3 -m venv /tmp/lizardvenv
@@ -92,7 +101,7 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install tooling
-        run: python3 -m pip install ruff mypy pytest pytest-cov
+        run: python3 -m pip install ruff mypy pytest pytest-cov pillow
       - name: Run make lint-py
         # mypy + coverage need api/providers/storage importable as
         # top-level packages (see mypy.ini); MYPYPATH is set by the target.
