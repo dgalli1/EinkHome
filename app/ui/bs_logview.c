@@ -245,6 +245,8 @@ bs_log_view_tail_first(void)
     if (body_h < BS_LOG_ROW_H)
         body_h = BS_LOG_ROW_H;
     int              rows_vis = body_h / BS_LOG_ROW_H;
+    if (rows_vis > 41)
+        rows_vis = 41;   /* U634k3 firmware crashes rendering 42+ rows */
     const BsLogWrapCache *wc = log_wrap_get(w - 48, rows_vis * 8);
     if (wc == NULL)
         return 0;
@@ -282,6 +284,16 @@ bs_draw_log_view(void)
     if (body_h < BS_LOG_ROW_H)
         body_h = BS_LOG_ROW_H;
     int rows_vis = body_h / BS_LOG_ROW_H;
+    /* U634k3's firmware (libinkview) crashes inside the text renderer when
+     * the log viewer issues 42 back-to-back DrawString calls in one frame
+     * (the guest segfaults via a corrupt jump and the watchdog respawns the
+     * app; observed only on the 1072x1448 U634k3, where body_h/BS_LOG_ROW_H
+     * reaches 42).  Cap the visible rows so the largest clear screen draws
+     * at most 41 rows — one fewer than the crash boundary.  Smaller screens
+     * (rows_vis < 42) are unaffected, and the missing last row sits within
+     * the fold next to the scroll buttons. */
+    if (rows_vis > 41)
+        rows_vis = 41;
 
     int   first = 0;
     int   max_first = 0;
