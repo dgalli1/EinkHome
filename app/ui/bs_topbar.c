@@ -415,15 +415,15 @@ bs_draw_layout_icon(void)
     if (bs_g_state.view_mode == BS_VIEW_LIST) {
         /* List glyph: three rows, each a leading square + a line. */
         for (int i = 0; i < 3; i++) {
-            int ry = cy - 26 + i * 26;
-            DrawRect(cx - 30, ry - 8, 18, 16, col);
-            DrawLine(cx - 4, ry, cx + 30, ry, col);
+            int ry = cy - 16 + i * 16;
+            DrawRect(cx - 18, ry - 7, 14, 13, col);
+            DrawLine(cx - 1, ry, cx + 22, ry, col);
         }
     } else {
-        /* Grid glyph: 2x2 cells. */
+        /* Grid glyph: 2x2 cells, sized to the common icon box. */
         for (int r = 0; r < 2; r++) {
             for (int c = 0; c < 2; c++) {
-                DrawRect(cx - 36 + c * 36, cy - 36 + r * 36, 28, 28, col);
+                DrawRect(cx - 23 + c * 26, cy - 23 + r * 26, 20, 20, col);
             }
         }
     }
