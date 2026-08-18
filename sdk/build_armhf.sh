@@ -62,6 +62,7 @@ while [ "$#" -gt 0 ]; do
 	esac
 	case "$1" in
 	*.c) SRCS="${SRCS} $1" ;;
+	*.a) LINK_INPUTS="${LINK_INPUTS:-} $1" ;;
 	*) EXTRA_FLAGS="${EXTRA_FLAGS:-} $1" ;;
 	esac
 	shift
@@ -76,6 +77,10 @@ mkdir -p "$(dirname "${REPO_ROOT}/${OUTPUT}")"
 CONTAINER_SRCS=""
 for _src in ${SRCS}; do
 	CONTAINER_SRCS="${CONTAINER_SRCS} /work/$(echo "${_src}" | sed "s|^${REPO_ROOT}/||")"
+done
+CONTAINER_LINK_INPUTS=""
+for _lib in ${LINK_INPUTS:-}; do
+	CONTAINER_LINK_INPUTS="${CONTAINER_LINK_INPUTS} /work/$(echo "${_lib}" | sed "s|^${REPO_ROOT}/||")"
 done
 case "${OUTPUT}" in
 /*) CONTAINER_OUT="${OUTPUT}" ;;
@@ -100,6 +105,7 @@ podman run --rm \
 	-Wall -Wextra -Werror=implicit-function-declaration -O2 \
 	${EXTRA_FLAGS:-} \
 	${CONTAINER_SRCS} \
+	${CONTAINER_LINK_INPUTS:-} \
 	-o "${CONTAINER_OUT}" \
 	"-Wl,-dynamic-linker,/lib/ld-linux-armhf.so.3" \
 	"-Wl,--allow-shlib-undefined" \
@@ -110,6 +116,8 @@ podman run --rm \
 	"/work/pbemu/U1030_6.11.1437/ebrmain/lib/libsqlite3.so.0" \
 	"/work/pbemu/U1030_6.11.1437/rootfs/lib/libm.so.6" \
 	"/work/pbemu/U1030_6.11.1437/rootfs/lib/libpthread.so.0" \
+	"/work/pbemu/U1030_6.11.1437/rootfs/lib/ld-linux-armhf.so.3" \
+	"/work/pbemu/U1030_6.11.1437/rootfs/lib/libdl.so.2" \
 	-lgcc -lgcc_s \
 	"/usr/lib/gcc-cross/arm-linux-gnueabihf/12/crtendS.o" \
 	"/usr/arm-linux-gnueabihf/lib/crtn.o"

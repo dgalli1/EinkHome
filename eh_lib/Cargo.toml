@@ -1,0 +1,22 @@
+[package]
+name = "eh_lib"
+version = "0.1.0"
+edition = "2021"
+description = "Rust native library for the EinkHome PocketBook app, compiled as a C-ABI staticlib and linked into the C binary. Exposes the book metadata/cover extraction API (eh_extract_*) declared in app/data/eh_extract.h, plus a growing set of Rust-backed helpers."
+
+[lib]
+# staticlib is what the C app links; rlib keeps `cargo test` and doc builds working.
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+# Pure-Rust deflate (miniz_oxide) — no C zlib needed at cross-link time.
+zip = { version = "2", default-features = false, features = ["deflate"] }
+roxmltree = "0.20"
+
+# A C-ABI static lib linked by GCC must not use Rust LTO: rustc's LTO emits
+# LLVM-bitcode objects that GNU ld cannot consume. codegen-units=1 gives a
+# single ELF object per crate; panic=abort drops the unwind runtime from the
+# resulting ELF (no libgcc_eh needed).
+[profile.release]
+panic = "abort"
+codegen-units = 1

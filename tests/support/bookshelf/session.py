@@ -188,7 +188,7 @@ class BookshelfSession:
             except Exception:  # noqa: BLE001 - db may be mid-sync
                 return True
 
-        # Mirror bs_view_dim_available (series = kavita + series_id).
+        # Mirror eh_view_dim_available (series = kavita + series_id).
         a_avail = _has("author IS NOT NULL AND author!=''")
         s_avail = src == "kavita" and _has(
             "series_id IS NOT NULL AND series_id!=''"

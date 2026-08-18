@@ -3,7 +3,7 @@
 # run-visible-sdl.sh — build and launch EinkHome as a NATIVE PC binary
 # (x86_64, SDL2 window).  This is the desktop (Wayland/X11) counterpart to
 # run-visible-pb.sh: no emulator, no qemu — the same app source compiled
-# for the host with the SDL render backend (bs_plat_sdl.c).
+# for the host with the SDL render backend (eh_plat_sdl.c).
 #
 # Steps (shared bootstrap in lib-run.sh):
 #   1. Build the PC binary (build/bookshelf.pc) via sdk/build_pc.sh.
@@ -16,7 +16,7 @@
 #   scripts/run-visible-sdl.sh            # build + launch
 #   scripts/run-visible-sdl.sh --no-build # skip the rebuild (faster)
 #   scripts/run-visible-sdl.sh --host URL # API base URL override
-#   BS_RES=1404x1872 scripts/run-visible-sdl.sh  # start at a PB resolution
+#   EH_RES=1404x1872 scripts/run-visible-sdl.sh  # start at a PB resolution
 #   # (after launch, F11 cycles 758x1024 / 1072x1448 / 1404x1872)
 #
 # Stop the app with Ctrl-C (also stops the API server it started).
@@ -27,9 +27,9 @@
 set -eu
 
 . "$(dirname "$0")/lib-run.sh"
-bs_run_env
+eh_run_env
 
-cleanup_on_error() { bs_run_cleanup; }
+cleanup_on_error() { eh_run_cleanup; }
 # On the SDL path the app runs in the foreground; Ctrl-C (INT) should stop
 # everything too.  EXIT alone is installed for the shared error cleanup.
 trap cleanup_on_error EXIT
@@ -67,7 +67,7 @@ else
 	fi
 fi
 
-bs_run_api_start
+eh_run_api_start
 
 cd "${REPO_ROOT}"
 echo "==> 3/3  writing build/bookshelf.cfg + launching SDL window"

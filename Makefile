@@ -33,7 +33,7 @@ OUT_ARMHF := $(CURDIR)/build/bookshelf.armhf.app
 
 # PC (SDL2) native desktop build — the second platform backend.  The
 # same app sources minus the PocketBook backend, plus sdk/build_pc.sh:
-# host gcc with BS_PLATFORM_SDL so bs_plat.h selects the SDL backend.
+# host gcc with EH_PLATFORM_SDL so eh_plat.h selects the SDL backend.
 # Requires SDL2/SDL2_ttf/SDL2_image/libcurl dev packages on the host.
 BUILD_PC := $(CURDIR)/sdk/build_pc.sh
 OUT_PC := $(CURDIR)/build/bookshelf.pc
@@ -41,41 +41,64 @@ OUT_PC := $(CURDIR)/build/bookshelf.pc
 # Recursive (=) so this stays empty-proof: a `:=` here would expand before
 # SOURCES is defined below and silently make `make pc` skip rebuilding when
 # app sources change (bookshelf.pc would then never track edits).
-PC_SOURCES = $(filter-out platform/bs_plat_pb.c,$(SOURCES))
+PC_SOURCES = $(filter-out platform/eh_plat_pb.c,$(SOURCES))
+
+# Rust native library (eh_lib): book metadata/cover extraction + future
+# Rust-backed helpers.  FFI surface declared in app/data/eh_extract.h (used
+# by eh_local.c/eh_grid.c).  Built by scripts/build-rust.sh; a separate
+# archive per target — armv7 (+armhf) for devices / the emulator, x86_64
+# for the PC/SDL build.
+RUST_LIB_ARM := $(CURDIR)/build/libeh_lib.a
+RUST_LIB_ARMHF := $(CURDIR)/build/libeh_lib_armhf.a
+RUST_LIB_PC := $(CURDIR)/build/libeh_lib_host.a
+RUST_CRATE := $(CURDIR)/eh_lib
 
 SOURCES := \
-	core/bs_main.c \
-	core/bs_net.c \
-	core/bs_config.c \
-	core/bs_i18n.c \
-	core/bs_worker.c \
-	platform/bs_plat_pb.c \
-	data/bs_store.c \
-	data/bs_model.c \
-	data/bs_local.c \
-	data/bs_extract.c \
-	data/bs_progress.c \
-	data/bs_licenses.c \
-	ui/bs_screen.c \
-	ui/bs_grid.c \
-	ui/bs_topbar.c \
-	ui/bs_search.c \
-	ui/bs_popups.c \
-	ui/bs_overlays.c \
-	ui/bs_logview.c \
-	ui/bs_licenses.c \
-	ui/bs_browser.c \
-	action/bs_downloads.c \
-	action/bs_input.c \
-	action/bs_launcher.c \
-	action/bs_sysapp.c \
+	core/eh_main.c \
+	core/eh_net.c \
+	core/eh_config.c \
+	core/eh_i18n.c \
+	core/eh_worker.c \
+	platform/eh_plat_pb.c \
+	data/eh_store.c \
+	data/eh_model.c \
+	data/eh_local.c \
+	data/eh_progress.c \
+	data/eh_licenses.c \
+	ui/eh_screen.c \
+	ui/eh_grid.c \
+	ui/eh_topbar.c \
+	ui/eh_search.c \
+	ui/eh_popups.c \
+	ui/eh_overlays.c \
+	ui/eh_logview.c \
+	ui/eh_licenses.c \
+	ui/eh_browser.c \
+	action/eh_downloads.c \
+	action/eh_input.c \
+	action/eh_launcher.c \
+	action/eh_sysapp.c \
 	vendor/cJSON.c
 
 SRC_PATHS := $(addprefix $(CURDIR)/app/,$(SOURCES))
 
-.PHONY: all clean test armhf pc lint lint-c lint-py compile-commands
+.PHONY: all clean test armhf pc lint lint-c lint-py compile-commands build-rust
 
 all: $(OUT)
+
+# Build the Rust extraction staticlibs.  Requires the armv7 Rust target:
+#   rustup target add armv7-unknown-linux-gnueabi
+build-rust: $(RUST_LIB_ARM) $(RUST_LIB_ARMHF) $(RUST_LIB_PC)
+	@echo "Rust extraction libs ready"
+
+$(RUST_LIB_ARM): $(wildcard $(RUST_CRATE)/src/*.rs) $(RUST_CRATE)/Cargo.toml
+	$(CURDIR)/scripts/build-rust.sh arm
+
+$(RUST_LIB_ARMHF): $(wildcard $(RUST_CRATE)/src/*.rs) $(RUST_CRATE)/Cargo.toml
+	$(CURDIR)/scripts/build-rust.sh armhf
+
+$(RUST_LIB_PC): $(wildcard $(RUST_CRATE)/src/*.rs) $(RUST_CRATE)/Cargo.toml
+	$(CURDIR)/scripts/build-rust.sh host
 
 armhf: $(OUT_ARMHF)
 
@@ -114,24 +137,25 @@ lint-py:
 compile-commands:
 	@python3 scripts/gen-compile-commands.py --output build/compile_commands.json
 
-$(OUT): $(SRC_PATHS) $(wildcard $(CURDIR)/app/*/*.h) $(BUILD_ARMEL)
+$(OUT): $(SRC_PATHS) $(wildcard $(CURDIR)/app/*/*.h) $(BUILD_ARMEL) $(RUST_LIB_ARM)
 	mkdir -p $(CURDIR)/build
 	PBEMU_FIRMWARE_DIR="$(PBEMU_FIRMWARE_DIR)" \
-	$(BUILD_ARMEL) $(SRC_PATHS) \
+	$(BUILD_ARMEL) $(SRC_PATHS) $(RUST_LIB_ARM) \
 		-I/work/app/core -I/work/app/data -I/work/app/ui \
 		-I/work/app/action -I/work/app/vendor -I/work/app/platform \
 		--output build/bookshelf.app
 
-$(OUT_ARMHF): $(SRC_PATHS) $(wildcard $(CURDIR)/app/*/*.h) $(BUILD_ARMHF)
+$(OUT_ARMHF): $(SRC_PATHS) $(wildcard $(CURDIR)/app/*/*.h) $(BUILD_ARMHF) $(RUST_LIB_ARMHF)
 	mkdir -p $(CURDIR)/build
 	PBEMU_FIRMWARE_DIR="$(ARMHF_FIRMWARE_DIR)" \
-	$(BUILD_ARMHF) $(SRC_PATHS) \
+	$(BUILD_ARMHF) $(SRC_PATHS) $(RUST_LIB_ARMHF) \
 		-I/work/app/platform \
 		--output build/bookshelf.armhf.app
 
-$(OUT_PC): $(addprefix $(CURDIR)/app/,$(PC_SOURCES)) app/platform/bs_plat_sdl.c $(wildcard $(CURDIR)/app/*/*.h) $(BUILD_PC)
+$(OUT_PC): $(addprefix $(CURDIR)/app/,$(PC_SOURCES)) app/platform/eh_plat_sdl.c $(wildcard $(CURDIR)/app/*/*.h) $(BUILD_PC) $(RUST_LIB_PC)
 	mkdir -p $(CURDIR)/build
-	$(BUILD_PC) --output build/bookshelf.pc
+	$(BUILD_PC) --output build/bookshelf.pc $(RUST_LIB_PC)
 
 clean:
 	rm -f $(OUT) $(OUT_ARMHF) $(OUT_PC)
+	rm -f $(RUST_LIB_ARM) $(RUST_LIB_ARMHF) $(RUST_LIB_PC)

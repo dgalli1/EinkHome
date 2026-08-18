@@ -21,3 +21,6 @@ sdk/pocketbook-sdk-b288/
 screenshots/
 firmwares/
 tmp/
+
+# Rust native lib (eh_lib) build artifacts
+eh_lib/target/

@@ -100,6 +100,12 @@ while [ "$#" -gt 0 ]; do
 			SRCS="${SRCS} $1"
 		fi
 		;;
+	*.a)
+		# Static-library link input (e.g. the Rust libeh_lib.a): like a
+		# source it must resolve inside the container, so it is remapped to
+		# /work/... and spliced after the objects (correct link order).
+		LINK_INPUTS="${LINK_INPUTS:-} $1"
+		;;
 	*)
 		EXTRA_FLAGS="${EXTRA_FLAGS:-} $1"
 		;;
@@ -149,6 +155,25 @@ for _src in ${SRCS}; do
 	fi
 done
 
+# Remap static-library link inputs (.a) the same way as sources so the
+# container linker can see them under /work/... .
+CONTAINER_LINK_INPUTS=""
+for _lib in ${LINK_INPUTS:-}; do
+	_rel=$(echo "${_lib}" | sed "s|^${REPO_ROOT}/||")
+	_cpath="/work/${_rel}"
+	for _m in ${PBEMU_EXTRA_MOUNTS:-}; do
+		_host="${_m%%:*}"
+		_cont="${_m#*:}"
+		case "${_lib}" in
+		"${_host}"/*)
+			_cpath="${_cont}/$(echo "${_lib}" | sed "s|^${_host}/||")"
+			break
+			;;
+		esac
+	done
+	CONTAINER_LINK_INPUTS="${CONTAINER_LINK_INPUTS} ${_cpath}"
+done
+
 NAME=$(basename "${_FIRST_SRC}" .c)
 if [ -z "${OUTPUT}" ]; then
 	OUT_REL="build/${NAME}"
@@ -174,6 +199,8 @@ CONTAINER_FW_LIBC="/work/U633_6.8.2817/rootfs/lib/libc.so.6"
 CONTAINER_FW_LM="/work/U633_6.8.2817/rootfs/lib/libm.so.6"
 CONTAINER_FW_SQLITE="/work/U633_6.8.2817/ebrmain/lib/libsqlite3.so.0.8.6"
 CONTAINER_FW_PTHREAD="/work/U633_6.8.2817/rootfs/lib/libpthread.so.0"
+CONTAINER_FW_LDDL="/work/U633_6.8.2817/rootfs/lib/ld-linux.so.3"
+CONTAINER_FW_LIBDL="/work/U633_6.8.2817/rootfs/lib/libdl.so.2"
 CONTAINER_SYSROOT="/work/U633_6.8.2817/rootfs"
 # Crt objects live with the cross compiler, not in the firmware rootfs.
 CRT_CROSS_DIR="/usr/lib/gcc-cross/arm-linux-gnueabi/12"
@@ -217,6 +244,7 @@ podman run --rm \
 	-Wall -Wextra -Werror=implicit-function-declaration -O2 \
 	${EXTRA_FLAGS:-} \
 	${CONTAINER_SRCS} \
+	${CONTAINER_LINK_INPUTS:-} \
 	-o "${CONTAINER_OUT}" \
 	"-Wl,-dynamic-linker,/lib/ld-linux.so.3" \
 	"-Wl,--allow-shlib-undefined" \
@@ -227,6 +255,8 @@ podman run --rm \
 	"${CONTAINER_FW_SQLITE}" \
 	"${CONTAINER_FW_LM}" \
 	"${CONTAINER_FW_PTHREAD}" \
+	"${CONTAINER_FW_LDDL}" \
+	"${CONTAINER_FW_LIBDL}" \
 	-lgcc -lgcc_s \
 	"${CRTE}" \
 	"${CRTN}"

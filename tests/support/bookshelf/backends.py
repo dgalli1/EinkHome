@@ -127,7 +127,7 @@ class _EmulatorLog:
 
 class _ProcessLog:
     """The SDL/device app logs to a file we choose at launch
-    (BS_LOG_FILE).  Read it directly; invocation slicing uses the
+    (EH_LOG_FILE).  Read it directly; invocation slicing uses the
     log-open marker the app writes."""
 
     def __init__(self, path: str) -> None:

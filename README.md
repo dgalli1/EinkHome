@@ -16,11 +16,16 @@ are not touched by this repository.
 ```
 Makefile            # the only source list; builds build/bookshelf.app
 app/                # the app sources, split by layer:
-  core/             #   boot/event loop, HTTP, config, i18n, worker, bs_core.h
+  core/             #   boot/event loop, HTTP, config, i18n, worker, eh_core.h
   data/             #   store (SQLite), model/sync, local scan, metadata, progress
   ui/               #   drawing: grid, top bar, popups, overlays, browsers
   action/           #   downloads/context menu, input hit-testing, app launcher
   vendor/           #   cJSON, sqlite3.h
+eh_lib/             # Rust native library, compiled as a C-ABI staticlib and
+                    # linked into the C binary (build/libeh_lib.a).  Exposes
+                    # the epub/pdf/fb2 metadata/cover extraction API declared
+                    # in app/data/eh_extract.h, plus future Rust-backed
+                    # helpers.  Uses the zip, roxmltree and miniz_oxide crates.
 scripts/            # run.sh (headless), run-visible-pb.sh (emulator+viewer),
                     # run-visible-sdl.sh (native SDL desktop window), setup.sh
                     # (bootstrap), install-device.sh / install-koreader-device.sh
@@ -66,8 +71,22 @@ app against the firmware rootfs staged in the pbemu submodule via
 
 ## Build
 
+The app is C, linked against a Rust native library (`eh_lib`) that handles
+the book metadata/cover extraction (and more as it grows).  First-time setup
+needs the two ARM Rust targets (the emulator/device build is soft-float
+armel; the InkPad One is hard-float armhf):
+
+```sh
+rustup target add armv7-unknown-linux-gnueabi armv7-unknown-linux-gnueabihf
+```
+
+Then a normal `make` builds the Rust staticlibs (via `scripts/build-rust.sh`)
+and links the app:
+
 ```sh
 make                       # → build/bookshelf.app
+make armhf                 # → build/bookshelf.armhf.app (InkPad One)
+make pc                    # → build/bookshelf.pc (host SDL, uses x86_64 staticlib)
 ```
 
 ## Run in the emulator
@@ -81,7 +100,7 @@ pbemu/pbemu stop              # stop the emulator
 ## Run as a desktop app (SDL)
 
 The same app source also builds natively for the PC — a Wayland/X11
-window rendered by SDL2 (the `bs_plat_sdl` backend behind the platform
+window rendered by SDL2 (the `eh_plat_sdl` backend behind the platform
 seam).  Requires SDL2/SDL2_ttf/SDL2_image/libcurl dev packages.
 
 ```sh

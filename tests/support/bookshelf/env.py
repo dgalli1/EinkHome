@@ -274,7 +274,7 @@ def _ensure_sdl_test_binary() -> Path:
         ):
             return _SDL_TEST_OUT
         env = os.environ.copy()
-        env["BS_ENABLE_TEST_IPC"] = "1"
+        env["EH_ENABLE_TEST_IPC"] = "1"
         proc = subprocess.run(
             ["bash", "sdk/build_pc.sh", "--output", "build/bookshelf.test"],
             cwd=EINKHOME_ROOT,

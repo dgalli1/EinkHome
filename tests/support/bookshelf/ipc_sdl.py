@@ -1,7 +1,7 @@
 """Headless IPC client for the SDL (PC) build of EinkHome.
 
 Drives the app through the UNIX-socket control plane in
-app/platform/bs_plat_sdl.c — no emulator, no window.  The method names
+app/platform/eh_plat_sdl.c — no emulator, no window.  The method names
 mirror the pbemu `BookshelfSession` (tests/support/bookshelf/session.py)
 so the same test logic can target either backend.
 
@@ -15,7 +15,7 @@ Protocol: newline-delimited commands, one-line text replies.
     state           -> "state=<overlay>:<tab>:<page>"
     quit
 
-The socket path must match the running app's $BS_SOCKET.  Parallel test
+The socket path must match the running app's $EH_SOCKET.  Parallel test
 runs each launch their own app with a distinct socket → no collision.
 """
 
@@ -173,9 +173,9 @@ def launch_headless(
     """Launch bookshelf.pc headless with a control socket; returns the
     Popen.  Caller owns cleanup (proc.terminate())."""
     env = os.environ.copy()
-    env["BS_SOCKET"] = sock_path
+    env["EH_SOCKET"] = sock_path
     env["SDL_VIDEODRIVER"] = "dummy"  # no window/display needed
-    env.setdefault("BS_API_URL", api_url)
+    env.setdefault("EH_API_URL", api_url)
     proc = subprocess.Popen([binary], env=env)
     # Wait for the socket to appear.
     deadline = time.monotonic() + wait_ready

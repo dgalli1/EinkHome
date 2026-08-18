@@ -8,11 +8,11 @@
  * dynamic symbol table).  Struct layouts (ibitmap/ifont/irect/icanvas),
  * event codes, key codes and colour constants are byte-identical to the
  * firmware SDK so the app behaves the same on a PC.  The functions are
- * implemented over SDL2 in bs_plat_sdl.c.
+ * implemented over SDL2 in eh_plat_sdl.c.
  *
  * Only what the app uses is declared here; the firmware SDK's full surface
  * is NOT copied.  When a new app code path needs another inkview symbol,
- * add it here AND implement it in bs_plat_sdl.c.
+ * add it here AND implement it in eh_plat_sdl.c.
  */
 
 #include <stddef.h>
@@ -167,7 +167,7 @@ void  *QuickDownloadExt(const char *url, int *retsize, int timeout, char *cookie
 void  *QuickDownloadExt3(const char *url, int *retsize, int timeout, char *cookie,
                          char *post, int *error_code);
 
-/* ── event loop entry (app calls via bs_plat_boot) ──────────────────── */
+/* ── event loop entry (app calls via eh_plat_boot) ──────────────────── */
 void InkViewMain(void *cb);
 
 /* ── colours (contract: identical to firmware SDK) ──────────────────── */

@@ -6,20 +6,20 @@
 # POSIX-sh compatible (the callers run under `set -eu`).
 #
 # It owns the pieces every run path needs:
-#   bs_run_env          — resolve the common paths/env (REPO_ROOT, pbemu,
+#   eh_run_env          — resolve the common paths/env (REPO_ROOT, pbemu,
 #                         container, API port/pidfile, firmware, python)
-#   bs_run_api_start    — (re)start the pbemu-api server + LAN surfacing
-#   bs_run_cleanup      — failure trap: stop emulator + API, drop pidfile
+#   eh_run_api_start    — (re)start the pbemu-api server + LAN surfacing
+#   eh_run_cleanup      — failure trap: stop emulator + API, drop pidfile
 # plus the PocketBook-emulator staging steps:
-#   bs_run_stage_live   — stage binary + cfg into the HOST .live tree
-#   bs_run_wait_container, bs_run_stage_container — push into the running
+#   eh_run_stage_live   — stage binary + cfg into the HOST .live tree
+#   eh_run_wait_container, eh_run_stage_container — push into the running
 #   container + respawn bookshelf.app
 #
-# The SDL "visible" run (run-visible-sdl.sh) reuses bs_run_env,
-# bs_run_api_start and bs_run_cleanup but skips the emulator stages.
+# The SDL "visible" run (run-visible-sdl.sh) reuses eh_run_env,
+# eh_run_api_start and eh_run_cleanup but skips the emulator stages.
 
 # Common paths / env — call once at the top of each script that sources us.
-bs_run_env() {
+eh_run_env() {
 	HERE=$(
 		unset CDPATH
 		cd "$(dirname "$0")" && pwd
@@ -51,7 +51,7 @@ bs_run_env() {
 
 # Failure trap: stop the emulator + API server and remove the pidfile,
 # but ONLY on error — the normal exit path leaves everything running.
-bs_run_cleanup() {
+eh_run_cleanup() {
 	_status=$?
 	if [ "${_status}" -eq 0 ]; then
 		return 0
@@ -80,7 +80,7 @@ bs_run_cleanup() {
 #     server runs from PBEMU_API_CWD (default ${REPO_ROOT}) so the
 #     config's repo-relative paths resolve.
 #   PBEMU_API_CWD    — working dir for the server when a config is set.
-bs_run_api_start() {
+eh_run_api_start() {
 	echo "==> (re)starting pbemu-api on 127.0.0.1:${API_PORT}"
 	# Kill any stale server first.  The run scripts share ${API_PIDFILE},
 	# so this also stops a server left by another one.  The pid is
@@ -163,7 +163,7 @@ EOF
 }
 
 # Stop any running emulator container.
-bs_run_stop_emulator() {
+eh_run_stop_emulator() {
 	echo "==> stopping any running emulator"
 	if podman container exists "${CONTAINER}" 2>/dev/null; then
 		"${PBEMU_DIR}/pbemu" stop
@@ -175,7 +175,7 @@ bs_run_stop_emulator() {
 # Stage the freshly built ${OUT_REL} + bookshelf.cfg into the HOST .live
 # tree (${FIRMWARE}/.live/...).  Seeds the fresh container's /mnt.
 # ${OUT_REL} is the build-relative output (e.g. build/bookshelf.app).
-bs_run_stage_live() {
+eh_run_stage_live() {
 	_out="${1:-build/bookshelf.app}"
 	cd "${REPO_ROOT}"
 	echo "==> staging ${_out} + cfg into ${FIRMWARE}/.live"
@@ -226,10 +226,10 @@ CFGEOF
 }
 
 # Poll until the emulator container reports running (bounded retry budget),
-# so the podman cp/exec in bs_run_stage_container fail loudly only on a
+# so the podman cp/exec in eh_run_stage_container fail loudly only on a
 # real failure.  `pbemu start` returns as soon as the container is created,
 # but it may still be initializing.
-bs_run_wait_container() {
+eh_run_wait_container() {
 	_CONTAINER_READY=0
 	_i=0
 	while [ "${_i}" -lt 60 ]; do
@@ -252,7 +252,7 @@ bs_run_wait_container() {
 # looks under both /ebrmain/bin and /mnt/ext1/system/bin, and the ebr bin
 # takes priority.  These must fail loudly if the container is down, so no
 # `|| true` masking.
-bs_run_stage_container() {
+eh_run_stage_container() {
 	_out="${1:-build/bookshelf.app}"
 	echo "==> staging ${_out} into running container"
 	podman cp "${_out}" "${CONTAINER}:/tmp/bookshelf.app.new"

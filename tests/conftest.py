@@ -74,9 +74,9 @@ def pytest_collection_modifyitems(config, items):
     series suggestion file injection, settings persistence via the device
     config) reaches into the .live filesystem / NewTaskEx / on-screen
     keyboard rendering, which are emulator/device concerns — those tests are
-    skipped when BS_TEST_BACKEND is not the emulator.
+    skipped when EH_TEST_BACKEND is not the emulator.
     """
-    backend = os.environ.get("BS_TEST_BACKEND", "emulator")
+    backend = os.environ.get("EH_TEST_BACKEND", "emulator")
     if backend == "emulator":
         return
     _STORAGE_HELPERS = {
@@ -118,7 +118,7 @@ def pytest_collection_modifyitems(config, items):
                     True,
                     reason=(
                         "requires the emulator/device storage backend "
-                        f"(BS_TEST_BACKEND={backend})"
+                        f"(EH_TEST_BACKEND={backend})"
                     ),
                 )
             )

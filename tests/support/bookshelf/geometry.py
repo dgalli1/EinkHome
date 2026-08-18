@@ -244,8 +244,8 @@ class BookshelfGeometry:
 
     # ── third-party licenses viewer (full-screen) ─────────────────────
     # The list body starts at the shared overlay header (the top bar's
-    # own 96 px, BS_OVERLAY_HEADER_H) plus 16 — i.e. BS_LIC_LIST_TOP in
-    # bs_core.h — with BS_LIC_LIST_H (110) per row.
+    # own 96 px, EH_OVERLAY_HEADER_H) plus 16 — i.e. EH_LIC_LIST_TOP in
+    # eh_core.h — with EH_LIC_LIST_H (110) per row.
 
     def licenses_list_row_center(self, index: int) -> tuple[int, int]:
         """Centre of license-list row *index* (0-based)."""
@@ -265,16 +265,16 @@ class BookshelfGeometry:
 
     # ── group / sort chooser sheets (centered source-chooser style) ────
 
-    # App grid area starts just below the top bar (BS_TOP_BAR_H 96 +
-    # BS_TOP_BAR_PAD 12); the group header band is the first 48 px.
+    # App grid area starts just below the top bar (EH_TOP_BAR_H 96 +
+    # EH_TOP_BAR_PAD 12); the group header band is the first 48 px.
     GROUP_GRID_TOP = 108
     GROUP_HEADER_H = 48
 
     def _chooser_py(self, n_rows: int) -> int:
         ph = 72 + n_rows * 96 + 24
         # The app centers chooser sheets in the content area (below the top
-        # bar, above the system panel): bs_group_geom uses
-        # (bs_content_bottom() - ph)/2.  Centering in the full screen_h
+        # bar, above the system panel): eh_group_geom uses
+        # (eh_content_bottom() - ph)/2.  Centering in the full screen_h
         # instead shifts every row ~panel_h down, which on the emulator
         # (panel_h>0) lands taps on the wrong row.
         return (self.content_bottom() - ph) // 2

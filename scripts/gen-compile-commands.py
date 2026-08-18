@@ -15,7 +15,7 @@ Design constraints:
     second copy.
   * Both platform backends are covered: the SDL entries are host
     compilable (all dev deps present on the build host); the lone PB
-    backend file (app/platform/bs_plat_pb.c) is emitted against the
+    backend file (app/platform/eh_plat_pb.c) is emitted against the
     PocketBook SDK include dir, which lives in-repo.
   * cJSON.c is vendored third-party code; it is skipped so analysers
     don't drown in upstream findings.
@@ -48,14 +48,14 @@ APP_INCLUDES = (
     "app/platform",
 )
 
-PB_ONLY_FILE = "app/platform/bs_plat_pb.c"
+PB_ONLY_FILE = "app/platform/eh_plat_pb.c"
 EXCLUDED_VENDOR = {"app/vendor/cJSON.c"}
 
 
 def make_sources() -> list[str]:
     """Return the app sources as listed in the Makefile's SOURCES variable.
 
-    The Makefile writes ``SOURCES := core/bs_main.c ...`` (paths relative
+    The Makefile writes ``SOURCES := core/eh_main.c ...`` (paths relative
     to ``app/``) and ``make -pn`` joins the backslash-continuations onto a
     single logical line.  Return the tokens from the first (real, ``:=``)
     definition, prefixed with ``app/``.
@@ -130,7 +130,7 @@ def main() -> int:
                     "-Wextra",
                     "-O2",
                     "-g",
-                    "-DBS_PLATFORM_SDL",
+                    "-DEH_PLATFORM_SDL",
                     *sdl_cflags,
                     "-std=gnu11",
                     str(REPO_ROOT / src),
@@ -141,7 +141,7 @@ def main() -> int:
             }
         )
 
-    # PB backend: parsed against the SDK headers, no BS_PLATFORM_SDL.
+    # PB backend: parsed against the SDK headers, no EH_PLATFORM_SDL.
     entries.append(
         {
             "directory": str(REPO_ROOT),

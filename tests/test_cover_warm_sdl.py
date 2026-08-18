@@ -121,8 +121,8 @@ def warm_env(tmp_path_factory):
     """Independent SDL environment: the app syncs once against an
     in-process server whose provider serves real covers.  Yields
     (bs, run_dir, corpus)."""
-    if os.environ.get("BS_TEST_BACKEND", "emulator") != "sdl":
-        pytest.skip("cover-warm SDL tests need BS_TEST_BACKEND=sdl")
+    if os.environ.get("EH_TEST_BACKEND", "emulator") != "sdl":
+        pytest.skip("cover-warm SDL tests need EH_TEST_BACKEND=sdl")
 
     binary = _ensure_sdl_test_binary()
     run_dir = EINKHOME_ROOT / "build" / f"bs-warm-{os.getpid()}"
@@ -170,7 +170,7 @@ def warm_env(tmp_path_factory):
     sock = f"/tmp/bs-warm-{os.getpid()}.sock"
     logpath = run_dir / "bookshelf.log"
     env = os.environ.copy()
-    env["BS_SOCKET"] = sock
+    env["EH_SOCKET"] = sock
     env["SDL_VIDEODRIVER"] = "dummy"
     env["PBEMU_LOG_DIR"] = str(run_dir)
     _held = {"proc": None}

@@ -116,10 +116,10 @@ def _sdl_env(*, config: str | None = None):
     sock = f"/tmp/bs-{uniq}.sock"
     logpath = run_dir / "bookshelf.log"
     env = os.environ.copy()
-    env["BS_SOCKET"] = sock
+    env["EH_SOCKET"] = sock
     env["SDL_VIDEODRIVER"] = "dummy"
     env["PBEMU_LOG_DIR"] = str(run_dir)
-    env["BS_SYSAPP_DIR"] = str(run_dir / "sysapp")  # isolate home-task promote/demote
+    env["EH_SYSAPP_DIR"] = str(run_dir / "sysapp")  # isolate home-task promote/demote
     _held = {"proc": None}
 
     def _launch():
@@ -168,12 +168,12 @@ def _sdl_env(*, config: str | None = None):
 def bookshelf_env():
     """Full bookshelf e2e environment: API server + a bookshelf backend.
 
-    The backend is selected by BS_TEST_BACKEND (emulator | sdl);
+    The backend is selected by EH_TEST_BACKEND (emulator | sdl);
     default is the emulator (the classic qemu target).  Each yields
     ``(bs, runtime)`` where *runtime* is an Emulator for the emulator
     backend (tests that need its probes) or a Popen for the sdl target.
     """
-    backend_name = os.environ.get("BS_TEST_BACKEND", "emulator")
+    backend_name = os.environ.get("EH_TEST_BACKEND", "emulator")
     if backend_name == "sdl":
         yield from _sdl_env()
         return
@@ -197,7 +197,7 @@ def synth_bookshelf_env(tmp_path_factory):
     books carry a series, so the Author > Series preset is offered too.
     Only available on the SDL backend.
     """
-    if os.environ.get("BS_TEST_BACKEND", "emulator") != "sdl":
+    if os.environ.get("EH_TEST_BACKEND", "emulator") != "sdl":
         pytest.skip("synthetic group fixtures need SDL")
 
     books_dir = tmp_path_factory.mktemp("synth-books")  # empty dir scan
@@ -767,12 +767,12 @@ def test_settings_system_app_toggle_promotes_and_demotes(fresh_bookshelf):
     /mnt/ext1/system/bin/bookshelf.app), so sysapp_self_bin() == the
     promote target -> promote is a deliberate no-op and the copy this
     test inspects never happens.  The test's premise (target dir differs
-    from the running binary) only holds under SDL, where BS_SYSAPP_DIR
+    from the running binary) only holds under SDL, where EH_SYSAPP_DIR
     isolates a per-instance run_dir/sysapp.
     """
-    if os.environ.get("BS_TEST_BACKEND", "emulator") != "sdl":
+    if os.environ.get("EH_TEST_BACKEND", "emulator") != "sdl":
         pytest.skip("sysapp promote/demote target == running binary under "
-                    "the emulator; needs an isolated BS_SYSAPP_DIR (SDL)")
+                    "the emulator; needs an isolated EH_SYSAPP_DIR (SDL)")
 
     def _exists(path: Path) -> bool:
         return path.exists()
@@ -898,7 +898,7 @@ def test_search_commit_filters_grid(fresh_bookshelf):
     filter the shelf.
 
     Regression for the "search never searches" bug: OpenKeyboard() wrote
-    the live keystrokes straight into bs_g_state.query, and on commit the
+    the live keystrokes straight into eh_g_state.query, and on commit the
     handler's snprintf(query, ..., buffer) aliased that same buffer,
     wiping the query before apply_filter_and_sort() ran — so the grid
     never changed and the filter log showed an empty query.  The fix
@@ -1014,7 +1014,7 @@ def test_search_page_hides_source_button(fresh_bookshelf):
     mx0, my0, mx1, my1 = w - 104, panel + 48, w - 8, panel + 84
 
     # Shelf: both spots are drawn (non-white).
-    shelf = _settled_dump(bs, "bs_source_shelf")
+    shelf = _settled_dump(bs, "eh_source_shelf")
     assert not _ppm_region_white(shelf, sx0, sy0, sx1, sy1), "source button not drawn on the shelf"
     assert not _ppm_region_white(shelf, mx0, my0, mx1, my1), "menu icon not drawn on the shelf"
 
@@ -1023,7 +1023,7 @@ def test_search_page_hides_source_button(fresh_bookshelf):
     bs.wait_for_stable()
 
     # Both spots are now plain white — the buttons are gone.
-    search = _settled_dump(bs, "bs_source_search")
+    search = _settled_dump(bs, "eh_source_search")
     assert _ppm_region_white(search, sx0, sy0, sx1, sy1), "source button still drawn on Search page"
     assert _ppm_region_white(search, mx0, my0, mx1, my1), "right icons still drawn on Search page"
 
@@ -1089,7 +1089,7 @@ def test_search_page_layout_centered(fresh_bookshelf):
     panel = bs.geom.panel_h
     bs.tap_search_and_verify()
     bs.wait_for_stable()
-    ppm = _settled_dump(bs, "bs_search_layout")
+    ppm = _settled_dump(bs, "eh_search_layout")
 
     # Title: the only ink in the top-bar band between the back button
     # and the right edge is the title text; its extent must be centred
@@ -2294,7 +2294,7 @@ def test_search_suggestions_live_and_commit(fresh_bookshelf):
         bs.type_text("pott", commit=False)
         # Poll until the debounce tick has drawn the suggestion row (a
         # fixed sleep races the pixel assertion against a slow guest).
-        ppm = _dump_suggestion_in_band(bs, "bs_suggest_pott")
+        ppm = _dump_suggestion_in_band(bs, "eh_suggest_pott")
         # Visual check: a left-aligned suggestion row is drawn in the
         # band above the keyboard (the centered "No recent searches"
         # placeholder does not reach x<300, so ink there is the row).
@@ -2324,7 +2324,7 @@ def test_search_suggestions_live_and_commit(fresh_bookshelf):
             time.sleep(0.1)
         time.sleep(0.4)
         bs.type_text("harry po", commit=False)
-        _dump_suggestion_in_band(bs, "bs_suggest_harrypo")
+        _dump_suggestion_in_band(bs, "eh_suggest_harrypo")
         before = bs.current_log()
         bs.tap_at(*bs.geom.suggestion_row_center(0))
         _wait_log_slice(bs, before, "suggest tap: term=`harry potter`")
@@ -2362,7 +2362,7 @@ def test_search_folded_suggestion_finds_diacritic_title(fresh_bookshelf):
         bs.tap_search_input_and_verify()
         time.sleep(0.5)
         bs.type_text("songgong", commit=False)
-        _dump_suggestion_in_band(bs, "bs_suggest_songgong")
+        _dump_suggestion_in_band(bs, "eh_suggest_songgong")
         before = bs.current_log()
         bs.tap_at(*bs.geom.suggestion_row_center(0))
         _wait_log_slice(bs, before, "suggest tap: term=`songgong`")

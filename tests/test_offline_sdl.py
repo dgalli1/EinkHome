@@ -17,7 +17,7 @@ always reports online, so the app attempts its boot sync, the transport
 fails, and it keeps the cached rows (the same "do_sync FAILED but library
 renders" path the emulator offline test exercises).
 
-Run:  BS_TEST_BACKEND=sdl pytest tests/test_offline_sdl.py -v
+Run:  EH_TEST_BACKEND=sdl pytest tests/test_offline_sdl.py -v
 """
 
 from __future__ import annotations
@@ -111,7 +111,7 @@ def _wait_log_slice(bs, before: str, needle: str, *, timeout: float = 10.0) -> N
 def _wait_offline_boot(bs) -> str:
     """Poll until the offline boot rendered the cached library grid.
 
-    With BS_OFFLINE the app's QueryNetwork() reports no connection, so
+    With EH_OFFLINE the app's QueryNetwork() reports no connection, so
     it skips the boot auto-sync entirely: the grid must render from the
     on-disk store with covers coming from the cache, and no sync request
     may have been attempted (proving zero network traffic)."""
@@ -123,7 +123,7 @@ def _wait_offline_boot(bs) -> str:
             break
         time.sleep(0.3)
     assert "do_sync ENTER" not in log, (
-        "offline boot attempted a network sync (BS_OFFLINE not honoured)"
+        "offline boot attempted a network sync (EH_OFFLINE not honoured)"
     )
     view, _ = _last_draw_grid(log)
     assert view >= 1, f"offline boot rendered an empty grid (view={view})"
@@ -143,7 +143,7 @@ def _free_port() -> int:
 # Phase 1 (online): run against the live mock so the store + cover cache
 # populate and book 0 downloads to disk.  Record the download path from
 # the reader-launch log line (the app logs it verbatim — OpenBook on the
-# PC build is a no-op but bs_launch_reader prints the path first).
+# PC build is a no-op but eh_launch_reader prints the path first).
 # Phase 2 (offline): stop the app, point the config at a dead port,
 # relaunch.  The module yields the offline session; each test restarts
 # it (still pointing at the dead port) for a clean UI state.
@@ -157,8 +157,8 @@ def offline_sdl_env(tmp_path_factory):
     port and cover/ledger state, so it never collides with the shared
     bookshelf_env module in test_bookshelf.py.
     """
-    if os.environ.get("BS_TEST_BACKEND", "emulator") != "sdl":
-        pytest.skip("offline SDL tests need BS_TEST_BACKEND=sdl")
+    if os.environ.get("EH_TEST_BACKEND", "emulator") != "sdl":
+        pytest.skip("offline SDL tests need EH_TEST_BACKEND=sdl")
 
     binary = _ensure_sdl_test_binary()
 
@@ -218,7 +218,7 @@ def offline_sdl_env(tmp_path_factory):
     sock = f"/tmp/bs-offline-{os.getpid()}.sock"
     logpath = run_dir / "bookshelf.log"
     env = os.environ.copy()
-    env["BS_SOCKET"] = sock
+    env["EH_SOCKET"] = sock
     env["SDL_VIDEODRIVER"] = "dummy"
     env["PBEMU_LOG_DIR"] = str(run_dir)
     _held = {"proc": None, "live_api": f"http://127.0.0.1:{port}"}
@@ -284,13 +284,13 @@ def offline_sdl_env(tmp_path_factory):
     )
 
     # ── Phase 2: go offline and relaunch ──────────────────────────────
-    # BS_OFFLINE makes the SDL build's QueryNetwork() report offline, so
+    # EH_OFFLINE makes the SDL build's QueryNetwork() report offline, so
     # the app skips its boot auto-sync and skips remote cover fetches —
     # it renders purely from the on-disk store + cover cache (the same
     # behaviour a real device shows with WiFi off).  The relaunch reuses
-    # *env*, so every later per-test restart inherits BS_OFFLINE too.
+    # *env*, so every later per-test restart inherits EH_OFFLINE too.
     backend.kill_all()  # quit the online instance
-    env["BS_OFFLINE"] = "1"
+    env["EH_OFFLINE"] = "1"
     (run_dir / "bookshelf.cfg").write_text(
         f"api_url=http://127.0.0.1:9\napi_token={API_TOKEN}\n", encoding="utf-8"
     )

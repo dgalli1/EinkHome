@@ -31,9 +31,9 @@
 set -eu
 
 . "$(dirname "$0")/lib-run.sh"
-bs_run_env
+eh_run_env
 
-cleanup_on_error() { bs_run_cleanup; }
+cleanup_on_error() { eh_run_cleanup; }
 trap cleanup_on_error EXIT
 
 DO_BUILD=1
@@ -64,12 +64,12 @@ else
 	fi
 fi
 
-bs_run_api_start
+eh_run_api_start
 
 echo "==> 3/6  stopping any running emulator"
-bs_run_stop_emulator
+eh_run_stop_emulator
 
-bs_run_stage_live build/bookshelf.app
+eh_run_stage_live build/bookshelf.app
 
 echo "==> 5/6  starting emulator WITH viewer"
 # --network=host so the guest reaches the API server at 127.0.0.1.
@@ -80,9 +80,9 @@ PBEMU_NO_KEEPID=1 PBEMU_PODMAN_ARGS="--network=host" \
 # "pbemu start" returns once the container is created, but it may still
 # be initializing.  Poll until it reports running so the podman cp/exec
 # below fail loudly only on a real failure.
-bs_run_wait_container
+eh_run_wait_container
 
-bs_run_stage_container build/bookshelf.app
+eh_run_stage_container build/bookshelf.app
 
 cat <<EOF
 

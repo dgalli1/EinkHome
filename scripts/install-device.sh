@@ -69,11 +69,11 @@ HERE=$(
 )
 # Shared helpers (lan_ip) — must stay POSIX sh.
 . "${HERE}/lib.sh"
-# lib-run.sh provides bs_run_env (common paths + a python interpreter)
-# and bs_run_api_start, the (re)start logic for the pbemu-api server —
+# lib-run.sh provides eh_run_env (common paths + a python interpreter)
+# and eh_run_api_start, the (re)start logic for the pbemu-api server —
 # reused for --mock/--real below.  All of lib-run.sh is POSIX-sh.
 . "${HERE}/lib-run.sh"
-bs_run_env
+eh_run_env
 
 usage() {
 	cat >&2 <<EOF
@@ -189,7 +189,7 @@ fi
 # --mock / --real: (re)start the host pbemu-api with the matching config.
 # Both backends bind the same LAN host:port, so the api_url resolved
 # below is identical either way — the config is what selects the source.
-# bs_run_api_start passes --config and runs from REPO_ROOT (via
+# eh_run_api_start passes --config and runs from REPO_ROOT (via
 # PBEMU_API_CONFIG) so the 100k config's repo-relative corpus/books paths
 # resolve.
 if [ -n "${DATA_MODE}" ]; then
@@ -198,7 +198,7 @@ if [ -n "${DATA_MODE}" ]; then
 	real) _API_CFG="${REPO_ROOT}/api/config/server.json" ;;
 	esac
 	echo "==> (re)starting pbemu-api with ${DATA_MODE} config: ${_API_CFG}"
-	PBEMU_API_CONFIG="${_API_CFG}" bs_run_api_start
+	PBEMU_API_CONFIG="${_API_CFG}" eh_run_api_start
 fi
 
 # Resolve the api_url the device should hit.  When the user doesn't

@@ -46,7 +46,7 @@ The SDK is NOT part of pbemu — install it in the worktree (small):
 ```
 
 Caveats:
-- Local runs are SDL-only (`BS_TEST_BACKEND=sdl`), which never touches
+- Local runs are SDL-only (`EH_TEST_BACKEND=sdl`), which never touches
   the shared pbemu `.live` state — so parallel local runs share it safely.
 - Never `git add pbemu`; the skip-worktree entry is excluded from
   `git status`, so commit explicit paths and check `git status` before
@@ -60,11 +60,11 @@ Work normally in the worktree. Verify with scoped tests in the worktree
 using the parallel local SDL build — fast, no podman/firmware needed:
 
 ```bash
-BS_TEST_BACKEND=sdl pbemu/.venv/bin/python -m pytest \
+EH_TEST_BACKEND=sdl pbemu/.venv/bin/python -m pytest \
   tests/test_bookshelf.py -n auto -q -k "<scope>"
 ```
 
-Local verification uses ONLY the SDL backend (`BS_TEST_BACKEND=sdl`) via
+Local verification uses ONLY the SDL backend (`EH_TEST_BACKEND=sdl`) via
 pytest-xdist (`-n auto`). Never run the emulator-backed suites locally —
 the real pipeline (bookshelf emulator suite + 100k scale suite, both of
 which download the firmware and boot qemu) runs only on GitHub Actions.
