@@ -11,12 +11,10 @@ eh_http_post_timeout_status(const char *url, const char *body, int timeout,
 {
     int   retsize = 0;
     int   err = 0;
-    /* QuickDownloadExt3 reports the firmware HTTP outcome in its
-     * error_code output.  The body may still be non-NULL for an HTTP
-     * error response, so callers must key on the status, not just the
-     * presence of a body (see eh_net.h). */
-    char *resp = QuickDownloadExt3(url, &retsize, timeout, NULL,
-                                   (char *)body, &err);
+    /* The platform transport reports the HTTP outcome; the body may
+     * still be non-NULL for an error response, so callers key on the
+     * status, not just the presence of a body (see eh_net.h). */
+    char *resp = eh_plat_http_post(url, body, timeout, &retsize, &err);
     if (status_out)
         *status_out = err;
     if (resp_out)
@@ -32,8 +30,7 @@ int
 eh_http_post(const char *url, const char *body, char **resp_out, int *resp_len)
 {
     int   retsize = 0;
-    char *resp = QuickDownloadExt(url, &retsize, EH_HTTP_TIMEOUT, NULL,
-                                  (char *)body);
+    char *resp = eh_plat_http_post(url, body, EH_HTTP_TIMEOUT, &retsize, NULL);
     if (resp_out)
         *resp_out = resp;
     if (resp_len)

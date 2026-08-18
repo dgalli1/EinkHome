@@ -372,6 +372,47 @@ eh_plat_narrow_screen(void)
     return ScreenWidth() <= 758;
 }
 
+/* ── platform network + battery ────────────────────────────────────────
+ * The firmware transport is QuickDownload* (libinkview).  GET has no
+ * status out (QuickDownload only retsizes), so *status stays 0 =
+ * "unavailable" — exactly the information neutral GET callers had
+ * before.  POST surfaces the HTTP outcome via QuickDownloadExt3's
+ * error_code, which may be 0 for a transport failure or non-200 with a
+ * body for an error response. */
+
+void *
+eh_plat_http_get(const char *url, int timeout, int *retsize, int *status)
+{
+    if (status)
+        *status = 0;
+    return QuickDownload(url, retsize, timeout);
+}
+
+void *
+eh_plat_http_post(const char *url, const char *body, int timeout,
+                  int *retsize, int *status)
+{
+    /* Never hand the firmware a NULL error_code out: pass a scratch slot
+     * when the caller does not want the status. */
+    int    unknown = 0;
+    int   *sp = (status != NULL) ? status : &unknown;
+    return QuickDownloadExt3(url, retsize, timeout, NULL, (char *)body, sp);
+}
+
+/* Active connection = the firmware's net_state ACTIVE bits (0xf00), the
+ * same set QuickDownload itself tests before popping the WiFi dialog. */
+int
+eh_plat_net_active(void)
+{
+    return (QueryNetwork() & 0xf00) ? 1 : 0;
+}
+
+int
+eh_plat_battery_power(void)
+{
+    return GetBatteryPower();
+}
+
 /* ── platform filesystem layout ─────────────────────────────────────── */
 
 const char *

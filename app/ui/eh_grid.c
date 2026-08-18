@@ -43,7 +43,7 @@ static int       g_cover_warm_done = 0;       /* examined (fetched or skipped) s
 static int
 cover_warm_online(void)
 {
-    return (QueryNetwork() & 0xf00) ? 1 : 0;
+    return eh_plat_net_active();
 }
 
 /* A fetched cover is a useless 1x1 placeholder when the raw PNG is
@@ -671,7 +671,7 @@ cover_fetch_job(BsJob *job)
 {
     BsCoverJobArg *a = job->arg;
     int          rsize = 0;
-    char        *data = QuickDownload(a->url, &rsize, EH_HTTP_TIMEOUT);
+    char        *data = eh_plat_http_get(a->url, EH_HTTP_TIMEOUT, &rsize, NULL);
     int          ok = 0;
     a->is_placeholder = 0;
     if (data != NULL && rsize > 8 &&
@@ -851,7 +851,7 @@ cover_slot_fetch(BsCoverSlot *s, const char *bid, int local_book,
         eh_LOG("[bookshelf] cover_tick cache hit id=%s\n", bid);
         return 0;
     }
-    if (!(QueryNetwork() & 0xf00)) {
+    if (!eh_plat_net_active()) {
         /* No active connection: skip the fetch silently and let the
          * slot land in the failed state below so the next sync — the
          * only place the app may ask for WiFi — retries it. */

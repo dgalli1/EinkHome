@@ -254,7 +254,7 @@ eh_draw_system_strip(void)
     int by = y0 + (h - bh) / 2;
     DrawRect(bx, by, bw, bh, BLACK);
     FillArea(bx + bw + 1, by + bh / 2 - 7, 6, 14, BLACK);
-    int lvl = GetBatteryPower();
+    int lvl = eh_plat_battery_power();
     if (lvl < 0)
         lvl = 0;
     if (lvl > 100)

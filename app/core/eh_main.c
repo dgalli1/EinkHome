@@ -66,7 +66,7 @@ static void init_sync_tick(void *ctx) {
    * network.  Pressing Sync still attempts the connection and may
    * ask; an offline launch just renders the cached library. */
   if (eh_g_state.source == EH_SOURCE_LOCAL || eh_g_state.source == EH_SOURCE_FOLDER ||
-      (QueryNetwork() & 0xf00))
+      eh_plat_net_active())
     eh_do_sync();
   eh_redraw_shelf();
 }

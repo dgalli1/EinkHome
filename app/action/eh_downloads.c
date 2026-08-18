@@ -400,7 +400,7 @@ dl_fetch(BsJob *job)
 {
     BsDlJob *a = job->arg;
     int    rsize = 0;
-    char  *data = QuickDownload(a->url, &rsize, 60);
+    char  *data = eh_plat_http_get(a->url, 60, &rsize, NULL);
     int    ok = 0;
     if (data != NULL && rsize > 0) {
         if (atomic_load_explicit(&job->cancel, memory_order_acquire)) {

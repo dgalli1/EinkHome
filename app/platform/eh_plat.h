@@ -172,6 +172,34 @@ int eh_plat_display_color(void);
  * PC: the current logical canvas (F11-cycle) width. */
 int eh_plat_narrow_screen(void);
 
+/* ── platform network + battery ────────────────────────────────────────
+ * The HTTP transport, connection state and battery read are backend
+ * concerns.  The neutral code never calls the firmware QuickDownload* /
+ * QueryNetwork / GetBatteryPower symbols directly — it names the seam
+ * below; a future platform provides its own answers. */
+
+/* HTTP transport.  `post_body` NULL => GET, else POST with that body.
+ * Returns a malloc'd response body (caller frees; *retsize = length) or
+ * NULL on failure.  `status` is optional (may be NULL): when provided,
+ * receives the HTTP outcome — a non-200 status that still returns a body
+ * is an error response, not a transport failure, so callers key on the
+ * status, not the body (the sync engine's failure handling depends on
+ * this); 0 when unavailable (e.g. a transport failure, or a GET path with
+ * no status out).  PB: QuickDownload for GET, QuickDownloadExt3 for POST;
+ * PC: libcurl. */
+void *eh_plat_http_get(const char *url, int timeout, int *retsize, int *status);
+void *eh_plat_http_post(const char *url, const char *body, int timeout,
+                        int *retsize, int *status);
+
+/* 1 when the platform has an active network connection — i.e. the
+ * firmware would NOT nag to enable WiFi (the "Turn on WiFi" dialog).
+ * PB: QueryNetwork() & 0xf00 (net_state ACTIVE); PC: same on the host
+ * connection (EH_OFFLINE test hook in the SDL backend). */
+int eh_plat_net_active(void);
+
+/* Current battery charge, 0..100 (100 on desktops).  PB: GetBatteryPower(). */
+int eh_plat_battery_power(void);
+
 /* ── platform filesystem layout ────────────────────────────────────────
  * The platform owns the on-device directory layout: the neutral app
  * never hardcodes a mount point, it asks the backend.  The SDL/PC

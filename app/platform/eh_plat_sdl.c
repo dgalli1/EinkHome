@@ -995,6 +995,27 @@ QuickDownloadExt3(const char *url, int *retsize, int timeout, char *cookie,
                   char *post, int *error_code)
 { (void)cookie; return http_fetch(url, post, timeout, retsize, error_code); }
 
+/* ── platform network + battery ───────────────────────────────────────
+ * The SDL backend backs the seam directly with libcurl (http_fetch):
+ * POST vs GET is the post_body arg. */
+
+void *
+eh_plat_http_get(const char *url, int timeout, int *retsize, int *status)
+{ return http_fetch(url, NULL, timeout, retsize, status); }
+
+void *
+eh_plat_http_post(const char *url, const char *body, int timeout,
+                  int *retsize, int *status)
+{ return http_fetch(url, body, timeout, retsize, status); }
+
+int
+eh_plat_net_active(void)
+{ return (QueryNetwork() & 0xf00) ? 1 : 0; }
+
+int
+eh_plat_battery_power(void)
+{ return GetBatteryPower(); }
+
 /* ── hwconfig surface (host view) ───────────────────────────────────── */
 unsigned int
 device_number(void)
