@@ -4,11 +4,11 @@
 #ifndef EH_SYSAPP_H
 #define EH_SYSAPP_H
 
-/* The system-bin directory the home-task override is written to;
- * $EH_SYSAPP_DIR overrides it (tests). */
+/* The platform-owned directory the home-task override is written to
+ * (eh_plat_sysapp_dir); $EH_SYSAPP_DIR overrides it (tests). */
 const char *eh_sysapp_dir(void);
 
-/* Is the home-task override (EH_HOME_TASK_APP) currently installed? */
+/* Is the home-task override (bookshelf.app in the sysapp dir) installed? */
 int eh_sysapp_detect(void);
 
 /* Copy the running binary + a fresh config to the home-task override so

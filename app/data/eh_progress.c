@@ -15,9 +15,10 @@
  * table covers both sources.  The shelf renders percent-read as a
  * black bar at the bottom of every cover. */
 
-#define EH_PROGRESS_DB "/mnt/ext1/system/explorer-3/explorer-3.db"
-/* /tmp snapshot the worker refreshes (db + -wal + -shm). */
-#define EH_PROGRESS_SNAP "/tmp/progress_import.db"
+/* The progress source DB and its writable snapshot (db + -wal + -shm)
+ * live at platform-owned paths: eh_plat_progress_db() is the firmware
+ * explorer db, eh_plat_progress_snap() the snapshot the worker copies
+ * into so a read-only open never blocks a non-writable guest. */
 /* Upper bound for a fallback copy: the explorer db is a handful of MB
  * at most; refusing to copy anything pathological keeps a huge source
  * from stalling the worker. */
@@ -42,8 +43,8 @@ progress_snapshot(void)
     const char *suffixes[] = {"", "-wal", "-shm"};
     for (size_t i = 0; i < sizeof suffixes / sizeof suffixes[0]; i++) {
         char src[300], dst[300];
-        snprintf(src, sizeof src, "%s%s", EH_PROGRESS_DB, suffixes[i]);
-        snprintf(dst, sizeof dst, "%s%s", EH_PROGRESS_SNAP, suffixes[i]);
+        snprintf(src, sizeof src, "%s%s", eh_plat_progress_db(), suffixes[i]);
+        snprintf(dst, sizeof dst, "%s%s", eh_plat_progress_snap(), suffixes[i]);
         struct stat st, sd;
         if (iv_stat(src, &st) != 0) {
             remove(dst);
@@ -102,9 +103,10 @@ static sqlite3 *
 progress_db_open(void)
 {
     sqlite3 *db = NULL;
-    if (sqlite3_open_v2(EH_PROGRESS_SNAP, &db, SQLITE_OPEN_READWRITE, NULL) == SQLITE_OK)
+    const char *snap = eh_plat_progress_snap();
+    if (sqlite3_open_v2(snap, &db, SQLITE_OPEN_READWRITE, NULL) == SQLITE_OK)
         return db;
-    eh_LOG("[bookshelf] progress: cannot open %s\n", EH_PROGRESS_SNAP);
+    eh_LOG("[bookshelf] progress: cannot open %s\n", snap);
     return NULL;
 }
 

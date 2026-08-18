@@ -125,4 +125,79 @@ int eh_plat_launcher_build(struct BsLauncherItem *items, int cap);
  * directly).  Returns 0 on success, non-zero on failure. */
 int eh_plat_launch_app(const struct BsLauncherItem *it, char **argv, int argc);
 
+/* ── platform device capabilities ──────────────────────────────────────
+ * Per-device special rules live HERE, resolved by the backend, never in
+ * the neutral app code.  A future platform provides its own answers. */
+
+/* 1 when the panel is colour-capable (covers decode as RGB24).  PB: the
+ * firmware device_display_colormask() != 0 (the PocketBook Color reports
+ * a colour mask even though the fb ioctl claims 8bpp).  PC: always 1
+ * (the SDL canvas is RGB24). */
+int eh_plat_display_color(void);
+
+/* 1 on narrow (≤758 px-wide, 6-inch) panels, where the top bar expands
+ * the source button to span the whole band.  PB: ScreenWidth() <= 758;
+ * PC: the current logical canvas (F11-cycle) width. */
+int eh_plat_narrow_screen(void);
+
+/* ── platform filesystem layout ────────────────────────────────────────
+ * The platform owns the on-device directory layout: the neutral app
+ * never hardcodes a mount point, it asks the backend.  The SDL/PC
+ * backend mirrors the PB layout so behaviour stays byte-identical on the
+ * host (where /mnt/ext1 simply does not exist and the writable paths
+ * fall back to the scratch root). */
+
+/* Default downloads folder (Settings → Download folder default).  PB:
+ * /mnt/ext1/Downloads; the writability check in eh_model.c falls back
+ * to eh_plat_write_root() when it cannot be created. */
+const char *eh_plat_downloads_dir(void);
+
+/* Guest-writable scratch root, used whenever the canonical dir is not
+ * writable (log/config/store fallback for the emulator's non-root
+ * qemu-arm guest).  PB and PC: /tmp. */
+const char *eh_plat_write_root(void);
+
+/* Root of the on-device storage tree the user browses (folder picker,
+ * folder-source browser, Local source scan).  PB: /mnt/ext1. */
+const char *eh_plat_browse_root(void);
+
+/* 1 when `p` lives under the on-device storage root — a valid download
+ * target or browsable path (the config's `downloads_dir=` is re-checked
+ * here; the picker never leaves this tree).  PB: a /mnt/ext1 prefix. */
+int eh_plat_path_on_storage(const char *p);
+
+/* Reading-progress source DB (the firmware's explorer db, written by
+ * both readers) and the writable snapshot the worker refreshes
+ * (db + -wal + -shm).  PB: /mnt/ext1/system/explorer-3/explorer-3.db and
+ * /tmp/progress_import.db. */
+const char *eh_plat_progress_db(void);
+const char *eh_plat_progress_snap(void);
+
+/* Scratch cover PNG the cover worker decodes into before scaling.  PB:
+ * /tmp/.bcov.png. */
+const char *eh_plat_cover_tmp(void);
+
+/* Read-only base config directory (non-writable system config, applied
+ * after the app-dir config).  PB/PC: /etc/pbemu. */
+const char *eh_plat_config_base_dir(void);
+
+/* Reader binaries the settings page probes (standard + KOReader).  PB:
+ * the firmware's eink-reader.app and /mnt/ext1/applications/koreader.app. */
+const char *eh_plat_reader_std_path(void);
+const char *eh_plat_reader_koreader_path(void);
+
+/* Home-task override dir for promote/demote ("Install as system app").
+ * PB: /mnt/ext1/system/bin; honours $EH_SYSAPP_DIR (test hook). */
+const char *eh_plat_sysapp_dir(void);
+
+/* Launcher data sources.  Candidate desktop-config files for the PB
+ * firmware JSON (`kind` = "db" / "view"), tried in order; returns a
+ * NULL-terminated array, or NULL when the backend has no such source.
+ * PB: /mnt/ext1/system/config/desktop then /ebrmain/config/desktop. */
+const char *const *eh_plat_launcher_desktop_paths(const char *kind);
+
+/* Directory the backend scans for user-installed *.app launcher items
+ * (NULL when it has none).  PB: /mnt/ext1/applications. */
+const char *eh_plat_launcher_user_apps_dir(void);
+
 #endif /* EH_PLAT_H */

@@ -13,6 +13,11 @@
 
 #include <ctype.h>
 
+/* Height of the self-drawn status strip used when the firmware's panel
+ * painter never activates (PanelHeight()==0 on the live device).  Matches
+ * the stock collapsed bar height the emulator's PanelHeight() reports. */
+#define EH_SELF_PANEL_H 106
+
 /* Exported by the firmware's libinkview but absent from this SDK
  * vintage's headers (and its bundled lib).  Weak so the link succeeds
  * either way; the guard skips the call if the runtime library lacks it. */
@@ -243,4 +248,126 @@ eh_plat_launch_app(const BsLauncherItem *it, char **argv, int argc)
     if (NewTaskEx(it->path, argv, base, it->text, NULL, 0x25 | TASK_MAKEACTIVE, 0) < 0)
         return -1;
     return 0;
+}
+
+/* ── device capabilities ────────────────────────────────────────────── */
+
+/* Colour display: device_display_colormask() reports the panel's colour
+ * mask.  The PocketBook Color has a nonzero mask while its fb ioctl
+ * claims 8bpp; the stock bookshelf uses the same probe to pick RGB24
+ * cover decodes. */
+int
+eh_plat_display_color(void)
+{
+    return device_display_colormask() != 0;
+}
+
+/* Narrow (≤758 px, 6-inch) panel: the top bar spans the source button. */
+int
+eh_plat_narrow_screen(void)
+{
+    return ScreenWidth() <= 758;
+}
+
+/* ── platform filesystem layout ─────────────────────────────────────── */
+
+const char *
+eh_plat_downloads_dir(void)
+{
+    return "/mnt/ext1/Downloads";
+}
+
+const char *
+eh_plat_write_root(void)
+{
+    return "/tmp";
+}
+
+const char *
+eh_plat_browse_root(void)
+{
+    return "/mnt/ext1";
+}
+
+int
+eh_plat_path_on_storage(const char *p)
+{
+    return strncmp(p, "/mnt/ext1", 9) == 0 && (p[9] == '/' || p[9] == '\0');
+}
+
+const char *
+eh_plat_progress_db(void)
+{
+    return "/mnt/ext1/system/explorer-3/explorer-3.db";
+}
+
+const char *
+eh_plat_progress_snap(void)
+{
+    return "/tmp/progress_import.db";
+}
+
+const char *
+eh_plat_cover_tmp(void)
+{
+    return "/tmp/.bcov.png";
+}
+
+const char *
+eh_plat_config_base_dir(void)
+{
+    return "/etc/pbemu";
+}
+
+/* Reader binaries probed by recognize_readers().  The standard reader
+ * lives in the firmware image; KOReader is a third-party install under
+ * /mnt/ext1/applications. */
+const char *
+eh_plat_reader_std_path(void)
+{
+    return "/ebrmain/bin/eink-reader.app";
+}
+
+const char *
+eh_plat_reader_koreader_path(void)
+{
+    return "/mnt/ext1/applications/koreader.app";
+}
+
+/* Home-task override dir, overridable for tests ($EH_SYSAPP_DIR: the
+ * SDL e2e suite has no /mnt/ext1 device paths).  /mnt/ext1 is the user
+ * partition the app can write. */
+const char *
+eh_plat_sysapp_dir(void)
+{
+    const char *d = getenv("EH_SYSAPP_DIR");
+    return (d != NULL && d[0] != '\0') ? d : "/mnt/ext1/system/bin";
+}
+
+/* Launcher desktop-config candidates, tried in order (the firmware
+ * rewrites the desktop JSONs into both locations; the SDK vintages only
+ * ship one). */
+static const char *const g_lc_db_paths[] = {
+    "/mnt/ext1/system/config/desktop/apps_db.json",
+    "/ebrmain/config/desktop/apps_db.json",
+    NULL,
+};
+static const char *const g_lc_view_paths[] = {
+    "/mnt/ext1/system/config/desktop/view.json",
+    "/ebrmain/config/desktop/view.json",
+    NULL,
+};
+
+const char *const *
+eh_plat_launcher_desktop_paths(const char *kind)
+{
+    if (kind != NULL && strcmp(kind, "view") == 0)
+        return g_lc_view_paths;
+    return g_lc_db_paths;
+}
+
+const char *
+eh_plat_launcher_user_apps_dir(void)
+{
+    return "/mnt/ext1/applications";
 }

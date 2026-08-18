@@ -349,12 +349,12 @@ eh_on_tap_source(int x, int y)
         eh_do_sync();
         eh_redraw_shelf();
     } else {
-        /* Folder source: the browser is always rooted at /mnt/ext1 —
-         * the user only has this partition, so there is no base
-         * directory to choose. */
+        /* Folder source: the browser is always rooted at the platform's
+         * on-device storage root (eh_plat_browse_root) — the user only
+         * has that partition, so there is no base directory to choose. */
         eh_g_state.source = EH_SOURCE_FOLDER;
         eh_save_config_file();
-        eh_browse_start(EH_BROWSE_ROOT);
+        eh_browse_start(eh_plat_browse_root());
     }
     return 1;
 }
@@ -479,7 +479,7 @@ static int
 eh_on_tap_settings_folder(int y, int y_row)
 {
     if (y >= y_row && y < y_row + EH_SETTINGS_ROW_H - 12) {
-        /* Download-folder picker (confined to /mnt/ext1). */
+        /* Download-folder picker (confined to the on-device storage root). */
         eh_folder_open();
         return 1;
     }

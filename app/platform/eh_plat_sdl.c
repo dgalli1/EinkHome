@@ -928,6 +928,82 @@ int
 device_display_colormask(void)
 { return 1; } /* PC shows colour */
 
+/* ── device capabilities + platform filesystem layout ─────────────────
+ * The SDL/PC backend mirrors the PocketBook layout so behaviour is
+ * byte-identical on the host: /mnt/ext1 simply does not exist there, so
+ * every writable path falls through to eh_plat_write_root() (/tmp). */
+
+int
+eh_plat_display_color(void)
+{ return 1; } /* the SDL canvas is always RGB24 */
+
+int
+eh_plat_narrow_screen(void)
+{ return ScreenWidth() <= 758; }
+
+const char *
+eh_plat_downloads_dir(void)
+{ return "/mnt/ext1/Downloads"; }
+
+const char *
+eh_plat_write_root(void)
+{ return "/tmp"; }
+
+const char *
+eh_plat_browse_root(void)
+{ return "/mnt/ext1"; }
+
+int
+eh_plat_path_on_storage(const char *p)
+{
+    return strncmp(p, "/mnt/ext1", 9) == 0 && (p[9] == '/' || p[9] == '\0');
+}
+
+const char *
+eh_plat_progress_db(void)
+{ return "/mnt/ext1/system/explorer-3/explorer-3.db"; }
+
+const char *
+eh_plat_progress_snap(void)
+{ return "/tmp/progress_import.db"; }
+
+const char *
+eh_plat_cover_tmp(void)
+{ return "/tmp/.bcov.png"; }
+
+const char *
+eh_plat_config_base_dir(void)
+{ return "/etc/pbemu"; }
+
+const char *
+eh_plat_reader_std_path(void)
+{ return "/ebrmain/bin/eink-reader.app"; }
+
+const char *
+eh_plat_reader_koreader_path(void)
+{ return "/mnt/ext1/applications/koreader.app"; }
+
+const char *
+eh_plat_sysapp_dir(void)
+{
+    const char *d = getenv("EH_SYSAPP_DIR");
+    return (d != NULL && d[0] != '\0') ? d : "/mnt/ext1/system/bin";
+}
+
+/* The SDL backend has no firmware desktop JSONs or /mnt/ext1 app scan;
+ * its launcher reads freedesktop .desktop files (eh_plat_launcher_build
+ * below). */
+const char *const *
+eh_plat_launcher_desktop_paths(const char *kind)
+{
+    (void)kind;
+    return NULL;
+}
+
+const char *
+eh_plat_launcher_user_apps_dir(void)
+{ return NULL; }
+
 /* ── SDL event loop ─────────────────────────────────────────────────── */
 
 static int map_scancode_to_ivkey(SDL_Scancode sc)

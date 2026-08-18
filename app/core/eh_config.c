@@ -42,15 +42,15 @@ eh_log_open(const char *argv0)
             *slash = '\0';
         snprintf(path, sizeof path, "%s/bookshelf.log", dir);
     } else {
-        snprintf(path, sizeof path, "/tmp/bookshelf.log");
+        snprintf(path, sizeof path, "%s/bookshelf.log", eh_plat_write_root());
     }
     eh_g_log = fopen(path, "a");
     if (eh_g_log == NULL) {
         /* The app dir may not be writable (emulator guest); the log
-         * then lives in /tmp.  Only record the fallback path once its
-         * fopen actually succeeds, so g_log_path never claims a file
-         * that was not opened. */
-        snprintf(path, sizeof path, "/tmp/bookshelf.log");
+         * then lives in the platform's scratch root.  Only record the
+         * fallback path once its fopen actually succeeds, so
+         * g_log_path never claims a file that was not opened. */
+        snprintf(path, sizeof path, "%s/bookshelf.log", eh_plat_write_root());
         eh_g_log = fopen(path, "a");
         if (eh_g_log != NULL)
             snprintf(g_log_path, sizeof g_log_path, "%s", path);
@@ -200,13 +200,23 @@ eh_load_config_file(const char *argv0, struct eh_cfg_out *out)
                 eh_LOG("[bookshelf] config: %s\n", candidate);
         }
     }
-    if (eh_read_kv_file("/etc/pbemu/bookshelf.cfg", eh_cfg_set_kv, out) == 0)
-        eh_LOG("[bookshelf] config: /etc/pbemu/bookshelf.cfg\n");
-    /* A settings save that had to fall back to /tmp (unwritable app dir,
-     * e.g. the emulator guest) is re-applied last so it overrides the
-     * read-only base config on the next launch. */
-    if (eh_read_kv_file(EH_CONFIG_TMP_PATH, eh_cfg_set_kv, out) == 0)
-        eh_LOG("[bookshelf] config: %s (override)\n", EH_CONFIG_TMP_PATH);
+    {
+        char base[400];
+        snprintf(base, sizeof base, "%s/%s", eh_plat_config_base_dir(),
+                 EH_CONFIG_FILENAME);
+        if (eh_read_kv_file(base, eh_cfg_set_kv, out) == 0)
+            eh_LOG("[bookshelf] config: %s\n", base);
+    }
+    /* A settings save that had to fall back to the scratch root
+     * (unwritable app dir, e.g. the emulator guest) is re-applied last
+     * so it overrides the read-only base config on the next launch. */
+    {
+        char tmp[400];
+        snprintf(tmp, sizeof tmp, "%s/%s", eh_plat_write_root(),
+                 EH_CONFIG_FILENAME);
+        if (eh_read_kv_file(tmp, eh_cfg_set_kv, out) == 0)
+            eh_LOG("[bookshelf] config: %s (override)\n", tmp);
+    }
 }
 
 /* Resolved path of the config file actually loaded (or the preferred
@@ -233,7 +243,8 @@ eh_resolve_config_path(const char *argv0)
             snprintf(primary, sizeof primary, "%s/%s", dir, EH_CONFIG_FILENAME);
     }
     if (primary[0] == '\0')
-        snprintf(primary, sizeof primary, "/etc/pbemu/%s", EH_CONFIG_FILENAME);
+        snprintf(primary, sizeof primary, "%s/%s", eh_plat_config_base_dir(),
+                 EH_CONFIG_FILENAME);
 
     /* Prefer the primary when its DIRECTORY is writable — settings and
      * the library store are created next to the config file, so a
@@ -250,5 +261,6 @@ eh_resolve_config_path(const char *argv0)
         snprintf(eh_g_config_path, sizeof eh_g_config_path, "%s", primary);
         return;
     }
-    snprintf(eh_g_config_path, sizeof eh_g_config_path, "%s", EH_CONFIG_TMP_PATH);
+    snprintf(eh_g_config_path, sizeof eh_g_config_path, "%s/%s",
+             eh_plat_write_root(), EH_CONFIG_FILENAME);
 }

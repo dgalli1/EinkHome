@@ -80,32 +80,33 @@ eh_hash_hex(const char *s, char out[9])
     snprintf(out, 9, "%08lx", h & 0xfffffffful);
 }
 
-/* Display form of an absolute path: everything under /mnt/ext1 shows
- * relative to it (the user only has this partition — the mount point
- * is noise).  The root itself shows as "/"; paths outside the mount
- * are shown verbatim. */
+/* Display form of an absolute path: everything under the on-device
+ * storage root (eh_plat_browse_root) shows relative to it (the user
+ * only has this partition — the mount point is noise).  The root itself
+ * shows as "/"; paths outside the root are shown verbatim. */
 const char *
 eh_user_path_display(const char *path, char *out, size_t cap)
 {
-    static const char prefix[] = "/mnt/ext1";
-    if (strncmp(path, prefix, sizeof prefix - 1) == 0) {
-        if (path[sizeof prefix - 1] == '/')
-            snprintf(out, cap, "%s", path + sizeof prefix - 1);
-        else if (path[sizeof prefix - 1] == '\0')
+    const char *root = eh_plat_browse_root();
+    size_t      rlen = strlen(root);
+    if (strncmp(path, root, rlen) == 0) {
+        if (path[rlen] == '/')
+            snprintf(out, cap, "%s", path + rlen);
+        else if (path[rlen] == '\0')
             snprintf(out, cap, "/");
         else
-            snprintf(out, cap, "%s", path); /* /mnt/ext1x — not ours */
+            snprintf(out, cap, "%s", path); /* <root>x — not ours */
     } else {
         snprintf(out, cap, "%s", path);
     }
     return out;
 }
 
-/* No ascent above the /mnt/ext1 root. */
+/* No ascent above the storage root. */
 static int
 browser_can_go_up(void)
 {
-    return strcmp(eh_g_browse_path, "/mnt/ext1") != 0;
+    return strcmp(eh_g_browse_path, eh_plat_browse_root()) != 0;
 }
 
 /* How many list rows the mode shows.  The picker overlay reserves the
@@ -423,7 +424,7 @@ eh_browse_start(const char *dir)
 int
 eh_browse_up(void)
 {
-    if (strcmp(eh_g_browse_path, EH_BROWSE_ROOT) == 0)
+    if (strcmp(eh_g_browse_path, eh_plat_browse_root()) == 0)
         return 0;
     char *slash = strrchr(eh_g_browse_path, '/');
     if (slash != NULL && slash != eh_g_browse_path)
@@ -552,13 +553,14 @@ eh_folder_close(void)
     eh_flush_content();
 }
 
-/* Open the picker from the settings page.  Starts at the /mnt/ext1
- * root so the user can only choose on-device storage. */
+/* Open the picker from the settings page.  Starts at the platform's
+ * on-device storage root so the user can only choose on-device storage. */
 void
 eh_folder_open(void)
 {
     s_bmode = BR_MODE_PICKER;
-    snprintf(eh_g_browse_path, sizeof eh_g_browse_path, "/mnt/ext1");
+    snprintf(eh_g_browse_path, sizeof eh_g_browse_path, "%s",
+             eh_plat_browse_root());
     eh_g_browse_scroll = 0;
     eh_g_browser_drag = 0;
     eh_g_browser_moved = 0;

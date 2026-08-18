@@ -242,7 +242,7 @@ local_scan_walk(BsJob *job)
         return;
     }
     snprintf(res->src, sizeof res->src, "local");
-    folder_scan_collect(EH_BROWSE_ROOT, 0, res);
+    folder_scan_collect(eh_plat_browse_root(), 0, res);
     if (res->truncated)
         eh_LOG("[bookshelf] local: scan cap %d reached, import truncated\n",
             EH_LOCAL_SCAN_CAP);
@@ -432,7 +432,7 @@ local_apply_slice(BsJob *job)
         return;
     }
     eh_LOG("[bookshelf] local: imported %d books (%s) from %s\n", res->count,
-        res->src, EH_BROWSE_ROOT);
+        res->src, eh_plat_browse_root());
     free(res->books);
     free(res);
     free(a);

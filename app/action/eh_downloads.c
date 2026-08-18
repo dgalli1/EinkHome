@@ -482,7 +482,7 @@ eh_launch_reader(BsBook *b)
     if (eh_g_state.reader_pref > 0 && eh_g_state.reader_pref <= eh_g_reader_count)
         reader_path = eh_g_readers[eh_g_state.reader_pref - 1].path;
     if (reader_path != NULL && access(reader_path, X_OK) == 0 &&
-        strcmp(reader_path, EH_READER_STD_PATH) != 0) {
+        strcmp(reader_path, eh_plat_reader_std_path()) != 0) {
         const char *rbase = strrchr(reader_path, '/');
         rbase = rbase ? rbase + 1 : reader_path;
         char *args[3] = {(char *)reader_path, path, NULL};

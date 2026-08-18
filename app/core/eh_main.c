@@ -309,15 +309,15 @@ static int eh_evt_init(void) {
        * the old per-folder import left behind.  The browser is
        * always rooted at /mnt/ext1. */
       eh_store_delete_source("folder");
-      eh_browse_start(EH_BROWSE_ROOT);
+      eh_browse_start(eh_plat_browse_root());
     }
     eh_LOG("[bookshelf] config_path=%s\n", eh_g_config_path);
     eh_g_state.reader_pref = eh_reader_pref_from_path(eh_g_cfg_reader);
-    /* Colour display?  The PB Color reports a nonzero colormask
-     * while the fb ioctl claims 8bpp; the stock bookshelf uses
-     * device_display_colormask() to pick RGB24 cover decodes, so do
-     * the same (see load_cover_scaled). */
-    eh_g_display_color = (device_display_colormask() != 0);
+/* Colour display?  A per-device capability resolved by the platform
+         * backend (eh_plat_display_color: the PB Color reports a nonzero
+         * colormask while the fb ioctl claims 8bpp; the stock bookshelf
+         * uses that probe to pick RGB24 cover decodes). */
+    eh_g_display_color = eh_plat_display_color();
     eh_LOG("[bookshelf] display_colormask=%d\n", eh_g_display_color);
     eh_LOG("[bookshelf] reader_pref=%d (cfg `%s`)\n", eh_g_state.reader_pref,
         eh_g_cfg_reader);

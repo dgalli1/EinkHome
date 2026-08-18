@@ -427,7 +427,10 @@ launcher_has_user_header(void)
 static void
 eh_launcher_scan_ext1_apps(void)
 {
-    DIR *d = opendir("/mnt/ext1/applications");
+    const char *apps_dir = eh_plat_launcher_user_apps_dir();
+    if (apps_dir == NULL)
+        return;
+    DIR *d = opendir(apps_dir);
     if (d == NULL)
         return;
     struct dirent *e;
@@ -438,7 +441,7 @@ eh_launcher_scan_ext1_apps(void)
         if (strcasecmp(e->d_name + len - 4, ".app") != 0)
             continue;
         char path[EH_MAX_PATH_LEN];
-        snprintf(path, sizeof path, "/mnt/ext1/applications/%s", e->d_name);
+        snprintf(path, sizeof path, "%s/%s", apps_dir, e->d_name);
         struct stat st;
         if (iv_stat(path, &st) != 0)
             continue;
@@ -582,12 +585,16 @@ eh_launcher_build_pb(void)
     eh_g_launcher_count = 0;
     eh_g_launcher_body_h = 0;
 
-    char *db_txt = eh_read_text_file("/mnt/ext1/system/config/desktop/apps_db.json");
-    if (!db_txt)
-        db_txt = eh_read_text_file("/ebrmain/config/desktop/apps_db.json");
-    char *vw_txt = eh_read_text_file("/mnt/ext1/system/config/desktop/view.json");
-    if (!vw_txt)
-        vw_txt = eh_read_text_file("/ebrmain/config/desktop/view.json");
+    /* The desktop-config file locations are platform-owned (PB try
+         * /mnt/ext1/system/config/desktop then /ebrmain/config/desktop). */
+    char *db_txt = NULL;
+    const char *const *db_paths = eh_plat_launcher_desktop_paths("db");
+    for (const char *const *p = db_paths; p != NULL && *p != NULL && db_txt == NULL; p++)
+        db_txt = eh_read_text_file(*p);
+    char *vw_txt = NULL;
+    const char *const *vw_paths = eh_plat_launcher_desktop_paths("view");
+    for (const char *const *p = vw_paths; p != NULL && *p != NULL && vw_txt == NULL; p++)
+        vw_txt = eh_read_text_file(*p);
 
     cJSON *db = db_txt ? cJSON_Parse(db_txt) : NULL;
     cJSON *vw = vw_txt ? cJSON_Parse(vw_txt) : NULL;

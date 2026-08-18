@@ -57,8 +57,8 @@ extern int eh_g_download_count;
 
 extern char eh_g_downloads_dir[128];
 
-/* Raw `downloads_dir=` from the config file (validated against /mnt/ext1
- * by resolve_downloads_dir). */
+/* Raw `downloads_dir=` from the config file (validated against the
+ * on-device storage root by resolve_downloads_dir). */
 extern char eh_g_cfg_downloads_dir[256];
 
 /* Folder picked in Settings → Download folder, pending the Save tap. */

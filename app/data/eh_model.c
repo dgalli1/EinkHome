@@ -100,34 +100,28 @@ int eh_g_dl_batch_failed = 0;
 /* Directory downloads are written to.  Resolved at startup (and again
  * after a settings save) by resolve_downloads_dir(): the configured
  * `downloads_dir=` (Settings → Download folder) when it is a valid
- * /mnt/ext1 path, else the default /mnt/ext1/Downloads, else — when
- * the guest cannot write /mnt/ext1 at all, e.g. the emulator's
- * non-root qemu-arm — the /tmp fallback. */
+ * on-device-storage path (eh_plat_path_on_storage), else the platform's
+ * default downloads dir, else — when the guest cannot write it at all,
+ * e.g. the emulator's non-root qemu-arm — the scratch root. */
 char eh_g_downloads_dir[128];
 
 /* Raw `downloads_dir=` from the config file.  Not trusted: the picker
- * confines choices to /mnt/ext1, but the config file is re-validated
- * against that prefix here. */
+ * confines choices to the on-device storage root, but the config file
+ * is re-validated against that root here. */
 char eh_g_cfg_downloads_dir[256];
 
 /* Folder picked in Settings → Download folder, pending the Save tap. */
 char eh_g_settings_dl_dir[256];
-
-static int
-is_mnt_ext1_path(const char *p)
-{
-    return strncmp(p, "/mnt/ext1", 9) == 0 && (p[9] == '/' || p[9] == '\0');
-}
 
 void
 eh_resolve_downloads_dir(void)
 {
     /* The pending picker choice (before the settings Save has been
      * re-read from the config) wins over the stored config value. */
-    const char *wanted = EH_DEFAULT_DOWNLOADS_DIR;
-    if (eh_g_settings_dl_dir[0] != '\0' && is_mnt_ext1_path(eh_g_settings_dl_dir))
+    const char *wanted = eh_plat_downloads_dir();
+    if (eh_g_settings_dl_dir[0] != '\0' && eh_plat_path_on_storage(eh_g_settings_dl_dir))
         wanted = eh_g_settings_dl_dir;
-    else if (eh_g_cfg_downloads_dir[0] != '\0' && is_mnt_ext1_path(eh_g_cfg_downloads_dir))
+    else if (eh_g_cfg_downloads_dir[0] != '\0' && eh_plat_path_on_storage(eh_g_cfg_downloads_dir))
         wanted = eh_g_cfg_downloads_dir;
     /* First run on a real device: the default folder does not exist
      * yet.  Creating it here makes the picker default usable; a
@@ -153,15 +147,16 @@ eh_resolve_downloads_dir(void)
             eh_LOG("[bookshelf] downloads dir too long (%d bytes, max %d); "
                 "falling back to %s\n",
                 (int)wlen, (int)(sizeof eh_g_downloads_dir - 1),
-                EH_LOCAL_DOWNLOADS_FALLBACK);
+                eh_plat_write_root());
             snprintf(eh_g_downloads_dir, sizeof eh_g_downloads_dir, "%s",
-                     EH_LOCAL_DOWNLOADS_FALLBACK);
+                     eh_plat_write_root());
         } else {
             memcpy(eh_g_downloads_dir, wanted, wlen);
             eh_g_downloads_dir[wlen] = '\0';
         }
     } else {
-        snprintf(eh_g_downloads_dir, sizeof eh_g_downloads_dir, "%s", EH_LOCAL_DOWNLOADS_FALLBACK);
+        snprintf(eh_g_downloads_dir, sizeof eh_g_downloads_dir, "%s",
+                 eh_plat_write_root());
     }
     eh_LOG("[bookshelf] downloads dir = %s (cfg=%s%s)\n",
         eh_g_downloads_dir,
@@ -310,9 +305,9 @@ int             eh_g_reader_count = 0;
 void
 eh_detect_readers(void)
 {
-    static const BsReaderCandidate known[] = {
-        {EH_READER_STD_PATH, "Standard"},
-        {EH_READER_KO_PATH, "KOReader"},
+    BsReaderCandidate known[] = {
+        {.path = eh_plat_reader_std_path(), .label = "Standard"},
+        {.path = eh_plat_reader_koreader_path(), .label = "KOReader"},
     };
     eh_g_reader_count = 0;
     for (size_t i = 0; i < sizeof known / sizeof known[0] && eh_g_reader_count < EH_MAX_READERS; i++) {
@@ -1323,8 +1318,9 @@ load_scaled_internal(const char *path, int greyscale_fastpath, int log)
 }
 
 /* Decode a cover image scaled to 240x360.  On a colour display the decode
- * stays RGB24 — the same choice the stock bookshelf.app makes via
- * device_display_colormask() — so covers keep their colour; on a
+ * stays RGB24 — the same choice the stock bookshelf.app makes via the
+ * platform's eh_plat_display_color() (device_display_colormask) — so
+ * covers keep their colour; on a
  * greyscale display the 8-bit decode is used, with the PNG
  * LoadPNGStretch fast path and diagnostic logging.  The caller frees the
  * returned bitmap. */

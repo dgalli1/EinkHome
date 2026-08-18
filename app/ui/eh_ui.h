@@ -9,7 +9,7 @@
 
 extern int eh_g_self_panel;    /* 1 = we draw the status strip ourselves */
 
-extern int eh_g_display_color; /* 1 = colour display (device_display_colormask) */
+extern int eh_g_display_color; /* 1 = colour display (eh_plat_display_color) */
 
 extern int eh_g_settings_edit;
 

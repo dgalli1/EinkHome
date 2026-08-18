@@ -39,37 +39,11 @@
 #endif
 
 #define EH_TOKEN_DEFAULT "pbemu-dev-token"
-/* Download folder for books, chosen in Settings → Download folder.
- * The picker only browses inside /mnt/ext1 (on-device storage); the
- * default is the stock PocketBook downloads folder.  In the emulator
- * the non-root qemu-arm guest cannot write /mnt/ext1 at all, so
- * downloads fall back to /tmp there (see resolve_downloads_dir). */
-#define EH_DEFAULT_DOWNLOADS_DIR "/mnt/ext1/Downloads"
-#define EH_LOCAL_DOWNLOADS_FALLBACK "/tmp"
+/* On-device filesystem layout (downloads dir, config dirs, reader
+ * binaries, home-task override, …) is owned by the platform backend —
+ * see the "platform device capabilities / platform filesystem layout"
+ * section of eh_plat.h.  The neutral app only keeps relative filenames. */
 #define EH_CONFIG_FILENAME "bookshelf.cfg"
-/* Guest-writable fallback config path (used when the app's own directory
- * is not writable, e.g. the emulator's non-root qemu-arm guest). */
-#define EH_CONFIG_TMP_PATH "/tmp/" EH_CONFIG_FILENAME
-/* Reader apps the settings page can detect and offer.  The standard
- * PocketBook reader lives in the firmware image; KOReader is a common
- * third-party install dropped into /mnt/ext1/applications.  Detection is
- * a plain access(X_OK) probe so the list adapts to whatever is actually
- * installed on the device. */
-#define EH_READER_STD_PATH "/ebrmain/bin/eink-reader.app"
-#define EH_READER_KO_PATH "/mnt/ext1/applications/koreader.app"
-
-/* Deployment.  The app is meant to be copied to the standard PocketBook
- * application folder (EH_USER_APP_PATH), where it runs as an ordinary
- * app tile without touching the boot path — that is the safe way to
- * install and test.  "Promoting" it to a system app copies the running
- * binary to the firmware's home-task override (EH_HOME_TASK_APP), which
- * monitor.app boots in preference to the stock /ebrmain/bin/bookshelf.app.
- * The user opts in via Settings → Install as system app, only after the
- * safe copy has been verified to work.  See eh_sysapp.c. */
-#define EH_USER_APP_PATH "/mnt/ext1/applications/einkhome.app"
-#define EH_HOME_TASK_DIR "/mnt/ext1/system/bin"
-#define EH_HOME_TASK_APP EH_HOME_TASK_DIR "/bookshelf.app"
-#define EH_HOME_TASK_CFG EH_HOME_TASK_DIR "/bookshelf.cfg"
 #define EH_MAX_READERS 4
 
 #define EH_HTTP_TIMEOUT 8
@@ -158,7 +132,6 @@
  * one per weak-timer tick so the event loop never blocks; until then a
  * hatch placeholder is drawn.  (Blurhash placeholders were removed — the
  * device is too slow to usefully display them.) */
-#define EH_COVER_TMP "/tmp/.bcov.png"
 #define EH_COVER_FETCH_MS 60
 #define EH_LIB_DB_FILENAME "bookshelf_lib.db"
 #define EH_LIB_LEGACY_FILENAME "bookshelf_lib.json" /* pre-sqlite store */
@@ -171,11 +144,6 @@
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
-/* Height of the self-drawn status strip used when the firmware's panel
- * painter never activates (PanelHeight()==0 on the live device).  Matches
- * the stock collapsed bar height the emulator's PanelHeight() reports. */
-#define EH_SELF_PANEL_H 106
-
 /* Long-press detection.  The emulator only injects POINTERDOWN/UP/MOVE
  * (the firmware-synthesised EVT_POINTERLONG never fires under qemu), so
  * a long-press is detected app-side: POINTERDOWN arms a one-shot timer;
@@ -422,8 +390,9 @@ typedef struct {
   int lic_scroll;
 
   /* Whether the home-task override is installed (Settings → Install as
-   * system app).  Derived from presence of EH_HOME_TASK_APP at startup;
-   * toggling promotes/unpromotes the running app (see eh_sysapp.c). */
+   * system app).  Derived from presence of the home-task app in the
+   * platform's sysapp dir at startup; toggling promotes/unpromotes the
+   * running app (see eh_sysapp.c). */
   int sys_app_on;
 
   /* Reader selection.  reader_pref == 0 means "Auto" (honour the
@@ -459,15 +428,14 @@ typedef struct {
 #define EH_SETTINGS_BTN_H 96
 /* Download-folder picker overlay (eh_browser.c): header with the current
  * path, a scrollable list of subdirectories, and Select/Back buttons.
- * Browsing is confined to /mnt/ext1 — the list has no ".." above the
- * root, so on-device storage is the only thing choosable. */
+ * Browsing is confined to the on-device storage root (eh_plat_browse_root)
+ * — the list has no ".." above the root, so on-device storage is the only
+ * thing choosable. */
 #define EH_FOLDER_ROW_H 96
 #define EH_FOLDER_LIST_TOP 120
 #define EH_FOLDER_BTN_H 96
 #define EH_FOLDER_BTN_PAD 24
 #define EH_FOLDER_MAX_DIRS 128
-/* Root of the folder-source file browser and the Local source scan. */
-#define EH_BROWSE_ROOT "/mnt/ext1"
 /* Source button (right of the house): the active library source as a
  * small icon + label (globe = Kavita, book = Local, folder = Folder).
  * Wider than the old bare-icon button because it carries text. */

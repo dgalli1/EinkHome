@@ -2,17 +2,17 @@
  * (part of the bookshelf app; see eh_core.h).
  *
  * The app is safest installed as an ordinary application in the
- * standard PocketBook folder (EH_USER_APP_PATH) where it never touches
- * the boot path.  "Install as system app" (Settings) promotes the
- * RUNNING binary to the firmware's home-task override path
- * (EH_HOME_TASK_APP under /mnt/ext1/system/bin) that monitor.app boots
- * in preference to the stock bookshelf.  Because promotion copies the
- * binary that is actually running and verified, flipping the toggle is
- * the explicit "this version works" confirmation — a freshly copied
- * standard-folder build is never silently promoted.
+ * standard PocketBook applications folder where it never touches the
+ * boot path.  "Install as system app" (Settings) promotes the RUNNING
+ * binary to the firmware's home-task override path (eh_plat_sysapp_dir:
+ * /mnt/ext1/system/bin) that monitor.app boots in preference to the
+ * stock bookshelf.  Because promotion copies the binary that is
+ * actually running and verified, flipping the toggle is the explicit
+ * "this version works" confirmation — a freshly copied standard-folder
+ * build is never silently promoted.
  *
  * The target directory can be redirected with $EH_SYSAPP_DIR (used by
- * the SDL e2e suite, which has no /mnt/ext1 device paths). */
+ * the SDL e2e suite, which has no device paths). */
 
 #include "eh_core.h"
 #include "eh_config.h"
@@ -23,15 +23,14 @@
 #include <errno.h>
 #include <unistd.h>
 
-/* The system-bin dir, overridable for tests.  Defaults to the real
- * device path which the app user can write (/mnt/ext1 is the user
+/* Home-task override dir: platform-owned (eh_plat_sysapp_dir).  Defaults
+ * to the real device path the app user can write (/mnt/ext1 is the user
  * partition); the emulator guest and the SDL build cannot, hence the
- * hook. */
+ * $EH_SYSAPP_DIR test hook lives in the backend. */
 const char *
 eh_sysapp_dir(void)
 {
-    const char *d = getenv("EH_SYSAPP_DIR");
-    return (d != NULL && d[0] != '\0') ? d : EH_HOME_TASK_DIR;
+    return eh_plat_sysapp_dir();
 }
 
 /* Resolve the running binary's path.  /proc/self/exe is authoritative

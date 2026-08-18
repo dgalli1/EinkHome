@@ -184,8 +184,9 @@ eh_cover_slot(const char *id, int create)
     return empty;
 }
 
-/* 1 = the display is colour-capable (device_display_colormask() != 0);
- * covers decode as RGB24 then.  Resolved once at EVT_INIT. */
+/* 1 = the display is colour-capable (eh_plat_display_color(), resolved
+ * once at EVT_INIT from the platform backend); covers decode as RGB24
+ * then. */
 int eh_g_display_color = 0;
 
 /* Mode-aware layout accessors.  Grid mode keeps the fixed 3×2 cover
@@ -715,7 +716,7 @@ cover_fetch_job(BsJob *job)
         /* Stage the decode source in COVER_TMP (always writable) and
          * best-effort persist the raw PNG so the next launch can skip
          * the network entirely. */
-        FILE *f = fopen(EH_COVER_TMP, "wb");
+        FILE *f = fopen(eh_plat_cover_tmp(), "wb");
         if (f != NULL) {
             size_t w = fwrite(data, 1, (size_t)rsize, f);
             int    fc = fclose(f);
@@ -791,7 +792,7 @@ cover_job_done(BsJob *job)
     ibitmap   *bmp = NULL;
     if (job->rc == 0) {
         eh_LOG("[bookshelf] cover_job_done load_cover_scaled begin id=%s\n", a->id);
-        bmp = eh_load_cover_scaled(EH_COVER_TMP);
+        bmp = eh_load_cover_scaled(eh_plat_cover_tmp());
         eh_LOG("[bookshelf] cover_job_done load_cover_scaled done bmp=%p\n", (void *)bmp);
     }
     if (bmp != NULL) {

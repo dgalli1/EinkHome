@@ -105,14 +105,15 @@ source_short_label(void)
     }
 }
 
-/* Width of the source button.  On the 6-inch (758px) panels the
- * button grows to fill the whole band up to the right icon stack (the
- * empty space would otherwise dwarf the label); everywhere else it
- * keeps the fixed width, with the divider staying at its edge. */
+/* Width of the source button.  On narrow (6-inch, ≤758px — platform
+ * device capability eh_plat_narrow_screen) panels the button grows to
+ * fill the whole band up to the right icon stack (the empty space would
+ * otherwise dwarf the label); everywhere else it keeps the fixed width,
+ * with the divider staying at its edge. */
 int
 eh_source_btn_w(void)
 {
-    if (ScreenWidth() <= 758)
+    if (eh_plat_narrow_screen())
         return (ScreenWidth() - (EH_TOP_BTN_PAD + 4 * EH_TOP_BTN_SIZE)) - EH_SOURCE_BTN_X;
     return EH_SOURCE_BTN_W;
 }
