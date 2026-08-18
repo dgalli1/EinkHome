@@ -1,0 +1,1 @@
+//! Cover fetch + on-disk cache.

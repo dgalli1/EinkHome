@@ -1,0 +1,35 @@
+[package]
+name = "eh_app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+eh_hal = { path = "../eh_hal" }
+eh_render = { path = "../eh_render" }
+eh_layout = { path = "../eh_layout" }
+eh_shell = { path = "../eh_shell" }
+
+# HTTP to the LAN pbemu-api server.  No TLS: the device talks to the API
+# server over plain http (api_url from bookshelf.cfg); TLS termination (if a
+# remote Kavita needs it) happens in the Python server.  Disabling ureq's tls
+# features keeps the dep pure-std (no ring/rustls C build) so it cross-compiles
+# to armv7 .2.23 without extra toolchain.
+ureq = { version = "2", default-features = false }
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# SQLite persistence with the exact existing books/meta/view/search schema
+# (device DB stays compatible with the C app's store).  bundled cross-compiles
+# the C glue via zig cc under cargo-zigbuild.
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[features]
+default = []
