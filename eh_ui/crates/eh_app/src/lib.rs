@@ -21,3 +21,34 @@ pub mod cover;
 pub mod store;
 pub mod sync;
 pub mod util;
+
+#[cfg(test)]
+pub mod testutil {
+    use crate::client::BookMeta;
+
+    /// A BookMeta fixture with just an id + title.
+    pub fn book(id: &str, title: &str) -> BookMeta {
+        BookMeta { id: id.into(), title: title.into(), ..Default::default() }
+    }
+}
+
+/// Simple diagnostic logger.  On the device this writes to the same
+/// guest-writable path the demo used; on host it prints to stderr.  Hook
+/// point for the real logging backend later.
+pub fn log(msg: &str) {
+    #[cfg(not(target_arch = "arm"))]
+    {
+        eprintln!("[eh_app] {msg}");
+    }
+    #[cfg(target_arch = "arm")]
+    {
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open("/tmp/eh_app.log")
+        {
+            use std::io::Write;
+            let _ = writeln!(f, "{msg}");
+        }
+    }
+}

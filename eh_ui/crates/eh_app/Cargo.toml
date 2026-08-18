@@ -28,6 +28,12 @@ serde_json = "1"
 # the C glue via zig cc under cargo-zigbuild.
 rusqlite = { version = "0.32", features = ["bundled"] }
 
+# Cover decoding: covers are served as PNG (cached covers dir) or JPEG
+# (the raw /cover endpoint — 240x360 JPEGs for Kavita).  Single-threaded
+# decoder (no rayon) keeps the embedded footprint small.
+png = "0.17"
+jpeg-decoder = { version = "0.3", default-features = false }
+
 [dev-dependencies]
 tempfile = "3"
 

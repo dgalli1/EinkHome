@@ -75,6 +75,38 @@ impl Store {
             .query_row("SELECT COUNT(*) FROM books", [], |r| r.get(0))
     }
 
+    /// The last-applied sync cursor (persisted in the `meta` table, same as
+    /// the C app's eh_store_set_cursor).  0 = never synced.
+    pub fn cursor(&self) -> rusqlite::Result<i64> {
+        let raw: Option<String> = self
+            .conn
+            .query_row("SELECT value FROM meta WHERE key='cursor'", [], |r| r.get(0))
+            .optional()?;
+        match raw {
+            None => Ok(0),
+            Some(v) => Ok(v.parse::<i64>().unwrap_or(0)),
+        }
+    }
+
+    pub fn set_cursor(&self, cursor: i64) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO meta(key,value) VALUES('cursor',?1)",
+            [cursor.to_string()],
+        )?;
+        Ok(())
+    }
+
+    /// Begin a transaction (the sync applies each delta batch atomically).
+    pub fn begin(&self) -> rusqlite::Result<()> {
+        self.conn.execute_batch("BEGIN IMMEDIATE;")
+    }
+    pub fn commit(&self) -> rusqlite::Result<()> {
+        self.conn.execute_batch("COMMIT;")
+    }
+    pub fn rollback(&self) -> rusqlite::Result<()> {
+        self.conn.execute_batch("ROLLBACK;")
+    }
+
     /// Insert or update one book.  An existing row keeps its
     /// `downloaded`/`local_path` (a re-sync must not lose the file flag),
     /// exactly like the C app's eh_store_upsert_book.
