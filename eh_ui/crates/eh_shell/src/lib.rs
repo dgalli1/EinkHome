@@ -73,6 +73,32 @@ impl<'a> DrawCtx<'a> {
         let w = self.font.width(s, size) as i32;
         self.text(cx - w / 2, baseline, size, s, gray);
     }
+
+/// Centre `s` on `cx`, truncating (whole glyphs + `…`) so it never exceeds
+/// `max_w` px AND stays within `[cx - max_w/2, cx + max_w/2]` — the C app's
+/// `utf8_fit_width` analog for cover captions that must stay in their cell.
+pub fn text_center_fit(&mut self, cx: i32, baseline: i32, size: f32, s: &str, max_w: i32, gray: u8) {
+        let full = self.font.width(s, size);
+        if full as i32 <= max_w {
+            // Fits whole; centre normally but never bleed off the left edge.
+            let x = (cx - (full as i32) / 2).max(0);
+            self.text(x, baseline, size, s, gray);
+            return;
+        }
+        // Ellipsis; cut chars until we fit inside [cx-half, cx+half].
+        let ell = self.font.width("…", size);
+        let half = max_w / 2;
+        let budget = (half * 2) as f32 - ell;
+        let chars: Vec<char> = s.chars().collect();
+        let mut cut_len = chars.len();
+        while self.font.width(&s[..byte_len(&s, cut_len)], size) > budget && cut_len > 0 {
+            cut_len -= 1;
+        }
+        let shown = format!("{}…", &s[..byte_len(&s, cut_len)]);
+        let w2 = self.font.width(&shown, size) as i32;
+        let x = cx - w2 / 2;
+        self.text(x, baseline, size, &shown, gray);
+    }
     pub fn blit(&mut self, img: &[u8], w: u32, h: u32, fmt: eh_hal::PixelFormat, at: Rect) {
         let used = self.surf.blit_image(img, w, h, fmt, at);
         self.push(used);
@@ -206,7 +232,7 @@ impl Widget for Cover {
         let img_h = (rect.h as f32 * 0.78) as u32;
         let area = Rect { x: rect.x, y: rect.y, w: rect.w, h: img_h };
         if let Some(img) = &self.img {
-            ctx.blit(img, self.img_w, self.img_h, eh_hal::PixelFormat::Grayscale8, area);
+            ctx.blit(img, self.img_w, self.img_h, eh_hal::PixelFormat::Rgb24, area);
         } else {
             // Placeholder: inset card with a border, centred on the tile.
             let border = 2u32;
@@ -218,13 +244,16 @@ impl Widget for Cover {
                 ctx.line(Rect { x: cx, y: cy, w: cw, h: ch }, border, GRAY_LGRAY);
             }
         }
-        // Title + author, centred horizontally in the tile, below the image.
-        let ty = rect.y + img_h + 2;
-        let cx = rect.x + rect.w / 2;
+        // Title + author, centred horizontally + fitted to the tile width so
+        // long titles never run past the cell edge.
+        let text_h = rect.h - img_h;
+        let ty = rect.y + img_h;
+        let cx = rect.x as i32 + rect.w as i32 / 2;
+        let max_w = rect.w.saturating_sub(4) as i32;
         let b1 = ty as i32 + self.title_size as i32;
-        ctx.text_center(cx as i32, b1, self.title_size, &self.title, GRAY_BLACK);
-        if !self.author.is_empty() {
-            ctx.text_center(cx as i32, b1 + self.author_size as i32, self.author_size, &self.author, GRAY_DGRAY);
+        ctx.text_center_fit(cx, b1, self.title_size, &self.title, max_w, GRAY_BLACK);
+        if !self.author.is_empty() && text_h >= (self.title_size + self.author_size) as u32 {
+            ctx.text_center_fit(cx, b1 + self.author_size as i32, self.author_size, &self.author, max_w, GRAY_DGRAY);
         }
     }
     fn dirty(&self, out: &mut Vec<Rect>) {
@@ -239,6 +268,11 @@ impl Widget for Cover {
 
 fn rect_contains(r: Rect, x: i32, y: i32) -> bool {
     (x as u32) >= r.x && (x as u32) < r.x + r.w && (y as u32) >= r.y && (y as u32) < r.y + r.h
+}
+
+/// Byte length of the first `n` chars of `s` (for slicing on a boundary).
+fn byte_len(s: &str, n: usize) -> usize {
+    s.chars().take(n).map(|c| c.len_utf8()).sum::<usize>().min(s.len())
 }
 
 /// A screen: the widget tree + layout engine + dirty tracking driving one
