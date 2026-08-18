@@ -275,8 +275,12 @@ def _ensure_sdl_test_binary() -> Path:
             return _SDL_TEST_OUT
         env = os.environ.copy()
         env["EH_ENABLE_TEST_IPC"] = "1"
+        # The host Rust extraction library (eh_lib) is linked as the
+        # trailing EXTRA arg, exactly like the `make pc` target.
+        rust_lib = EINKHOME_ROOT / "build" / "libeh_lib_host.a"
         proc = subprocess.run(
-            ["bash", "sdk/build_pc.sh", "--output", "build/bookshelf.test"],
+            ["bash", "sdk/build_pc.sh", "--output", "build/bookshelf.test",
+             str(rust_lib)],
             cwd=EINKHOME_ROOT,
             check=False,
             capture_output=True,
