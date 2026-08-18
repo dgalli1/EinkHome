@@ -99,6 +99,7 @@ dependencies = [
 name = "eh_app"
 version = "0.1.0"
 dependencies = [
+ "eh_backend_sdl",
  "eh_hal",
  "eh_layout",
  "eh_render",

@@ -18,6 +18,7 @@
 pub mod client;
 pub mod config;
 pub mod cover;
+pub mod shelf;
 pub mod store;
 pub mod sync;
 pub mod util;

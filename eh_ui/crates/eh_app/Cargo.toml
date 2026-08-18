@@ -36,6 +36,7 @@ jpeg-decoder = { version = "0.3", default-features = false }
 
 [dev-dependencies]
 tempfile = "3"
+eh_backend_sdl = { path = "../eh_backend_sdl" }
 
 [features]
 default = []
