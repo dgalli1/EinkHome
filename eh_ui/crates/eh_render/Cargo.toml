@@ -1,0 +1,13 @@
+[package]
+name = "eh_render"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+eh_hal = { path = "../eh_hal" }
+fontdue = "0.9"
+
+# The renderer is no_std-friendly (no alloc) except for fontdue's font blob.
+[features]
+default = []

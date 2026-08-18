@@ -1,0 +1,13 @@
+# Build std/core/alloc/panic_abort from source against the pinned glibc 2.23
+# sysroot. The prebuilt armv7-unknown-linux-gnueabi std references
+# stat64/open64/statx symbols absent from the firmware's glibc 2.23.
+[unstable]
+build-std = ["std", "core", "alloc", "panic_abort"]
+
+# Static (non-PIC) code model: the firmware's binaries are non-PIE.  A PIE
+# Rust staticlib explodes the RELATIVE relocation table (RELCOUNT ~3281),
+# which trips glibc 2.23's dl-minimal bootstrap allocator at OpenTheme
+# (ld.so: dl-minimal.c:137 realloc assert).  Static defeats that.
+[target.'armv7-unknown-linux-gnueabi.2.23']
+linker = "zig"
+rustflags = ["-C", "target-cpu=arm1176jzf-s", "-C", "relocation-model=static"]

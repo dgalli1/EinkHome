@@ -1,0 +1,28 @@
+[package]
+name = "eh_demo"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "eh_demo_sdl"
+path = "src/bin/sdl.rs"
+required-features = ["sdl"]
+
+[[bin]]
+name = "eh_demo_linuxfb"
+path = "src/bin/linuxfb.rs"
+required-features = ["linuxfb"]
+
+[dependencies]
+eh_hal = { path = "../eh_hal" }
+eh_render = { path = "../eh_render" }
+eh_layout = { path = "../eh_layout" }
+eh_shell = { path = "../eh_shell" }
+eh_backend_sdl = { path = "../eh_backend_sdl", optional = true }
+eh_backend_linuxfb = { path = "../eh_backend_linuxfb", optional = true }
+
+[features]
+default = []
+sdl = ["dep:eh_backend_sdl"]
+linuxfb = ["dep:eh_backend_linuxfb"]

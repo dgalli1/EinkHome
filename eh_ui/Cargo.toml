@@ -1,0 +1,25 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/eh_hal",
+    "crates/eh_render",
+    "crates/eh_layout",
+    "crates/eh_shell",
+    "crates/eh_backend_sdl",
+    "crates/eh_backend_linuxfb",
+    "crates/eh_backend_inkview",
+    "crates/eh_pb",
+    "crates/eh_demo",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+# Device staticlibs must not use Rust LTO (GNU ld cannot consume bitcode) and
+# should drop the unwind runtime; the C app links the result. Same reasoning
+# as eh_lib.
+[profile.release]
+panic = "abort"
+codegen-units = 1

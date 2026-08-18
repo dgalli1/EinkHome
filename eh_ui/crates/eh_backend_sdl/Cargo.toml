@@ -1,0 +1,12 @@
+[package]
+name = "eh_backend_sdl"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+eh_hal = { path = "../eh_hal" }
+sdl2 = "0.36"
+
+[features]
+default = []

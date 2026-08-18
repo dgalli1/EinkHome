@@ -1,0 +1,9 @@
+[package]
+name = "eh_backend_inkview"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+eh_hal = { path = "../eh_hal" }
+eh_render = { path = "../eh_render" }

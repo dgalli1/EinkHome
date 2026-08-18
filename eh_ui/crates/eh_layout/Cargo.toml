@@ -1,0 +1,9 @@
+[package]
+name = "eh_layout"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+eh_hal = { path = "../eh_hal" }
+taffy = "0.13"

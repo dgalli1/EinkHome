@@ -24,3 +24,7 @@ tmp/
 
 # Rust native lib (eh_lib) build artifacts
 eh_lib/target/
+
+# Device screenshots (scp'd off a PocketBook via ssh)
+scr*.bmp
+scr*.png

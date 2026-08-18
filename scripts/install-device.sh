@@ -81,10 +81,15 @@ usage: $(basename "$0") [flags] <device-ip> [api-url]
        $(basename "$0") --abi armhf <device-ip> [api-url]
        $(basename "$0") --build [--abi armhf] <device-ip> [api-url]
        $(basename "$0") --mock[|--real] [--reset-db] <device-ip> [api-url]
+       $(basename "$0") --demo <device-ip>
 
 Flags (combinable, any order before the positional args):
   --build      rebuild the binary first (default: build only when missing).
   --abi armhf  use the build/bookshelf.armhf.app hard-float build.
+  --demo       install the Rust GUI toolkit demo (build/pb-demo.app) as
+               /mnt/ext1/applications/demo.app (a normal app, NOT the home
+               task — the real bookshelf home task is left untouched).
+               Standalone: does not need --mock/--real/--reset-db (skipped).
   --mock       use the 100k mock server: (re)start the host pbemu-api
                with api/config/server-100k.json (mock provider, 100k OL
                corpus) before installing.
@@ -109,6 +114,7 @@ DEVICE=""
 API_URL=""
 DO_BUILD=0
 ABI="armel"
+DEMO=0
 # "" (leave the host server alone) | mock | real
 DATA_MODE=""
 DO_RESET_DB=0
@@ -118,6 +124,9 @@ while [ $# -gt 0 ]; do
 	-h | --help) usage ;;
 	--build)
 		DO_BUILD=1
+		;;
+	--demo)
+		DEMO=1
 		;;
 	--abi)
 		ABI="${2:-}"
@@ -166,14 +175,41 @@ fi
 # armhf = the hard-float build linked against U1030_6.11.1437.  The
 # destination name is bookshelf.app in both cases — monitor.app resolves
 # the home task by that exact name.
+#
+# --demo installs the Rust GUI toolkit demo (build/pb-demo.app) instead of
+# the full C bookshelf.  The demo is standalone (renders a responsive cover
+# grid; it does not talk to the pbemu-api), so --mock/--real/--reset-db are
+# skipped when it is selected.
 SRC_APP="${REPO_ROOT}/build/bookshelf.app"
 if [ "${ABI}" = "armhf" ]; then
 	SRC_APP="${REPO_ROOT}/build/bookshelf.armhf.app"
 fi
+if [ "${DEMO}" = "1" ]; then
+	SRC_APP="${REPO_ROOT}/build/pb-demo.app"
+fi
 SRC_CFG="${REPO_ROOT}/build/bookshelf.cfg"
+
+# Where the binary lands + the app name it is registered under.
+#   non-demo: /mnt/ext1/system/bin/bookshelf.app — the home task.
+#   --demo:   /mnt/ext1/applications/demo.app — a normal app; keeps the real
+#             home task (and its C shell) untouched, and is launchable from
+#             the firmware's app list or `../../applications/demo.app`.
+DEST_DIR="/mnt/ext1/system/bin"
+DEST_APP_NAME="bookshelf.app"
+if [ "${DEMO}" = "1" ]; then
+	DEST_DIR="/mnt/ext1/applications"
+	DEST_APP_NAME="demo.app"
+fi
+DEST_APP="${DEST_DIR}/${DEST_APP_NAME}"
 
 if [ "${DO_BUILD}" = "1" ] || [ ! -f "${SRC_APP}" ]; then
 	echo "==> building ${SRC_APP}"
+	if [ "${DEMO}" = "1" ]; then
+		echo "ERROR: ${SRC_APP} not found; build it with:" >&2
+		echo "  (cd ${REPO_ROOT}/eh_ui && cargo +nightly zigbuild --release --target armv7-unknown-linux-gnueabi.2.23 -p eh_pb)" >&2
+		echo "  PBEMU_FIRMWARE_DIR=pbemu/U633_6.8.2817 LINK_INPUTS=eh_ui/target/armv7-unknown-linux-gnueabi/release/libeh_pb.a sdk/build_armel.sh sdk/pb-demo/main.c --output build/pb-demo.app" >&2
+		exit 1
+	fi
 	if [ "${ABI}" = "armhf" ]; then
 		make -C "${REPO_ROOT}" armhf
 	else
@@ -185,6 +221,13 @@ if [ ! -f "${SRC_APP}" ]; then
 	echo "ERROR: ${SRC_APP} not found; pass --build or run ./scripts/run.sh first" >&2
 	exit 1
 fi
+
+# The --demo build is standalone (no pbemu-api dependency): skip the API
+# server restart, config write and --reset-db below.  The demo still needs
+# ssh + scp + the home-task install.
+if [ "${DEMO}" = "1" ]; then
+	echo "==> installing Rust GUI toolkit demo as /mnt/ext1/applications/demo.app"
+else
 
 # --mock / --real: (re)start the host pbemu-api with the matching config.
 # Both backends bind the same LAN host:port, so the api_url resolved
@@ -231,22 +274,33 @@ api_url=${API_URL}
 api_token=pbemu-dev-token
 EOF
 
-echo "==> staging to ${DEVICE}:/mnt/ext1/system/bin/"
-echo "    api_url = ${API_URL}"
+fi # --demo skip end
+
+echo "==> staging to ${DEVICE}:${DEST_DIR}"
+if [ "${DEMO}" = "1" ]; then
+	echo "    (standalone demo: no api_url needed)"
+else
+	echo "    api_url = ${API_URL}"
+fi
 
 # A previously installed copy is often owned by a different user (the
 # pbjb installer writes as root) or read-only, so scp cannot overwrite
 # it in place — it fails with `dest open ...: Failure`.  Remove the
-# stale files first: rm only needs write permission on the directory,
-# which the ssh user has.
-ssh ${SSH_COMMON} "root@${DEVICE}" rm -f \
-	/mnt/ext1/system/bin/bookshelf.app /mnt/ext1/system/bin/bookshelf.cfg
+# stale file first: rm only needs write permission on the directory,
+# which the ssh user has.  The non-demo cfg is removed too; the demo
+# has no config.
+_REMOVE="${DEST_APP}"
+if [ "${DEMO}" != "1" ]; then
+	_REMOVE="${_REMOVE} /mnt/ext1/system/bin/bookshelf.cfg"
+fi
+ssh ${SSH_COMMON} "root@${DEVICE}" rm -f ${_REMOVE}
 
 # --reset-db: wipe the on-device library store so the app re-syncs from
 # scratch on next launch.  The store, covers and legacy json live next
 # to the config file in the app dir.  Deliberately leaves explorer-3.db
-# (the firmware reader's reading-progress DB) alone.
-if [ "${DO_RESET_DB}" = "1" ]; then
+# (the firmware reader's reading-progress DB) alone.  Skipped for --demo
+# (the demo has no library store).
+if [ "${DEMO}" != "1" ] && [ "${DO_RESET_DB}" = "1" ]; then
 	echo "==> resetting on-device library db + cover cache"
 	ssh ${SSH_COMMON} "root@${DEVICE}" sh -c '
 		rm -f /mnt/ext1/system/bin/bookshelf_lib.db \
@@ -267,21 +321,44 @@ fi
 # breaks the reader's book-open handshake (the reader shows an
 # hourglass and closes).  If the binary is ever missing, the launcher
 # falls back to the stock /ebrmain/bin/bookshelf.app on its own.
-scp ${SSH_COMMON} "${SRC_APP}" "root@${DEVICE}:/mnt/ext1/system/bin/bookshelf.app"
-scp ${SSH_COMMON} "${SRC_CFG}" "root@${DEVICE}:/mnt/ext1/system/bin/bookshelf.cfg"
+scp ${SSH_COMMON} "${SRC_APP}" "root@${DEVICE}:${DEST_APP}"
+if [ "${DEMO}" = "1" ]; then
+	# The demo is standalone; do not push bookshelf.cfg (nothing reads it).
+	echo "    (demo: skipped bookshelf.cfg push)"
+else
+	scp ${SSH_COMMON} "${SRC_CFG}" "root@${DEVICE}:/mnt/ext1/system/bin/bookshelf.cfg"
+fi
 
 # Make the binary executable, kill any stale copy, restart cleanly.
 # The `killall` is best-effort: it's OK if no process matches.
-ssh ${SSH_COMMON} "root@${DEVICE}" sh -c '
-	set -e
-	chmod +x /mnt/ext1/system/bin/bookshelf.app
-	# Clear any stale log so the next run is easy to read.
-	: >/mnt/ext1/applications/bookshelf.log
-	killall bookshelf.app 2>/dev/null || true
-	sleep 1
-'
+if [ "${DEMO}" = "1" ]; then
+	# Demo logs to /tmp/pbdemo.log; nothing to clear on the app dir.
+	ssh ${SSH_COMMON} "root@${DEVICE}" sh -c '
+		set -e
+		chmod +x '"${DEST_APP}"'
+		killall '"${DEST_APP_NAME}"' 2>/dev/null || true
+		sleep 1
+	'
+else
+	ssh ${SSH_COMMON} "root@${DEVICE}" sh -c '
+		set -e
+		chmod +x '"${DEST_APP}"'
+		# Clear any stale log so the next run is easy to read.
+		: >/mnt/ext1/applications/bookshelf.log
+		killall '"${DEST_APP_NAME}"' 2>/dev/null || true
+		sleep 1
+	'
+fi
 
 echo "==> installed.  verify with:"
-echo "    ssh root@${DEVICE} 'tail -f /mnt/ext1/applications/bookshelf.log'"
-echo "    reboot the device; the custom bookshelf IS the home screen"
-echo "    (Home button opens it; the binary is the home task directly)."
+if [ "${DEMO}" = "1" ]; then
+	echo "    ssh root@${DEVICE} 'cat /tmp/pbdemo.log'   (toolkit init trace)"
+	echo "    Installed as /mnt/ext1/applications/demo.app (a normal app,"
+	echo "    NOT the home task — the C bookshelf home task is untouched)."
+	echo "    Launch it from the firmware app list, or:"
+	echo "    ssh root@${DEVICE} '/mnt/ext1/applications/demo.app'"
+else
+	echo "    ssh root@${DEVICE} 'tail -f /mnt/ext1/applications/bookshelf.log'"
+	echo "    reboot the device; the custom bookshelf IS the home screen"
+	echo "    (Home button opens it; the binary is the home task directly)."
+fi
