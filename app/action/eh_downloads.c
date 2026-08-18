@@ -442,27 +442,12 @@ dl_fetch(BsJob *job)
 
 /* Launch the configured reader on an already-downloaded book.
  *
- * The standard reader (and the auto default) goes through OpenBook() —
- * the firmware's canonical book-open path.  OpenBook() routes the book
- * to monitor.app / reader_controller, which picks the reader for the
- * file type, registers the book with the task, and brings the reader to
- * the foreground.  NewTaskEx() on the reader binary does none of that:
- * it execs the app without a book-open request (the reader came up on
- * its home screen), it never makes the task visible, and it fails
- * silently when the resolved app does not exist on this firmware (the
- * server's open-with table names pdfviewer, which the Era image does
- * not ship — access() inside NewTaskEx then returns -1 and nothing
- * happens).
- *
- * Only an explicitly selected third-party reader (KOReader) is still
- * launched via NewTaskEx() — it is a standalone app that takes the book
- * path as its argument and has no OpenBook integration.  argv[0] must
- * be the program path: the task launcher passes the args array through
- * as-is, so with only the book path in the array the reader would
- * receive it as argv[0] and never see a book argument.  Flags 0x25
- * (TASK_HIDDEN|TASK_NOUPDATEONFOCUS|TASK_SINGLEINSTANCE|TASK_OUTOFSTACK)
- * match what reader_controller.app and the stock bookshelf pass to
- * NewTaskEx() for app launches. */
+ * The launch mechanics are platform policy (how a book-open reaches the
+ * reader, which task flags, whether a third-party reader is exec'd):
+ * the PocketBook backend picks OpenBook() vs NewTaskEx() behind the
+ * eh_plat_launch_reader seam; a future platform does its own.  The
+ * neutral code only resolves the chosen reader path and owns the
+ * hourglass-during-launch UX. */
 void
 eh_launch_reader(BsBook *b)
 {
@@ -481,26 +466,8 @@ eh_launch_reader(BsBook *b)
     const char *reader_path = NULL;
     if (eh_g_state.reader_pref > 0 && eh_g_state.reader_pref <= eh_g_reader_count)
         reader_path = eh_g_readers[eh_g_state.reader_pref - 1].path;
-    if (reader_path != NULL && access(reader_path, X_OK) == 0 &&
-        strcmp(reader_path, eh_plat_reader_std_path()) != 0) {
-        const char *rbase = strrchr(reader_path, '/');
-        rbase = rbase ? rbase + 1 : reader_path;
-        char *args[3] = {(char *)reader_path, path, NULL};
-        eh_LOG("[bookshelf] launching reader app=%s path=%s reader_pref=%d\n",
-            rbase,
-            path,
-            eh_g_state.reader_pref);
-        if (NewTaskEx(reader_path, args, rbase, b->title, NULL, 0x25, 0) < 0) {
-            HideHourglass();
-            eh_redraw_shelf();
-        }
-        return;
-    }
 
-    eh_LOG("[bookshelf] launching reader via OpenBook path=%s reader_pref=%d\n",
-        path,
-        eh_g_state.reader_pref);
-    if (OpenBook(path, NULL, 1) < 0) {
+    if (eh_plat_launch_reader(path, reader_path, b->title) != 0) {
         HideHourglass();
         eh_redraw_shelf();
     }

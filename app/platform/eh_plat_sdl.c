@@ -39,8 +39,11 @@
 #include "eh_core.h"
 #include "eh_ui.h"
 #include "eh_launcher.h"
+#include "eh_progress.h"
 #include "sdl/inkview.h"
 #include "sdl/hwconfig.h"
+
+#include "sqlite3.h"
 
 /* ── window / canvas state ──────────────────────────────────────────── */
 /*
@@ -825,6 +828,87 @@ void
 eh_plat_cover_flush(void)
 {
     sdl_merge_covers();
+}
+
+/* Blit an RGB24 cover into the SDL colour overlay (g_canvas24, exposed
+ * via GetCanvas) exactly as the app does on the Kaleido device.  Merged
+ * into the display buffer on the next FullUpdate. */
+void
+eh_plat_blit_cover(int cx, int cy, int cw, int ch, const ibitmap *src)
+{
+    icanvas *cv = GetCanvas();
+    if (cv == NULL || cv->depth != 24 || cv->addr == 0)
+        return;
+    uint8_t *base = (uint8_t *)(uintptr_t)cv->addr;
+    lockCanvasDrawing();
+    for (int y = 0; y < ch; y++) {
+        int sy = (y * src->height) / ch;
+        if (sy >= src->height)
+            sy = src->height - 1;
+        uint8_t       *dst = base + (size_t)(cy + y) * (size_t)cv->scanline + (size_t)cx * 3u;
+        const uint8_t *row = src->data + (size_t)sy * (size_t)src->scanline;
+        for (int x = 0; x < cw; x++) {
+            int sx = (x * src->width) / cw;
+            if (sx >= src->width)
+                sx = src->width - 1;
+            dst[x * 3u + 0] = row[sx * 3u + 0];
+            dst[x * 3u + 1] = row[sx * 3u + 1];
+            dst[x * 3u + 2] = row[sx * 3u + 2];
+        }
+    }
+    unlockCanvasDrawing();
+}
+
+/* Host backend launches no reader: OpenBook/NewTaskEx are no-ops that
+ * report success, so report success to leave the hourglass up (the PC
+ * build has nothing to hand the book to). */
+int
+eh_plat_launch_reader(const char *path, const char *reader_path,
+                      const char *title)
+{
+    (void)path; (void)reader_path; (void)title;
+    return 0;
+}
+
+/* Reading progress: the SDL backend reads the same PB firmware
+ * explorer-3.db schema (it is the emulator host exposing PB data).
+ * Progress comes from books_settings — the integrated reader writes
+ * cpage/npage, and the KOReader pocketbooksync plugin the same table. */
+int
+eh_plat_progress_read(sqlite3 *db, BsProgressEntry *out, int cap)
+{
+    if (db == NULL || out == NULL || cap <= 0)
+        return 0;
+    int n = 0;
+    sqlite3_stmt *st = NULL;
+    int           rc = sqlite3_prepare_v2(db,
+                                "SELECT fol.name, f.filename, bs.cpage, bs.npage"
+                                          " FROM books_settings bs"
+                                          " JOIN files f ON f.book_id = bs.bookid"
+                                          " JOIN folders fol ON fol.id = f.folder_id"
+                                          " WHERE bs.npage IS NOT NULL AND bs.npage > 0",
+                                -1,
+                                &st,
+                                NULL);
+    if (rc == SQLITE_OK) {
+        while (sqlite3_step(st) == SQLITE_ROW && n < cap) {
+            const char *folder = (const char *)sqlite3_column_text(st, 0);
+            const char *file = (const char *)sqlite3_column_text(st, 1);
+            long long   cpage = sqlite3_column_int64(st, 2);
+            long long   npage = sqlite3_column_int64(st, 3);
+            if (folder == NULL || file == NULL || npage <= 0)
+                continue;
+            BsProgressEntry *e = &out[n];
+            snprintf(e->path, sizeof e->path, "%s/%s", folder, file);
+            int pct = (int)(cpage * 100 / npage);
+            e->percent = pct < 1 ? 0 : (pct > 100 ? 100 : pct);
+            n++;
+        }
+        sqlite3_finalize(st);
+    } else {
+        eh_LOG("[bookshelf] progress: query failed: %s\n", sqlite3_errmsg(db));
+    }
+    return n;
 }
 
 void

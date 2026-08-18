@@ -7,13 +7,14 @@
 #include "sqlite3.h"
 
 /* ── reading progress ──────────────────────────────────────────────────
- * Both readers report into the firmware's explorer-3.db
- * `books_settings` table: the integrated reader writes its current
- * page / total pages while reading, and the KOReader plugin
- * "pocketbooksync" (github.com/ckilb/pocketbooksync.koplugin) writes
- * KOReader's progress into the very same table.  So one read of that
- * table covers both sources.  The shelf renders percent-read as a
- * black bar at the bottom of every cover. */
+ * Percent-read per book is sourced from the platform's progress store
+ * (on PocketBook the firmware's explorer-3.db: the integrated reader
+ * writes page/total while reading, and the KOReader plugin
+ * "pocketbooksync" writes into the very same table).  The schema query
+ * is platform-owned behind eh_plat_progress_read; this module only
+ * orchestrates the copy, caches the map, and answers lookups.  The
+ * shelf renders percent-read as a black bar at the bottom of every
+ * cover. */
 
 /* The progress source DB and its writable snapshot (db + -wal + -shm)
  * live at platform-owned paths: eh_plat_progress_db() is the firmware
@@ -23,11 +24,6 @@
  * at most; refusing to copy anything pathological keeps a huge source
  * from stalling the worker. */
 #define EH_PROGRESS_COPY_MAX (64 * 1024 * 1024)
-
-typedef struct {
-    char path[EH_MAX_PATH_LEN]; /* folder + "/" + filename */
-    int  percent;            /* 0..100 */
-} BsProgressEntry;
 
 static BsProgressEntry g_progress[4096];
 static int           g_progress_count = 0;
@@ -114,44 +110,16 @@ progress_db_open(void)
  * publishing it wholesale at the end (g_progress_count is set last) so
  * progress_percent never observes a half-populated map — it reads either
  * the previous complete map or the new one.  Runs on the main thread;
- * the worker only copied the snapshot. */
+ * the worker only copied the snapshot.  The schema query itself is
+ * platform-owned (eh_plat_progress_read). */
 static void
 progress_reload_db(void)
 {
     sqlite3 *db = progress_db_open();
     if (db == NULL)
         return;
-    int n = 0;
-    sqlite3_stmt *st = NULL;
-    int           rc = sqlite3_prepare_v2(db,
-                                "SELECT fol.name, f.filename, bs.cpage, bs.npage"
-                                          " FROM books_settings bs"
-                                          " JOIN files f ON f.book_id = bs.bookid"
-                                          " JOIN folders fol ON fol.id = f.folder_id"
-                                          " WHERE bs.npage IS NOT NULL AND bs.npage > 0",
-                                -1,
-                                &st,
-                                NULL);
-    if (rc == SQLITE_OK) {
-        while (sqlite3_step(st) == SQLITE_ROW && n < 4096) {
-            const char *folder = (const char *)sqlite3_column_text(st, 0);
-            const char *file = (const char *)sqlite3_column_text(st, 1);
-            long long   cpage = sqlite3_column_int64(st, 2);
-            long long   npage = sqlite3_column_int64(st, 3);
-            if (folder == NULL || file == NULL || npage <= 0)
-                continue;
-            BsProgressEntry *e = &g_progress[n];
-            snprintf(e->path, sizeof e->path, "%s/%s", folder, file);
-            int pct = (int)(cpage * 100 / npage);
-            e->percent = pct < 1 ? 0 : (pct > 100 ? 100 : pct);
-            n++;
-        }
-        sqlite3_finalize(st);
-    } else {
-        eh_LOG("[bookshelf] progress: query failed: %s\n", sqlite3_errmsg(db));
-        sqlite3_close(db);
-        return;
-    }
+    int n = eh_plat_progress_read(db, g_progress,
+                                  (int)(sizeof g_progress / sizeof g_progress[0]));
     sqlite3_close(db);
     /* Publish on complete: the count is the commit point. */
     g_progress_count = n;

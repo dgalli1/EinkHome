@@ -41,7 +41,7 @@ OUT_PC := $(CURDIR)/build/bookshelf.pc
 # Recursive (=) so this stays empty-proof: a `:=` here would expand before
 # SOURCES is defined below and silently make `make pc` skip rebuilding when
 # app sources change (bookshelf.pc would then never track edits).
-PC_SOURCES = $(filter-out platform/eh_plat_pb.c,$(SOURCES))
+PC_SOURCES = $(filter-out platform/eh_plat_pb.c platform/eh_plat_pb_launcher.c,$(SOURCES))
 
 # Rust native library (eh_lib): book metadata/cover extraction + future
 # Rust-backed helpers.  FFI surface declared in app/data/eh_extract.h (used
@@ -60,6 +60,7 @@ SOURCES := \
 	core/eh_i18n.c \
 	core/eh_worker.c \
 	platform/eh_plat_pb.c \
+	platform/eh_plat_pb_launcher.c \
 	data/eh_store.c \
 	data/eh_model.c \
 	data/eh_local.c \

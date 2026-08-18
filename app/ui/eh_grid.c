@@ -371,47 +371,17 @@ eh_cover_schedule_next(void)
     }
 }
 
-/* Blit an RGB24 cover directly into the libinkview canvas, bypassing
- * the 8-bit draw pipeline (iv_area flattens 24-bit sources to grey).
- * The QPA bridge that eink-reader uses does exactly this, and it is the
- * only way an app gets colour on the Kaleido panel.  Nearest-neighbour
- * scale to the tile rect; the canvas must be 24bpp, else fall back. */
-static void
-blit_cover_color24(int cx, int cy, int cw, int ch, const ibitmap *src)
-{
-    icanvas *cv = GetCanvas();
-    if (cv == NULL || cv->depth != 24 || cv->addr == 0)
-        return;
-    uint8_t *base = (uint8_t *)(uintptr_t)cv->addr;
-    lockCanvasDrawing();
-    for (int y = 0; y < ch; y++) {
-        int sy = (y * src->height) / ch;
-        if (sy >= src->height)
-            sy = src->height - 1;
-        uint8_t       *dst = base + (size_t)(cy + y) * (size_t)cv->scanline + (size_t)cx * 3u;
-        const uint8_t *row = src->data + (size_t)sy * (size_t)src->scanline;
-        for (int x = 0; x < cw; x++) {
-            int sx = (x * src->width) / cw;
-            if (sx >= src->width)
-                sx = src->width - 1;
-            /* The 24-bit bitmap from LoadPNGToFormat is already in the
-             * fb's byte order (RGB); writing it verbatim keeps the
-             * colours correct on the device and in the viewer. */
-            dst[x * 3u + 0] = row[sx * 3u + 0];
-            dst[x * 3u + 1] = row[sx * 3u + 1];
-            dst[x * 3u + 2] = row[sx * 3u + 2];
-        }
-    }
-    unlockCanvasDrawing();
-}
-
+/* Blit the colour cover through the platform seam: the backend owns the
+ * RGB24 canvas path (Kaleido framebuffer on PB, RGB24 overlay on SDL)
+ * that bypasses the 8-bit draw pipeline (iv_area flattens 24-bit sources
+ * to grey). */
 void
 eh_blit_cover(int cx, int cy, int cw, int ch, const BsBook *b)
 {
     BsCoverSlot *s = eh_cover_slot(b->id, 1);
     if (s != NULL && s->cover_bmp != NULL) {
         if (s->cover_bmp->depth == 24) {
-            blit_cover_color24(cx, cy, cw, ch, s->cover_bmp);
+            eh_plat_blit_cover(cx, cy, cw, ch, s->cover_bmp);
             return;
         }
         StretchBitmap(cx, cy, cw, ch, s->cover_bmp, 0);

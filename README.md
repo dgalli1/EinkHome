@@ -19,7 +19,11 @@ app/                # the app sources, split by layer:
   core/             #   boot/event loop, HTTP, config, i18n, worker, eh_core.h
   data/             #   store (SQLite), model/sync, local scan, metadata, progress
   ui/               #   drawing: grid, top bar, popups, overlays, browsers
-  action/           #   downloads/context menu, input hit-testing, app launcher
+  action/           #   downloads/context menu, input hit-testing, app launcher UI
+  platform/         #   the eh_plat_* seam + backends: eh_plat_pb.c (boot/services/
+                    #   panel/identity), eh_plat_pb_launcher.c (PB view.json +
+                    #   apps_db.json launcher parser + /mnt/ext1/applications scan),
+                    #   eh_plat_sdl.c (native PC/SDL2 backend), eh_plat.h
   vendor/           #   cJSON, sqlite3.h
 eh_lib/             # Rust native library, compiled as a C-ABI staticlib and
                     # linked into the C binary (build/libeh_lib.a).  Exposes

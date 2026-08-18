@@ -8,10 +8,13 @@
 
 #include "eh_core.h"
 #include "eh_ui.h"
-#include "eh_launcher.h"
+#include "eh_progress.h"
 #include "eh_config.h"
+#include "sqlite3.h"
 
 #include <ctype.h>
+#include <string.h>
+#include <unistd.h>
 
 /* Height of the self-drawn status strip used when the firmware's panel
  * painter never activates (PanelHeight()==0 on the live device).  Matches
@@ -215,22 +218,11 @@ eh_plat_log_identity(void)
            (fw != NULL && fw[0] != '\0') ? fw : "?");
 }
 
-/* ── app launcher (PB data source + launch) ─────────────────────────── */
-/* The launcher's app list on PocketBook comes from the firmware's
- * view.json / apps_db.json + the /mnt/ext1/applications *.app scan.  That
- * parser (eh_lc_* resolvers + the build walk) lives in eh_launcher.c as
- * eh_launcher_build_pb(); this delegates to it.  eh_plat_launcher_build
- * writes into the passed items array (the app's global eh_g_launcher_items,
- * so the PB parser's own globals are reused) and returns the count. */
-
-int
-eh_plat_launcher_build(BsLauncherItem *items, int cap)
-{
-    (void)items;
-    (void)cap;
-    eh_launcher_build_pb();
-    return eh_g_launcher_count;
-}
+/* ── app launcher (PB launch) ───────────────────────────────────────── */
+/* The launcher's PB item source (view.json/apps_db.json + the
+ * /mnt/ext1/applications *.app scan) lives in app/platform/
+ * eh_plat_pb_launcher.c behind eh_plat_launcher_build.  This file only
+ * implements the app-launch side. */
 
 /* Launch a launcher app on PocketBook via NewTaskEx.  argv[0] is the app
  * path followed by its params; run_as_reader=0 (a launcher tile is a plain
@@ -248,6 +240,117 @@ eh_plat_launch_app(const BsLauncherItem *it, char **argv, int argc)
     if (NewTaskEx(it->path, argv, base, it->text, NULL, 0x25 | TASK_MAKEACTIVE, 0) < 0)
         return -1;
     return 0;
+}
+
+/* Launch a reader on an already-downloaded book (moved out of the neutral
+ * eh_launch_reader).  The standard reader (and the auto default) goes
+ * through OpenBook() — the firmware's canonical book-open path, which
+ * routes the book to monitor.app / reader_controller: that picks the
+ * reader for the file type, registers the book with the task, and brings
+ * the reader to the foreground.  NewTaskEx() on the reader binary does
+ * none of that (it execs without a book-open request, never makes the
+ * task visible, and fails silently when the resolved app does not exist
+ * on this firmware — the server's open-with table names pdfviewer, which
+ * the Era image does not ship).
+ *
+ * Only an explicitly selected third-party reader (KOReader) is exec'd via
+ * NewTaskEx() — it is a standalone app that takes the book path as its
+ * argument and has no OpenBook integration.  argv[0] must be the program
+ * path: the task launcher passes the args array through as-is, so with
+ * only the book path in the array the reader would receive it as argv[0]
+ * and never see a book argument.  Flags 0x25
+ * (TASK_HIDDEN|TASK_NOUPDATEONFOCUS|TASK_SINGLEINSTANCE|TASK_OUTOFSTACK)
+ * match what reader_controller.app and the stock bookshelf pass to
+ * NewTaskEx() for app launches. */
+int
+eh_plat_launch_reader(const char *path, const char *reader_path,
+                      const char *title)
+{
+    if (reader_path != NULL && access(reader_path, X_OK) == 0 &&
+        strcmp(reader_path, eh_plat_reader_std_path()) != 0) {
+        const char *rbase = strrchr(reader_path, '/');
+        rbase = rbase ? rbase + 1 : reader_path;
+        char *args[3] = {(char *)reader_path, (char *)path, NULL};
+        eh_LOG("[bookshelf] launching reader app=%s path=%s\n", rbase, path);
+        return NewTaskEx(reader_path, args, rbase, title, NULL, 0x25, 0) < 0;
+    }
+    eh_LOG("[bookshelf] launching reader via OpenBook path=%s\n", path);
+    return OpenBook(path, NULL, 1) < 0;
+}
+
+/* Blit an RGB24 cover directly into the libinkview canvas, bypassing the
+ * 8-bit draw pipeline (iv_area flattens 24-bit sources to grey).  The
+ * QPA bridge that eink-reader uses does exactly this, and it is the only
+ * way an app gets colour on the Kaleido panel.  Nearest-neighbour scale
+ * to the tile rect; the canvas must be 24bpp, else fall back. */
+void
+eh_plat_blit_cover(int cx, int cy, int cw, int ch, const ibitmap *src)
+{
+    icanvas *cv = GetCanvas();
+    if (cv == NULL || cv->depth != 24 || cv->addr == 0)
+        return;
+    uint8_t *base = (uint8_t *)(uintptr_t)cv->addr;
+    lockCanvasDrawing();
+    for (int y = 0; y < ch; y++) {
+        int sy = (y * src->height) / ch;
+        if (sy >= src->height)
+            sy = src->height - 1;
+        uint8_t       *dst = base + (size_t)(cy + y) * (size_t)cv->scanline + (size_t)cx * 3u;
+        const uint8_t *row = src->data + (size_t)sy * (size_t)src->scanline;
+        for (int x = 0; x < cw; x++) {
+            int sx = (x * src->width) / cw;
+            if (sx >= src->width)
+                sx = src->width - 1;
+            /* The 24-bit bitmap from LoadPNGToFormat is already in the
+             * fb's byte order (RGB); writing it verbatim keeps the
+             * colours correct on the device and in the viewer. */
+            dst[x * 3u + 0] = row[sx * 3u + 0];
+            dst[x * 3u + 1] = row[sx * 3u + 1];
+            dst[x * 3u + 2] = row[sx * 3u + 2];
+        }
+    }
+    unlockCanvasDrawing();
+}
+
+/* Reading progress: the platform owns the firmware explorer-3.db schema.
+ * Progress comes from its books_settings table — the integrated reader
+ * writes cpage/npage while reading, and the KOReader pocketbooksync
+ * plugin writes into the very same table. */
+int
+eh_plat_progress_read(sqlite3 *db, BsProgressEntry *out, int cap)
+{
+    if (db == NULL || out == NULL || cap <= 0)
+        return 0;
+    int n = 0;
+    sqlite3_stmt *st = NULL;
+    int           rc = sqlite3_prepare_v2(db,
+                                "SELECT fol.name, f.filename, bs.cpage, bs.npage"
+                                          " FROM books_settings bs"
+                                          " JOIN files f ON f.book_id = bs.bookid"
+                                          " JOIN folders fol ON fol.id = f.folder_id"
+                                          " WHERE bs.npage IS NOT NULL AND bs.npage > 0",
+                                -1,
+                                &st,
+                                NULL);
+    if (rc == SQLITE_OK) {
+        while (sqlite3_step(st) == SQLITE_ROW && n < cap) {
+            const char *folder = (const char *)sqlite3_column_text(st, 0);
+            const char *file = (const char *)sqlite3_column_text(st, 1);
+            long long   cpage = sqlite3_column_int64(st, 2);
+            long long   npage = sqlite3_column_int64(st, 3);
+            if (folder == NULL || file == NULL || npage <= 0)
+                continue;
+            BsProgressEntry *e = &out[n];
+            snprintf(e->path, sizeof e->path, "%s/%s", folder, file);
+            int pct = (int)(cpage * 100 / npage);
+            e->percent = pct < 1 ? 0 : (pct > 100 ? 100 : pct);
+            n++;
+        }
+        sqlite3_finalize(st);
+    } else {
+        eh_LOG("[bookshelf] progress: query failed: %s\n", sqlite3_errmsg(db));
+    }
+    return n;
 }
 
 /* ── device capabilities ────────────────────────────────────────────── */
@@ -342,32 +445,4 @@ eh_plat_sysapp_dir(void)
 {
     const char *d = getenv("EH_SYSAPP_DIR");
     return (d != NULL && d[0] != '\0') ? d : "/mnt/ext1/system/bin";
-}
-
-/* Launcher desktop-config candidates, tried in order (the firmware
- * rewrites the desktop JSONs into both locations; the SDK vintages only
- * ship one). */
-static const char *const g_lc_db_paths[] = {
-    "/mnt/ext1/system/config/desktop/apps_db.json",
-    "/ebrmain/config/desktop/apps_db.json",
-    NULL,
-};
-static const char *const g_lc_view_paths[] = {
-    "/mnt/ext1/system/config/desktop/view.json",
-    "/ebrmain/config/desktop/view.json",
-    NULL,
-};
-
-const char *const *
-eh_plat_launcher_desktop_paths(const char *kind)
-{
-    if (kind != NULL && strcmp(kind, "view") == 0)
-        return g_lc_view_paths;
-    return g_lc_db_paths;
-}
-
-const char *
-eh_plat_launcher_user_apps_dir(void)
-{
-    return "/mnt/ext1/applications";
 }

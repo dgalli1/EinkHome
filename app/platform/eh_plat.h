@@ -6,7 +6,10 @@
  * PocketBook is the first backend (inkview + hwconfig).  App code includes
  * this header and the inkview drawing/event subset it exposes; it never
  * includes <inkview.h> / <hwconfig.h> directly.  All PocketBook-specific
- * boot, service, and device-identity logic lives in app/platform/eh_plat_pb.c.
+ * logic lives in app/platform/: boot, service, panel and device-identity in
+ * eh_plat_pb.c; the launcher data source (firmware view.json/apps_db.json
+ * parser + the /mnt/ext1/applications *.app scan) in
+ * eh_plat_pb_launcher.c.
  *
  * Adding a future platform (Kobo/Kindle/…) means providing a new backend
  * that implements the functions declared below and the same drawing/event
@@ -21,7 +24,8 @@
  * (DrawString/DrawLine/DrawRect/FillArea/SetFont/OpenFont/CloseFont/
  * StringWidth/PartialUpdate/FullUpdate/DrawBitmap/StretchBitmap/
  * GetCanvas/OpenKeyboard/EVT and IV_KEY constants, ibitmap/ifont/irect)
- * is part of the contract.  Colour constants are the contract too:
+ * is part of the contract.
+ * Colour constants are the contract too:
  *   BLACK = 0x000000, DGRAY = 0x555555, LGRAY = 0xaaaaaa, WHITE = 0xffffff
  */
 #ifdef EH_PLATFORM_SDL
@@ -61,6 +65,8 @@ extern void GetKeyboardRect(irect *rect) __attribute__((weak));
 
 struct BsLcProfile;
 struct BsLauncherItem;
+struct BsProgressEntry;
+struct sqlite3;
 
 /* Register with the firmware exactly like the stock bookshelf's main()
  * (InitInkview/IvSetAppCapability/SetOrientation/SetDefaultOrientation/
@@ -124,6 +130,32 @@ int eh_plat_launcher_build(struct BsLauncherItem *items, int cap);
  * its params (NULL-terminated, so argv/argc let a native backend exec
  * directly).  Returns 0 on success, non-zero on failure. */
 int eh_plat_launch_app(const struct BsLauncherItem *it, char **argv, int argc);
+
+/* Launch a reader on an already-downloaded book file.  `path` is the
+ * book's on-disk location; `reader_path` the resolved third-party reader
+ * binary (NULL or the standard reader -> the platform's default open-book
+ * path); `title` the book title used as the launched task's label.
+ * Returns 0 when the launch was initiated, non-zero on failure (the
+ * caller then hides its hourglass and repaints).  PB: OpenBook() routes
+ * to monitor.app/reader_controller; only an explicitly selected third-party
+ * reader (KOReader) is exec'd via NewTaskEx with the firmware flags. */
+int eh_plat_launch_reader(const char *path, const char *reader_path,
+                          const char *title);
+
+/* Query reading progress from the platform's source store.  `db` is the
+ * already-open SQLite handle (the neutral module opens the snapshot);
+ * fill `out` with up to `cap` {path, percent} entries and return the
+ * count.  PB: reads the firmware explorer-3.db books_settings/files/
+ * folders tables.  A future platform stores progress elsewhere. */
+int eh_plat_progress_read(struct sqlite3 *db, struct BsProgressEntry *out,
+                          int cap);
+
+/* Blit an RGB24 cover into the platform's colour surface, bypassing the
+ * 8-bit draw pipeline (iv_area flattens 24-bit sources to grey).  PB: the
+ * Kaleido framebuffer canvas (GetCanvas); SDL: the RGB24 cover overlay.
+ * Nearest-neighbour scale to (cx,cy,cw,ch); no-op when the surface is not
+ * 24bpp. */
+void eh_plat_blit_cover(int cx, int cy, int cw, int ch, const ibitmap *src);
 
 /* ── platform device capabilities ──────────────────────────────────────
  * Per-device special rules live HERE, resolved by the backend, never in
