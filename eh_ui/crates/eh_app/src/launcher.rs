@@ -288,6 +288,7 @@ fn scroll_state<B: Framebuffer>(app: &App<B>) -> (i32, i32) {
 pub fn draw<B: Framebuffer>(surf: &mut eh_render::Surface, app: &mut App<B>, dirty: &mut Vec<Rect>) {
     let w = surf.width();
     let h = app.content_bottom as u32;
+    dirty.push(Rect { x: 0, y: 0, w, h });
     surf.fill_gray(Rect { x: 0, y: 0, w, h }, GRAY_WHITE);
     crate::settings::draw_header(surf, "Applications", dirty);
 
@@ -305,25 +306,31 @@ pub fn draw<B: Framebuffer>(surf: &mut eh_render::Surface, app: &mut App<B>, dir
         return;
     }
 
-    for (i, it) in app.launcher_items.iter().enumerate() {
-        let r = app.launcher_rects[i];
+    let items: Vec<(Rect, bool, String, String)> = app
+        .launcher_items
+        .iter()
+        .zip(app.launcher_rects.iter())
+        .map(|(it, r)| (*r, it.group, it.icon.clone(), it.text.clone()))
+        .collect();
+    for (r, is_group, icon, text) in items.iter() {
+        let r = *r;
         let sy = r.y as i32 - scroll + body_top as i32;
         if sy + r.h as i32 <= body_top as i32 || sy >= body_bottom {
             continue;
         }
-        if it.group {
+        if *is_group {
             // Group heading row (C launcher_draw_heading): white band,
             // baseline rule, title at the left.
             surf.fill_gray(Rect::from_xy(r.x as i32, sy, r.w as i32, r.h as i32), GRAY_WHITE);
             surf.hline(r.x, (sy + r.h as i32 - 2) as u32, r.w, 2, GRAY_BLACK);
-            draw_text(surf, font, 28.0, &it.text, (r.x + 12) as i32, sy + (r.h as i32) / 2 + 10, GRAY_BLACK, &mut glyph);
+            draw_text(surf, font, 28.0, text, (r.x + 12) as i32, sy + (r.h as i32) / 2 + 10, GRAY_BLACK, &mut glyph);
         } else {
             let cx = (r.x + r.w / 2) as i32;
             let icon_cy = sy + 12 + (ICON_SZ as i32) / 2;
-            draw_icon(surf, &it.icon, cx, icon_cy, &it.text, font, &mut glyph, fmt);
+            draw_icon(surf, icon, cx, icon_cy, text, app, font, &mut glyph, fmt);
             let ly = sy + 12 + ICON_SZ as i32 + 8;
             let maxw = r.w as i32 - 8;
-            draw_label(surf, font, &mut glyph, &it.text, cx, ly, maxw);
+            draw_label(surf, font, &mut glyph, text, cx, ly, maxw);
         }
     }
 
@@ -352,43 +359,53 @@ pub fn draw<B: Framebuffer>(surf: &mut eh_render::Surface, app: &mut App<B>, dir
 /// One launcher icon: decoded firmware art (image paths only — theme names
 /// need GetResource, not available here) or the C app's single-letter
 /// placeholder box.
-fn draw_icon(
+fn draw_icon<B: eh_hal::Framebuffer>(
     surf: &mut eh_render::Surface,
     icon: &str,
     cx: i32,
     cy: i32,
     title: &str,
+    app: &mut crate::app::App<B>,
     font: &eh_render::Font,
     glyph: &mut eh_render::Glyph,
     fmt: eh_hal::PixelFormat,
 ) {
+    let _t0 = std::time::Instant::now();
     let x0 = cx - (ICON_SZ as i32) / 2;
     let y0 = cy - (ICON_SZ as i32) / 2;
     let mut ok = false;
-    if !icon.is_empty() && icon.starts_with('/') {
-        if let Ok(bytes) = std::fs::read(icon) {
-            if let Ok((iw, ih, rgb)) = crate::cover::decode_rgb(&bytes) {
-                // Scale down oversized icons aspect-preserving (C
-                // launcher_draw_bitmap).
-                let (bw, bh) = if iw > ICON_SZ || ih > ICON_SZ {
-                    if iw > ih {
-                        (ICON_SZ, ih * ICON_SZ / ih.max(1))
-                    } else {
-                        (iw * ICON_SZ / ih.max(1), ICON_SZ)
-                    }
-                } else {
-                    (iw, ih)
-                };
-                surf.blit_image(
-                    &rgb,
-                    iw,
-                    ih,
-                    fmt,
-                    Rect::from_xy(x0 + ((ICON_SZ as i32 - bw as i32) / 2), y0 + ((ICON_SZ as i32 - bh as i32) / 2), bw as i32, bh as i32),
-                );
-                ok = true;
-            }
+    let art = app.icon_cache.get(icon).cloned().or_else(|| {
+        if icon.is_empty() || !icon.starts_with('/') {
+            return None;
         }
+        let decoded = std::fs::read(icon)
+            .ok()
+            .and_then(|bytes| crate::cover::decode_rgb(&bytes).ok());
+        if let Some(a) = &decoded {
+            app.icon_cache.insert(icon.to_string(), a.clone());
+        }
+        decoded
+    });
+    if let Some((iw, ih, rgb)) = art {
+        // Scale down oversized icons aspect-preserving (C
+        // launcher_draw_bitmap).
+        let (bw, bh) = if iw > ICON_SZ || ih > ICON_SZ {
+            if iw > ih {
+                (ICON_SZ, ih * ICON_SZ / ih.max(1))
+            } else {
+                (iw * ICON_SZ / ih.max(1), ICON_SZ)
+            }
+        } else {
+            (iw, ih)
+        };
+        surf.blit_image(
+            &rgb,
+            iw,
+            ih,
+            fmt,
+            Rect::from_xy(x0 + ((ICON_SZ as i32 - bw as i32) / 2), y0 + ((ICON_SZ as i32 - bh as i32) / 2), bw as i32, bh as i32),
+        );
+        ok = true;
     }
     if !ok {
         surf.fill_gray(Rect::from_xy(x0, y0, ICON_SZ as i32, ICON_SZ as i32), GRAY_WHITE);

@@ -225,6 +225,10 @@ pub struct App<B: Framebuffer> {
     /// pre-scroll — taps apply the scroll offset like the C app).
     pub launcher_rects: Vec<Rect>,
     pub launcher_scroll: i32,
+    /// Launcher drag tracking: the last pointer y + accumulated delta while
+    /// a drag is in flight (PointerMove -> scroll, then PointerUp taps).
+    drag_y: Option<i32>,
+    drag_total: i32,
     pub launcher_body_h: i32,
     pub launcher_view_h: i32,
     pub source: Source,
@@ -270,6 +274,9 @@ pub struct App<B: Framebuffer> {
     /// The license currently shown in the detail page (licenses viewer).
     pub license_selected: Option<usize>,
     pub license_rects: Vec<Rect>,
+    /// Decoded launcher icon art by path (decoded once; the emulator PNG
+    /// decode is ~100ms each, so per-frame re-decoding froze the render).
+    pub icon_cache: std::collections::HashMap<String, (u32, u32, Vec<u8>)>,
     /// The book the context menu was opened for (None when dismissed).
     pub context_book: Option<Book>,
     /// The series context's scope + label (stack-card long-press).
@@ -374,12 +381,15 @@ impl<B: Framebuffer> App<B> {
             context_series: 0,
             license_selected: None,
             license_rects: Vec::new(),
+            icon_cache: std::collections::HashMap::new(),
             context_book: None,
             context_scope: String::new(),
             context_label: String::new(),
             context_count: 0,
             press_pos: None,
             press_start: None,
+            drag_y: None,
+            drag_total: 0,
             dirty: true,
             last_overlay: Overlay::None,
         };
@@ -453,6 +463,7 @@ impl<B: Framebuffer> App<B> {
     /// top of the canvas.  The overlay + the self status strip flush only
     /// their own regions (partial update — the e-ink discipline).
     pub fn present(&mut self) {
+        let _t0 = std::time::Instant::now();
         self.drain_keyboard();
         // Complete any worker downloads (may auto-open the reader when a
         // single-book batch drains) before we take the screen.
@@ -533,6 +544,26 @@ impl<B: Framebuffer> App<B> {
             InputEvent::PointerDown { x, y } => {
                 self.press_pos = Some((*x, *y));
                 self.press_start = Some(std::time::Instant::now());
+                self.drag_y = Some(*y);
+                self.drag_total = 0;
+            }
+            InputEvent::PointerMove { x, y } => {
+                // Launcher vertical drag: move the scroll offset with the
+                // finger (C eh_launcher drag), clamped to the body.
+                if self.overlay == Overlay::Launcher {
+                    if let (Some(prev), Some(_)) = (self.drag_y, self.press_start) {
+                        let dy = prev - *y;
+                        self.drag_total += dy;
+                        let max = (self.launcher_body_h - self.launcher_view_h).max(0);
+                        let new = (self.launcher_scroll + dy).clamp(0, max);
+                        if new != self.launcher_scroll {
+                            self.launcher_scroll = new;
+                            self.dirty = true;
+                        }
+                    }
+                }
+                self.drag_y = Some(*y);
+                let _ = x;
             }
             InputEvent::PointerUp { x, y } => {
                 let (x, y) = (*x, *y);
@@ -548,6 +579,13 @@ impl<B: Framebuffer> App<B> {
                 self.press_pos = None;
                 self.press_start = None;
                 if self.overlay == Overlay::None && is_long && self.tab == Tab::Library && self.long_press_at(x, y) {
+                    return;
+                }
+                // A drag (moved > 48px) is not a tap.
+                let dragged = self.drag_total.abs() > 48;
+                self.drag_total = 0;
+                self.drag_y = None;
+                if dragged {
                     return;
                 }
                 if self.overlay == Overlay::None {
@@ -1026,10 +1064,6 @@ impl<B: Framebuffer> App<B> {
 
     /// A context-menu row tap (C eh_context_item_handler).
     fn tap_context(&mut self, x: i32, y: i32) {
-        crate::log(&format!("[eh_app] tap_context at ({x},{y}) nrects={}", self.context_rects.len()));
-        for (i, r) in self.context_rects.iter().enumerate() {
-            crate::log(&format!("[eh_app]   ctx rect[{i}]=({},{},{},{})", r.x, r.y, r.w, r.h));
-        }
         for (i, r) in self.context_rects.iter().enumerate() {
             if r.contains(x, y) {
                 if let Some(action) = self.context_items.get(i).copied() {

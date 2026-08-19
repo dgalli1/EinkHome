@@ -263,18 +263,37 @@ impl InkviewFb {
     }
 
     /// Launch a launcher app (NewTaskEx with the stock bookshelf's task
-    /// flags + TASK_MAKEACTIVE so the new task takes the foreground).
     pub fn launch_app(&mut self, path: &str, name: &str) -> bool {
         let base = path.rsplit('/').next().unwrap_or(path);
+        // NewTaskEx may read argv asynchronously (the emulator task
+        // system / launched app), so the C strings must outlive the call:
+        // keep the owners in a static until the next launch (the C app
+        // passes a heap argv it never frees).
+        let mut holder = LAUNCH_ARG_OWN.lock().unwrap();
         let p = std::ffi::CString::new(path).unwrap_or_default();
         let b = std::ffi::CString::new(base).unwrap_or_default();
         let n = std::ffi::CString::new(name).unwrap_or_default();
-        let mut args: [*mut u8; 2] = [p.as_ptr() as *mut u8, std::ptr::null_mut()];
-        // TASK_HIDDEN|NOUPDATEONFOCUS|SINGLEINSTANCE|OUTOFSTACK|MAKEACTIVE
-        const FLAGS: u32 = 0x25 | 0x80;
-        unsafe { NewTaskEx(p.as_ptr() as *const u8, args.as_mut_ptr(), b.as_ptr() as *const u8, n.as_ptr() as *const u8, std::ptr::null(), FLAGS, 0) == 0 }
+        let ptrs = [p.as_ptr() as *mut u8, std::ptr::null_mut()];
+        let rc = unsafe {
+            NewTaskEx(
+                p.as_ptr() as *const u8,
+                ptrs.as_ptr() as *mut *mut u8,
+                b.as_ptr() as *const u8,
+                n.as_ptr() as *const u8,
+                std::ptr::null(),
+                0xA5, // TASK_HIDDEN|NOUPDATEONFOCUS|SINGLEINSTANCE|OUTOFSTACK|MAKEACTIVE
+                0,
+            )
+        };
+        // Keep the buffers alive until the next launch.
+        *holder = Some([p, b, n]);
+        rc == 0
     }
 }
+
+/// Owners of the C strings passed to NewTaskEx (kept alive until the next
+/// launch — the task system may read argv asynchronously).
+static LAUNCH_ARG_OWN: std::sync::Mutex<Option<[std::ffi::CString; 3]>> = std::sync::Mutex::new(None);
 
 // Keyboard commit state: the firmware's keyboard handler is a single
 // global function pointer, so the in-flight (buffer, on_done) pair lives

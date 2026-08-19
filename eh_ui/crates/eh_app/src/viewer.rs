@@ -8,8 +8,7 @@ use eh_render::draw_text;
 use eh_shell::{GRAY_BLACK, GRAY_DGRAY, GRAY_WHITE};
 
 use crate::app::{App, Overlay};
-use crate::settings::{BACK_W, HEADER_H};
-
+use crate::settings::{HEADER_H, back_rect, draw_header as draw_settings_header};
 /// One bundled third-party license (name, one-line summary, full text).
 pub struct License {
     pub name: &'static str,
@@ -71,28 +70,10 @@ pub const LICENSES: &[License] = &[
     },
 ];
 
-pub fn back_rect() -> Rect {
-    let y = (HEADER_H.saturating_sub(BACK_W)) / 2;
-    Rect { x: 8, y, w: BACK_W, h: 56 }
-}
-
 fn draw_header(surf: &mut eh_render::Surface, title: &str) {
-    let w = surf.width();
-    surf.fill_gray(Rect { x: 0, y: 0, w, h: HEADER_H }, GRAY_WHITE);
-    surf.hline(0, HEADER_H - 2, w, 2, GRAY_BLACK);
-    let br = back_rect();
-    crate::settings::draw_back_icon(
-        surf,
-        (br.x + br.w / 2) as i32,
-        (br.y + br.h / 2) as i32,
-        GRAY_BLACK,
-    );
-    let font = crate::shelf::shelf_font();
-    let mut glyph = eh_render::Glyph::new();
-    let tw = font.width(title, 36.0) as i32;
-    draw_text(surf, font, 36.0, title, (w as i32 - tw) / 2, (HEADER_H / 2 + 12) as i32, GRAY_BLACK, &mut glyph);
+    let mut dirty = Vec::new();
+    draw_settings_header(surf, title, &mut dirty);
 }
-
 /// The e2e log path (mirrors logger::init's resolution).
 fn log_path() -> std::path::PathBuf {
     if let Ok(d) = std::env::var("PBEMU_LOG_DIR") {

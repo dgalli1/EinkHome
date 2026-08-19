@@ -29,59 +29,34 @@ thread_local! {
     static APP: RefCell<Option<eh_app::app::App<InkviewFb>>> = const { RefCell::new(None) };
 }
 
-/// Append a diagnostic line to /tmp/pbdemo.log (guest-writable); stderr of a
-/// qemu-arm guest process may be dropped, so a file is more reliable.
-/// The app's own diagnostics go to /tmp/eh_app.log (eh_app::log).
-fn dlog(msg: &str) {
-    use std::io::Write;
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/tmp/pbdemo.log") {
-        let _ = writeln!(f, "{msg}");
-    } else {
-        eprintln!("[eh_pb] (no log file) {msg}");
-    }
-}
 
 /// Build the app, sync the library, draw the first frame, store it.  Called
 /// lazily from the first EVT_INIT / EVT_SHOW so it runs inside the inkview
 /// event context (matching how hello.c draws on EVT_INIT).
 fn init_once() {
-    dlog("[eh_pb] init_once enter");
     let mut fb = InkviewFb::new();
     let s = fb.screen();
     // The e2e harness reads bookshelf.log + the EVT_INIT geometry line.
     eh_app::logger::init(Some(APP_DIR));
     eh_app::logger::evt_init(s.height.saturating_sub(s.content_height()), s.width, s.height);
-    dlog(&format!("[eh_pb] canvas {}x{} panel={}", s.width, s.height, s.height.saturating_sub(s.content_height())));
     // Establish the firmware panel content once at boot (C app's
     // eh_plat_panel_init), so the native clock/battery painters have
     // something to stamp before our first content-area refresh.
     if s.height > s.content_height() {
         fb.panel_init("EinkHome");
-        dlog("[eh_pb] called panel_init (firmware panel established)");
     }
     let dir = Path::new(APP_DIR);
-    if let Err(e) = std::fs::create_dir_all(dir) {
-        dlog(&format!("[eh_pb] create {APP_DIR} failed: {e}"));
-    }
+    let _ = std::fs::create_dir_all(dir);
     let cfg_path = Path::new(CFG_PATH);
     let config = if cfg_path.exists() {
-        match eh_app::config::Config::load(cfg_path) {
-            Ok(c) => c,
-            Err(e) => {
-                dlog(&format!("[eh_pb] config load failed: {e}; using defaults"));
-                eh_app::config::Config::default()
-            }
-        }
+        eh_app::config::Config::load(cfg_path).unwrap_or_default()
     } else {
-        dlog("[eh_pb] no bookshelf.cfg; using defaults (ensure_config will persist)");
         eh_app::config::Config::default()
     };
     let mut app = eh_app::app::App::new(fb, config, Some(cfg_path.to_path_buf()), dir);
     app.present();
-    dlog("[eh_pb] app booted");
     APP.with(|a| {
         *a.borrow_mut() = Some(app);
-        dlog("[eh_pb] app stored in thread_local");
     });
     // Recurring tick that repaints + drains worker downloads while any are
     // in flight (the inkview event loop's only source of periodic work:

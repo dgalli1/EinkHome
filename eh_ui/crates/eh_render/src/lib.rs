@@ -99,10 +99,34 @@ impl<'a> Surface<'a> {
     /// Fill a rectangle with a grayscale intensity, clipped to the surface.
     pub fn fill_gray(&mut self, rect: Rect, gray: u8) {
         let clip = rect.intersect(&Rect { x: 0, y: 0, w: self.width, h: self.height });
-        if clip.is_empty() { return; }
+        if clip.is_empty() {
+            return;
+        }
+        // Row-wise fill (the per-pixel set_px loop was ~1s for a full
+        // canvas under qemu-arm — the e-ink overlays dim the whole frame).
+        let bpp = self.bpp();
+        let row_bytes = self.stride;
         for y in clip.y..clip.y + clip.h {
-            for x in clip.x..clip.x + clip.w {
-                self.set_px(x, y, gray);
+            let row = (y as usize) * row_bytes;
+            let start = row + (clip.x as usize) * bpp;
+            let end = start + (clip.w as usize) * bpp;
+            if end > self.data.len() {
+                continue;
+            }
+            match self.format {
+                PixelFormat::Grayscale8 => self.data[start..end].fill(gray),
+                PixelFormat::Rgb24 => {
+                    let fill = [gray, gray, gray];
+                    for c in self.data[start..end].chunks_exact_mut(3) {
+                        c.copy_from_slice(&fill);
+                    }
+                }
+                PixelFormat::Rgba32 => {
+                    let fill = [gray, gray, gray, 0xff];
+                    for c in self.data[start..end].chunks_exact_mut(4) {
+                        c.copy_from_slice(&fill);
+                    }
+                }
             }
         }
     }
@@ -110,10 +134,35 @@ impl<'a> Surface<'a> {
     /// Fill a rectangle with a truecolour value.
     pub fn fill_rgb(&mut self, rect: Rect, r: u8, g: u8, b: u8) {
         let clip = rect.intersect(&Rect { x: 0, y: 0, w: self.width, h: self.height });
-        if clip.is_empty() { return; }
+        if clip.is_empty() {
+            return;
+        }
+        let bpp = self.bpp();
+        let row_bytes = self.stride;
         for y in clip.y..clip.y + clip.h {
-            for x in clip.x..clip.x + clip.w {
-                self.set_px_rgb(x, y, r, g, b);
+            let row = (y as usize) * row_bytes;
+            let start = row + (clip.x as usize) * bpp;
+            let end = start + (clip.w as usize) * bpp;
+            if end > self.data.len() {
+                continue;
+            }
+            match self.format {
+                PixelFormat::Grayscale8 => {
+                    let g8 = (r as u32 + g as u32 + b as u32) / 3;
+                    self.data[start..end].fill(g8 as u8);
+                }
+                PixelFormat::Rgb24 => {
+                    let fill = [r, g, b];
+                    for c in self.data[start..end].chunks_exact_mut(3) {
+                        c.copy_from_slice(&fill);
+                    }
+                }
+                PixelFormat::Rgba32 => {
+                    let fill = [r, g, b, 0xff];
+                    for c in self.data[start..end].chunks_exact_mut(4) {
+                        c.copy_from_slice(&fill);
+                    }
+                }
             }
         }
     }
@@ -301,6 +350,16 @@ pub struct Font {
     face: fontdue::Font,
 }
 
+/// Rasterised-glyph cache keyed by (char, size): the first draw of each
+/// glyph pays fontdue's rasterize; every later draw copies the cached
+/// coverage (the emulator's text-heavy overlays went ~1s -> ~20ms).
+static GLYPH_CACHE: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<(char, u32), (fontdue::Metrics, Vec<u8>)>>> =
+    std::sync::OnceLock::new();
+fn glyph_cache() -> &'static std::sync::Mutex<std::collections::HashMap<(char, u32), (fontdue::Metrics, Vec<u8>)>> {
+    GLYPH_CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+
 /// A glyph rasterisation: coverage bitmap + the metrics that position it.
 pub struct Glyph {
     pub metrics: fontdue::Metrics,
@@ -323,11 +382,20 @@ impl Font {
         Ok(Self { face })
     }
 
-    /// Rasterise one glyph into `glyph`; returns true on success.
+    /// Rasterise one glyph into `glyph` (cached by char+size — fontdue's
+    /// SDF rasterize is ~10ms per glyph under qemu-arm, so uncached text
+    /// re-renders were the emulator's ~1s overlay draws).
     pub fn raster(&self, ch: char, size_px: f32, glyph: &mut Glyph) -> bool {
+        let key = (ch, (size_px * 4.0).round() as u32);
+        if let Some((m, cov)) = glyph_cache().lock().unwrap().get(&key) {
+            glyph.metrics = *m;
+            glyph.coverage = cov.clone();
+            return true;
+        }
         let (metrics, coverage) = self.face.rasterize(ch, size_px);
         glyph.metrics = metrics;
-        glyph.coverage = coverage;
+        glyph.coverage = coverage.clone();
+        glyph_cache().lock().unwrap().insert(key, (glyph.metrics, coverage));
         true
     }
 

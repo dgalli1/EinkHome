@@ -4,8 +4,26 @@
 //! C app used): list/`sync/delta`/`sync/state`/cover/file.  Maps the
 //! `BookMeta` JSON shape into a Rust struct.
 
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 
+fn deserialize_string_or_number<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum StrOrNum {
+        Str(String),
+        Num(i64),
+        Float(f64),
+    }
+    match Option::<StrOrNum>::deserialize(deserializer)? {
+        None => Ok(None),
+        Some(StrOrNum::Str(s)) => Ok(Some(s)),
+        Some(StrOrNum::Num(n)) => Ok(Some(n.to_string())),
+        Some(StrOrNum::Float(f)) => Ok(Some((f as i64).to_string())),
+    }
+}
 /// Author attribution helper.
 pub fn author_first(authors: &[String]) -> &str {
     authors.first().map(|s| s.as_str()).unwrap_or("")
@@ -36,9 +54,8 @@ pub struct BookMeta {
     pub cover: Option<String>,
     #[serde(default)]
     pub url: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_string_or_number")]
     pub added_at: Option<String>,
-    #[serde(default)]
     pub updated_at: Option<String>,
     #[serde(default)]
     pub remote_only: bool,

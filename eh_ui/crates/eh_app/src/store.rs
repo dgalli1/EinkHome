@@ -61,6 +61,7 @@ pub struct Store {
 impl Store {
     /// The store DB filename next to the config (C: EH_LIB_DB_FILENAME).
     pub const LIB_DB_FILENAME: &'static str = EH_LIB_DB_FILENAME;
+    pub const LIB_LEGACY_FILENAME: &'static str = "bookshelf_lib.json";
     /// Open (creating if needed) the store at `path`, applying the schema +
     /// column migrations.  Fails loudly on a corrupt/undecodable DB.
     pub fn open(path: &std::path::Path) -> rusqlite::Result<Store> {
@@ -70,9 +71,53 @@ impl Store {
         // fail with SQLITE_BUSY.
         conn.busy_timeout(std::time::Duration::from_secs(2))?;
         apply_schema(&conn)?;
-        Ok(Store { conn })
+        let store = Store { conn };
+        if let Some(parent) = path.parent() {
+            store.import_legacy_once(parent);
+        }
+        Ok(store)
     }
 
+    /// One-time legacy JSON import (C store_import_legacy_once).
+    fn import_legacy_once(&self, dir: &std::path::Path) {
+        let legacy = dir.join(Self::LIB_LEGACY_FILENAME);
+        if !legacy.exists() {
+            return;
+        }
+        let Ok(text) = std::fs::read_to_string(&legacy) else {
+            return;
+        };
+        let Ok(items) = serde_json::from_str::<Vec<BookMeta>>(&text) else {
+            crate::logger::log("[bookshelf] store: legacy import: JSON parse failed");
+            return;
+        };
+        let Ok(()) = self.begin() else {
+            return;
+        };
+        let mut count = 0;
+        let mut failed = false;
+        for item in &items {
+            if self.upsert_book(item).is_ok() {
+                count += 1;
+            } else {
+                failed = true;
+                break;
+            }
+        }
+        if failed || self.commit().is_err() {
+            let _ = self.rollback();
+            crate::logger::log(&format!(
+                "[bookshelf] store: legacy import incomplete, keeping {}",
+                legacy.display()
+            ));
+        } else {
+            let migrated = dir.join(format!("{}.migrated", Self::LIB_LEGACY_FILENAME));
+            let _ = std::fs::rename(&legacy, &migrated);
+            crate::logger::log(&format!(
+                "[bookshelf] store: migrated legacy JSON ({count} books)"
+            ));
+        }
+    }
     /// Number of books in the library.
     pub fn count(&self) -> rusqlite::Result<i64> {
         self.conn
@@ -658,6 +703,9 @@ fn add_column_if_missing(
 /// unix int directly; the server string is only a convenience).
 fn parse_ts(s: Option<&str>) -> i64 {
     let Some(s) = s else { return 0 };
+    if let Ok(ts) = s.parse::<i64>() {
+        return ts;
+    }
     // "YYYY-MM-DDTHH:MM:SS" — strip the 'Z'/offset, treat as UTC.
     let digits: String = s
         .chars()

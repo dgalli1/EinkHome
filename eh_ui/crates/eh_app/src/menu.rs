@@ -27,6 +27,7 @@ fn labels() -> [(MenuRow, &'static str, Option<&'static str>); 5] {
 /// tap routing (the C app's draw/hit geometry parity).
 pub fn draw<B: eh_hal::Framebuffer>(surf: &mut eh_render::Surface, app: &mut App<B>, dirty: &mut Vec<Rect>) {
     use eh_shell::{GRAY_BLACK, GRAY_DGRAY, GRAY_WHITE};
+    let _t0 = std::time::Instant::now();
     let w = surf.width();
     let h = app.content_bottom as u32;
     dirty.push(Rect { x: 0, y: 0, w, h });
@@ -41,10 +42,11 @@ pub fn draw<B: eh_hal::Framebuffer>(surf: &mut eh_render::Surface, app: &mut App
     surf.vline(px, 0, h, 2, GRAY_BLACK);
 
     app.menu_rows.clear();
+    let _t1 = std::time::Instant::now();
     let font = crate::shelf::shelf_font();
     let mut glyph = eh_render::Glyph::new();
-    for (i, (row, label, val)) in labels().iter().enumerate() {
-        let ry = Y0 + i as u32 * ITEM_H;
+    for (_i, (row, label, val)) in labels().iter().enumerate() {
+        let ry = Y0 + _i as u32 * ITEM_H;
         // Row card (C: 12px inset, ITEM_H-12 tall).
         surf.fill_gray(Rect { x: px + 12, y: ry, w: (pw as u32) - 24, h: ITEM_H - ROW_GAP }, GRAY_WHITE);
         surf.rect_outline(Rect { x: px + 12, y: ry, w: (pw as u32) - 24, h: ITEM_H - ROW_GAP }, 2, GRAY_BLACK);

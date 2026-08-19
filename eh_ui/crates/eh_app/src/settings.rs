@@ -57,6 +57,7 @@ pub fn back_rect() -> Rect {
 pub fn draw<B: Framebuffer>(surf: &mut eh_render::Surface, app: &mut App<B>, dirty: &mut Vec<Rect>) {
     let w = surf.width();
     let h = app.content_bottom as u32;
+    dirty.push(Rect { x: 0, y: 0, w, h });
     surf.fill_gray(Rect { x: 0, y: 0, w, h }, GRAY_WHITE);
     draw_header(surf, "Settings", dirty);
 
