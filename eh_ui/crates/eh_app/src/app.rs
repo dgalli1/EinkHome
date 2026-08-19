@@ -76,6 +76,12 @@ pub enum Overlay {
     GroupChooser,
     /// The Sort by chooser sheet.
     SortChooser,
+    /// The full-screen log viewer.
+    LogViewer,
+    /// The licenses list viewer.
+    Licenses,
+    /// One license's full-text page.
+    LicenseDetail,
 }
 
 /// One long-press context action (C eh_ctx_*).
@@ -105,6 +111,9 @@ pub enum PageAction {
     Last,
     Next,
 }
+
+/// The standard firmware reader path (C eh_plat_standard_reader).
+pub const STANDARD_READER: &str = "/ebrmain/bin/eink-reader.app";
 
 /// The active library source (C `BsSourceMode`, EH_SOURCE_*).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -233,6 +242,10 @@ pub struct App<B: Framebuffer> {
     pub drill: u32,
     /// The drilled group's raw scope value (author / series_id / genre).
     pub group_scope: String,
+    /// Reader preference (C eh_g_state.reader_pref): 0 = Auto, 1 = the
+    /// standard eink reader.
+    pub reader_pref: i32,
+    pub reader_path: String,
     /// Group/sort chooser row rects (drawn in the chooser sheet overlays).
     pub chooser_rects: Vec<Rect>,
     /// Download queue + worker + completion channel.
@@ -254,6 +267,9 @@ pub struct App<B: Framebuffer> {
     pub context_rects: Vec<Rect>,
     /// Series set by long-press (for the `context menu open series=N` log).
     pub context_series: u32,
+    /// The license currently shown in the detail page (licenses viewer).
+    pub license_selected: Option<usize>,
+    pub license_rects: Vec<Rect>,
     /// The book the context menu was opened for (None when dismissed).
     pub context_book: Option<Book>,
     /// The series context's scope + label (stack-card long-press).
@@ -343,6 +359,8 @@ impl<B: Framebuffer> App<B> {
             sort: crate::store::SortMode::Recent,
             drill: 0,
             group_scope: String::new(),
+            reader_pref: 0,
+            reader_path: "auto".to_string(),
             chooser_rects: Vec::new(),
             downloader: crate::downloads::Downloader::new(),
             dl_single: false,
@@ -354,6 +372,8 @@ impl<B: Framebuffer> App<B> {
             context_items: Vec::new(),
             context_rects: Vec::new(),
             context_series: 0,
+            license_selected: None,
+            license_rects: Vec::new(),
             context_book: None,
             context_scope: String::new(),
             context_label: String::new(),
@@ -370,6 +390,7 @@ impl<B: Framebuffer> App<B> {
     /// Boot: sync the library delta, then build the first shelf page.
     fn boot(&mut self) {
         crate::logger::log("[bookshelf] do_sync ENTER");
+        self.resolve_reader();
         if let Err(e) = crate::sync::sync(&self.client, &self.store, 50) {
             crate::logger::log(&format!("[bookshelf] do_sync FAILED: {e}"));
             crate::log(&format!("[eh_app] sync failed: {e} (showing cached library)"));
@@ -465,6 +486,9 @@ impl<B: Framebuffer> App<B> {
                     Overlay::Context => draw_context_menu(&mut surf, self, &mut dirty),
                     Overlay::GroupChooser => draw_chooser_sheet(&mut surf, self, &mut dirty, ChooserKind::Group),
                     Overlay::SortChooser => draw_chooser_sheet(&mut surf, self, &mut dirty, ChooserKind::Sort),
+                    Overlay::LogViewer => crate::viewer::draw_log_viewer(&mut surf, self, &mut dirty),
+                    Overlay::Licenses => crate::viewer::draw_licenses(&mut surf, self, &mut dirty),
+                    Overlay::LicenseDetail => crate::viewer::draw_license_detail(&mut surf, self, &mut dirty),
                     Overlay::None => {}
                 }
             }
@@ -1215,6 +1239,35 @@ impl<B: Framebuffer> App<B> {
         }
     }
 
+    /// Resolve the reader preference from the config at boot (C
+    /// eh_reader_pref_from_path) + log the C `reader_pref=N (cfg \`path\`)`
+    /// marker the persist test greps for.
+    fn resolve_reader(&mut self) {
+        let cfg = self.config.reader.clone().unwrap_or_default();
+        let pref: i32 = if cfg.contains("eink-reader") { 1 } else { 0 };
+        self.reader_pref = pref;
+        self.reader_path = if pref == 1 { STANDARD_READER.to_string() } else { cfg.clone() };
+        crate::logger::log(&format!(
+            "[bookshelf] reader_pref={pref} (cfg `{}`)",
+            if pref == 1 { STANDARD_READER.to_string() } else { cfg }
+        ));
+    }
+
+    /// Cycle the reader preference (C eh_settings reader row tap): Auto
+    /// -> Standard -> Auto with the single detected reader.
+    pub fn cycle_reader(&mut self) {
+        self.reader_pref = if self.reader_pref == 0 { 1 } else { 0 };
+        if self.reader_pref == 1 {
+            self.config.reader = Some(STANDARD_READER.to_string());
+            self.reader_path = STANDARD_READER.to_string();
+        } else {
+            self.config.reader = None;
+            self.reader_path = "auto".to_string();
+        }
+        self.dirty = true;
+        crate::logger::log(&format!("[bookshelf] reader_pref={}", self.reader_pref));
+    }
+
     /// Change the active overlay, marking the frame dirty (the present
     /// skip must repaint when the overlay changes).
     fn set_overlay(&mut self, o: Overlay) {
@@ -1381,6 +1434,11 @@ impl<B: Framebuffer> App<B> {
                 crate::log(&format!("[eh_app] config save failed: {e}"));
             } else {
                 crate::log(&format!("[eh_app] settings: saved {}", p.display()));
+                crate::logger::log(&format!(
+                    "[bookshelf] settings: reader_pref={} (cfg `{}`)",
+                    self.reader_pref,
+                    if self.reader_pref == 1 { STANDARD_READER } else { "auto" }
+                ));
             }
         }
     }
@@ -1464,6 +1522,7 @@ impl<B: Framebuffer> App<B> {
             Overlay::Context => self.tap_context(x, y),
             Overlay::GroupChooser => self.tap_chooser(x, y, ChooserKind::Group),
             Overlay::SortChooser => self.tap_chooser(x, y, ChooserKind::Sort),
+            Overlay::LogViewer | Overlay::Licenses | Overlay::LicenseDetail => crate::viewer::tap(x, y, self),
             // The download popup is modal while a batch is in flight; once
             // the queue drains, any tap dismisses it (C behavior).
             Overlay::Download => {

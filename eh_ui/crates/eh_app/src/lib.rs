@@ -30,6 +30,7 @@ pub mod source;
 pub mod store;
 pub mod sync;
 pub mod util;
+pub mod viewer;
 
 #[cfg(test)]
 pub mod testutil {

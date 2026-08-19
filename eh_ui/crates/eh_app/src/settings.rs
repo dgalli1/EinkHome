@@ -65,14 +65,11 @@ pub fn draw<B: Framebuffer>(surf: &mut eh_render::Surface, app: &mut App<B>, dir
     let mut glyph = eh_render::Glyph::new();
 
     let dl = app.config.downloads_dir.clone().unwrap_or_default();
+    let reader_val = if app.reader_pref == 1 { "Standard".to_string() } else { "Auto".to_string() };
     let rows: [(SettingsRow, &str, &str); 5] = [
         (SettingsRow::ApiHost, "API host", &app.config.api_url),
         (SettingsRow::ApiKey, "API key", &app.config.api_token),
-        (
-            SettingsRow::ReaderApp,
-            "Reader app",
-            app.config.reader.as_deref().unwrap_or("auto"),
-        ),
+        (SettingsRow::ReaderApp, "Reader app", &reader_val),
         (SettingsRow::DownloadFolder, "Download folder", &dl),
         (SettingsRow::SystemApp, "System app", "Off"),
     ];
@@ -130,11 +127,17 @@ pub fn tap_settings<B: Framebuffer>(x: i32, y: i32, app: &mut App<B>) {
                 app.save_config();
             }
             SettingsRow::ReaderApp => {
-                // Cycling reader detection lands with the reader-preference
-                // slice; the row is shown for parity.
-                crate::log("[eh_app] settings: reader list not ported yet");
+                app.cycle_reader();
             }
-            SettingsRow::DownloadFolder | SettingsRow::SystemApp | SettingsRow::ShowLogs | SettingsRow::Licenses => {
+            SettingsRow::ShowLogs => {
+                app.overlay = crate::app::Overlay::LogViewer;
+                app.dirty = true;
+            }
+            SettingsRow::Licenses => {
+                app.overlay = crate::app::Overlay::Licenses;
+                app.dirty = true;
+            }
+            SettingsRow::DownloadFolder | SettingsRow::SystemApp => {
                 crate::log(&format!("[eh_app] settings: {row:?} not ported yet"));
             }
         }
