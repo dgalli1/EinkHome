@@ -256,6 +256,10 @@ pub struct App<B: Framebuffer> {
     pub context_series: u32,
     /// The book the context menu was opened for (None when dismissed).
     pub context_book: Option<Book>,
+    /// The series context's scope + label (stack-card long-press).
+    pub context_scope: String,
+    pub context_label: String,
+    pub context_count: i64,
     /// Long-press tracking: the down-tap screen position + time.
     press_pos: Option<(i32, i32)>,
     press_start: Option<std::time::Instant>,
@@ -351,6 +355,9 @@ impl<B: Framebuffer> App<B> {
             context_rects: Vec::new(),
             context_series: 0,
             context_book: None,
+            context_scope: String::new(),
+            context_label: String::new(),
+            context_count: 0,
             press_pos: None,
             press_start: None,
             dirty: true,
@@ -943,6 +950,15 @@ impl<B: Framebuffer> App<B> {
             if w.hit(x, y) {
                 let pos = i - 2; // widget 0 = topbar, 1 = grid container
                 if pos < self.entries.len() {
+                    if self.entries[pos].stack {
+                        // A stack card long-press opens the SERIES context
+                        // (Download all / Delete series).
+                        let scope = self.entries[pos].stack_scope.clone();
+                        let label = self.entries[pos].stack_label.clone();
+                        let count = self.entries[pos].stack_count;
+                        self.open_context_series(&scope, &label, count);
+                        return true;
+                    }
                     let book = self.entries[pos].book.clone();
                     self.open_context_book(&book);
                     return true;
@@ -951,6 +967,18 @@ impl<B: Framebuffer> App<B> {
             }
         }
         false
+    }
+
+    /// Open the series context menu (Download all / Delete series) for a
+    /// stack card (C eh_context series branch).
+    fn open_context_series(&mut self, scope: &str, label: &str, count: i64) {
+        self.context_items = vec![ContextAction::DownloadAll, ContextAction::DeleteAll];
+        self.context_series = 1;
+        self.context_scope = scope.to_string();
+        self.context_label = label.to_string();
+        self.context_count = count;
+        crate::logger::log("[bookshelf] context menu open series=1");
+        self.set_overlay(Overlay::Context);
     }
 
     /// Open the book context menu (Open/Download/Delete).
@@ -993,7 +1021,18 @@ impl<B: Framebuffer> App<B> {
                                 self.delete_book(&b);
                             }
                         }
-                        _ => {}
+                        ContextAction::DownloadAll => {
+                            let (scope, label) = (self.context_scope.clone(), self.context_label.clone());
+                            let count = self.context_count;
+                            self.context_scope.clear();
+                            self.context_label.clear();
+                            self.download_series(&scope, &label, count);
+                        }
+                        ContextAction::DeleteAll => {
+                            let scope = self.context_scope.clone();
+                            self.context_scope.clear();
+                            self.delete_series(&scope);
+                        }
                     }
                     self.refresh_shelf();
                 }
@@ -1021,6 +1060,40 @@ impl<B: Framebuffer> App<B> {
             crate::logger::log(&format!("[bookshelf] delete_book_file removed path={}", cur.display()));
         } else {
             crate::log(&format!("[eh_app] delete_book_file missing path={}", cur.display()));
+        }
+    }
+
+    /// Download every book of a series (C eh_context Download all): queue
+    /// the scope's books on the worker + open the modal popup.
+    fn download_series(&mut self, scope: &str, _label: &str, _count: i64) {
+        let books = self
+            .store
+            .list_sorted(crate::store::SortMode::Recent, "", 1, scope)
+            .unwrap_or_default();
+        crate::logger::log(&format!("[bookshelf] download_series scope={scope} queued={}", books.len()));
+        let dl = self.downloads_dir();
+        for b in &books {
+            let cur = book_local_path(b, &dl);
+            self.downloader
+                .enqueue(&self.config.api_url, &self.config.api_token, &b.id, &cur.to_string_lossy());
+        }
+        crate::logger::log("[bookshelf] draw_dl_popup");
+        self.set_overlay(Overlay::Download);
+        self.dl_single = false;
+        self.dl_batch_all = false;
+        self.dl_autopen = None;
+    }
+
+    /// Delete every downloaded file of a series (C eh_context Delete
+    /// series).
+    fn delete_series(&mut self, scope: &str) {
+        let books = self
+            .store
+            .list_sorted(crate::store::SortMode::Recent, "", 1, scope)
+            .unwrap_or_default();
+        crate::logger::log(&format!("[bookshelf] delete_series scope={scope} books={}", books.len()));
+        for b in &books {
+            self.delete_book(&b);
         }
     }
 
