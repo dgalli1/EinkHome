@@ -277,6 +277,7 @@ impl<B: Framebuffer> App<B> {
 
     /// Boot: sync the library delta, then build the first shelf page.
     fn boot(&mut self) {
+        crate::logger::log("[bookshelf] do_sync ENTER");
         if let Err(e) = crate::sync::sync(&self.client, &self.store, 50) {
             crate::log(&format!("[eh_app] sync failed: {e} (showing cached library)"));
         }
@@ -502,6 +503,7 @@ impl<B: Framebuffer> App<B> {
 
     /// Manual library sync (C top-bar sync icon, which==2).
     pub(crate) fn do_sync(&mut self) {
+        crate::logger::log("[bookshelf] do_sync ENTER");
         self.syncing = true;
         let res = crate::sync::sync(&self.client, &self.store, 50);
         self.syncing = false;
@@ -526,6 +528,7 @@ impl<B: Framebuffer> App<B> {
         if let Err(e) = self.store.search_add(&term) {
             crate::log(&format!("[eh_app] search_add: {e}"));
         }
+        crate::logger::log(&format!("[bookshelf] search commit: query=`{term}`"));
         self.tab = Tab::Library;
         self.page = 0;
         self.refresh_shelf();
@@ -565,6 +568,7 @@ impl<B: Framebuffer> App<B> {
             let terms = self.store.search_list(1000, 0).unwrap_or_default();
             if let Some(t) = terms.get(idx) {
                 let t = t.clone();
+                crate::logger::log(&format!("[bookshelf] search history tap: query=`{t}`"));
                 self.commit_search(&t);
             }
         }
@@ -660,6 +664,12 @@ impl<B: Framebuffer> App<B> {
                     if let Err(e) = self.store.set_downloaded(&book.id, true, &cur.to_string_lossy()) {
                         crate::log(&format!("[eh_app] set_downloaded: {e}"));
                     }
+                    crate::logger::log(&format!(
+                        "[bookshelf] download_book_file OK id={} bytes={} path={}",
+                        book.id,
+                        bytes.len(),
+                        cur.display()
+                    ));
                     crate::log(&format!(
                         "[eh_app] download OK id={} bytes={} path={}",
                         book.id,
@@ -677,6 +687,7 @@ impl<B: Framebuffer> App<B> {
     /// default reader is the firmware's OpenBook path; a configured
     /// third-party reader would go through launch_app).
     fn open_reader(&mut self, path: &Path, title: &str) {
+        crate::logger::log(&format!("[bookshelf] launching reader via OpenBook: {}", path.display()));
         crate::log(&format!("[eh_app] opening reader path={}", path.display()));
         if !self.screen().framebuffer_mut().open_book(&path.to_string_lossy(), title) {
             crate::log("[eh_app] reader launch failed (no reader on this platform)");
@@ -719,6 +730,12 @@ impl<B: Framebuffer> App<B> {
         };
         screen.content_h = self.content_bottom;
         self.screen = Some(screen);
+        // C draw_grid marker (the e2e harness's wait-for-grid token).
+        let sw = self.screen().framebuffer().screen().width;
+        crate::logger::log(&format!(
+            "[bookshelf] draw_grid view=0 page={} cell={}x0 top=96 bot={}",
+            self.page, sw, self.content_bottom
+        ));
         crate::log(&format!(
             "[eh_app] shelf page={}/{} entries={}",
             self.page + 1,

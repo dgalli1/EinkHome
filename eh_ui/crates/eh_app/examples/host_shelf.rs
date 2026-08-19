@@ -60,6 +60,7 @@ fn main() -> Result<(), String> {
     config.downloads_dir = Some(dir.join("Downloads").to_string_lossy().into());
 
     let fb = eh_backend_sdl::SdlFb::new("EinkHome App (host)", width, height, 0.55)?;
+    eh_app::logger::init(Some(&dir.to_string_lossy()));
     let mut app = App::new(fb, config, Some(cfg_path), &dir);
 
     let dump_dir = std::env::var("EH_DUMP_DIR").ok();

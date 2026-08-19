@@ -21,6 +21,7 @@ pub mod client;
 pub mod config;
 pub mod cover;
 pub mod launcher;
+pub mod logger;
 pub mod menu;
 pub mod settings;
 pub mod shelf;
@@ -43,10 +44,9 @@ pub mod testutil {
 /// guest-writable path the demo used; on host it prints to stderr.  Hook
 /// point for the real logging backend later.
 pub fn log(msg: &str) {
-    #[cfg(not(target_arch = "arm"))]
-    {
-        eprintln!("[eh_app] {msg}");
-    }
+    // The e2e harness reads bookshelf.log (see `logger`); on the host we
+    // also mirror to stderr.  Kept cheap + non-fatal.
+    crate::logger::log(&format!("[eh_app] {msg}"));
     #[cfg(target_arch = "arm")]
     {
         if let Ok(mut f) = std::fs::OpenOptions::new()

@@ -48,6 +48,9 @@ fn init_once() {
     dlog("[eh_pb] init_once enter");
     let mut fb = InkviewFb::new();
     let s = fb.screen();
+    // The e2e harness reads bookshelf.log + the EVT_INIT geometry line.
+    eh_app::logger::init(Some(APP_DIR));
+    eh_app::logger::evt_init(s.height.saturating_sub(s.content_height()), s.width, s.height);
     dlog(&format!("[eh_pb] canvas {}x{} panel={}", s.width, s.height, s.height.saturating_sub(s.content_height())));
     // Establish the firmware panel content once at boot (C app's
     // eh_plat_panel_init), so the native clock/battery painters have
