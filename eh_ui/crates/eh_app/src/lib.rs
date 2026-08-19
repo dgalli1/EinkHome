@@ -20,6 +20,7 @@ pub mod appui;
 pub mod client;
 pub mod config;
 pub mod cover;
+pub mod downloads;
 pub mod launcher;
 pub mod logger;
 pub mod menu;

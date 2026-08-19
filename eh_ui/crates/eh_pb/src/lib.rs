@@ -83,6 +83,43 @@ fn init_once() {
         *a.borrow_mut() = Some(app);
         dlog("[eh_pb] app stored in thread_local");
     });
+    // Recurring tick that repaints + drains worker downloads while any are
+    // in flight (the inkview event loop's only source of periodic work:
+    // downloads must not block the UI thread, and the download-progress
+    // popup repaints on this cadence — the C app's weak-timer pattern).
+    arm_tick();
+}
+
+/// Inkview weak-timer handler: repaint + drain any in-flight downloads.
+/// The timer is permanently re-armed (a weak one-shot fires once per arm),
+/// so a download started at ANY time after boot is caught; presenting only
+/// runs while a batch is active.
+extern "C" fn eh_pb_tick(_data: *mut std::ffi::c_void) {
+    use eh_app::app::Overlay;
+    let active = APP.with(|a| {
+        a.borrow()
+            .as_ref()
+            .map(|app| app.downloader.pending > 0 || matches!(app.overlay, Overlay::Download))
+            .unwrap_or(false)
+    });
+    if active {
+        APP.with(|a| {
+            if let Some(app) = a.borrow_mut().as_mut() {
+                app.present();
+            }
+        });
+    }
+    arm_tick();
+}
+
+/// Arm the 200ms weak timer (once per active stretch).
+fn arm_tick() {
+    unsafe {
+        // NUL-terminated static name kept alive for the timer's lifetime.
+        static NAME: &[u8] = b"ehtick\0";
+        let cname = std::ffi::CStr::from_bytes_with_nul_unchecked(NAME);
+        eh_backend_inkview::arm_weak_timer(cname, eh_pb_tick, 200);
+    }
 }
 
 /// Handle one raw inkview event (evt, par1, par2), redrawing the affected

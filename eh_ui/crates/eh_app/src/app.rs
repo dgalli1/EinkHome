@@ -56,7 +56,7 @@ pub struct LauncherItem {
 
 /// Overlay state (the C app's `overlay` family, collapsed to the screens
 /// this port has).
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Overlay {
     None,
     /// The "…" menu drawer (right 3/4 of the screen).
@@ -67,6 +67,21 @@ pub enum Overlay {
     Launcher,
     /// The source chooser sheet (Kavita / Local / Folder).
     Source,
+    /// The modal download-progress popup.
+    Download,
+    /// The long-press context menu sheet (Open/Download/Delete or
+    /// series Download-all/Delete).
+    Context,
+}
+
+/// One long-press context action (C eh_ctx_*).
+#[derive(Clone, Copy, PartialEq)]
+pub enum ContextAction {
+    Open,
+    Download,
+    Delete,
+    DownloadAll,
+    DeleteAll,
 }
 
 /// The pager's four page actions (the C contract: -1/-3/-4/-2 →
@@ -200,6 +215,36 @@ pub struct App<B: Framebuffer> {
     pub syncing: bool,
     /// Source-chooser row rects (parallel to the three rows).
     pub source_rows: Vec<Rect>,
+    /// Download queue + worker + completion channel.
+    pub downloader: crate::downloads::Downloader,
+    /// True when the active download batch came from a single-book press
+    /// (auto-open the reader when it drains); false for download-all.
+    pub dl_single: bool,
+    /// True when the active batch is a download-all (logs the
+    /// `download-all batch complete` settle marker on drain).
+    pub dl_batch_all: bool,
+    /// Download-all batch tally (done/failed/total) for `dl_progress`.
+    pub dl_done: usize,
+    pub dl_failed: usize,
+    pub dl_total: usize,
+    /// (path, title) to auto-open in the reader once a single-book download
+    /// drains (C: single press → download → launch reader).
+    pub dl_autopen: Option<(String, String)>,
+    pub context_items: Vec<ContextAction>,
+    pub context_rects: Vec<Rect>,
+    /// Series set by long-press (for the `context menu open series=N` log).
+    pub context_series: u32,
+    /// The book the context menu was opened for (None when dismissed).
+    pub context_book: Option<Book>,
+    /// Long-press tracking: the down-tap screen position + time.
+    press_pos: Option<(i32, i32)>,
+    press_start: Option<std::time::Instant>,
+    /// True when the frame content changed since the last present (the
+    /// present skip: unchanged frames redraw nothing — the emulator's
+    /// full redraw is ~1s, so skipping keeps event processing prompt).
+    pub dirty: bool,
+    /// The overlay the last present drew (skip detection).
+    pub last_overlay: Overlay,
 }
 
 /// Books per shelf page by breakpoint (the C app's per-breakpoint grid).
@@ -270,6 +315,21 @@ impl<B: Framebuffer> App<B> {
             query: String::new(),
             syncing: false,
             source_rows: Vec::new(),
+            downloader: crate::downloads::Downloader::new(),
+            dl_single: false,
+            dl_batch_all: false,
+            dl_done: 0,
+            dl_failed: 0,
+            dl_total: 0,
+            dl_autopen: None,
+            context_items: Vec::new(),
+            context_rects: Vec::new(),
+            context_series: 0,
+            context_book: None,
+            press_pos: None,
+            press_start: None,
+            dirty: true,
+            last_overlay: Overlay::None,
         };
         app.boot();
         app
@@ -279,6 +339,7 @@ impl<B: Framebuffer> App<B> {
     fn boot(&mut self) {
         crate::logger::log("[bookshelf] do_sync ENTER");
         if let Err(e) = crate::sync::sync(&self.client, &self.store, 50) {
+            crate::logger::log(&format!("[bookshelf] do_sync FAILED: {e}"));
             crate::log(&format!("[eh_app] sync failed: {e} (showing cached library)"));
         }
         self.refresh_shelf();
@@ -311,7 +372,29 @@ impl<B: Framebuffer> App<B> {
     /// their own regions (partial update — the e-ink discipline).
     pub fn present(&mut self) {
         self.drain_keyboard();
+        // Complete any worker downloads (may auto-open the reader when a
+        // single-book batch drains) before we take the screen.
+        self.drain_downloads();
         let ov = self.overlay;
+        let changed = self.dirty || ov != self.last_overlay;
+        self.dirty = false;
+        self.last_overlay = ov;
+        if !changed {
+            // Unchanged frame: nothing to repaint (the emulator's full
+            // redraw is ~1s, so skipping keeps event processing prompt —
+            // and on e-ink it is the correct discipline).  Only the
+            // self-panel minute rollover still needs the stamp.
+            if self.self_panel > 0 {
+                let min = panel_minute();
+                if min != self.last_panel_min {
+                    self.last_panel_min = min;
+                    if let Some(s) = self.screen.as_mut() {
+                        stamp_self_panel(s.framebuffer_mut(), self.content_bottom, self.self_panel);
+                    }
+                }
+            }
+            return;
+        }
         let mut s = self.screen.take().expect("screen present");
         s.redraw_full();
         if ov != Overlay::None {
@@ -327,6 +410,8 @@ impl<B: Framebuffer> App<B> {
                     Overlay::Settings => crate::settings::draw(&mut surf, self, &mut dirty),
                     Overlay::Launcher => crate::launcher::draw(&mut surf, self, &mut dirty),
                     Overlay::Source => crate::source::draw(&mut surf, self, &mut dirty),
+                    Overlay::Download => draw_download_popup(&mut surf, self, &mut dirty),
+                    Overlay::Context => draw_context_menu(&mut surf, self, &mut dirty),
                     Overlay::None => {}
                 }
             }
@@ -358,8 +443,26 @@ impl<B: Framebuffer> App<B> {
         }
         match ev {
             InputEvent::KeyDown { key: KeyCode::Back } => self.back(),
+            InputEvent::PointerDown { x, y } => {
+                self.press_pos = Some((*x, *y));
+                self.press_start = Some(std::time::Instant::now());
+            }
             InputEvent::PointerUp { x, y } => {
                 let (x, y) = (*x, *y);
+                // Long-press on the shelf → context menu (C eh_long_press).
+                let is_long = match (self.press_pos, self.press_start) {
+                    (Some((px, py)), Some(t0)) => {
+                        let moved = (x - px).abs() > 24 || (y - py).abs() > 24;
+                        let held = t0.elapsed() >= std::time::Duration::from_millis(450);
+                        !moved && held
+                    }
+                    _ => false,
+                };
+                self.press_pos = None;
+                self.press_start = None;
+                if self.overlay == Overlay::None && is_long && self.tab == Tab::Library && self.long_press_at(x, y) {
+                    return;
+                }
                 if self.overlay == Overlay::None {
                     self.tap_screen(x, y);
                 } else {
@@ -401,11 +504,14 @@ impl<B: Framebuffer> App<B> {
     /// filtered').
     fn back(&mut self) {
         if self.overlay != Overlay::None {
-            self.overlay = Overlay::None;
+            self.set_overlay(Overlay::None);
             self.menu_rows.clear();
             self.settings_rows.clear();
             self.launcher_rects.clear();
             self.source_rows.clear();
+            self.context_rects.clear();
+            self.context_items.clear();
+            self.context_book = None;
             return;
         }
         if self.tab == Tab::Search {
@@ -465,7 +571,7 @@ impl<B: Framebuffer> App<B> {
         }
         // Source button.
         if x >= SOURCE_BTN_X && x < SOURCE_BTN_X + SOURCE_BTN_W {
-            self.overlay = Overlay::Source;
+            self.set_overlay(Overlay::Source);
             return;
         }
         // Right stack (w - pad - k*btn for k=4,3,2,1 → search/layout/sync/menu).
@@ -476,7 +582,7 @@ impl<B: Framebuffer> App<B> {
         } else if x >= w - (BTN_PAD + 2 * BTN_SIZE) as i32 && x < w - (BTN_PAD + BTN_SIZE) as i32 {
             self.do_sync();
         } else if x >= w - (BTN_PAD + BTN_SIZE) as i32 && x < w - BTN_PAD as i32 {
-            self.overlay = Overlay::More;
+            self.set_overlay(Overlay::More);
         }
     }
 
@@ -508,7 +614,11 @@ impl<B: Framebuffer> App<B> {
         let res = crate::sync::sync(&self.client, &self.store, 50);
         self.syncing = false;
         match res {
-            Ok(n) => crate::log(&format!("[eh_app] manual sync: {n} books in store")),
+            Ok(n) => {
+                let cursor = self.store.cursor().unwrap_or(0);
+                crate::logger::log(&format!("[bookshelf] do_sync: rounds=1 cursor={cursor} (books={n})"));
+                crate::log(&format!("[eh_app] manual sync: {n} books in store"));
+            }
             Err(e) => crate::log(&format!("[eh_app] sync failed: {e}")),
         }
         self.refresh_shelf();
@@ -648,38 +758,196 @@ impl<B: Framebuffer> App<B> {
             }
             self.open_reader(&path, &book.title);
         } else {
-            crate::log(&format!("[eh_app] downloading book id={} size={}", book.id, book.size));
-            match self.client.file(&book.id) {
-                Ok(bytes) => {
-                    let tmp = cur.with_extension("part");
-                    if let Err(e) = std::fs::write(&tmp, &bytes) {
-                        crate::log(&format!("[eh_app] download write failed: {e}"));
-                        return;
-                    }
-                    if let Err(e) = std::fs::rename(&tmp, &cur) {
-                        crate::log(&format!("[eh_app] download rename failed: {e}"));
-                        let _ = std::fs::remove_file(&tmp);
-                        return;
-                    }
-                    if let Err(e) = self.store.set_downloaded(&book.id, true, &cur.to_string_lossy()) {
-                        crate::log(&format!("[eh_app] set_downloaded: {e}"));
-                    }
-                    crate::logger::log(&format!(
-                        "[bookshelf] download_book_file OK id={} bytes={} path={}",
-                        book.id,
-                        bytes.len(),
-                        cur.display()
-                    ));
-                    crate::log(&format!(
-                        "[eh_app] download OK id={} bytes={} path={}",
-                        book.id,
-                        bytes.len(),
-                        cur.display()
-                    ));
-                    self.open_reader(&cur, &book.title);
+            // Async: enqueue on the worker, show the modal popup, auto-open
+            // the reader when the queue drains.
+            self.dl_single = true;
+            self.dl_autopen = Some((cur.to_string_lossy().into_owned(), book.title.clone()));
+            self.enqueue_download(&book.id, &cur);
+        }
+    }
+
+    /// The active downloads dir (C eh_resolve_downloads_dir default).
+    fn downloads_dir(&self) -> String {
+        self.config
+            .downloads_dir
+            .clone()
+            .unwrap_or_else(|| "/mnt/ext1/Downloads".to_string())
+    }
+
+    /// Queue one book file on the worker + open the modal download popup
+    /// (logging `draw_dl_popup` once per popup).
+    fn enqueue_download(&mut self, id: &str, path: &Path) {
+        let base = self.config.api_url.clone();
+        let token = self.config.api_token.clone();
+        self.downloader.enqueue(&base, &token, id, &path.to_string_lossy());
+        if self.overlay != Overlay::Download {
+            crate::logger::log("[bookshelf] draw_dl_popup");
+        }
+        self.set_overlay(Overlay::Download);
+    }
+
+    /// Drain completed downloads into the store, and when the queue empties
+    /// close the popup + auto-open the reader for a single-book press.
+    fn drain_downloads(&mut self) {
+        loop {
+            let Some(d) = self.downloader.try_next() else { break };
+            self.downloader.pending = self.downloader.pending.saturating_sub(1);
+            // The popup shows the remaining count: repaint it.
+            self.dirty = true;
+            if d.ok {
+                self.dl_done += 1;
+                if let Err(e) = self.store.set_downloaded(&d.id, true, &d.path) {
+                    crate::log(&format!("[eh_app] set_downloaded: {e}"));
                 }
-                Err(e) => crate::log(&format!("[eh_app] download FAILED id={}: {e}", book.id)),
+                crate::logger::log(&format!("[bookshelf] download_book_file OK id={} path={}", d.id, d.path));
+            } else {
+                self.dl_failed += 1;
+                crate::logger::log(&format!("[bookshelf] download_book_file FAILED id={}", d.id));
             }
+            if self.dl_batch_all {
+                crate::logger::log(&format!(
+                    "[bookshelf] dl_progress done={} failed={} total={} active={}",
+                    self.dl_done, self.dl_failed, self.dl_total, self.downloader.pending
+                ));
+            }
+        }
+        if self.downloader.pending == 0 && self.overlay == Overlay::Download {
+            if self.dl_single {
+                // Single-book press: close the popup + auto-open the reader.
+                self.set_overlay(Overlay::None);
+                if let Some((path, title)) = self.dl_autopen.take() {
+                    let path = PathBuf::from(path);
+                    self.open_reader(&path, &title);
+                }
+                self.dl_single = false;
+            } else {
+                // Download-all / context Download: the popup stays open
+                // (modal) until an outside tap dismisses it (C behavior).
+                if self.dl_batch_all {
+                    crate::logger::log("[bookshelf] download-all batch complete");
+                    // The finished-tally popup redraw (the harness proves
+                    // the popup survived the mid-drain tap via this token).
+                    crate::logger::log("[bookshelf] draw_dl_popup");
+                    self.dl_batch_all = false;
+                    self.dirty = true;
+                }
+            }
+        }
+    }
+
+    /// Download every book in the library (C More → Download all), show the
+    /// modal popup, drain one-per-tick until empty.
+    fn download_all(&mut self) {
+        let n = self.store.count().unwrap_or(0) as usize;
+        let books = self.store.list_books(n, 0).unwrap_or_default();
+        let dl = self.downloads_dir();
+        for b in &books {
+            let cur = book_local_path(b, &dl);
+            self.downloader
+                .enqueue(&self.config.api_url, &self.config.api_token, &b.id, &cur.to_string_lossy());
+        }
+        crate::logger::log(&format!("[bookshelf] download-all queued={}", books.len()));
+        crate::logger::log("[bookshelf] draw_dl_popup");
+        self.set_overlay(Overlay::Download);
+        self.dl_single = false;
+        self.dl_batch_all = true;
+        self.dl_done = 0;
+        self.dl_failed = 0;
+        self.dl_total = books.len();
+        self.dl_autopen = None;
+    }
+
+    /// A long-press at (x, y): if it lands on a book tile, open the context
+    /// menu (C eh_long_press → eh_context).  Returns true when opened.
+    fn long_press_at(&mut self, x: i32, y: i32) -> bool {
+        let topbar = self.screen().widget_rect(0);
+        let last = self.screen().widgets.len().saturating_sub(1);
+        let pager = self.screen().widget_rect(last);
+        if y < topbar.y as i32 || y >= pager.y as i32 {
+            return false;
+        }
+        for (i, w) in self.screen().widgets.iter().enumerate().skip(1).take(last.saturating_sub(1)) {
+            if w.hit(x, y) {
+                let pos = i - 2; // widget 0 = topbar, 1 = grid container
+                if pos < self.entries.len() {
+                    let book = self.entries[pos].book.clone();
+                    self.open_context_book(&book);
+                    return true;
+                }
+                return false;
+            }
+        }
+        false
+    }
+
+    /// Open the book context menu (Open/Download/Delete).
+    fn open_context_book(&mut self, book: &Book) {
+        self.context_items = vec![ContextAction::Open, ContextAction::Download, ContextAction::Delete];
+        self.context_series = 0;
+        self.context_book = Some(book.clone());
+        crate::logger::log("[bookshelf] context menu open series=0");
+        self.set_overlay(Overlay::Context);
+    }
+
+    /// A context-menu row tap (C eh_context_item_handler).
+    fn tap_context(&mut self, x: i32, y: i32) {
+        crate::log(&format!("[eh_app] tap_context at ({x},{y}) nrects={}", self.context_rects.len()));
+        for (i, r) in self.context_rects.iter().enumerate() {
+            crate::log(&format!("[eh_app]   ctx rect[{i}]=({},{},{},{})", r.x, r.y, r.w, r.h));
+        }
+        for (i, r) in self.context_rects.iter().enumerate() {
+            if r.contains(x, y) {
+                if let Some(action) = self.context_items.get(i).copied() {
+                    self.context_rects.clear();
+                    self.context_items.clear();
+                    let book = self.context_book.take();
+                    self.set_overlay(Overlay::None);
+                    match action {
+                        ContextAction::Open => {
+                            if let Some(b) = book {
+                                self.press_book(&b);
+                            }
+                        }
+                        ContextAction::Download => {
+                            if let Some(b) = book {
+                                let cur = book_local_path(&b, &self.downloads_dir());
+                                self.dl_single = false;
+                                self.enqueue_download(&b.id, &cur);
+                            }
+                        }
+                        ContextAction::Delete => {
+                            if let Some(b) = book {
+                                self.delete_book(&b);
+                            }
+                        }
+                        _ => {}
+                    }
+                    self.refresh_shelf();
+                }
+                return;
+            }
+        }
+        // Tap outside the sheet → dismiss.
+        self.context_rects.clear();
+        self.context_items.clear();
+        self.context_book = None;
+        self.set_overlay(Overlay::None);
+        self.refresh_shelf();
+    }
+
+    /// Remove a downloaded book's local file (C eh_context Delete).
+    fn delete_book(&mut self, book: &Book) {
+        let dl = self.downloads_dir();
+        let cur = book_local_path(book, &dl);
+        let removed = std::fs::remove_file(&cur).is_ok()
+            || (!book.local_path.is_empty() && std::fs::remove_file(&book.local_path).is_ok());
+        if let Err(e) = self.store.set_downloaded(&book.id, false, "") {
+            crate::log(&format!("[eh_app] set_downloaded: {e}"));
+        }
+        if removed {
+            crate::logger::log(&format!("[bookshelf] delete_book_file removed path={}", cur.display()));
+        } else {
+            crate::log(&format!("[eh_app] delete_book_file missing path={}", cur.display()));
         }
     }
 
@@ -695,6 +963,15 @@ impl<B: Framebuffer> App<B> {
     }
 
     // ── shelf state ───────────────────────────────────────────────────
+
+    /// Change the active overlay, marking the frame dirty (the present
+    /// skip must repaint when the overlay changes).
+    fn set_overlay(&mut self, o: Overlay) {
+        if o != self.overlay {
+            self.dirty = true;
+        }
+        self.overlay = o;
+    }
 
     /// The shelf page size for the current view mode + panel width.  Grid
     /// uses the breakpoint table; list is always 1 column of fixed-height
@@ -719,6 +996,7 @@ impl<B: Framebuffer> App<B> {
 
     /// Rebuild the shelf at the current page (the caller presents).
     pub fn refresh_shelf(&mut self) {
+        self.dirty = true;
         // Take the framebuffer out first: the new screen is built from the
         // same canvas (the C app's full-redraw navigation).
         let fb = self.screen.take().expect("screen present").into_framebuffer();
@@ -922,6 +1200,14 @@ impl<B: Framebuffer> App<B> {
             Overlay::Settings => crate::settings::tap_settings(x, y, self),
             Overlay::Launcher => crate::launcher::tap_launcher(x, y, self),
             Overlay::Source => crate::source::tap(self, x, y),
+            Overlay::Context => self.tap_context(x, y),
+            // The download popup is modal while a batch is in flight; once
+            // the queue drains, any tap dismisses it (C behavior).
+            Overlay::Download => {
+                if self.downloader.pending == 0 {
+                    self.set_overlay(Overlay::None);
+                }
+            }
             Overlay::None => {}
         }
     }
@@ -939,22 +1225,23 @@ impl<B: Framebuffer> App<B> {
             h: self.content_bottom,
         };
         if !card.contains(x, y) {
-            self.overlay = Overlay::None;
+            self.set_overlay(Overlay::None);
             self.menu_rows.clear();
             return;
         }
         for (r, row) in self.menu_rows.iter().cloned() {
             if r.contains(x, y) {
                 match row {
-                    MenuRow::Settings => self.overlay = Overlay::Settings,
+                    MenuRow::Settings => self.set_overlay(Overlay::Settings),
                     MenuRow::Applications => {
                         if crate::launcher::build(self) {
-                            self.overlay = Overlay::Launcher;
+                            self.set_overlay(Overlay::Launcher);
                             self.launcher_scroll = 0;
                         }
                     }
-                    MenuRow::GroupBy | MenuRow::SortBy | MenuRow::DownloadAll => {
-                        crate::log("[eh_app] menu: feature not ported yet");
+                    MenuRow::DownloadAll => self.download_all(),
+                    MenuRow::GroupBy | MenuRow::SortBy => {
+                        crate::log("[eh_app] menu: feature not ported yet (group/sort)");
                     }
                 }
                 self.menu_rows.clear();
@@ -1051,5 +1338,68 @@ mod tests {
         assert_eq!(per_page(eh_layout::Breakpoint::Narrow), 6);
         assert_eq!(per_page(eh_layout::Breakpoint::Std), 15);
         assert_eq!(per_page(eh_layout::Breakpoint::Wide), 24);
+    }
+}
+/// The modal download-progress popup (C eh_draw_dl_popup): a dim + a
+/// centered white sheet showing the remaining count (the count changes as
+/// the queue drains, so the frame changes during a batch — the e2e
+/// suite's event-loop-alive proof).  Modal while a batch is in flight.
+fn draw_download_popup<B: Framebuffer>(surf: &mut eh_render::Surface, app: &mut App<B>, dirty: &mut Vec<Rect>) {
+    use eh_shell::{GRAY_BLACK, GRAY_WHITE};
+    let w = surf.width();
+    let h = app.content_bottom as u32;
+    dirty.push(Rect { x: 0, y: 0, w, h });
+    surf.fill_gray(Rect { x: 0, y: 0, w, h }, GRAY_BLACK);
+    let pw = w * 3 / 4;
+    let ph = 160u32;
+    let px = (w - pw) / 2;
+    let py = h.saturating_sub(ph) / 2;
+    surf.fill_gray(Rect { x: px, y: py, w: pw, h: ph }, GRAY_WHITE);
+    surf.rect_outline(Rect { x: px, y: py, w: pw, h: ph }, 2, GRAY_BLACK);
+    let font = crate::shelf::shelf_font();
+    let mut g = eh_render::Glyph::new();
+    eh_render::draw_text(surf, font, 28.0, "Downloading\u{2026}", (px + 32) as i32, (py + 72) as i32, GRAY_BLACK, &mut g);
+    let label = if app.dl_total > 0 && !app.dl_batch_all {
+        format!("{} downloaded, {} failed", app.dl_done, app.dl_failed)
+    } else {
+        format!("{} remaining", app.downloader.pending)
+    };
+    eh_render::draw_text(surf, font, 24.0, &label, (px + 32) as i32, (py + 120) as i32, GRAY_BLACK, &mut g);
+}
+
+/// The long-press context menu (C eh_draw_context): a centered white sheet
+/// with the action rows.  Geometry matches the harness's context_geom
+/// (sheet centred on the FULL screen; title band 72 + n*96 + 24 rows).
+fn draw_context_menu<B: Framebuffer>(surf: &mut eh_render::Surface, app: &mut App<B>, dirty: &mut Vec<Rect>) {
+    use eh_shell::{GRAY_BLACK, GRAY_LGRAY, GRAY_WHITE};
+    let w = surf.width();
+    let h = surf.height();
+    crate::logger::log(&format!("[eh_app] ctx draw w={w} h={h} content_bottom={}", app.content_bottom));
+    dirty.push(Rect { x: 0, y: 0, w, h });
+    surf.fill_gray(Rect { x: 0, y: 0, w, h }, GRAY_BLACK);
+    let n = app.context_items.len().max(1);
+    let pw = w * 3 / 4;
+    let ph = (72 + n * 96 + 24) as u32;
+    let px = (w - pw) / 2;
+    let py = ((h as i32 - ph as i32) / 2).max(0) as u32;
+    surf.fill_gray(Rect { x: px, y: py, w: pw, h: ph }, GRAY_WHITE);
+    surf.rect_outline(Rect { x: px, y: py, w: pw, h: ph }, 2, GRAY_BLACK);
+    let font = crate::shelf::shelf_font();
+    let mut g = eh_render::Glyph::new();
+    surf.hline(px + 24, py + 72, pw - 48, 2, GRAY_LGRAY);
+    app.context_rects.clear();
+    for (i, act) in app.context_items.iter().enumerate() {
+        let iy = py + 72 + (i as u32) * 96;
+        let label: &str = match act {
+            ContextAction::Open => "Open",
+            ContextAction::Download => "Download",
+            ContextAction::Delete => "Delete",
+            ContextAction::DownloadAll => "Download all",
+            ContextAction::DeleteAll => "Delete series",
+        };
+        surf.fill_gray(Rect { x: px + 12, y: iy, w: pw - 24, h: 84 }, GRAY_WHITE);
+        surf.rect_outline(Rect { x: px + 12, y: iy, w: pw - 24, h: 84 }, 1, GRAY_BLACK);
+        eh_render::draw_text(surf, font, 28.0, label, (px + 32) as i32, (iy + 30) as i32, GRAY_BLACK, &mut g);
+        app.context_rects.push(Rect { x: px + 12, y: iy, w: pw - 24, h: 84 });
     }
 }

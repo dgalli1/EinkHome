@@ -61,6 +61,8 @@ mod imp {
     pub unsafe extern "C" fn NewTaskEx(_path: *const u8, _args: *mut *mut u8, _appname: *const u8, _name: *const u8, _icon: *const core::ffi::c_void, _flags: u32, _as_reader: i32) -> i32 { 0 }
     #[allow(dead_code)]
     pub unsafe extern "C" fn OpenKeyboard(_title: *const u8, _buf: *mut i8, _max: i32, _flags: i32, _h: extern "C" fn(*mut i8)) {}
+    #[allow(dead_code)]
+    pub unsafe extern "C" fn SetWeakTimerEx(_name: *const u8, _h: extern "C" fn(*mut core::ffi::c_void), _d: *mut core::ffi::c_void, _ms: i32) -> i32 { 0 }
 }
 #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
 #[allow(non_snake_case)]
@@ -81,14 +83,15 @@ mod imp {
         pub(super) fn OpenBook(path: *const u8, parameters: *const u8, flags: i32) -> i32;
         pub(super) fn NewTaskEx(path: *const u8, args: *mut *mut u8, appname: *const u8, name: *const u8, icon: *const core::ffi::c_void, flags: u32, run_as_reader: i32) -> i32;
         pub(super) fn OpenKeyboard(title: *const u8, buffer: *mut i8, maxlen: i32, flags: i32, hproc: extern "C" fn(*mut i8));
+        pub(super) fn SetWeakTimerEx(name: *const u8, handler: extern "C" fn(*mut core::ffi::c_void), data: *mut core::ffi::c_void, ms: i32) -> i32;
     }
 }
 
 // Re-expose the imports uniformly.
 #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
-use imp::{DrawPanel, FullUpdate, GetCanvas, InitInkview, InkViewMain, NewTaskEx, OpenBook, OpenKeyboard, PanelHeight, PartialUpdate, Repaint, ScreenHeight, ScreenWidth, iv_update_panel};
+use imp::{DrawPanel, FullUpdate, GetCanvas, InitInkview, InkViewMain, NewTaskEx, OpenBook, OpenKeyboard, PanelHeight, PartialUpdate, Repaint, ScreenHeight, ScreenWidth, SetWeakTimerEx, iv_update_panel};
 #[cfg(not(any(target_arch = "arm", target_arch = "aarch64")))]
-use imp::{DrawPanel, FullUpdate, GetCanvas, InitInkview, InkViewMain, NewTaskEx, OpenBook, PanelHeight, PartialUpdate, Repaint, ScreenHeight, ScreenWidth, iv_update_panel};
+use imp::{DrawPanel, FullUpdate, GetCanvas, InitInkview, InkViewMain, NewTaskEx, OpenBook, PanelHeight, PartialUpdate, Repaint, ScreenHeight, ScreenWidth, SetWeakTimerEx, iv_update_panel};
 
 /// Boot the inkview library exactly like the stock bookshelf: register, then
 /// hand the event loop a callback.  `on_event` receives raw (evt, par1, par2)
@@ -336,3 +339,11 @@ fn iv_to_key(code: i32) -> KeyCode {
 /// A full surface over the inkview canvas for one draw pass (re-exported so
 /// the shell can rasterise; the shell already builds it from `surface_mut`).
 pub type IvSurface<'a> = Surface<'a>;
+/// Arm an inkview weak timer (C SetWeakTimerEx).  `name` must be a
+/// NUL-terminated static buffer kept alive for the timer's lifetime.
+/// Public wrapper around the crate-internal SDK import.
+pub fn arm_weak_timer(name: &'static std::ffi::CStr, handler: extern "C" fn(*mut std::ffi::c_void), ms: i32) {
+    unsafe {
+        SetWeakTimerEx(name.as_ptr() as *const u8, handler, std::ptr::null_mut(), ms);
+    }
+}

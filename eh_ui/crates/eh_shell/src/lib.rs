@@ -468,17 +468,13 @@ impl<B: Framebuffer> Screen<B> {
 
         self.dirty.clear();
 
-        // E-ink semantics: the panel background is white, and we repaint the
-        // whole content region each frame (covers/tiles draw on top).  This
-        // is what prevents stale pixels / ghosting between widgets, matching
-        // the C app's white-panel behaviour.
+        // E-ink semantics: the panel background is white, and every widget
+        // fills its own rect white (top bar / tiles / pager cover the whole
+        // content band), so no full-canvas pre-fill is needed — the C app
+        // paints per-widget too.  A full-canvas fill here is ~4.6MB through
+        // qemu on the emulator (~90ms), which delayed every redraw flush.
         let content = Rect { x: 0, y: 0, w, h };
         let fmt = self.fb.format();
-        {
-            let mut surf = Surface::new(self.fb.surface_mut(), w, h, stride, fmt);
-            surf.fill_gray(content, GRAY_WHITE);
-            self.dirty.push(content);
-        }
 
         for i in 0..self.widgets.len() {
             let rect = self.layout.rect(self.nodes[i]);

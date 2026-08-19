@@ -28,25 +28,29 @@ impl Config {
     /// `api_token` defaults to [`EH_TOKEN_DEFAULT`] when absent (the C app's
     /// fallback).  Returns an empty Config when the file is unreadable.
     pub fn load(path: &Path) -> std::io::Result<Config> {
-        let text = std::fs::read_to_string(path)?;
-        let mut cfg = Config::default();
-        for line in text.lines() {
-            let line = line.trim();
-            if line.is_empty() || line.starts_with('#') {
-                continue;
+        let mut cfg = parse_kv_file(path)?;
+        // The scratch-root override (C eh_load_config_file reads
+        // /tmp/bookshelf.cfg LAST so it wins): the emulator guest's app
+        // dir is read-only, so settings saves land in /tmp and are
+        // re-applied on top of the base config every launch.  The e2e
+        // suite also uses it to point the app at a dead/delayed API.
+        let tmp = Path::new("/tmp/bookshelf.cfg");
+        if tmp != path && tmp.is_file() {
+            let over = parse_kv_file(tmp).unwrap_or_default();
+            if !over.api_url.is_empty() {
+                cfg.api_url = over.api_url;
             }
-            let Some(eq) = line.find('=') else {
-                continue;
-            };
-            let key = line[..eq].trim();
-            let value = line[eq + 1..].trim();
-            match key {
-                "api_url" | "url" => cfg.api_url = value.to_string(),
-                "api_token" | "token" => cfg.api_token = value.to_string(),
-                "reader" => cfg.reader = Some(value.to_string()),
-                "downloads_dir" | "download_dir" => cfg.downloads_dir = Some(value.to_string()),
-                "source" => cfg.source = Some(value.to_string()),
-                _ => {}
+            if !over.api_token.is_empty() {
+                cfg.api_token = over.api_token;
+            }
+            if over.reader.is_some() {
+                cfg.reader = over.reader;
+            }
+            if over.downloads_dir.is_some() {
+                cfg.downloads_dir = over.downloads_dir;
+            }
+            if over.source.is_some() {
+                cfg.source = over.source;
             }
         }
         if cfg.api_token.is_empty() {
@@ -89,6 +93,33 @@ impl Config {
         text.push_str(&format!("reader={}\n", self.reader.as_deref().unwrap_or("auto")));
         std::fs::write(path, text)
     }
+}
+
+/// Parse one `key=value` config file (blank lines + `#` comments skipped),
+/// shared by `load` and the /tmp override pass.
+fn parse_kv_file(path: &Path) -> std::io::Result<Config> {
+    let text = std::fs::read_to_string(path)?;
+    let mut cfg = Config::default();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some(eq) = line.find('=') else {
+            continue;
+        };
+        let key = line[..eq].trim();
+        let value = line[eq + 1..].trim();
+        match key {
+            "api_url" | "url" => cfg.api_url = value.to_string(),
+            "api_token" | "token" => cfg.api_token = value.to_string(),
+            "reader" => cfg.reader = Some(value.to_string()),
+            "downloads_dir" | "download_dir" => cfg.downloads_dir = Some(value.to_string()),
+            "source" => cfg.source = Some(value.to_string()),
+            _ => {}
+        }
+    }
+    Ok(cfg)
 }
 
 #[cfg(test)]
