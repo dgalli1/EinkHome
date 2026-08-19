@@ -78,6 +78,11 @@ fn apply_round(store: &Store, delta: &Delta, _cursor: i64) -> Result<Round> {
                 ok = false;
                 break;
             }
+            // Sync suggest terms for this book.
+            if !b.suggest.is_empty() && store.suggest_set(&b.id, &b.suggest).is_err() {
+                ok = false;
+                break;
+            }
         }
         if ok {
             for id in &delta.removed {
@@ -85,6 +90,8 @@ fn apply_round(store: &Store, delta: &Delta, _cursor: i64) -> Result<Round> {
                     ok = false;
                     break;
                 }
+                // Clear suggest edges for removed books.
+                let _ = store.suggest_set(id, &[]);
             }
         }
         ok

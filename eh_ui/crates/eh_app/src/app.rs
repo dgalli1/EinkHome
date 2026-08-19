@@ -408,7 +408,7 @@ impl<B: Framebuffer> App<B> {
         // Materialise the default view (flat, recent order) — the shelf
         // reads from `view`, and the group/sort choosers rebuild it.
         let (g, s, d, q, sc) = (self.group, self.sort, self.drill, self.query.clone(), self.group_scope.clone());
-        let total = self.store.view_rebuild(g, s, d, &q, &sc).unwrap_or(0);
+        let total = self.store.view_rebuild(self.group as i64, self.sort as i64, self.drill as i64, &q, &sc).unwrap_or(0);
         crate::logger::log(&format!(
             "[bookshelf] view_rebuild: view={} sort={} group={} drill={}",
             total, s as i64, g as i64, d
@@ -618,7 +618,14 @@ impl<B: Framebuffer> App<B> {
                 true
             }
             Some((KbField::Search, text)) => {
-                self.commit_search(&text);
+                // C eh_keyboard_handler: only commit when text actually changed.
+                // A dismissed keyboard delivers the buffer unchanged; committing
+                // an unchanged empty buffer would teleport the user home.
+                if text != self.query {
+                    self.commit_search(&text);
+                } else if text.is_empty() {
+                    // Dismissed unchanged: stay on search page, don't teleport.
+                }
                 true
             }
         }
@@ -765,12 +772,11 @@ impl<B: Framebuffer> App<B> {
 
     /// Apply a committed search query (C eh_keyboard_handler non-empty
     /// branch): record it, filter the shelf, return to the library tab.
+    /// Empty / unchanged text keeps the search page open (C outside-tap).
     fn commit_search(&mut self, term: &str) {
         let term = term.trim().to_string();
-        if term.is_empty() {
+        if term.is_empty() || term == self.query {
             // Dismissed unedited: leave search, don't teleport home.
-            self.tab = Tab::Library;
-            self.refresh_shelf();
             return;
         }
         self.query = term.clone();
@@ -1209,7 +1215,7 @@ impl<B: Framebuffer> App<B> {
         let (group, sort, drill, q, scope) = (self.group, self.sort, self.drill, self.query.clone(), self.group_scope.clone());
         let total = self
             .store
-            .view_rebuild(group, sort, drill, &q, &scope)
+            .view_rebuild(group as i64, sort as i64, drill as i64, &q, &scope)
             .unwrap_or(0);
         crate::logger::log(&format!(
             "[bookshelf] view_rebuild: view={} sort={} group={} drill={}",
@@ -1404,7 +1410,7 @@ impl<B: Framebuffer> App<B> {
     /// Tile count the shelf pages over: the materialised view when one is
     /// present, else the library count (the C eh_view_total).
     fn view_total_books(&self) -> usize {
-        let vt = self.store.view_total().unwrap_or(-1);
+        let vt = self.store.view_total();
         if vt >= 0 {
             vt as usize
         } else {

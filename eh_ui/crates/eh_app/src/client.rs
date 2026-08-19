@@ -59,6 +59,15 @@ pub struct BookMeta {
     pub updated_at: Option<String>,
     #[serde(default)]
     pub remote_only: bool,
+    /// Server-folded search blob (folded title + authors + series).
+    /// Suggestions are folded server-side, so searches must match this
+    /// folded text — a "songgong" suggestion from "sŏnggong" never
+    /// matches the raw title.
+    #[serde(default)]
+    pub search_text: Option<String>,
+    /// Suggestion term edges for prefix completion (server-generated).
+    #[serde(default)]
+    pub suggest: Vec<String>,
 }
 
 impl BookMeta {
