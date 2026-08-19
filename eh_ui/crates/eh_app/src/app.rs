@@ -404,6 +404,16 @@ impl<B: Framebuffer> App<B> {
             total, s as i64, g as i64, d
         ));
         self.refresh_shelf();
+        // C cover-warm pass: fetch the visible page's covers into the cache
+        // so the next launch renders from disk (the offline suite waits for
+        // cached covers after an online boot).  Idempotent (fetch skips
+        // cache hits); best-effort on a dead API.
+        let ids: Vec<String> = self.entries.iter().map(|e| e.book.id.clone()).collect();
+        for id in ids {
+            if cover::load_cached(&self.covers_dir, &id).is_none() {
+                let _ = cover::fetch(&self.client, &self.covers_dir, &id);
+            }
+        }
     }
 
     /// Persist the resolved config (C: eh_save_config_file at boot, so the
@@ -1312,10 +1322,12 @@ impl<B: Framebuffer> App<B> {
         };
         screen.content_h = self.content_bottom;
         self.screen = Some(screen);
-        // C draw_grid marker (the e2e harness's wait-for-grid token).
+        // C draw_grid marker (the e2e harness's wait-for-grid token)
+        // with the projected tile total.
         let sw = self.screen().framebuffer().screen().width;
+        let view = self.view_total_books();
         crate::logger::log(&format!(
-            "[bookshelf] draw_grid view=0 page={} cell={}x0 top=96 bot={}",
+            "[bookshelf] draw_grid view={view} page={} cell={}x0 top=96 bot={}",
             self.page, sw, self.content_bottom
         ));
         crate::log(&format!(
@@ -1377,6 +1389,9 @@ impl<B: Framebuffer> App<B> {
                 let art = cover::load_cached(&self.covers_dir, &book.id)
                     .and_then(|bytes| cover::decode_rgb(&bytes).ok())
                     .map(|(w, h, rgb)| (rgb, w, h));
+                if art.is_some() {
+                    crate::logger::log(&format!("[bookshelf] cover_tick cache hit id={}", book.id));
+                }
                 let stack = v.kind == 1;
                 let scope = if stack { v.series_id.clone() } else { String::new() };
                 ShelfEntry { book, art, stack, stack_label: v.series_name, stack_count: v.series_count, stack_scope: scope }
@@ -1400,6 +1415,7 @@ impl<B: Framebuffer> App<B> {
             self.page = self.pages.saturating_sub(1);
         }
         let offset = self.page * rows_per;
+        crate::logger::log("[bookshelf] draw_search_tab");
         let history = self.store.search_list(rows_per, offset).unwrap_or_default();
         let (page, pages, query, content_bottom, syncing) =
             (self.page, self.pages, self.query.clone(), self.content_bottom, self.syncing);
