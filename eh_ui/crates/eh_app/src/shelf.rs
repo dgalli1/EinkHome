@@ -30,6 +30,58 @@ pub struct ShelfEntry {
     pub book: Book,
     /// (rgb, width, height) cover art, or None for a placeholder tile.
     pub art: Option<(Vec<u8>, u32, u32)>,
+    /// Stack-card tile (kind 1 in the view): shows the group label +
+    /// member count instead of one book's title/author.
+    pub stack: bool,
+    pub stack_label: String,
+    pub stack_count: i64,
+    /// The raw group value (author / series_id / genre / year) this card
+    /// drills into.
+    pub stack_scope: String,
+}
+
+/// One stack-card tile (C eh_draw_thumbnail stack branch): a bordered card
+/// centred in the tile showing the group label + member count.
+pub struct StackCard {
+    pub label: String,
+    pub count: i64,
+    rect: Option<Rect>,
+}
+
+impl StackCard {
+    pub fn new(label: impl Into<String>, count: i64) -> Self {
+        Self { label: label.into(), count, rect: None }
+    }
+}
+
+impl Widget for StackCard {
+    fn draw(&mut self, ctx: &mut DrawCtx, rect: Rect) {
+        self.rect = Some(rect);
+        ctx.fill(rect, GRAY_WHITE);
+        let border = 2u32;
+        let pad = 8u32;
+        if rect.w > pad * 2 + 4 && rect.h > pad * 2 + 4 {
+            ctx.outline(
+                Rect { x: rect.x + pad, y: rect.y + pad, w: rect.w - pad * 2, h: rect.h - pad * 2 },
+                border,
+                GRAY_BLACK,
+            );
+        }
+        let cx = rect.x as i32 + rect.w as i32 / 2;
+        let cy = rect.y as i32 + rect.h as i32 / 2;
+        let max_w = rect.w.saturating_sub(12) as i32;
+        ctx.text_center_fit(cx, cy - 8, 20.0, &self.label, max_w, GRAY_BLACK);
+        let sub = format!("{} books", self.count);
+        ctx.text_center_fit(cx, cy + 26, 16.0, &sub, max_w, GRAY_DGRAY);
+    }
+    fn dirty(&self, out: &mut Vec<Rect>) {
+        if let Some(r) = self.rect {
+            out.push(r);
+        }
+    }
+    fn hit(&self, x: i32, y: i32) -> bool {
+        matches!(self.rect, Some(r) if (x as u32) >= r.x && (x as u32) < r.x + r.w && (y as u32) >= r.y && (y as u32) < r.y + r.h)
+    }
 }
 
 /// One list-mode shelf row (C eh_draw_thumbnail_fonts list branch): a fixed
@@ -155,6 +207,18 @@ pub fn build_shelf<B: Framebuffer>(
             let rows = if entries.is_empty() { 1 } else { (entries.len() as u32 + cols - 1) / cols };
             let row_h = grid_h / rows;
             for e in entries {
+                if e.stack {
+                    let c = StackCard::new(e.stack_label.clone(), e.stack_count);
+                    let style = Style {
+                        size: taffy::geometry::Size {
+                            width: Dimension::percent(1.0 / cols as f32),
+                            height: Dimension::length(row_h as f32),
+                        },
+                        ..Style::default()
+                    };
+                    screen.add_to(grid, Box::new(c), style);
+                    continue;
+                }
                 let mut c = Cover::new(e.book.title.clone());
                 c.author = e.book.author.clone();
                 c.title_size = 18.0;
@@ -221,7 +285,7 @@ pub fn load_page(
         .into_iter()
         .map(|book| {
             let art = fetch_cover(client, covers_dir, &book.id).ok().flatten();
-            ShelfEntry { book, art }
+            ShelfEntry { book, art, stack: false, stack_label: String::new(), stack_count: 0, stack_scope: String::new() }
         })
         .collect()
 }

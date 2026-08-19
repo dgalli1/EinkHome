@@ -339,6 +339,263 @@ fn like_escape(s: &str) -> String {
     }
     out
 }
+
+/// One materialised `view` row (kind 0 = flat tile, 1 = stack card).
+#[derive(Debug, Clone)]
+pub struct ViewRow {
+    pub kind: i64,
+    pub book_id: String,
+    pub series_id: String,
+    pub series_name: String,
+    pub series_count: i64,
+}
+
+/// Grouping presets (the C BsGroupPreset numeric codes, used in the
+/// `view_rebuild: group=N` log).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum GroupPreset {
+    None = 0,
+    Series = 1,
+    Author = 2,
+    Year = 3,
+    Genre = 4,
+    AuthorSeries = 5,
+}
+
+/// Sort modes (the C BsSortMode codes, used in the `sort=N` log).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SortMode {
+    Title = 0,
+    Author = 1,
+    Series = 2,
+    Recent = 3,
+}
+
+impl Store {
+    /// Rebuild the materialised `view` table (C eh_view_rebuild) for the
+    /// active sort/group/drill + query.  A non-leaf grouped drill collapses
+    /// multi-member groups into stack cards interleaved at their first
+    /// member's sort position; everything else emits every book flat.
+    /// Returns the tile count.
+    pub fn view_rebuild(
+        &self,
+        group: GroupPreset,
+        sort: SortMode,
+        drill: u32,
+        query: &str,
+        scope: &str,
+    ) -> rusqlite::Result<i64> {
+        fn group_key(b: &Book, g: GroupPreset) -> String {
+            match g {
+                GroupPreset::Author => b.author.trim().to_string(),
+                GroupPreset::Genre => b.genre.trim().to_string(),
+                GroupPreset::Year => year_of(b.added_at).unwrap_or_default(),
+                _ => b.series_id.trim().to_string(),
+            }
+        }
+        fn label(b: &Book, g: GroupPreset) -> String {
+            match g {
+                GroupPreset::Author => b.author.trim().to_string(),
+                GroupPreset::Genre => b.genre.trim().to_string(),
+                GroupPreset::Year => group_key(b, g),
+                _ => b.series.trim().to_string(),
+            }
+        }
+
+        let books = self.list_sorted(sort, query, drill, scope)?;
+        let total = books.len() as i64;
+        let grouped = drill == 0 && group != GroupPreset::None;
+
+        self.conn.execute("DELETE FROM view", [])?;
+        self.conn.execute("BEGIN", [])?;
+        let result = (|| -> rusqlite::Result<()> {
+            let mut pos = 0i64;
+            if grouped {
+                use std::collections::HashMap;
+                let mut groups: HashMap<String, Vec<&Book>> = HashMap::new();
+                for b in &books {
+                    let k = group_key(b, group);
+                    if !k.is_empty() {
+                        groups.entry(k).or_default().push(b);
+                    }
+                }
+                let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+                for b in &books {
+                    let k = group_key(b, group);
+                    if k.is_empty() || !seen.insert(k.clone()) {
+                        continue;
+                    }
+                    let members = groups.get(&k).unwrap();
+                    let kind = if members.len() > 1 { 1 } else { 0 };
+                    let sid = if members.len() > 1 { k.clone() } else { String::new() };
+                    self.conn.execute(
+                        "INSERT INTO view(pos,kind,book_id,series_id,series_name,series_count) VALUES(?1,?2,?3,?4,?5,?6)",
+                        rusqlite::params![pos, kind, members[0].id, sid, label(members[0], group), members.len() as i64],
+                    )?;
+                    pos += 1;
+                }
+            } else {
+                for b in &books {
+                    let sid = b.series_id.clone();
+                    let name = b.series.clone();
+                    self.conn.execute(
+                        "INSERT INTO view(pos,kind,book_id,series_id,series_name,series_count) VALUES(?1,0,?2,?3,?4,1)",
+                        rusqlite::params![pos, b.id, sid, name],
+                    )?;
+                    pos += 1;
+                }
+            }
+            Ok(())
+        })();
+        match result {
+            Ok(()) => {
+                let _ = self.conn.execute("COMMIT", []);
+                Ok(total)
+            }
+            Err(e) => {
+                let _ = self.conn.execute("ROLLBACK", []);
+                Err(e)
+            }
+        }
+    }
+
+    /// Books in the active sort order (+ query / drill-scope filter), for
+    /// `view_rebuild` and the flat-velocity paths.
+    pub fn list_sorted(
+        &self,
+        sort: SortMode,
+        query: &str,
+        drill: u32,
+        scope: &str,
+    ) -> rusqlite::Result<Vec<Book>> {
+        let order = match sort {
+            SortMode::Title => "title COLLATE NOCASE, id",
+            SortMode::Author => "author COLLATE NOCASE, title COLLATE NOCASE, id",
+            SortMode::Series => "series COLLATE NOCASE, series_idx, id",
+            SortMode::Recent => "added_at DESC, title COLLATE NOCASE, id",
+        };
+        let mut sql = String::from(concat!(
+            "SELECT id,title,author,series,series_id,series_idx,",
+            " ext,size,downloaded,local_path,added_at,",
+            " filename,source,search_text,genre FROM books WHERE 1=1"
+        ));
+        let mut params: Vec<String> = Vec::new();
+        let mut n = 0i32;
+        if drill > 0 && !scope.is_empty() {
+            n += 1;
+            sql.push_str(&format!(
+                " AND (author=?{n} OR series_id=?{n} OR genre=?{n})"
+            ));
+            params.push(scope.to_string());
+        }
+        if !query.trim().is_empty() {
+            let pat = format!("%{}%", like_escape(query));
+            n += 1;
+            let p = n.to_string();
+            sql.push_str(&format!(
+                " AND (title LIKE ?{p} ESCAPE '\\' OR author LIKE ?{p} ESCAPE '\\' \
+                 OR series LIKE ?{p} ESCAPE '\\' OR search_text LIKE ?{p} ESCAPE '\\')"
+            ));
+            params.push(pat);
+        }
+        sql.push_str(" ORDER BY ");
+        sql.push_str(order);
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt
+            .query_map(rusqlite::params_from_iter(params.iter()), |r| row_to_book(r))?
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(stmt);
+        Ok(rows)
+    }
+
+    /// One page of the materialised view (the shelf's source when grouped).
+    pub fn view_page(&self, limit: usize, offset: usize) -> rusqlite::Result<Vec<ViewRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT kind,book_id,series_id,series_name,series_count FROM view \
+             ORDER BY pos LIMIT ?1 OFFSET ?2",
+        )?;
+        let rows = stmt
+            .query_map(rusqlite::params![limit as i64, offset as i64], |r| {
+                Ok(ViewRow {
+                    kind: r.get(0)?,
+                    book_id: r.get(1)?,
+                    series_id: r.get(2)?,
+                    series_name: r.get(3)?,
+                    series_count: r.get(4)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// Tile count of the materialised view.
+    pub fn view_total(&self) -> rusqlite::Result<i64> {
+        self.conn.query_row("SELECT COUNT(*) FROM view", [], |r| r.get(0))
+    }
+
+    /// Which grouping dimensions the current data actually offers
+    /// (author / series / year / genre present somewhere), C
+    /// eh_view_dim_available — the group chooser omits empty dims so the
+    /// harness's row indices line up.
+    pub fn dim_availability(&self) -> rusqlite::Result<(bool, bool, bool, bool)> {
+        let a: bool = self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM books WHERE author IS NOT NULL AND author!='')",
+            [],
+            |r| r.get(0),
+        )?;
+        let s: bool = self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM books WHERE series_id IS NOT NULL AND series_id!='')",
+            [],
+            |r| r.get(0),
+        )?;
+        let y: bool = self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM books WHERE added_at IS NOT NULL AND added_at>0)",
+            [],
+            |r| r.get(0),
+        )?;
+        let g: bool = self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM books WHERE genre IS NOT NULL AND genre!='')",
+            [],
+            |r| r.get(0),
+        )?;
+        Ok((a, s, y, g))
+    }
+}
+
+/// UTC year of a unix timestamp (Howard Hinnant civil-from-days),
+/// or None for 1970-01-01 (year 0 guard / invalid).
+fn year_of(unix: i64) -> Option<String> {
+    if unix <= 0 {
+        return None;
+    }
+    let z = unix.div_euclid(86400) + 719468;
+    let era = z.div_euclid(146097);
+    let doe = z - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe + era * 400;
+    Some(format!("{}", y))
+}
+
+/// Map a books row to a [`Book`] (shared by list/search/view reads).
+fn row_to_book(r: &rusqlite::Row) -> rusqlite::Result<Book> {
+    Ok(Book {
+        id: r.get(0)?,
+        title: r.get(1)?,
+        author: r.get(2)?,
+        series: r.get(3)?,
+        series_id: r.get(4)?,
+        series_idx: r.get(5)?,
+        ext: r.get(6)?,
+        size: r.get(7)?,
+        downloaded: r.get::<_, i64>(8)? != 0,
+        local_path: r.get(9)?,
+        added_at: r.get(10)?,
+        filename: r.get(11)?,
+        source: r.get(12)?,
+        search_text: r.get(13)?,
+        genre: r.get(14)?,
+    })
+}
 /// same order/shape as the C app's SCHEMA_SQL + store_migrate_columns.
 fn apply_schema(conn: &Connection) -> rusqlite::Result<()> {
     // Base tables (no indexes yet — the C app's SCHEMA_SQL creates the
@@ -350,7 +607,10 @@ fn apply_schema(conn: &Connection) -> rusqlite::Result<()> {
         " local_path TEXT, added_at INTEGER,",
         " filename TEXT, source TEXT, search_text TEXT, genre TEXT);",
         "CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT);",
-        "CREATE TABLE IF NOT EXISTS search_history(term TEXT PRIMARY KEY, ts INTEGER);"
+        "CREATE TABLE IF NOT EXISTS search_history(term TEXT PRIMARY KEY, ts INTEGER);",
+        "CREATE TABLE IF NOT EXISTS view(",
+        " pos INTEGER PRIMARY KEY, kind INTEGER, book_id TEXT, series_id TEXT,",
+        " series_name TEXT, series_count INTEGER);"
     ))?;
 
     // Additive columns for stores predating them (match C migration list),
@@ -512,6 +772,33 @@ mod tests {
         assert!(none.is_empty());
         // Empty query = full shelf.
         assert_eq!(store.search("", 10, 0).unwrap().len(), 3);
+    }
+
+    #[test]
+    fn view_rebuild_collapses_single_author() {
+        use crate::client::BookMeta;
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("t.db")).unwrap();
+        for i in 0..3 {
+            let mut m = BookMeta::default();
+            m.id = format!("b{i}");
+            m.title = format!("T{i}");
+            m.authors = vec!["One Author".into()];
+            store.upsert_book(&m).unwrap();
+        }
+        let total = store.view_rebuild(GroupPreset::Author, SortMode::Recent, 0, "", "").unwrap();
+        assert_eq!(total, 3);
+        let rows = store.view_page(10, 0).unwrap();
+        assert_eq!(rows.len(), 1, "single-author library must collapse to one card");
+        assert_eq!(rows[0].kind, 1);
+        assert_eq!(rows[0].series_count, 3);
+        // Drilled view: the group's books flat.
+        let scope = rows[0].series_id.clone();
+        let total2 = store.view_rebuild(GroupPreset::Author, SortMode::Recent, 1, "", &scope).unwrap();
+        assert_eq!(total2, 3);
+        let flat = store.view_page(10, 0).unwrap();
+        assert_eq!(flat.len(), 3);
+        assert!(flat.iter().all(|r| r.kind == 0));
     }
 
     #[test]

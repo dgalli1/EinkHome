@@ -72,6 +72,10 @@ pub enum Overlay {
     /// The long-press context menu sheet (Open/Download/Delete or
     /// series Download-all/Delete).
     Context,
+    /// The Group by chooser sheet.
+    GroupChooser,
+    /// The Sort by chooser sheet.
+    SortChooser,
 }
 
 /// One long-press context action (C eh_ctx_*).
@@ -82,6 +86,14 @@ pub enum ContextAction {
     Delete,
     DownloadAll,
     DeleteAll,
+}
+
+/// Which chooser sheet is open (group vs sort) — both share the same
+/// centered-row sheet layout.
+#[derive(Clone, Copy)]
+pub enum ChooserKind {
+    Group,
+    Sort,
 }
 
 /// The pager's four page actions (the C contract: -1/-3/-4/-2 →
@@ -215,6 +227,14 @@ pub struct App<B: Framebuffer> {
     pub syncing: bool,
     /// Source-chooser row rects (parallel to the three rows).
     pub source_rows: Vec<Rect>,
+    /// Active grouping preset + drill level (C eh_g_group / drill).
+    pub group: crate::store::GroupPreset,
+    pub sort: crate::store::SortMode,
+    pub drill: u32,
+    /// The drilled group's raw scope value (author / series_id / genre).
+    pub group_scope: String,
+    /// Group/sort chooser row rects (drawn in the chooser sheet overlays).
+    pub chooser_rects: Vec<Rect>,
     /// Download queue + worker + completion channel.
     pub downloader: crate::downloads::Downloader,
     /// True when the active download batch came from a single-book press
@@ -315,6 +335,11 @@ impl<B: Framebuffer> App<B> {
             query: String::new(),
             syncing: false,
             source_rows: Vec::new(),
+            group: crate::store::GroupPreset::None,
+            sort: crate::store::SortMode::Recent,
+            drill: 0,
+            group_scope: String::new(),
+            chooser_rects: Vec::new(),
             downloader: crate::downloads::Downloader::new(),
             dl_single: false,
             dl_batch_all: false,
@@ -342,6 +367,14 @@ impl<B: Framebuffer> App<B> {
             crate::logger::log(&format!("[bookshelf] do_sync FAILED: {e}"));
             crate::log(&format!("[eh_app] sync failed: {e} (showing cached library)"));
         }
+        // Materialise the default view (flat, recent order) — the shelf
+        // reads from `view`, and the group/sort choosers rebuild it.
+        let (g, s, d, q, sc) = (self.group, self.sort, self.drill, self.query.clone(), self.group_scope.clone());
+        let total = self.store.view_rebuild(g, s, d, &q, &sc).unwrap_or(0);
+        crate::logger::log(&format!(
+            "[bookshelf] view_rebuild: view={} sort={} group={} drill={}",
+            total, s as i64, g as i64, d
+        ));
         self.refresh_shelf();
     }
 
@@ -423,6 +456,8 @@ impl<B: Framebuffer> App<B> {
                     Overlay::Source => crate::source::draw(&mut surf, self, &mut dirty),
                     Overlay::Download => draw_download_popup(&mut surf, self, &mut dirty),
                     Overlay::Context => draw_context_menu(&mut surf, self, &mut dirty),
+                    Overlay::GroupChooser => draw_chooser_sheet(&mut surf, self, &mut dirty, ChooserKind::Group),
+                    Overlay::SortChooser => draw_chooser_sheet(&mut surf, self, &mut dirty, ChooserKind::Sort),
                     Overlay::None => {}
                 }
             }
@@ -525,6 +560,11 @@ impl<B: Framebuffer> App<B> {
             self.context_book = None;
             return;
         }
+        // Drilled into a group: pop the drill level first.
+        if self.drill > 0 {
+            self.drill_back();
+            return;
+        }
         if self.tab == Tab::Search {
             self.leave_search();
         }
@@ -551,14 +591,22 @@ impl<B: Framebuffer> App<B> {
             self.tap_search_body(x, y);
             return;
         }
-        for (i, w) in self.screen().widgets.iter().rev().enumerate() {
-            if i == 0 || i == last {
-                continue;
+        // Forward widget indices 2..last are the cover tiles (0 = top bar,
+        // 1 = grid container, last = pager).  The C hit-test walks tiles
+        // top-to-bottom; tap_cover maps the widget index to the entry.
+        let hit = {
+            let n = self.screen().widgets.len();
+            let mut h: Option<usize> = None;
+            for fwd in 2..n.saturating_sub(1) {
+                if self.screen().widgets[fwd].hit(x, y) {
+                    h = Some(fwd);
+                    break;
+                }
             }
-            if w.hit(x, y) {
-                self.tap_cover(i);
-                return;
-            }
+            h
+        };
+        if let Some(i) = hit {
+            self.tap_cover(i);
         }
     }
 
@@ -629,6 +677,7 @@ impl<B: Framebuffer> App<B> {
                 let cursor = self.store.cursor().unwrap_or(0);
                 crate::logger::log(&format!("[bookshelf] do_sync: rounds=1 cursor={cursor} (books={n})"));
                 crate::log(&format!("[eh_app] manual sync: {n} books in store"));
+                self.rebuild_view();
             }
             Err(e) => crate::log(&format!("[eh_app] sync failed: {e}")),
         }
@@ -742,10 +791,23 @@ impl<B: Framebuffer> App<B> {
     fn tap_cover(&mut self, idx: usize) {
         let pos = idx - 2; // [0]=top bar, [1]=grid container precede covers
         if pos < self.entries.len() {
+            if self.entries[pos].stack {
+                // Stack card: drill into the group (C eh_drill_card).
+                let card = crate::store::ViewRow {
+                    kind: 1,
+                    book_id: self.entries[pos].book.id.clone(),
+                    series_id: self.entries[pos].stack_scope.clone(),
+                    series_name: self.entries[pos].stack_label.clone(),
+                    series_count: self.entries[pos].stack_count,
+                };
+                self.drill_into_card(&card);
+                return;
+            }
             let book = self.entries[pos].book.clone();
             self.press_book(&book);
         }
     }
+
 
     /// The C app's eh_book_press_action: probe the on-disk file (both the
     /// current downloads dir AND the stored path — the folder may have
@@ -975,6 +1037,111 @@ impl<B: Framebuffer> App<B> {
 
     // ── shelf state ───────────────────────────────────────────────────
 
+    /// The offered group-chooser presets (C eh_view_dim_available), in the
+    /// harness's row order: None, Author>Series, Series, Author, Year,
+    /// Genre, minus dims the store has no values for.
+    fn group_offer(&self) -> Vec<crate::store::GroupPreset> {
+        let (a, s, y, g) = self.store.dim_availability().unwrap_or((true, false, true, true));
+        use crate::store::GroupPreset;
+        let mut out = vec![GroupPreset::None];
+        if a && s {
+            out.push(GroupPreset::AuthorSeries);
+        }
+        if s {
+            out.push(GroupPreset::Series);
+        }
+        if a {
+            out.push(GroupPreset::Author);
+        }
+        if y {
+            out.push(GroupPreset::Year);
+        }
+        if g {
+            out.push(GroupPreset::Genre);
+        }
+        out
+    }
+
+    /// Rebuild the materialised view for the active group/sort/drill and
+    /// log the C `view_rebuild: view=… sort=… group=… drill=…` marker.
+    fn rebuild_view(&mut self) {
+        let (group, sort, drill, q, scope) = (self.group, self.sort, self.drill, self.query.clone(), self.group_scope.clone());
+        let total = self
+            .store
+            .view_rebuild(group, sort, drill, &q, &scope)
+            .unwrap_or(0);
+        crate::logger::log(&format!(
+            "[bookshelf] view_rebuild: view={} sort={} group={} drill={}",
+            total, sort as i64, group as i64, drill
+        ));
+        self.dirty = true;
+        self.refresh_shelf();
+    }
+
+    /// Open the Group by chooser sheet.
+    fn open_group_chooser(&mut self) {
+        self.chooser_rects.clear();
+        self.set_overlay(Overlay::GroupChooser);
+    }
+
+    /// Open the Sort by chooser sheet.
+    fn open_sort_chooser(&mut self) {
+        self.chooser_rects.clear();
+        self.set_overlay(Overlay::SortChooser);
+    }
+
+    /// A chooser-sheet row (or outside) tap: apply the choice, rebuild the
+    /// view, close.  Outside the sheet dismisses (C sheet behaviour).
+    fn tap_chooser(&mut self, x: i32, y: i32, kind: ChooserKind) {
+        for (i, r) in self.chooser_rects.iter().enumerate() {
+            if r.contains(x, y) {
+                match kind {
+                    ChooserKind::Group => {
+                        let offer = self.group_offer();
+                        if let Some(g) = offer.get(i) {
+                            self.group = *g;
+                            self.drill = 0;
+                            self.group_scope.clear();
+                            self.rebuild_view();
+                        }
+                    }
+                    ChooserKind::Sort => {
+                        let mode = match i {
+                            1 => crate::store::SortMode::Author,
+                            2 => crate::store::SortMode::Series,
+                            3 => crate::store::SortMode::Recent,
+                            _ => crate::store::SortMode::Title,
+                        };
+                        self.sort = mode;
+                        self.rebuild_view();
+                    }
+                }
+                self.chooser_rects.clear();
+                self.set_overlay(Overlay::None);
+                return;
+            }
+        }
+        // Tap outside the sheet → dismiss.
+        self.chooser_rects.clear();
+        self.set_overlay(Overlay::None);
+    }
+
+    /// Drill into a tapped stack card (or a flat row's group scope).
+    fn drill_into_card(&mut self, view_row: &crate::store::ViewRow) {
+        self.drill = 1;
+        self.group_scope = view_row.series_id.clone();
+        self.rebuild_view();
+    }
+
+    /// Back: pop the drill level (C eh_group_drill_back).
+    fn drill_back(&mut self) {
+        if self.drill > 0 {
+            self.drill = 0;
+            self.group_scope.clear();
+            self.rebuild_view();
+        }
+    }
+
     /// Change the active overlay, marking the frame dirty (the present
     /// skip must repaint when the overlay changes).
     fn set_overlay(&mut self, o: Overlay) {
@@ -1036,17 +1203,17 @@ impl<B: Framebuffer> App<B> {
     /// The library shelf (grid or list) at the current page.
     fn build_library_page(&mut self, fb: B, width: u32) -> Screen<B> {
         let per = self.page_size(width);
-        let total = self.store.count().unwrap_or(0) as usize;
+        let total = self.view_total_books();
         self.pages = if total == 0 { 1 } else { (total + per - 1) / per };
         if self.page >= self.pages {
             self.page = self.pages.saturating_sub(1);
         }
-        self.entries = self.store_list_page(per, self.page * per);
+        self.entries = self.store_view_page(per, self.page * per);
         let page = self.page;
         let pages = self.pages;
         let content_bottom = self.content_bottom;
         let title = self.top_title().to_string();
-        let (view_mode, source, syncing) = (self.view_mode, self.source, self.syncing);
+        let (view_mode, source, syncing, drilled) = (self.view_mode, self.source, self.syncing, self.drill > 0);
         shelf::build_shelf(
             fb,
             &title,
@@ -1055,11 +1222,40 @@ impl<B: Framebuffer> App<B> {
             &self.entries,
             content_bottom,
             view_mode,
-            false,   // back
+            drilled, // back chevron when drilled into a group
             source,  // source
             false,   // not the search tab
             syncing,
         )
+    }
+
+    /// Tile count the shelf pages over: the materialised view when one is
+    /// present, else the library count (the C eh_view_total).
+    fn view_total_books(&self) -> usize {
+        let vt = self.store.view_total().unwrap_or(-1);
+        if vt >= 0 {
+            vt as usize
+        } else {
+            self.store.count().unwrap_or(0) as usize
+        }
+    }
+
+    /// One page of shelf entries from the materialised view.  A stack card
+    /// (kind 1) is paired with its representative book so covers/drills
+    /// keep working; flat tiles map to their book.
+    fn store_view_page(&mut self, per: usize, offset: usize) -> Vec<ShelfEntry> {
+        let rows = self.store.view_page(per, offset).unwrap_or_default();
+        rows.into_iter()
+            .map(|v| {
+                let book = self.store.get_book(&v.book_id).ok().flatten().unwrap_or_default();
+                let art = cover::load_cached(&self.covers_dir, &book.id)
+                    .and_then(|bytes| cover::decode_rgb(&bytes).ok())
+                    .map(|(w, h, rgb)| (rgb, w, h));
+                let stack = v.kind == 1;
+                let scope = if stack { v.series_id.clone() } else { String::new() };
+                ShelfEntry { book, art, stack, stack_label: v.series_name, stack_count: v.series_count, stack_scope: scope }
+            })
+            .collect()
     }
 
     /// The Search sub-page at the current page (input row + history).
@@ -1082,25 +1278,6 @@ impl<B: Framebuffer> App<B> {
         let (page, pages, query, content_bottom, syncing) =
             (self.page, self.pages, self.query.clone(), self.content_bottom, self.syncing);
         shelf::build_search(fb, &query, page, pages, &history, content_bottom, syncing)
-    }
-
-    fn store_list_page(&self, per: usize, offset: usize) -> Vec<ShelfEntry> {
-        let books = if self.query.is_empty() {
-            self.store.list_books(per, offset).unwrap_or_default()
-        } else {
-            self.store.search(&self.query, per, offset).unwrap_or_default()
-        };
-        books
-            .into_iter()
-            .map(|book| {
-                // The cover is the cached art if present (page flips fetch
-                // it first; a missing cache is a placeholder tile).
-                let art = cover::load_cached(&self.covers_dir, &book.id)
-                    .and_then(|bytes| cover::decode_rgb(&bytes).ok())
-                    .map(|(w, h, rgb)| (rgb, w, h));
-                ShelfEntry { book, art }
-            })
-            .collect()
     }
 
     /// Flip to `page` (clamped): fetch the page's covers into the cache
@@ -1212,6 +1389,8 @@ impl<B: Framebuffer> App<B> {
             Overlay::Launcher => crate::launcher::tap_launcher(x, y, self),
             Overlay::Source => crate::source::tap(self, x, y),
             Overlay::Context => self.tap_context(x, y),
+            Overlay::GroupChooser => self.tap_chooser(x, y, ChooserKind::Group),
+            Overlay::SortChooser => self.tap_chooser(x, y, ChooserKind::Sort),
             // The download popup is modal while a batch is in flight; once
             // the queue drains, any tap dismisses it (C behavior).
             Overlay::Download => {
@@ -1250,10 +1429,9 @@ impl<B: Framebuffer> App<B> {
                             self.launcher_scroll = 0;
                         }
                     }
+                    MenuRow::GroupBy => self.open_group_chooser(),
+                    MenuRow::SortBy => self.open_sort_chooser(),
                     MenuRow::DownloadAll => self.download_all(),
-                    MenuRow::GroupBy | MenuRow::SortBy => {
-                        crate::log("[eh_app] menu: feature not ported yet (group/sort)");
-                    }
                 }
                 self.menu_rows.clear();
                 return;
@@ -1414,3 +1592,55 @@ fn draw_context_menu<B: Framebuffer>(surf: &mut eh_render::Surface, app: &mut Ap
         app.context_rects.push(Rect { x: px + 12, y: iy, w: pw - 24, h: 84 });
     }
 }
+
+/// The Group by / Sort by chooser sheet (C eh_draw_group / eh_draw_sort):
+/// a dim + a centered sheet with a title band and N rows.  Row geometry
+/// matches the harness's `_chooser_py` (centred on the CONTENT area).
+fn draw_chooser_sheet<B: Framebuffer>(
+    surf: &mut eh_render::Surface,
+    app: &mut App<B>,
+    dirty: &mut Vec<Rect>,
+    kind: ChooserKind,
+) {
+    use eh_shell::{GRAY_BLACK, GRAY_LGRAY, GRAY_WHITE};
+    let w = surf.width();
+    let h = app.content_bottom as u32;
+    dirty.push(Rect { x: 0, y: 0, w, h });
+    surf.fill_gray(Rect { x: 0, y: 0, w, h }, GRAY_BLACK);
+    let (n, labels, title): (usize, Vec<String>, &str) = match kind {
+        ChooserKind::Group => {
+            let offer = app.group_offer();
+            (
+                offer.len(),
+                offer.iter().map(|g| GROUP_LABELS[*g as usize].to_string()).collect(),
+                "Group by",
+            )
+        }
+        ChooserKind::Sort => (4, SORT_LABELS.iter().map(|s| s.to_string()).collect(), "Sort by"),
+    };
+    let pw = w * 3 / 4;
+    let ph = (72 + n as u32 * 96 + 24).max(1);
+    let px = (w - pw) / 2;
+    let py = ((h as i32 - ph as i32) / 2).max(0) as u32;
+    surf.fill_gray(Rect { x: px, y: py, w: pw, h: ph }, GRAY_WHITE);
+    surf.rect_outline(Rect { x: px, y: py, w: pw, h: ph }, 2, GRAY_BLACK);
+    let font = crate::shelf::shelf_font();
+    let mut g = eh_render::Glyph::new();
+    eh_render::draw_text(surf, font, 28.0, title, (px + 24) as i32, (py + 20) as i32, GRAY_BLACK, &mut g);
+    surf.hline(px + 24, py + 64, pw - 48, 2, GRAY_LGRAY);
+    app.chooser_rects.clear();
+    for i in 0..n {
+        let iy = py + 84 + (i as u32) * 96;
+        surf.fill_gray(Rect { x: px + 12, y: iy, w: pw - 24, h: 84 }, GRAY_WHITE);
+        surf.rect_outline(Rect { x: px + 12, y: iy, w: pw - 24, h: 84 }, 1, GRAY_BLACK);
+        eh_render::draw_text(surf, font, 26.0, &labels[i], (px + 32) as i32, (iy + 30) as i32, GRAY_BLACK, &mut g);
+        app.chooser_rects.push(Rect { x: px + 12, y: iy, w: pw - 24, h: 84 });
+    }
+}
+
+
+/// Labels of the group-chooser rows, in the C order (None, [Author>Series],
+/// Series, Author, Year, Genre) — the harness reads the store to map a
+/// chosen dimension to its row index, so the order must match.
+const GROUP_LABELS: [&str; 6] = ["All books", "Author > Series", "Series", "Author", "Year", "Genre"];
+const SORT_LABELS: [&str; 4] = ["Title A-Z", "By author", "By series", "Recent"];
