@@ -16,7 +16,7 @@ use eh_shell::Screen;
 
 use crate::appui::{PAGER_H, TOP_BAR_H};
 use crate::client::ApiClient;
-use crate::config::Config;
+use crate::config::{Config, parse_kv_file};
 use crate::cover;
 use crate::shelf::{self, ShelfEntry};
 use crate::store::{Book, Store};
@@ -346,14 +346,25 @@ impl<B: Framebuffer> App<B> {
     }
 
     /// Persist the resolved config (C: eh_save_config_file at boot, so the
-    /// defaults become visible + editable in Settings).
+    /// defaults become visible + editable in Settings).  The /tmp override
+    /// (dead/delayed API for the e2e suite) must NOT leak into the base
+    /// cfg: the save writes the base file's own api_url/api_token, while
+    /// the runtime config keeps the override (re-applied on every load).
     fn ensure_config(config: &Config, cfg_path: Option<&Path>, downloads_dir: &str) -> Config {
         let mut config = config.clone();
         if config.downloads_dir.as_deref().unwrap_or("") != downloads_dir {
             config.downloads_dir = Some(downloads_dir.to_string());
         }
         if let Some(p) = cfg_path {
-            if let Err(e) = config.save(p) {
+            let base = parse_kv_file(p).unwrap_or_default();
+            let mut save = config.clone();
+            if !base.api_url.is_empty() {
+                save.api_url = base.api_url;
+            }
+            if !base.api_token.is_empty() {
+                save.api_token = base.api_token;
+            }
+            if let Err(e) = save.save(p) {
                 crate::log(&format!("[eh_app] config save failed: {e}"));
             }
         }

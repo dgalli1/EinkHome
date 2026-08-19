@@ -96,8 +96,9 @@ impl Config {
 }
 
 /// Parse one `key=value` config file (blank lines + `#` comments skipped),
-/// shared by `load` and the /tmp override pass.
-fn parse_kv_file(path: &Path) -> std::io::Result<Config> {
+/// shared by `load`, the /tmp override pass, and the boot-save (which must
+/// persist the base values, not the override).
+pub(crate) fn parse_kv_file(path: &Path) -> std::io::Result<Config> {
     let text = std::fs::read_to_string(path)?;
     let mut cfg = Config::default();
     for line in text.lines() {
