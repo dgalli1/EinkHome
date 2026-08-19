@@ -333,6 +333,7 @@ pub fn build_search<B: Framebuffer>(
     history: &[String],
     _content_h: u32,
     syncing: bool,
+    search_kb: bool,
 ) -> Screen<B> {
     let font = load_font();
     let mut screen = Screen::new(fb, font);
@@ -359,9 +360,10 @@ pub fn build_search<B: Framebuffer>(
         },
     );
 
-    // Input row + history in a scroll column.
+    // Input row with keyboard state.
+    let si = if search_kb { SearchInput::new_active(query) } else { SearchInput::new(query) };
     screen.add_styled(
-        Box::new(SearchInput::new(query)),
+        Box::new(si),
         Style {
             flex_shrink: 0.0,
             size: taffy::geometry::Size {

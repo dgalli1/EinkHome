@@ -403,14 +403,19 @@ fn draw_back_chevron(ctx: &mut DrawCtx, cx: i32, cy: i32, col: u8) {
 
 /// The Search page's input row (C eh_draw_search_tab input row): a bordered
 /// bar with a magnifier and the current query (or a placeholder).
+/// When `active`, the bar inverts (C search_kb state) — black bg, white glyphs.
 pub struct SearchInput {
     pub text: String,
     rect: Option<Rect>,
+    active: bool,
 }
 
 impl SearchInput {
     pub fn new(text: impl Into<String>) -> Self {
-        Self { text: text.into(), rect: None }
+        Self { text: text.into(), rect: None, active: false }
+    }
+    pub fn new_active(text: impl Into<String>) -> Self {
+        Self { text: text.into(), rect: None, active: true }
     }
 }
 
@@ -423,16 +428,18 @@ impl Widget for SearchInput {
         let bh = rect.h.saturating_sub(20);
         let bw = rect.w.saturating_sub(32);
         ctx.outline(Rect { x: bx, y: by, w: bw, h: bh }, 2, GRAY_BLACK);
-        ctx.fill(Rect { x: bx + 1, y: by + 1, w: bw.saturating_sub(2), h: bh.saturating_sub(2) }, GRAY_WHITE);
+        let fill_col = if self.active { GRAY_BLACK } else { GRAY_WHITE };
+        let glyph_col = if self.active { GRAY_WHITE } else { GRAY_BLACK };
+        ctx.fill(Rect { x: bx + 1, y: by + 1, w: bw.saturating_sub(2), h: bh.saturating_sub(2) }, fill_col);
         // Magnifier ring + handle.
         let gx = (bx + 30) as i32;
         let gy = (by + bh / 2) as i32;
-        circle_outline(ctx, gx, gy, 13, GRAY_BLACK);
-        ctx.line(gx + 9, gy + 10, gx + 22, gy + 23, 2, GRAY_BLACK);
-        ctx.line(gx + 10, gy + 9, gx + 23, gy + 22, 2, GRAY_BLACK);
+        circle_outline(ctx, gx, gy, 13, glyph_col);
+        ctx.line(gx + 9, gy + 10, gx + 22, gy + 23, 2, glyph_col);
+        ctx.line(gx + 10, gy + 9, gx + 23, gy + 22, 2, glyph_col);
         // Query text (or placeholder).
         let text = if self.text.is_empty() { "search…" } else { self.text.as_str() };
-        ctx.text((bx + 68) as i32, (by + 18) as i32, 28.0, text, GRAY_BLACK);
+        ctx.text((bx + 68) as i32, (by + 18) as i32, 28.0, text, glyph_col);
     }
     fn dirty(&self, out: &mut Vec<Rect>) {
         if let Some(r) = self.rect {

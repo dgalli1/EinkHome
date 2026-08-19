@@ -250,6 +250,10 @@ pub struct App<B: Framebuffer> {
     /// standard eink reader.
     pub reader_pref: i32,
     pub reader_path: String,
+    /// Keyboard is open editing the search input (C search_kb flag).
+    pub search_kb: bool,
+    /// Live suggestion terms for the current keyboard buffer.
+    pub suggestions: Vec<String>,
     /// Group/sort chooser row rects (drawn in the chooser sheet overlays).
     pub chooser_rects: Vec<Rect>,
     /// Download queue + worker + completion channel.
@@ -368,6 +372,8 @@ impl<B: Framebuffer> App<B> {
             group_scope: String::new(),
             reader_pref: 0,
             reader_path: "auto".to_string(),
+            search_kb: false,
+            suggestions: Vec::new(),
             chooser_rects: Vec::new(),
             downloader: crate::downloads::Downloader::new(),
             dl_single: false,
@@ -618,13 +624,14 @@ impl<B: Framebuffer> App<B> {
                 true
             }
             Some((KbField::Search, text)) => {
-                // C eh_keyboard_handler: only commit when text actually changed.
-                // A dismissed keyboard delivers the buffer unchanged; committing
-                // an unchanged empty buffer would teleport the user home.
-                if text != self.query {
+                let changed = text != self.query;
+                self.search_kb = false;
+                self.suggestions.clear();
+                if changed {
                     self.commit_search(&text);
-                } else if text.is_empty() {
-                    // Dismissed unchanged: stay on search page, don't teleport.
+                } else if self.tab == Tab::Search {
+                    // Keyboard dismissed unchanged: redraw the bar in normal style.
+                    self.refresh_shelf();
                 }
                 true
             }
@@ -740,6 +747,8 @@ impl<B: Framebuffer> App<B> {
 
     /// Leave Search back to the library shelf, keeping the query filter.
     fn leave_search(&mut self) {
+        self.search_kb = false;
+        self.suggestions.clear();
         self.tab = Tab::Library;
         self.page = 0;
         self.refresh_shelf();
@@ -835,6 +844,10 @@ impl<B: Framebuffer> App<B> {
         let initial = self.query.clone();
         let _ = kb_take_pending();
         kb_arm(KbField::Search);
+        self.search_kb = true;
+        self.suggestions.clear();
+        // Rebuild the search page to show the inverted input bar.
+        self.refresh_shelf();
         self.screen()
             .framebuffer_mut()
             .open_keyboard("Search", &initial, kb_commit);
@@ -1459,7 +1472,7 @@ impl<B: Framebuffer> App<B> {
         let history = self.store.search_list(rows_per, offset).unwrap_or_default();
         let (page, pages, query, content_bottom, syncing) =
             (self.page, self.pages, self.query.clone(), self.content_bottom, self.syncing);
-        shelf::build_search(fb, &query, page, pages, &history, content_bottom, syncing)
+        shelf::build_search(fb, &query, page, pages, &history, content_bottom, syncing, self.search_kb)
     }
 
     /// Flip to `page` (clamped): fetch the page's covers into the cache
