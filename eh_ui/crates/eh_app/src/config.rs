@@ -20,6 +20,7 @@ pub struct Config {
     pub api_token: String,
     pub downloads_dir: Option<String>,
     pub reader: Option<String>,
+    pub source: Option<String>,
 }
 
 impl Config {
@@ -42,8 +43,9 @@ impl Config {
             match key {
                 "api_url" | "url" => cfg.api_url = value.to_string(),
                 "api_token" | "token" => cfg.api_token = value.to_string(),
-                "downloads_dir" | "download_dir" => cfg.downloads_dir = Some(value.to_string()),
                 "reader" => cfg.reader = Some(value.to_string()),
+                "downloads_dir" | "download_dir" => cfg.downloads_dir = Some(value.to_string()),
+                "source" => cfg.source = Some(value.to_string()),
                 _ => {}
             }
         }
@@ -70,6 +72,22 @@ impl Config {
             }
         }
         None
+    }
+
+    /// Persist the config as a plain `key=value` list (C
+    /// eh_write_config_file): api_url, api_token, downloads_dir, source,
+    /// reader (path, or `auto` for the firmware reader).
+    pub fn save(&self, path: &Path) -> std::io::Result<()> {
+        let mut text = format!("api_url={}\n", self.api_url);
+        text.push_str(&format!("api_token={}\n", self.api_token));
+        if let Some(d) = &self.downloads_dir {
+            if !d.is_empty() {
+                text.push_str(&format!("downloads_dir={d}\n"));
+            }
+        }
+        text.push_str(&format!("source={}\n", self.source.as_deref().unwrap_or("kavita")));
+        text.push_str(&format!("reader={}\n", self.reader.as_deref().unwrap_or("auto")));
+        std::fs::write(path, text)
     }
 }
 

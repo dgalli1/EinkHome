@@ -122,6 +122,11 @@ impl Rect {
         let y1 = self.y.saturating_add(self.h).min(bounds.y.saturating_add(bounds.h));
         Rect { x: x0, y: y0, w: x1.saturating_sub(x0), h: y1.saturating_sub(y0) }
     }
+
+    /// True when `(x, y)` (surface pixels) falls inside the rect.
+    pub fn contains(&self, x: i32, y: i32) -> bool {
+        x >= self.x as i32 && x < (self.x + self.w) as i32 && y >= self.y as i32 && y < (self.y + self.h) as i32
+    }
 }
 
 /// Pointer/button co-ordinates in surface pixels (origin top-left, matching
@@ -203,4 +208,23 @@ pub trait Framebuffer {
     /// Called by the shell once per frame after all draws, so the backend can
     /// flush its queued dirty regions to the panel.
     fn present(&mut self, mode: RefreshMode);
+
+    /// Open a book file in the platform reader (the firmware's canonical
+    /// open path).  Default: not available on this platform.
+    fn open_book(&mut self, _path: &str, _title: &str) -> bool {
+        false
+    }
+
+    /// Launch another on-device application (the launcher's action).
+    /// Default: not available on this platform.
+    fn launch_app(&mut self, _path: &str, _name: &str) -> bool {
+        false
+    }
+
+    /// Open the platform text keyboard, preloaded with `initial`.  On commit
+    /// (or cancel) `on_done` receives the buffer contents; on a backend
+    /// without a keyboard it is called immediately with `initial`.
+    fn open_keyboard(&mut self, _title: &str, initial: &str, on_done: fn(&[u8])) {
+        on_done(initial.as_bytes());
+    }
 }

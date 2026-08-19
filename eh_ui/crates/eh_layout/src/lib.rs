@@ -102,6 +102,12 @@ impl Layout {
             .expect("node allocation")
     }
 
+    /// Append `child` under `parent` (for building nested layouts after
+    /// construction).
+    pub fn add_child(&mut self, parent: NodeId, child: NodeId) {
+        self.tree.add_child(parent, child).expect("add child");
+    }
+
     /// Set the root's children (the top-level screen content).
     pub fn set_root_children(&mut self, children: &[NodeId]) {
         self.tree.set_children(self.root, children).expect("set root children");
@@ -136,10 +142,22 @@ impl Layout {
         self.tree.compute_layout(self.root, avail).expect("layout compute");
     }
 
-    /// Output rect for a node (taffy layout: position + size).
+    /// Output rect for a node (taffy layout: position + size).  Taffy reports
+    /// `location` relative to the node's PARENT, so walk up to the root to
+    /// get screen-absolute coordinates — nested containers (top-bar / grid /
+    /// pager) depend on this to land in their bands.
     pub fn rect(&self, id: NodeId) -> eh_hal::Rect {
+        let mut x = 0.0f32;
+        let mut y = 0.0f32;
+        let mut cur = Some(id);
+        while let Some(n) = cur {
+            let l = self.tree.layout(n).expect("node layout");
+            x += l.location.x;
+            y += l.location.y;
+            cur = self.tree.parent(n);
+        }
         let l = self.tree.layout(id).expect("node layout");
-        eh_hal::Rect::from_xy(l.location.x as i32, l.location.y as i32, l.size.width as i32, l.size.height as i32)
+        eh_hal::Rect::from_xy(x as i32, y as i32, l.size.width as i32, l.size.height as i32)
     }
 }
 

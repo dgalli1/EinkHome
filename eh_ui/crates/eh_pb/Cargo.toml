@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
-# Build the toolkit as a staticlib so the C shim (sdk/pb-dernot/*.c) can link
+# Build the toolkit as a staticlib so the C shim (sdk/pb-demo/*.c) can link
 # it through build_armel.sh exactly like eh_lib in the main app. rlib keeps
 # cargo test/doc building.
 [lib]
@@ -15,4 +15,4 @@ eh_hal = { path = "../eh_hal" }
 eh_render = { path = "../eh_render" }
 eh_shell = { path = "../eh_shell" }
 eh_backend_inkview = { path = "../eh_backend_inkview" }
-eh_demo = { path = "../eh_demo" }
+eh_app = { path = "../eh_app" }

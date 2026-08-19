@@ -61,9 +61,28 @@ impl<'a> DrawCtx<'a> {
         self.surf.fill_gray(rect, gray);
         self.push(rect);
     }
-    pub fn line(&mut self, r: Rect, thick: u32, gray: u8) {
+    pub fn outline(&mut self, r: Rect, thick: u32, gray: u8) {
         self.surf.rect_outline(r, thick, gray);
         self.push(r);
+    }
+    pub fn hline(&mut self, x: u32, y: u32, len: u32, thick: u32, gray: u8) {
+        self.surf.hline(x, y, len, thick, gray);
+        self.push(Rect { x, y, w: len, h: thick });
+    }
+    pub fn vline(&mut self, x: u32, y: u32, len: u32, thick: u32, gray: u8) {
+        self.surf.vline(x, y, len, thick, gray);
+        self.push(Rect { x, y, w: thick, h: len });
+    }
+    /// 2D Bresenham line (the C app's `DrawLine`), tracking the bounding
+    /// box for dirty regions (over-approximated by the line thickness).
+    pub fn line(&mut self, x0: i32, y0: i32, x1: i32, y1: i32, thick: u32, gray: u8) {
+        self.surf.line(x0, y0, x1, y1, thick, gray);
+        let t = thick as i32;
+        let x = x0.min(x1).max(0);
+        let y = y0.min(y1).max(0);
+        let w = (x0 - x1).abs() + t;
+        let h = (y0 - y1).abs() + t;
+        self.push(Rect { x: x as u32, y: y as u32, w: w as u32, h: h as u32 });
     }
     pub fn text(&mut self, x: i32, baseline: i32, size: f32, s: &str, gray: u8) {
         let w = draw_text(self.surf, self.font, size, s, x, baseline, gray, self.glyph) as i32;
@@ -192,6 +211,30 @@ impl Widget for Label {
     }
 }
 
+/// A layout group: a container that holds geometry but draws nothing.
+/// Used by the shell's nested layout (top-bar / grid / pager bands).
+pub struct Group {
+    pub rect: Option<Rect>,
+}
+
+impl Group {
+    pub fn new() -> Self {
+        Self { rect: None }
+    }
+}
+impl Widget for Group {
+    fn draw(&mut self, _ctx: &mut DrawCtx, rect: Rect) {
+        self.rect = Some(rect);
+    }
+    fn dirty(&self, _out: &mut Vec<Rect>) {}
+    fn layout(&mut self, rect: Rect) {
+        self.rect = Some(rect);
+    }
+    fn hit(&self, _x: i32, _y: i32) -> bool {
+        false
+    }
+}
+
 /// A cover tile: optional image + title/author lines.
 pub struct Cover {
     pub img: Option<alloc::vec::Vec<u8>>,
@@ -241,7 +284,7 @@ impl Widget for Cover {
             let cw = rect.w.saturating_sub(border * 2);
             let ch = img_h.saturating_sub(border * 2);
             if cw > 0 && ch > 0 {
-                ctx.line(Rect { x: cx, y: cy, w: cw, h: ch }, border, GRAY_LGRAY);
+                ctx.outline(Rect { x: cx, y: cy, w: cw, h: ch }, border, GRAY_LGRAY);
             }
         }
         // Title + author, centred horizontally + fitted to the tile width so
@@ -284,6 +327,9 @@ pub struct Screen<B: Framebuffer> {
     layout: Layout,
     /// taffy node id for each widget (parallel to `widgets`).
     nodes: Vec<NodeId>,
+    /// The top-level nodes that are direct children of the layout root (the
+    /// chrome bands + containers); nested `add_to` children are NOT here.
+    root_nodes: Vec<NodeId>,
     dirty: Vec<Rect>,
     pub breakpoint: Breakpoint,
     pub widgets: Vec<Box<dyn Widget>>,
@@ -300,6 +346,7 @@ impl<B: Framebuffer> Screen<B> {
             glyph: Glyph::new(),
             layout: Layout::new(),
             nodes: Vec::new(),
+            root_nodes: Vec::new(),
             dirty: Vec::new(),
             breakpoint: Breakpoint::from_width(screen.width),
             widgets: Vec::new(),
@@ -313,11 +360,32 @@ impl<B: Framebuffer> Screen<B> {
     pub fn framebuffer_mut(&mut self) -> &mut B {
         &mut self.fb
     }
+    /// Consume the screen, returning the framebuffer (for the app to rebuild
+    /// a different screen from the same canvas on navigation).
+    pub fn into_framebuffer(self) -> B {
+        self.fb
+    }
+    /// The content height this screen lays out against (the screen height
+    /// minus any firmware panel band).
+    pub fn content_height(&self) -> u32 {
+        self.content_h
+    }
 
     /// Access the underlying layout engine (configure root wrapping, etc.).
     pub fn layout_mut(&mut self) -> &mut Layout {
         &mut self.layout
     }
+    /// Screen-absolute rect of the widget at `idx` (the same taffy geometry
+    /// `present` draws with) — so app-level hit-testing shares one source
+    /// of truth with the paint path (the C app's draw/hit geometry parity).
+    /// Valid after the first `present`.
+    pub fn widget_rect(&self, idx: usize) -> Rect {
+        match self.nodes.get(idx) {
+            Some(&n) => self.clamp(self.layout.rect(n)).0,
+            None => Rect { x: 0, y: 0, w: 0, h: 0 },
+        }
+    }
+
 
     /// Push a widget, giving it a taffy node with the given style.  The app
     /// calls this once when building its screen.  `present()` places the
@@ -325,6 +393,7 @@ impl<B: Framebuffer> Screen<B> {
     pub fn add(&mut self, w: Box<dyn Widget>) -> usize {
         let node = self.layout.leaf(eh_layout::Style::DEFAULT);
         self.nodes.push(node);
+        self.root_nodes.push(node);
         self.widgets.push(w);
         self.widgets.len() - 1
     }
@@ -332,6 +401,32 @@ impl<B: Framebuffer> Screen<B> {
     /// Push a widget with an explicit taffy style (flexbox/grid layout).
     pub fn add_styled(&mut self, w: Box<dyn Widget>, style: eh_layout::Style) -> usize {
         let node = self.layout.leaf(style);
+        self.nodes.push(node);
+        self.root_nodes.push(node);
+        self.widgets.push(w);
+        self.widgets.len() - 1
+    }
+
+    /// Create a layout container (a taffy node with children + a style) that
+    /// is itself one of the root's children.  Returns its index; later
+    /// [`add_to`](Self::add_to) places widgets inside it so the screen can
+    /// express a nested layout (e.g. top-bar / grid-container / pager).
+    /// The container has no Widget of its own — it only groups geometry.
+    pub fn add_container(&mut self, style: eh_layout::Style) -> usize {
+        let node = self.layout.node(style, &[]);
+        self.nodes.push(node);
+        self.root_nodes.push(node);
+        self.widgets.push(Box::new(Group::new()));
+        self.nodes.len() - 1
+    }
+
+    /// Add a widget inside `container_idx` (a node created by
+    /// [`add_container`](Self::add_container)).  The container becomes that
+    /// node's parent in taffy.  Returns the widget's index.
+    pub fn add_to(&mut self, container_idx: usize, w: Box<dyn Widget>, style: eh_layout::Style) -> usize {
+        let parent = self.nodes[container_idx];
+        let node = self.layout.leaf(style);
+        self.layout.tree_mut().add_child(parent, node).ok();
         self.nodes.push(node);
         self.widgets.push(w);
         self.widgets.len() - 1
@@ -367,7 +462,7 @@ impl<B: Framebuffer> Screen<B> {
         let h = self.content_h;
         let stride = self.fb.stride();
 
-        let root_children: Vec<_> = self.nodes.iter().copied().collect();
+        let root_children: Vec<_> = self.root_nodes.iter().copied().collect();
         self.layout.set_root_children(&root_children);
         self.layout.compute(w as f32, h as f32);
 
@@ -411,6 +506,25 @@ impl<B: Framebuffer> Screen<B> {
         if !self.dirty.is_empty() {
             self.fb.refresh(content, mode);
         }
+        self.dirty.clear();
+    }
+
+    /// Flush the regions accumulated since the last present (used by the
+    /// app layer after drawing overlays onto the canvas without a full
+    /// widget repaint).
+    pub fn flush(&mut self, mode: RefreshMode) {
+        if self.dirty.is_empty() {
+            return;
+        }
+        let mut r = self.dirty[0];
+        for d in &self.dirty[1..] {
+            let x0 = r.x.min(d.x);
+            let y0 = r.y.min(d.y);
+            let x1 = (r.x + r.w).max(d.x + d.w);
+            let y1 = (r.y + r.h).max(d.y + d.h);
+            r = Rect { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
+        }
+        self.fb.refresh(r, mode);
         self.dirty.clear();
     }
 

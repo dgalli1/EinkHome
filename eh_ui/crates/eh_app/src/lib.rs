@@ -15,9 +15,14 @@
 //! The shelf screen renders real books (title/author/cover) instead of
 //! placeholder tiles, driven by the sync + store layers.
 
+pub mod app;
+pub mod appui;
 pub mod client;
 pub mod config;
 pub mod cover;
+pub mod launcher;
+pub mod menu;
+pub mod settings;
 pub mod shelf;
 pub mod store;
 pub mod sync;

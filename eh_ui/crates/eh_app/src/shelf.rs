@@ -17,6 +17,7 @@ use eh_layout::taffy::{Dimension, Style};
 use eh_render::Font;
 use eh_shell::{Cover, Screen};
 
+use crate::appui::{Pager, TopBar, PAGER_H, TOP_BAR_H};
 use crate::client::ApiClient;
 use crate::cover;
 use crate::store::{Book, Store};
@@ -28,29 +29,82 @@ pub struct ShelfEntry {
     pub art: Option<(Vec<u8>, u32, u32)>,
 }
 
-/// Layout: the same wrap-flex grid as the demo, but each tile is a real book.
-pub fn build_shelf<B: Framebuffer>(fb: B, entries: &[ShelfEntry]) -> Screen<B> {
+/// Build the full shelf screen: top bar + cover grid + pager, laid out as a
+/// vertical column that reserves the chrome bands at top/bottom.  `content_h`
+/// is the band the column must fit inside (the screen height minus the
+/// self-drawn status strip) — the rows are sized against it so the pager
+/// always keeps its band (a too-tall grid would overflow and collapse it).
+pub fn build_shelf<B: Framebuffer>(
+    fb: B,
+    title: &str,
+    page: usize,
+    pages: usize,
+    entries: &[ShelfEntry],
+    content_h: u32,
+) -> Screen<B> {
     let font = load_font();
     let mut screen = Screen::new(fb, font);
-    screen.layout_mut().root_flex_wrap();
+    // Root is a vertical column: [topbar, grid, pager].
+    screen.layout_mut().root_flex_column();
 
+    // --- top bar band ---
+    screen.add_styled(
+        Box::new(TopBar::new(title)),
+        Style {
+            flex_shrink: 0.0,
+            size: taffy::geometry::Size {
+                width: Dimension::percent(1.0),
+                height: Dimension::length(TOP_BAR_H as f32),
+            },
+            ..Style::default()
+        },
+    );
+
+    // --- grid container (fills remaining vertical space, wraps covers) ---
+    let grid = screen.add_container(Style {
+        flex_grow: 1.0,
+        flex_shrink: 1.0,
+        flex_wrap: taffy::style::FlexWrap::Wrap,
+        ..Style::default()
+    });
+
+    // Rows sized to the band left between the chrome bands, so the grid
+    // always fits and the pager stays visible (the C app sizes cells the
+    // same way from the available body height).
     let cols = columns_for(screen.breakpoint);
+    let rows = if entries.is_empty() { 1 } else { (entries.len() as u32 + cols - 1) / cols };
+    let grid_h = (content_h as i32 - TOP_BAR_H as i32 - PAGER_H as i32).max(1) as u32;
+    let row_h = grid_h / rows;
     for e in entries {
         let mut c = Cover::new(e.book.title.clone());
         c.author = e.book.author.clone();
-        c.title_size = 20.0;
+        c.title_size = 18.0;
+        c.author_size = 15.0;
         if let Some((rgb, w, h)) = &e.art {
             c.set_image(rgb.clone(), *w, *h);
         }
         let style = Style {
             size: taffy::geometry::Size {
                 width: Dimension::percent(1.0 / cols as f32),
-                height: Dimension::length(300.0),
+                height: Dimension::length(row_h as f32),
             },
             ..Style::default()
         };
-        screen.add_styled(Box::new(c), style);
+        screen.add_to(grid, Box::new(c), style);
     }
+
+    // --- pager band ---
+    screen.add_styled(
+        Box::new(Pager::new(page, pages)),
+        Style {
+            flex_shrink: 0.0,
+            size: taffy::geometry::Size {
+                width: Dimension::percent(1.0),
+                height: Dimension::length(PAGER_H as f32),
+            },
+            ..Style::default()
+        },
+    );
     screen
 }
 

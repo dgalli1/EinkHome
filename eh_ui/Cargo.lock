@@ -165,8 +165,8 @@ dependencies = [
 name = "eh_pb"
 version = "0.1.0"
 dependencies = [
+ "eh_app",
  "eh_backend_inkview",
- "eh_demo",
  "eh_hal",
  "eh_render",
  "eh_shell",

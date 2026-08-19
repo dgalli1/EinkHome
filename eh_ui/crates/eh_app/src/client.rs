@@ -141,6 +141,18 @@ impl ApiClient {
             &self.token,
         )
     }
+
+    /// `GET /api/v1/books/{id}/file` → the raw book file bytes.  Uses
+    /// `?access_token=` like the cover path (the device image route may not
+    /// resend the Authorization header).
+    pub fn file(&self, id: &str) -> Result<Vec<u8>, String> {
+        crate::util::get_bytes(
+            &self.agent,
+            &self.base,
+            &format!("/api/v1/books/{}/file?access_token={}", id, self.token),
+            &self.token,
+        )
+    }
 }
 
 #[cfg(test)]

@@ -57,6 +57,10 @@ mod imp {
     pub unsafe extern "C" fn ScreenWidth() -> i32 { 758 }
     pub unsafe extern "C" fn ScreenHeight() -> i32 { 1024 }
     pub unsafe extern "C" fn PanelHeight() -> i32 { 0 }
+    pub unsafe extern "C" fn OpenBook(_path: *const u8, _params: *const u8, _flags: i32) -> i32 { 0 }
+    pub unsafe extern "C" fn NewTaskEx(_path: *const u8, _args: *mut *mut u8, _appname: *const u8, _name: *const u8, _icon: *const core::ffi::c_void, _flags: u32, _as_reader: i32) -> i32 { 0 }
+    #[allow(dead_code)]
+    pub unsafe extern "C" fn OpenKeyboard(_title: *const u8, _buf: *mut i8, _max: i32, _flags: i32, _h: extern "C" fn(*mut i8)) {}
 }
 #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
 #[allow(non_snake_case)]
@@ -74,14 +78,17 @@ mod imp {
         pub(super) fn DrawPanel(icon: *const core::ffi::c_void, text: *const u8, title: *const u8, percent: i32) -> i32;
         pub(super) fn Repaint();
         pub(super) fn InkViewMain(cb: extern "C" fn(i32, i32, i32) -> i32);
+        pub(super) fn OpenBook(path: *const u8, parameters: *const u8, flags: i32) -> i32;
+        pub(super) fn NewTaskEx(path: *const u8, args: *mut *mut u8, appname: *const u8, name: *const u8, icon: *const core::ffi::c_void, flags: u32, run_as_reader: i32) -> i32;
+        pub(super) fn OpenKeyboard(title: *const u8, buffer: *mut i8, maxlen: i32, flags: i32, hproc: extern "C" fn(*mut i8));
     }
 }
 
 // Re-expose the imports uniformly.
 #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
-use imp::{DrawPanel, FullUpdate, GetCanvas, InitInkview, InkViewMain, PanelHeight, PartialUpdate, Repaint, ScreenHeight, ScreenWidth, iv_update_panel};
+use imp::{DrawPanel, FullUpdate, GetCanvas, InitInkview, InkViewMain, NewTaskEx, OpenBook, OpenKeyboard, PanelHeight, PartialUpdate, Repaint, ScreenHeight, ScreenWidth, iv_update_panel};
 #[cfg(not(any(target_arch = "arm", target_arch = "aarch64")))]
-use imp::{DrawPanel, FullUpdate, GetCanvas, InitInkview, InkViewMain, PanelHeight, PartialUpdate, Repaint, ScreenHeight, ScreenWidth, iv_update_panel};
+use imp::{DrawPanel, FullUpdate, GetCanvas, InitInkview, InkViewMain, NewTaskEx, OpenBook, PanelHeight, PartialUpdate, Repaint, ScreenHeight, ScreenWidth, iv_update_panel};
 
 /// Boot the inkview library exactly like the stock bookshelf: register, then
 /// hand the event loop a callback.  `on_event` receives raw (evt, par1, par2)
@@ -192,6 +199,37 @@ impl Framebuffer for InkviewFb {
     fn present(&mut self, mode: RefreshMode) {
         self.refresh(Rect { x: 0, y: 0, w: self.width, h: self.height.saturating_sub(self.panel_h) }, mode);
     }
+
+    fn open_book(&mut self, path: &str, title: &str) -> bool {
+        InkviewFb::open_book(self, path, title)
+    }
+    fn launch_app(&mut self, path: &str, name: &str) -> bool {
+        InkviewFb::launch_app(self, path, name)
+    }
+    fn open_keyboard(&mut self, title: &str, initial: &str, on_done: fn(&[u8])) {
+        #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
+        {
+            let t = std::ffi::CString::new(title).unwrap_or_default();
+            KB.with(|k| {
+                let mut g = k.borrow_mut();
+                if g.is_none() {
+                    let mut buf = vec![0u8; 260];
+                    let n = initial.len().min(259);
+                    buf[..n].copy_from_slice(&initial.as_bytes()[..n]);
+                    *g = Some((buf, on_done));
+                    let (b, _) = g.as_ref().unwrap();
+                    unsafe {
+                        OpenKeyboard(t.as_ptr() as *const u8, b.as_ptr() as *mut i8, 260, 0, kb_commit_handler);
+                    }
+                }
+            });
+        }
+        #[cfg(not(any(target_arch = "arm", target_arch = "aarch64")))]
+        {
+            let _ = title;
+            on_done(initial.as_bytes()); // host: no keyboard — cancel with initial value
+        }
+    }
 }
 
 impl InkviewFb {
@@ -212,6 +250,49 @@ impl InkviewFb {
             Repaint();
         }
     }
+
+    /// Open a downloaded book in the firmware reader (the stock bookshelf's
+    /// canonical path: `OpenBook(path, NULL, 1)` routes through
+    /// monitor.app/reader_controller).
+    pub fn open_book(&mut self, path: &str, _title: &str) -> bool {
+        let c = std::ffi::CString::new(path).unwrap_or_default();
+        unsafe { OpenBook(c.as_ptr() as *const u8, std::ptr::null(), 1) == 0 }
+    }
+
+    /// Launch a launcher app (NewTaskEx with the stock bookshelf's task
+    /// flags + TASK_MAKEACTIVE so the new task takes the foreground).
+    pub fn launch_app(&mut self, path: &str, name: &str) -> bool {
+        let base = path.rsplit('/').next().unwrap_or(path);
+        let p = std::ffi::CString::new(path).unwrap_or_default();
+        let b = std::ffi::CString::new(base).unwrap_or_default();
+        let n = std::ffi::CString::new(name).unwrap_or_default();
+        let mut args: [*mut u8; 2] = [p.as_ptr() as *mut u8, std::ptr::null_mut()];
+        // TASK_HIDDEN|NOUPDATEONFOCUS|SINGLEINSTANCE|OUTOFSTACK|MAKEACTIVE
+        const FLAGS: u32 = 0x25 | 0x80;
+        unsafe { NewTaskEx(p.as_ptr() as *const u8, args.as_mut_ptr(), b.as_ptr() as *const u8, n.as_ptr() as *const u8, std::ptr::null(), FLAGS, 0) == 0 }
+    }
+}
+
+// Keyboard commit state: the firmware's keyboard handler is a single
+// global function pointer, so the in-flight (buffer, on_done) pair lives
+// in a thread_local the static handler drains.
+#[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
+thread_local! {
+    static KB: std::cell::RefCell<Option<(std::vec::Vec<u8>, fn(&[u8]))>> = const { std::cell::RefCell::new(None) };
+}
+
+#[allow(non_snake_case)]
+#[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
+extern "C" fn kb_commit_handler(buf: *mut i8) {
+    if buf.is_null() {
+        return;
+    }
+    let s = unsafe { std::ffi::CStr::from_ptr(buf as *const u8) }.to_bytes().to_vec();
+    KB.with(|k| {
+        if let Some((_, f)) = k.borrow_mut().take() {
+            f(&s);
+        }
+    });
 }
 
 /// Paint the native panel content (frontlight icon + battery), delegating to

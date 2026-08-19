@@ -57,6 +57,8 @@ pub struct Store {
 }
 
 impl Store {
+    /// The store DB filename next to the config (C: EH_LIB_DB_FILENAME).
+    pub const LIB_DB_FILENAME: &'static str = EH_LIB_DB_FILENAME;
     /// Open (creating if needed) the store at `path`, applying the schema +
     /// column migrations.  Fails loudly on a corrupt/undecodable DB.
     pub fn open(path: &std::path::Path) -> rusqlite::Result<Store> {
@@ -158,6 +160,49 @@ impl Store {
 
     pub fn delete_book(&self, id: &str) -> rusqlite::Result<()> {
         self.conn.execute("DELETE FROM books WHERE id=?1", [id])?;
+        Ok(())
+    }
+
+    /// One book by id (the press action re-reads the row for the current
+    /// `downloaded`/`local_path`/`filename` before acting).
+    pub fn get_book(&self, id: &str) -> rusqlite::Result<Option<Book>> {
+        let mut stmt = self.conn.prepare(concat!(
+            "SELECT id,title,author,series,series_id,series_idx,",
+            " ext,size,downloaded,local_path,added_at,",
+            " filename,source,search_text,genre",
+            " FROM books WHERE id=?1"
+        ))?;
+        let row = stmt
+            .query_row([id], |r| {
+                Ok(Book {
+                    id: r.get(0)?,
+                    title: r.get(1)?,
+                    author: r.get(2)?,
+                    series: r.get(3)?,
+                    series_id: r.get(4)?,
+                    series_idx: r.get(5)?,
+                    ext: r.get(6)?,
+                    size: r.get(7)?,
+                    downloaded: r.get::<_, i64>(8)? != 0,
+                    local_path: r.get(9)?,
+                    added_at: r.get(10)?,
+                    filename: r.get(11)?,
+                    source: r.get(12)?,
+                    search_text: r.get(13)?,
+                    genre: r.get(14)?,
+                })
+            })
+            .optional()?;
+        Ok(row)
+    }
+
+    /// Persist the download state (C `eh_store_set_downloaded`): the flag
+    /// plus the on-disk path when downloaded, "" otherwise.
+    pub fn set_downloaded(&self, id: &str, downloaded: bool, local_path: &str) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "UPDATE books SET downloaded=?2, local_path=?3 WHERE id=?1",
+            params![id, downloaded as i64, local_path],
+        )?;
         Ok(())
     }
 
