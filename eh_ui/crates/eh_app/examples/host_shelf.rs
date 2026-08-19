@@ -155,6 +155,35 @@ fn main() -> Result<(), String> {
                 // Settings row 1 (API host): y = 112..232.
                 tap(&mut app, 200, 170)?;
             }
+            "layout" => {
+                // Layout toggle icon (3rd box from the right).
+                let (tb, _, _) = geo(&mut app);
+                tap(&mut app, tb.x as i32 + tb.w as i32 - 248, 48)?;
+            }
+            "search" => {
+                // Search icon (4th box from the right).
+                let (tb, _, _) = geo(&mut app);
+                tap(&mut app, tb.x as i32 + tb.w as i32 - 344, 48)?;
+            }
+            "sync" => {
+                // Sync icon (2nd box from the right).
+                let (tb, _, _) = geo(&mut app);
+                tap(&mut app, tb.x as i32 + tb.w as i32 - 152, 48)?;
+            }
+            "source" => {
+                // Source button (x=112..288, centered ~200).
+                tap(&mut app, 200, 48)?;
+            }
+            "src0" | "src1" | "src2" => {
+                // A source-chooser row.  Sheet py is (content_bottom-384)/2.
+                let i: i32 = match cmd {
+                    "src0" => 0,
+                    "src1" => 1,
+                    _ => 2,
+                };
+                let py = (app.content_bottom as i32 - 384) / 2;
+                tap(&mut app, 200, py + 80 + i * 96 + 42)?;
+            }
             other => return Err(format!("unknown tap token: {other}")),
         }
         if std::env::var("EH_GEO_LAUNCHER").is_ok() && app.overlay == eh_app::app::Overlay::Launcher {

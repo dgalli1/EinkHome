@@ -16,6 +16,8 @@ use rusqlite::{Connection, OptionalExtension, params};
 use crate::client::BookMeta;
 
 pub const EH_LIB_DB_FILENAME: &str = "bookshelf_lib.db";
+/// Max remembered search terms (C EH_SEARCH_HISTORY_MAX).
+const EH_SEARCH_HISTORY_MAX: usize = 20;
 /// Column names + types the C app's store_migrate_columns() adds to stores
 /// created by older builds (CREATE TABLE IF NOT EXISTS leaves old shapes
 /// untouched).  Mirrored verbatim for byte-compatible DBs.
@@ -239,9 +241,104 @@ impl Store {
             .collect::<Result<Vec<_>, _>>()?;
         Ok(rows)
     }
+
+    /// Record a search term in the history (C `eh_store_search_add`):
+    /// dedupe by refreshing the timestamp, then trim to the newest
+    /// `EH_SEARCH_HISTORY_MAX` rows.  Empty terms are ignored.
+    pub fn search_add(&self, term: &str) -> rusqlite::Result<()> {
+        if term.trim().is_empty() {
+            return Ok(());
+        }
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        self.conn.execute(
+            "INSERT OR REPLACE INTO search_history(term,ts) VALUES(?1,?2)",
+            params![term, now],
+        )?;
+        self.conn.execute(
+            "DELETE FROM search_history WHERE rowid NOT IN \
+             (SELECT rowid FROM search_history ORDER BY ts DESC, rowid DESC LIMIT ?1)",
+            [EH_SEARCH_HISTORY_MAX as i64],
+        )?;
+        Ok(())
+    }
+
+    /// Number of remembered search terms (C `eh_store_search_count`).
+    pub fn search_count(&self) -> rusqlite::Result<i64> {
+        self.conn
+            .query_row("SELECT COUNT(*) FROM search_history", [], |r| r.get(0))
+    }
+
+    /// Recent search terms, newest first (C `eh_store_search_list`).
+    pub fn search_list(&self, limit: usize, offset: usize) -> rusqlite::Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT term FROM search_history ORDER BY ts DESC, rowid DESC LIMIT ?1 OFFSET ?2",
+        )?;
+        let rows = stmt
+            .query_map(params![limit as i64, offset as i64], |r| r.get(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// Filtered shelf page: books whose title/author/series/search_text
+    /// match `query` (the C app's LIKE `view_where` fallback — ASCII
+    /// case-insensitive substring, `%`/`_`/`\` escaped).  Empty query =
+    /// the whole shelf.  Same column/order shape as `list_books`.
+    pub fn search(&self, query: &str, limit: usize, offset: usize) -> rusqlite::Result<Vec<Book>> {
+        if query.trim().is_empty() {
+            return self.list_books(limit, offset);
+        }
+        let pat = format!("%{}%", like_escape(query));
+        let mut stmt = self.conn.prepare(concat!(
+            "SELECT id,title,author,series,series_id,series_idx,",
+            " ext,size,downloaded,local_path,added_at,",
+            " filename,source,search_text,genre",
+            " FROM books",
+            " WHERE (title LIKE ?1 ESCAPE '\\' OR author LIKE ?1 ESCAPE '\\'",
+            " OR series LIKE ?1 ESCAPE '\\' OR search_text LIKE ?1 ESCAPE '\\')",
+            " ORDER BY added_at DESC, title COLLATE NOCASE, id",
+            " LIMIT ?2 OFFSET ?3"
+        ))?;
+        let rows = stmt
+            .query_map(params![pat, limit as i64, offset as i64], |r| {
+                Ok(Book {
+                    id: r.get(0)?,
+                    title: r.get(1)?,
+                    author: r.get(2)?,
+                    series: r.get(3)?,
+                    series_id: r.get(4)?,
+                    series_idx: r.get(5)?,
+                    ext: r.get(6)?,
+                    size: r.get(7)?,
+                    downloaded: r.get::<_, i64>(8)? != 0,
+                    local_path: r.get(9)?,
+                    added_at: r.get(10)?,
+                    filename: r.get(11)?,
+                    source: r.get(12)?,
+                    search_text: r.get(13)?,
+                    genre: r.get(14)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
 }
 
-/// Apply CREATE TABLE IF NOT EXISTS + the additive column migrations, in the
+/// Escape SQL `LIKE` metacharacters (`%`, `_`, `\`) for a `ESCAPE '\'`
+/// clause, matching the C app's `like_escape` so a literal `%` in a query
+/// is treated as text, not a wildcard.
+fn like_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if matches!(c, '%' | '_' | '\\') {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
+}
 /// same order/shape as the C app's SCHEMA_SQL + store_migrate_columns.
 fn apply_schema(conn: &Connection) -> rusqlite::Result<()> {
     // Base tables (no indexes yet — the C app's SCHEMA_SQL creates the
@@ -252,7 +349,8 @@ fn apply_schema(conn: &Connection) -> rusqlite::Result<()> {
         " title TEXT, author TEXT, series TEXT, series_id TEXT,",
         " local_path TEXT, added_at INTEGER,",
         " filename TEXT, source TEXT, search_text TEXT, genre TEXT);",
-        "CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT);"
+        "CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT);",
+        "CREATE TABLE IF NOT EXISTS search_history(term TEXT PRIMARY KEY, ts INTEGER);"
     ))?;
 
     // Additive columns for stores predating them (match C migration list),
@@ -378,5 +476,55 @@ mod tests {
         assert_eq!(parse_ts(Some("2026-06-19T12:34:56Z")), 1781872496);
         assert_eq!(parse_ts(None), 0);
         assert_eq!(parse_ts(Some("garbage")), 0);
+    }
+
+    #[test]
+    fn search_filters_across_fields_case_insensitive() {
+        use crate::client::BookMeta;
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("t.db")).unwrap();
+        // Authors aren't in BookMeta's first-author set — the store maps
+        // authors[0] into author.  Insert a few titled/author books.
+        let mut m = BookMeta::default();
+        m.id = "a1".into();
+        m.title = "The Last Leaf".into();
+        m.authors = vec!["O. Henry".into()];
+        store.upsert_book(&m).unwrap();
+        m.id = "a2".into();
+        m.title = "Moby Dick".into();
+        m.authors = vec!["Herman Melville".into()];
+        store.upsert_book(&m).unwrap();
+        m.id = "a3".into();
+        m.title = "Leaf Lovers".into();
+        m.authors = Vec::new();
+        store.upsert_book(&m).unwrap();
+
+        // Title substring, case-insensitive (added_at ties → title asc).
+        let hits = store.search("leaf", 10, 0).unwrap();
+        let ids: Vec<&str> = hits.iter().map(|b| b.id.as_str()).collect();
+        assert_eq!(ids, vec!["a3", "a1"]); // Leaf Lovers < The Last Leaf
+        // Author match.
+        let hits = store.search("melville", 10, 0).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].id, "a2");
+        // Literal % is escaped, not a wildcard.
+        let none = store.search("%", 10, 0).unwrap();
+        assert!(none.is_empty());
+        // Empty query = full shelf.
+        assert_eq!(store.search("", 10, 0).unwrap().len(), 3);
+    }
+
+    #[test]
+    fn search_history_dedupes_and_trims() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("t.db")).unwrap();
+        store.search_add("first").unwrap();
+        store.search_add("second").unwrap();
+        store.search_add("first").unwrap(); // dedupe → first again, bumps ts
+        let list = store.search_list(100, 0).unwrap();
+        assert_eq!(list, vec!["first", "second"]); // newest first
+        assert_eq!(store.search_count().unwrap(), 2);
+        store.search_add("").unwrap(); // ignored
+        assert_eq!(store.search_count().unwrap(), 2);
     }
 }

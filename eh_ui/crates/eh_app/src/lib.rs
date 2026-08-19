@@ -24,6 +24,7 @@ pub mod launcher;
 pub mod menu;
 pub mod settings;
 pub mod shelf;
+pub mod source;
 pub mod store;
 pub mod sync;
 pub mod util;

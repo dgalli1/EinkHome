@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 use eh_hal::{Framebuffer, InputEvent, KeyCode, Rect};
 use eh_shell::Screen;
 
+use crate::appui::{PAGER_H, TOP_BAR_H};
 use crate::client::ApiClient;
 use crate::config::Config;
 use crate::cover;
@@ -64,6 +65,8 @@ pub enum Overlay {
     Settings,
     /// The launcher overlay (full screen, scrolling column).
     Launcher,
+    /// The source chooser sheet (Kavita / Local / Folder).
+    Source,
 }
 
 /// The pager's four page actions (the C contract: -1/-3/-4/-2 →
@@ -75,11 +78,55 @@ pub enum PageAction {
     Last,
     Next,
 }
+
+/// The active library source (C `BsSourceMode`, EH_SOURCE_*).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Source {
+    Kavita,
+    Local,
+    Folder,
+}
+
+impl Source {
+    /// The persisted config value is the lowercase C camel name
+    /// ("kavita"/"local"/"folder"); anything else → Kavita.
+    pub fn from_config(s: &Option<String>) -> Self {
+        match s.as_deref() {
+            Some("local") => Source::Local,
+            Some("folder") => Source::Folder,
+            _ => Source::Kavita,
+        }
+    }
+    /// The config-file value (C `eh_save_config_file` writes the same).
+    pub fn config_value(self) -> String {
+        match self {
+            Source::Kavita => "kavita".to_string(),
+            Source::Local => "local".to_string(),
+            Source::Folder => "folder".to_string(),
+        }
+    }
+}
+
+/// Shelf rendering mode (C `BsViewMode`, EH_VIEW_GRID/LIST).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ViewMode {
+    Grid,
+    List,
+}
+
+/// The top-level tab (C `BsMainTab`, EH_TAB_LIBRARY/SEARCH).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Tab {
+    Library,
+    Search,
+}
 /// The field currently edited by the on-screen keyboard (Settings).
 #[derive(Clone, Copy, PartialEq)]
 pub enum KbField {
     ApiHost,
     ApiKey,
+    /// The search page's query edit.
+    Search,
 }
 
 // The firmware's OpenKeyboard commit is async: the static handler stashes
@@ -144,6 +191,15 @@ pub struct App<B: Framebuffer> {
     pub launcher_scroll: i32,
     pub launcher_body_h: i32,
     pub launcher_view_h: i32,
+    pub source: Source,
+    pub view_mode: ViewMode,
+    pub tab: Tab,
+    pub query: String,
+    /// True between the manual-sync trigger and its completion (drives the
+    /// top-bar sync glyph).
+    pub syncing: bool,
+    /// Source-chooser row rects (parallel to the three rows).
+    pub source_rows: Vec<Rect>,
 }
 
 /// Books per shelf page by breakpoint (the C app's per-breakpoint grid).
@@ -186,6 +242,7 @@ impl<B: Framebuffer> App<B> {
                 (s.content_height(), 0)
             }
         };
+        let source = Source::from_config(&config.source);
         let mut app = Self {
             screen: Some(screen),
             content_bottom,
@@ -207,6 +264,12 @@ impl<B: Framebuffer> App<B> {
             launcher_scroll: 0,
             launcher_body_h: 0,
             launcher_view_h: 0,
+            source,
+            view_mode: ViewMode::Grid,
+            tab: Tab::Library,
+            query: String::new(),
+            syncing: false,
+            source_rows: Vec::new(),
         };
         app.boot();
         app
@@ -262,6 +325,7 @@ impl<B: Framebuffer> App<B> {
                     Overlay::More => crate::menu::draw(&mut surf, self, &mut dirty),
                     Overlay::Settings => crate::settings::draw(&mut surf, self, &mut dirty),
                     Overlay::Launcher => crate::launcher::draw(&mut surf, self, &mut dirty),
+                    Overlay::Source => crate::source::draw(&mut surf, self, &mut dirty),
                     Overlay::None => {}
                 }
             }
@@ -288,7 +352,9 @@ impl<B: Framebuffer> App<B> {
     /// overlay or the shelf; Back closes overlays).  State-only: the caller
     /// presents afterwards (the C tap handlers draw + flush themselves).
     pub fn on_event(&mut self, ev: &InputEvent) {
-        self.drain_keyboard();
+        if self.drain_keyboard() {
+            return; // a keyboard commit consumed this event (C draws in it)
+        }
         match ev {
             InputEvent::KeyDown { key: KeyCode::Back } => self.back(),
             InputEvent::PointerUp { x, y } => {
@@ -303,33 +369,53 @@ impl<B: Framebuffer> App<B> {
         }
     }
 
-    /// Consume a committed keyboard edit (C eh_settings_keyboard_handler):
-    /// normalize, apply to the config, rebuild the client, persist.
-    fn drain_keyboard(&mut self) {
-        if let Some((field, text)) = kb_take_pending() {
-            match field {
-                KbField::ApiHost => self.config.api_url = normalize_host(&text),
-                KbField::ApiKey => self.config.api_token = text,
+    /// Consume a committed keyboard edit.  Returns true when the event that
+    /// triggered this drain came from the keyboard commit and must not also
+    /// be routed (the C app's commit handler draws immediately, so the tap
+    /// that closed the keyboard never reaches the screen).
+    fn drain_keyboard(&mut self) -> bool {
+        match kb_take_pending() {
+            None => false,
+            Some((KbField::ApiHost, text)) => {
+                self.config.api_url = normalize_host(&text);
+                self.client = ApiClient::new(&self.config.api_url, &self.config.api_token);
+                self.save_config();
+                true
             }
-            self.client = ApiClient::new(&self.config.api_url, &self.config.api_token);
-            self.save_config();
+            Some((KbField::ApiKey, text)) => {
+                self.config.api_token = text;
+                self.client = ApiClient::new(&self.config.api_url, &self.config.api_token);
+                self.save_config();
+                true
+            }
+            Some((KbField::Search, text)) => {
+                self.commit_search(&text);
+                true
+            }
         }
     }
 
-    /// Back (hardware key): close the topmost overlay (the shelf is the
-    /// app's top level; the C app's house tap is a no-op there too).
+    /// Back (hardware key): close the topmost overlay; on the search tab
+    /// leave search keeping the active query filter (C: 'the grid stays
+    /// filtered').
     fn back(&mut self) {
         if self.overlay != Overlay::None {
             self.overlay = Overlay::None;
             self.menu_rows.clear();
             self.settings_rows.clear();
             self.launcher_rects.clear();
+            self.source_rows.clear();
+            return;
+        }
+        if self.tab == Tab::Search {
+            self.leave_search();
         }
     }
 
     /// Shelf tap routing (C eh_hit_top_bar / eh_hit_pager /
     /// eh_hit_thumbnail), sharing the shell's taffy geometry: widget 0 is
-    /// the top bar, the last widget the pager, the rest are the covers.
+    /// the top bar, the last widget the pager, the rest are the covers
+    /// (or, on the search tab, the input row + history rows).
     fn tap_screen(&mut self, x: i32, y: i32) {
         let topbar = self.screen().widget_rect(0);
         let last = self.screen().widgets.len().saturating_sub(1);
@@ -343,6 +429,10 @@ impl<B: Framebuffer> App<B> {
             self.tap_pager(x, y, pager);
             return;
         }
+        if self.tab == Tab::Search {
+            self.tap_search_body(x, y);
+            return;
+        }
         for (i, w) in self.screen().widgets.iter().rev().enumerate() {
             if i == 0 || i == last {
                 continue;
@@ -354,20 +444,141 @@ impl<B: Framebuffer> App<B> {
         }
     }
 
-    /// Top bar zones (C eh_hit_top_bar): house (left) is a no-op at the top
-    /// level; the "…" menu button (right) opens the menu drawer.
-    fn tap_top_bar(&mut self, x: i32, y: i32) {
+    /// Top bar zones (C eh_hit_top_bar + eh_hit_top_bar_right).  Left box:
+    /// back (search / drilled) or no-op.  Source button opens the chooser.
+    /// Right stack, in the C order from the corner: menu(3) / sync(2) /
+    /// layout(7) / search(5).
+    fn tap_top_bar(&mut self, x: i32, _y: i32) {
+        use crate::appui::{BTN_PAD, BTN_SIZE, SOURCE_BTN_X, SOURCE_BTN_W};
         let r = self.screen().widget_rect(0);
-        let box_w = crate::appui::BTN_SIZE + crate::appui::BTN_PAD * 2;
-        let right_box = Rect {
-            x: r.x + r.w.saturating_sub(box_w),
-            y: r.y,
-            w: box_w,
-            h: r.h,
-        };
-        if right_box.contains(x, y) {
+        let w = r.w as i32;
+        // Left button.
+        if x >= BTN_PAD as i32 && x < (BTN_PAD + BTN_SIZE) as i32 {
+            if self.tab == Tab::Search {
+                self.leave_search();
+            }
+            return;
+        }
+        if self.tab == Tab::Search {
+            return; // search bar has no other zones
+        }
+        // Source button.
+        if x >= SOURCE_BTN_X && x < SOURCE_BTN_X + SOURCE_BTN_W {
+            self.overlay = Overlay::Source;
+            return;
+        }
+        // Right stack (w - pad - k*btn for k=4,3,2,1 → search/layout/sync/menu).
+        if x >= w - (BTN_PAD + 4 * BTN_SIZE) as i32 && x < w - (BTN_PAD + 3 * BTN_SIZE) as i32 {
+            self.enter_search();
+        } else if x >= w - (BTN_PAD + 3 * BTN_SIZE) as i32 && x < w - (BTN_PAD + 2 * BTN_SIZE) as i32 {
+            self.toggle_layout();
+        } else if x >= w - (BTN_PAD + 2 * BTN_SIZE) as i32 && x < w - (BTN_PAD + BTN_SIZE) as i32 {
+            self.do_sync();
+        } else if x >= w - (BTN_PAD + BTN_SIZE) as i32 && x < w - BTN_PAD as i32 {
             self.overlay = Overlay::More;
         }
+    }
+
+    /// Open the Search sub-page (C top-bar search-icon tap, which==5).
+    fn enter_search(&mut self) {
+        self.tab = Tab::Search;
+        self.page = 0;
+        self.refresh_shelf();
+    }
+
+    /// Leave Search back to the library shelf, keeping the query filter.
+    fn leave_search(&mut self) {
+        self.tab = Tab::Library;
+        self.page = 0;
+        self.refresh_shelf();
+    }
+
+    /// Toggle grid / list view (C layout icon, which==7); resets to page 0.
+    fn toggle_layout(&mut self) {
+        self.view_mode = if self.view_mode == ViewMode::Grid { ViewMode::List } else { ViewMode::Grid };
+        self.page = 0;
+        self.refresh_shelf();
+    }
+
+    /// Manual library sync (C top-bar sync icon, which==2).
+    pub(crate) fn do_sync(&mut self) {
+        self.syncing = true;
+        let res = crate::sync::sync(&self.client, &self.store, 50);
+        self.syncing = false;
+        match res {
+            Ok(n) => crate::log(&format!("[eh_app] manual sync: {n} books in store")),
+            Err(e) => crate::log(&format!("[eh_app] sync failed: {e}")),
+        }
+        self.refresh_shelf();
+    }
+
+    /// Apply a committed search query (C eh_keyboard_handler non-empty
+    /// branch): record it, filter the shelf, return to the library tab.
+    fn commit_search(&mut self, term: &str) {
+        let term = term.trim().to_string();
+        if term.is_empty() {
+            // Dismissed unedited: leave search, don't teleport home.
+            self.tab = Tab::Library;
+            self.refresh_shelf();
+            return;
+        }
+        self.query = term.clone();
+        if let Err(e) = self.store.search_add(&term) {
+            crate::log(&format!("[eh_app] search_add: {e}"));
+        }
+        self.tab = Tab::Library;
+        self.page = 0;
+        self.refresh_shelf();
+    }
+
+    /// Search-tab body taps: the input row opens the keyboard; a history
+    /// row re-runs that stored query (C eh_hit_search_input / history tap).
+    fn tap_search_body(&mut self, x: i32, y: i32) {
+        let n = self.screen().widgets.len();
+        let last = n.saturating_sub(1);
+        // Input row is widget index 1 (bordered box inset like its draw).
+        if n > 1 {
+            let r = self.screen().widget_rect(1);
+            if x >= r.x as i32 + 16
+                && x < (r.x + r.w) as i32 - 16
+                && y >= r.y as i32 + 10
+                && y < (r.y + r.h) as i32 - 10
+            {
+                self.edit_search();
+                return;
+            }
+        }
+        // History rows are widget indices 2..last (parallel to the store's
+        // newest-first list, so row i maps to term i-2).
+        let mut hit: Option<usize> = None;
+        let mut rects: Vec<Rect> = Vec::new();
+        for i in 2..last {
+            rects.push(self.screen().widget_rect(i));
+        }
+        for (i, r) in rects.iter().enumerate() {
+            if r.contains(x, y) {
+                hit = Some(i);
+                break;
+            }
+        }
+        if let Some(idx) = hit {
+            let terms = self.store.search_list(1000, 0).unwrap_or_default();
+            if let Some(t) = terms.get(idx) {
+                let t = t.clone();
+                self.commit_search(&t);
+            }
+        }
+    }
+
+    /// Open the search keyboard with the current query as initial text.
+    fn edit_search(&mut self) {
+        use crate::app::{kb_arm, kb_commit, kb_take_pending};
+        let initial = self.query.clone();
+        let _ = kb_take_pending();
+        kb_arm(KbField::Search);
+        self.screen()
+            .framebuffer_mut()
+            .open_keyboard("Search", &initial, kb_commit);
     }
 
     /// The pager's four buttons (C eh_hit_pager: -1/-3/-4/-2).  Box
@@ -474,24 +685,39 @@ impl<B: Framebuffer> App<B> {
 
     // ── shelf state ───────────────────────────────────────────────────
 
+    /// The shelf page size for the current view mode + panel width.  Grid
+    /// uses the breakpoint table; list is always 1 column of fixed-height
+    /// rows that fit the band below the top bar / above the pager.
+    fn page_size(&self, width: u32) -> usize {
+        match self.view_mode {
+            ViewMode::List => {
+                let band = (self.content_bottom as i32 - TOP_BAR_H as i32 - crate::appui::TOP_BAR_PAD as i32
+                    - PAGER_H as i32 - 8)
+                    .max(1) as u32;
+                (band / shelf::LIST_ROW_H).max(1) as usize
+            }
+            ViewMode::Grid => per_page(eh_layout::Breakpoint::from_width(width)),
+        }
+    }
+
+    /// The centered top-bar title (C top_bar_title): the query on a
+    /// filtered shelf, "Search" on the search page, else nothing.
+    fn top_title(&self) -> &str {
+        if self.query.is_empty() { "" } else { &self.query }
+    }
+
     /// Rebuild the shelf at the current page (the caller presents).
     pub fn refresh_shelf(&mut self) {
         // Take the framebuffer out first: the new screen is built from the
         // same canvas (the C app's full-redraw navigation).
         let fb = self.screen.take().expect("screen present").into_framebuffer();
-        let bp = eh_layout::Breakpoint::from_width(fb.screen().width);
-        let per = per_page(bp);
-        let total = self.store.count().unwrap_or(0) as usize;
-        self.pages = if total == 0 { 1 } else { (total + per - 1) / per };
-        if self.page >= self.pages {
-            self.page = self.pages.saturating_sub(1);
-        }
-        self.entries = self.store_list_page(per, self.page * per);
-        let page = self.page;
-        let pages = self.pages;
-        let content_bottom = self.content_bottom;
-        let mut screen = shelf::build_shelf(fb, "Library", page, pages, &self.entries, content_bottom);
-        screen.content_h = content_bottom;
+        let width = fb.screen().width;
+        let mut screen = if self.tab == Tab::Search {
+            self.build_search_page(fb, width)
+        } else {
+            self.build_library_page(fb, width)
+        };
+        screen.content_h = self.content_bottom;
         self.screen = Some(screen);
         crate::log(&format!(
             "[eh_app] shelf page={}/{} entries={}",
@@ -501,8 +727,63 @@ impl<B: Framebuffer> App<B> {
         ));
     }
 
+    /// The library shelf (grid or list) at the current page.
+    fn build_library_page(&mut self, fb: B, width: u32) -> Screen<B> {
+        let per = self.page_size(width);
+        let total = self.store.count().unwrap_or(0) as usize;
+        self.pages = if total == 0 { 1 } else { (total + per - 1) / per };
+        if self.page >= self.pages {
+            self.page = self.pages.saturating_sub(1);
+        }
+        self.entries = self.store_list_page(per, self.page * per);
+        let page = self.page;
+        let pages = self.pages;
+        let content_bottom = self.content_bottom;
+        let title = self.top_title().to_string();
+        let (view_mode, source, syncing) = (self.view_mode, self.source, self.syncing);
+        shelf::build_shelf(
+            fb,
+            &title,
+            page,
+            pages,
+            &self.entries,
+            content_bottom,
+            view_mode,
+            false,   // back
+            source,  // source
+            false,   // not the search tab
+            syncing,
+        )
+    }
+
+    /// The Search sub-page at the current page (input row + history).
+    fn build_search_page(&mut self, fb: B, width: u32) -> Screen<B> {
+        let _ = width;
+        // History rows per page: the C eh_history_pagesize formula.
+        let rows_per = ((self.content_bottom as i32 - PAGER_H as i32
+            - TOP_BAR_H as i32
+            - crate::appui::TOP_BAR_PAD as i32
+            - 88)
+            / 96)
+            .max(1) as usize;
+        let total = self.store.search_count().unwrap_or(0) as usize;
+        self.pages = if total == 0 { 1 } else { (total + rows_per - 1) / rows_per };
+        if self.page >= self.pages {
+            self.page = self.pages.saturating_sub(1);
+        }
+        let offset = self.page * rows_per;
+        let history = self.store.search_list(rows_per, offset).unwrap_or_default();
+        let (page, pages, query, content_bottom, syncing) =
+            (self.page, self.pages, self.query.clone(), self.content_bottom, self.syncing);
+        shelf::build_search(fb, &query, page, pages, &history, content_bottom, syncing)
+    }
+
     fn store_list_page(&self, per: usize, offset: usize) -> Vec<ShelfEntry> {
-        let books = self.store.list_books(per, offset).unwrap_or_default();
+        let books = if self.query.is_empty() {
+            self.store.list_books(per, offset).unwrap_or_default()
+        } else {
+            self.store.search(&self.query, per, offset).unwrap_or_default()
+        };
         books
             .into_iter()
             .map(|book| {
@@ -523,8 +804,13 @@ impl<B: Framebuffer> App<B> {
             return;
         }
         self.page = page;
-        let per = per_page(eh_layout::Breakpoint::from_width(self.screen().framebuffer().screen().width));
-        let books = self.store.list_books(per, page * per).unwrap_or_default();
+        let width = self.screen().framebuffer().screen().width;
+        let per = self.page_size(width);
+        let books = if self.query.is_empty() {
+            self.store.list_books(per, page * per).unwrap_or_default()
+        } else {
+            self.store.search(&self.query, per, page * per).unwrap_or_default()
+        };
         for b in &books {
             let _ = cover::fetch(&self.client, &self.covers_dir, &b.id);
         }
@@ -618,6 +904,7 @@ impl<B: Framebuffer> App<B> {
             Overlay::More => self.tap_more_menu(x, y),
             Overlay::Settings => crate::settings::tap_settings(x, y, self),
             Overlay::Launcher => crate::launcher::tap_launcher(x, y, self),
+            Overlay::Source => crate::source::tap(self, x, y),
             Overlay::None => {}
         }
     }

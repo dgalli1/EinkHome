@@ -151,6 +151,7 @@ impl<B: Framebuffer> App<B> {
         let initial = match field {
             KbField::ApiHost => self.config.api_url.clone(),
             KbField::ApiKey => self.config.api_token.clone(),
+            KbField::Search => self.query.clone(),
         };
         // Any stale pending commit is discarded (a new edit supersedes it).
         let _ = kb_take_pending();
@@ -158,6 +159,7 @@ impl<B: Framebuffer> App<B> {
         let (title, init) = match field {
             KbField::ApiHost => ("API host", initial.as_str()),
             KbField::ApiKey => ("API key", initial.as_str()),
+            KbField::Search => ("Search", initial.as_str()),
         };
         // The commit handler lives in eh_backend_inkview (static fn
         // pointer); it pushes into app's thread_local and we drain on the
