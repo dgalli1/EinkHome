@@ -111,7 +111,7 @@ impl LinuxFb {
                 close_quiet(fd);
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::Unsupported,
-                    format!("unsupported fb depth: {}bpp", bpp),
+                    format!("unsupported fb depth: {bpp}bpp"),
                 ));
             }
         };

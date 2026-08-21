@@ -521,8 +521,6 @@ impl<B: Framebuffer> App<B> {
     }
     /// Boot: sync the library delta (only when online or the source is
     /// local-only — C eh_evt_init), then build the first shelf page.
-
-
     fn boot(&mut self) {
         self.resolve_reader();
         let online = self.screen().framebuffer().net_active();
@@ -912,7 +910,7 @@ impl<B: Framebuffer> App<B> {
             return; // search bar has no other zones
         }
         // Source button.
-        if x >= SOURCE_BTN_X && x < SOURCE_BTN_X + SOURCE_BTN_W {
+        if (SOURCE_BTN_X..SOURCE_BTN_X + SOURCE_BTN_W).contains(&x) {
             self.set_overlay(Overlay::Source);
             return;
         }
@@ -1427,7 +1425,7 @@ impl<B: Framebuffer> App<B> {
             .unwrap_or_default();
         crate::logger::log(&format!("[bookshelf] delete_series scope={scope} books={}", books.len()));
         for b in &books {
-            self.delete_book(&b);
+            self.delete_book(b);
         }
     }
 
@@ -1656,7 +1654,7 @@ impl<B: Framebuffer> App<B> {
     fn build_library_page(&mut self, fb: B, width: u32) -> Screen<B> {
         let per = self.page_size(width);
         let total = self.view_total_books();
-        self.pages = if total == 0 { 1 } else { (total + per - 1) / per };
+        self.pages = if total == 0 { 1 } else { total.div_ceil(per) };
         if self.page >= self.pages {
             self.page = self.pages.saturating_sub(1);
         }
@@ -1685,8 +1683,8 @@ impl<B: Framebuffer> App<B> {
     /// present, else the library count (the C eh_view_total).
     fn view_total_books(&self) -> usize {
         let vt = self.store.view_total();
-        if vt >= 0 {
-            vt as usize
+        if vt > 0 {
+            vt
         } else {
             self.store.count().unwrap_or(0) as usize
         }
@@ -1724,7 +1722,7 @@ impl<B: Framebuffer> App<B> {
             / 96)
             .max(1) as usize;
         let total = self.store.search_count().unwrap_or(0) as usize;
-        self.pages = if total == 0 { 1 } else { (total + rows_per - 1) / rows_per };
+        self.pages = if total == 0 { 1 } else { total.div_ceil(rows_per) };
         if self.page >= self.pages {
             self.page = self.pages.saturating_sub(1);
         }
@@ -1945,6 +1943,121 @@ fn stamp_self_panel<B: Framebuffer>(fb: &mut B, y0: u32, panel: u32) {
     surf.fill_gray(Rect { x: bx + 4, y: by + 4, w: (bw - 8) / 2, h: bh - 8 }, GRAY_BLACK);
     fb.refresh(Rect { x: 0, y: y0, w: s.width, h: panel }, eh_hal::RefreshMode::Partial);
 }
+/// The modal download-progress popup (C eh_draw_dl_popup): a dim + a
+/// centered white sheet showing the remaining count (the count changes as
+/// the queue drains, so the frame changes during a batch — the e2e
+/// suite's event-loop-alive proof).  Modal while a batch is in flight.
+fn draw_download_popup<B: Framebuffer>(surf: &mut eh_render::Surface, app: &mut App<B>, dirty: &mut Vec<Rect>) {
+    use eh_shell::{GRAY_BLACK, GRAY_WHITE};
+    let w = surf.width();
+    let h = app.content_bottom;
+    dirty.push(Rect { x: 0, y: 0, w, h });
+    surf.fill_gray(Rect { x: 0, y: 0, w, h }, GRAY_BLACK);
+    let pw = w * 3 / 4;
+    let ph = 160u32;
+    let px = (w - pw) / 2;
+    let py = h.saturating_sub(ph) / 2;
+    surf.fill_gray(Rect { x: px, y: py, w: pw, h: ph }, GRAY_WHITE);
+    surf.rect_outline(Rect { x: px, y: py, w: pw, h: ph }, 2, GRAY_BLACK);
+    let font = crate::shelf::shelf_font();
+    let mut g = eh_render::Glyph::new();
+    eh_render::draw_text(surf, font, 28.0, "Downloading\u{2026}", (px + 32) as i32, (py + 72) as i32, GRAY_BLACK, &mut g);
+    let label = if app.dl_total > 0 && !app.dl_batch_all {
+        format!("{} downloaded, {} failed", app.dl_done, app.dl_failed)
+    } else {
+        format!("{} remaining", app.downloader.pending)
+    };
+    eh_render::draw_text(surf, font, 24.0, &label, (px + 32) as i32, (py + 120) as i32, GRAY_BLACK, &mut g);
+}
+
+/// The long-press context menu (C eh_draw_context): a centered white sheet
+/// with the action rows.  Geometry matches the harness's context_geom
+/// (sheet centred on the FULL screen; title band 72 + n*96 + 24 rows).
+fn draw_context_menu<B: Framebuffer>(surf: &mut eh_render::Surface, app: &mut App<B>, dirty: &mut Vec<Rect>) {
+    use eh_shell::{GRAY_BLACK, GRAY_LGRAY, GRAY_WHITE};
+    let w = surf.width();
+    let h = surf.height();
+    crate::logger::log(&format!("[eh_app] ctx draw w={w} h={h} content_bottom={}", app.content_bottom));
+    dirty.push(Rect { x: 0, y: 0, w, h });
+    surf.fill_gray(Rect { x: 0, y: 0, w, h }, GRAY_BLACK);
+    let n = app.context_items.len().max(1);
+    let pw = w * 3 / 4;
+    let ph = (72 + n * 96 + 24) as u32;
+    let px = (w - pw) / 2;
+    let py = ((h as i32 - ph as i32) / 2).max(0) as u32;
+    surf.fill_gray(Rect { x: px, y: py, w: pw, h: ph }, GRAY_WHITE);
+    surf.rect_outline(Rect { x: px, y: py, w: pw, h: ph }, 2, GRAY_BLACK);
+    let font = crate::shelf::shelf_font();
+    let mut g = eh_render::Glyph::new();
+    surf.hline(px + 24, py + 72, pw - 48, 2, GRAY_LGRAY);
+    app.context_rects.clear();
+    for (i, act) in app.context_items.iter().enumerate() {
+        let iy = py + 72 + (i as u32) * 96;
+        let label: &str = match act {
+            ContextAction::Open => "Open",
+            ContextAction::Download => "Download",
+            ContextAction::Delete => "Delete",
+            ContextAction::DownloadAll => "Download all",
+            ContextAction::DeleteAll => "Delete series",
+        };
+        surf.fill_gray(Rect { x: px + 12, y: iy, w: pw - 24, h: 84 }, GRAY_WHITE);
+        surf.rect_outline(Rect { x: px + 12, y: iy, w: pw - 24, h: 84 }, 1, GRAY_BLACK);
+        eh_render::draw_text(surf, font, 28.0, label, (px + 32) as i32, (iy + 30) as i32, GRAY_BLACK, &mut g);
+        app.context_rects.push(Rect { x: px + 12, y: iy, w: pw - 24, h: 84 });
+    }
+}
+
+/// The Group by / Sort by chooser sheet (C eh_draw_group / eh_draw_sort):
+/// a dim + a centered sheet with a title band and N rows.  Row geometry
+/// matches the harness's `_chooser_py` (centred on the CONTENT area).
+fn draw_chooser_sheet<B: Framebuffer>(
+    surf: &mut eh_render::Surface,
+    app: &mut App<B>,
+    dirty: &mut Vec<Rect>,
+    kind: ChooserKind,
+) {
+    use eh_shell::{GRAY_BLACK, GRAY_LGRAY, GRAY_WHITE};
+    let w = surf.width();
+    let h = app.content_bottom;
+    dirty.push(Rect { x: 0, y: 0, w, h });
+    surf.fill_gray(Rect { x: 0, y: 0, w, h }, GRAY_BLACK);
+    let (n, labels, title): (usize, Vec<String>, &str) = match kind {
+        ChooserKind::Group => {
+            let offer = app.group_offer();
+            (
+                offer.len(),
+                offer.iter().map(|g| GROUP_LABELS[*g as usize].to_string()).collect(),
+                "Group by",
+            )
+        }
+        ChooserKind::Sort => (4, SORT_LABELS.iter().map(|s| s.to_string()).collect(), "Sort by"),
+    };
+    let pw = w * 3 / 4;
+    let ph = (72 + n as u32 * 96 + 24).max(1);
+    let px = (w - pw) / 2;
+    let py = ((h as i32 - ph as i32) / 2).max(0) as u32;
+    surf.fill_gray(Rect { x: px, y: py, w: pw, h: ph }, GRAY_WHITE);
+    surf.rect_outline(Rect { x: px, y: py, w: pw, h: ph }, 2, GRAY_BLACK);
+    let font = crate::shelf::shelf_font();
+    let mut g = eh_render::Glyph::new();
+    eh_render::draw_text(surf, font, 28.0, title, (px + 24) as i32, (py + 20) as i32, GRAY_BLACK, &mut g);
+    surf.hline(px + 24, py + 64, pw - 48, 2, GRAY_LGRAY);
+    app.chooser_rects.clear();
+    for (i, _) in labels.iter().enumerate() {
+        let iy = py + 84 + (i as u32) * 96;
+        surf.fill_gray(Rect { x: px + 12, y: iy, w: pw - 24, h: 84 }, GRAY_WHITE);
+        surf.rect_outline(Rect { x: px + 12, y: iy, w: pw - 24, h: 84 }, 1, GRAY_BLACK);
+        eh_render::draw_text(surf, font, 26.0, &labels[i], (px + 32) as i32, (iy + 30) as i32, GRAY_BLACK, &mut g);
+        app.chooser_rects.push(Rect { x: px + 12, y: iy, w: pw - 24, h: 84 });
+    }
+}
+
+
+/// Labels of the group-chooser rows, in the C order (None, [Author>Series],
+/// Series, Author, Year, Genre) — the harness reads the store to map a
+/// chosen dimension to its row index, so the order must match.
+const GROUP_LABELS: [&str; 6] = ["All books", "Author > Series", "Series", "Author", "Year", "Genre"];
+const SORT_LABELS: [&str; 4] = ["Title A-Z", "By author", "By series", "Recent"];
 
 #[cfg(test)]
 mod tests {
@@ -2014,11 +2127,13 @@ mod tests {
     /// buffer, `live_keyboard_text` exposes it while open, and
     /// `cancel_keyboard` drops it WITHOUT firing the commit callback —
     /// the contract the inkview backend implements over the firmware.
+    type KbDoneCell = RefCell<Option<fn(&[u8])>>;
+
     struct FakeKb {
         px: Vec<u8>,
         buf: RefCell<Vec<u8>>,
         open: RefCell<bool>,
-        on_done: RefCell<Option<fn(&[u8])>>,
+        on_done: KbDoneCell,
         cancelled: RefCell<bool>,
     }
 
@@ -2266,118 +2381,3 @@ mod tests {
         assert_eq!(app.tab, Tab::Library);
     }
 }
-/// The modal download-progress popup (C eh_draw_dl_popup): a dim + a
-/// centered white sheet showing the remaining count (the count changes as
-/// the queue drains, so the frame changes during a batch — the e2e
-/// suite's event-loop-alive proof).  Modal while a batch is in flight.
-fn draw_download_popup<B: Framebuffer>(surf: &mut eh_render::Surface, app: &mut App<B>, dirty: &mut Vec<Rect>) {
-    use eh_shell::{GRAY_BLACK, GRAY_WHITE};
-    let w = surf.width();
-    let h = app.content_bottom as u32;
-    dirty.push(Rect { x: 0, y: 0, w, h });
-    surf.fill_gray(Rect { x: 0, y: 0, w, h }, GRAY_BLACK);
-    let pw = w * 3 / 4;
-    let ph = 160u32;
-    let px = (w - pw) / 2;
-    let py = h.saturating_sub(ph) / 2;
-    surf.fill_gray(Rect { x: px, y: py, w: pw, h: ph }, GRAY_WHITE);
-    surf.rect_outline(Rect { x: px, y: py, w: pw, h: ph }, 2, GRAY_BLACK);
-    let font = crate::shelf::shelf_font();
-    let mut g = eh_render::Glyph::new();
-    eh_render::draw_text(surf, font, 28.0, "Downloading\u{2026}", (px + 32) as i32, (py + 72) as i32, GRAY_BLACK, &mut g);
-    let label = if app.dl_total > 0 && !app.dl_batch_all {
-        format!("{} downloaded, {} failed", app.dl_done, app.dl_failed)
-    } else {
-        format!("{} remaining", app.downloader.pending)
-    };
-    eh_render::draw_text(surf, font, 24.0, &label, (px + 32) as i32, (py + 120) as i32, GRAY_BLACK, &mut g);
-}
-
-/// The long-press context menu (C eh_draw_context): a centered white sheet
-/// with the action rows.  Geometry matches the harness's context_geom
-/// (sheet centred on the FULL screen; title band 72 + n*96 + 24 rows).
-fn draw_context_menu<B: Framebuffer>(surf: &mut eh_render::Surface, app: &mut App<B>, dirty: &mut Vec<Rect>) {
-    use eh_shell::{GRAY_BLACK, GRAY_LGRAY, GRAY_WHITE};
-    let w = surf.width();
-    let h = surf.height();
-    crate::logger::log(&format!("[eh_app] ctx draw w={w} h={h} content_bottom={}", app.content_bottom));
-    dirty.push(Rect { x: 0, y: 0, w, h });
-    surf.fill_gray(Rect { x: 0, y: 0, w, h }, GRAY_BLACK);
-    let n = app.context_items.len().max(1);
-    let pw = w * 3 / 4;
-    let ph = (72 + n * 96 + 24) as u32;
-    let px = (w - pw) / 2;
-    let py = ((h as i32 - ph as i32) / 2).max(0) as u32;
-    surf.fill_gray(Rect { x: px, y: py, w: pw, h: ph }, GRAY_WHITE);
-    surf.rect_outline(Rect { x: px, y: py, w: pw, h: ph }, 2, GRAY_BLACK);
-    let font = crate::shelf::shelf_font();
-    let mut g = eh_render::Glyph::new();
-    surf.hline(px + 24, py + 72, pw - 48, 2, GRAY_LGRAY);
-    app.context_rects.clear();
-    for (i, act) in app.context_items.iter().enumerate() {
-        let iy = py + 72 + (i as u32) * 96;
-        let label: &str = match act {
-            ContextAction::Open => "Open",
-            ContextAction::Download => "Download",
-            ContextAction::Delete => "Delete",
-            ContextAction::DownloadAll => "Download all",
-            ContextAction::DeleteAll => "Delete series",
-        };
-        surf.fill_gray(Rect { x: px + 12, y: iy, w: pw - 24, h: 84 }, GRAY_WHITE);
-        surf.rect_outline(Rect { x: px + 12, y: iy, w: pw - 24, h: 84 }, 1, GRAY_BLACK);
-        eh_render::draw_text(surf, font, 28.0, label, (px + 32) as i32, (iy + 30) as i32, GRAY_BLACK, &mut g);
-        app.context_rects.push(Rect { x: px + 12, y: iy, w: pw - 24, h: 84 });
-    }
-}
-
-/// The Group by / Sort by chooser sheet (C eh_draw_group / eh_draw_sort):
-/// a dim + a centered sheet with a title band and N rows.  Row geometry
-/// matches the harness's `_chooser_py` (centred on the CONTENT area).
-fn draw_chooser_sheet<B: Framebuffer>(
-    surf: &mut eh_render::Surface,
-    app: &mut App<B>,
-    dirty: &mut Vec<Rect>,
-    kind: ChooserKind,
-) {
-    use eh_shell::{GRAY_BLACK, GRAY_LGRAY, GRAY_WHITE};
-    let w = surf.width();
-    let h = app.content_bottom as u32;
-    dirty.push(Rect { x: 0, y: 0, w, h });
-    surf.fill_gray(Rect { x: 0, y: 0, w, h }, GRAY_BLACK);
-    let (n, labels, title): (usize, Vec<String>, &str) = match kind {
-        ChooserKind::Group => {
-            let offer = app.group_offer();
-            (
-                offer.len(),
-                offer.iter().map(|g| GROUP_LABELS[*g as usize].to_string()).collect(),
-                "Group by",
-            )
-        }
-        ChooserKind::Sort => (4, SORT_LABELS.iter().map(|s| s.to_string()).collect(), "Sort by"),
-    };
-    let pw = w * 3 / 4;
-    let ph = (72 + n as u32 * 96 + 24).max(1);
-    let px = (w - pw) / 2;
-    let py = ((h as i32 - ph as i32) / 2).max(0) as u32;
-    surf.fill_gray(Rect { x: px, y: py, w: pw, h: ph }, GRAY_WHITE);
-    surf.rect_outline(Rect { x: px, y: py, w: pw, h: ph }, 2, GRAY_BLACK);
-    let font = crate::shelf::shelf_font();
-    let mut g = eh_render::Glyph::new();
-    eh_render::draw_text(surf, font, 28.0, title, (px + 24) as i32, (py + 20) as i32, GRAY_BLACK, &mut g);
-    surf.hline(px + 24, py + 64, pw - 48, 2, GRAY_LGRAY);
-    app.chooser_rects.clear();
-    for i in 0..n {
-        let iy = py + 84 + (i as u32) * 96;
-        surf.fill_gray(Rect { x: px + 12, y: iy, w: pw - 24, h: 84 }, GRAY_WHITE);
-        surf.rect_outline(Rect { x: px + 12, y: iy, w: pw - 24, h: 84 }, 1, GRAY_BLACK);
-        eh_render::draw_text(surf, font, 26.0, &labels[i], (px + 32) as i32, (iy + 30) as i32, GRAY_BLACK, &mut g);
-        app.chooser_rects.push(Rect { x: px + 12, y: iy, w: pw - 24, h: 84 });
-    }
-}
-
-
-/// Labels of the group-chooser rows, in the C order (None, [Author>Series],
-/// Series, Author, Year, Genre) — the harness reads the store to map a
-/// chosen dimension to its row index, so the order must match.
-const GROUP_LABELS: [&str; 6] = ["All books", "Author > Series", "Series", "Author", "Year", "Genre"];
-const SORT_LABELS: [&str; 4] = ["Title A-Z", "By author", "By series", "Recent"];

@@ -153,14 +153,17 @@ pub fn build<B: Framebuffer>(app: &mut App<B>) -> bool {
                             continue;
                         }
                     }
-                    let mut it = LauncherItem::default();
-                    it.text = def
+                    let text = def
                         .get("title")
                         .map(lc_str)
                         .filter(|t| !t.is_empty())
                         .unwrap_or_else(|| id.to_string());
-                    it.path = def.get("path").map(lc_str).unwrap_or_default();
-                    it.icon = def.get("icon").map(lc_str).unwrap_or_default();
+                    let it = LauncherItem {
+                        text,
+                        path: def.get("path").map(lc_str).unwrap_or_default(),
+                        icon: def.get("icon").map(lc_str).unwrap_or_default(),
+                        ..Default::default()
+                    };
                     if !it.path.is_empty() && !has_path(&app.launcher_items, &it.path) {
                         app.launcher_items.push(it);
                     }
@@ -180,14 +183,17 @@ pub fn build<B: Framebuffer>(app: &mut App<B>) -> bool {
                     }
                 }
                 add_header(&mut app.launcher_items, "Users", &mut hdr);
-                let mut it = LauncherItem::default();
-                it.text = val
+                let text = val
                     .get("title")
                     .map(lc_str)
                     .filter(|t| !t.is_empty())
                     .unwrap_or_else(|| key.clone());
-                it.path = val.get("path").map(lc_str).unwrap_or_default();
-                it.icon = val.get("icon").map(lc_str).unwrap_or_default();
+                let it = LauncherItem {
+                    text,
+                    path: val.get("path").map(lc_str).unwrap_or_default(),
+                    icon: val.get("icon").map(lc_str).unwrap_or_default(),
+                    ..Default::default()
+                };
                 if !it.path.is_empty() && !has_path(&app.launcher_items, &it.path) {
                     app.launcher_items.push(it);
                 }
@@ -366,7 +372,7 @@ fn scroll_state<B: Framebuffer>(app: &App<B>) -> (i32, i32) {
 /// body_top` (C's draw loop); rows fully outside the body are skipped.
 pub fn draw<B: Framebuffer>(surf: &mut eh_render::Surface, app: &mut App<B>, dirty: &mut Vec<Rect>) {
     let w = surf.width();
-    let h = app.content_bottom as u32;
+    let h = app.content_bottom;
     dirty.push(Rect { x: 0, y: 0, w, h });
     surf.fill_gray(Rect { x: 0, y: 0, w, h }, GRAY_WHITE);
     crate::settings::draw_header(surf, "Applications", dirty);

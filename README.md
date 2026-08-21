@@ -2,43 +2,48 @@
 
 EinkHome — the PocketBook home-screen replacement app, formerly the
 `bookshelf` app inside the [pbemu](https://github.com/dgalli1/pbemu)
-emulator project.  It is a native C application for PocketBook
-e-readers: a library home screen that syncs book metadata from a
-server (Kavita), renders cover grids, manages downloads, launches the
-built-in reader or KOReader, and doubles as the application launcher.
+emulator project.  It is a native application for PocketBook e-readers:
+a library home screen that syncs book metadata from a server (Kavita),
+renders cover grids, manages downloads, launches the built-in reader or
+KOReader, and doubles as the application launcher.
 
-The git history of every file in this repository was carried over
-from pbemu; the original `bookshelf/` sources still exist there and
-are not touched by this repository.
+The app is **Rust**.  The UI toolkit (`eh_ui` workspace) is
+platform-independent; thin per-platform backends bind it to the
+PocketBook firmware (libinkview), to SDL2 on the desktop, and to the
+emulator's headless test harness.
 
 ## Repository layout
 
 ```
-Makefile            # the only source list; builds build/bookshelf.app
-app/                # the app sources, split by layer:
-  core/             #   boot/event loop, HTTP, config, i18n, worker, eh_core.h
-  data/             #   store (SQLite), model/sync, local scan, metadata, progress
-  ui/               #   drawing: grid, top bar, popups, overlays, browsers
-  action/           #   downloads/context menu, input hit-testing, app launcher UI
-  platform/         #   the eh_plat_* seam + backends: eh_plat_pb.c (boot/services/
-                    #   panel/identity), eh_plat_pb_launcher.c (PB view.json +
-                    #   apps_db.json launcher parser + /mnt/ext1/applications scan),
-                    #   eh_plat_sdl.c (native PC/SDL2 backend), eh_plat.h
-  vendor/           #   cJSON, sqlite3.h
-eh_lib/             # Rust native library, compiled as a C-ABI staticlib and
-                    # linked into the C binary (build/libeh_lib.a).  Exposes
-                    # the epub/pdf/fb2 metadata/cover extraction API declared
-                    # in app/data/eh_extract.h, plus future Rust-backed
-                    # helpers.  Uses the zip, roxmltree and miniz_oxide crates.
-scripts/            # run.sh (headless), run-visible-pb.sh (emulator+viewer),
-                    # run-visible-sdl.sh (native SDL desktop window), setup.sh
-                    # (bootstrap), install-device.sh / install-koreader-device.sh
-                    # (real device), install-koreader.sh (emulator KOReader),
-                    # uninstall-device.sh, test.sh, build_ol_corpus.py +
-                    # click_first_book.py (dev tools), legacy/ (superseded
-                    # on-device helper scripts, kept for reference)
-sdk/                # cross-compile wrapper + SDK bootstrap
-tests/              # emulator integration test suite + support framework
+Makefile            # build entry points: bookshelf.app / .armhf.app /
+                    # bookshelf.pc / bookshelf.test + lint + test
+eh_ui/              # the Rust workspace:
+  crates/eh_hal     #   platform contract: framebuffer, input, keyboard,
+                    #   network seams (the KOReader device-abstraction analog)
+  crates/eh_render  #   surface rasterisation + fontdue text
+  crates/eh_layout  #   taffy-based flex layout
+  crates/eh_shell   #   Screen/widget runtime over any eh_hal backend
+  crates/eh_app     #   the app: shelf, search, downloads, sync, settings,
+                    #   launcher, sysapp promote, store (SQLite), config
+  crates/eh_backend_inkview  # PocketBook firmware backend (device/emulator)
+  crates/eh_backend_sdl      # SDL2 desktop backend + the headless IPC
+                             # control socket (tests/ drives it)
+  crates/eh_backend_linuxfb  # raw-linux-fb backend (experimental)
+  crates/eh_pb      # staticlib facade: libinkview boot + event pump → .app
+  crates/eh_host    # host binary: SDL window + IPC control plane
+                    # (→ build/bookshelf.test for the e2e suite)
+  crates/eh_demo    # scripted demo bins (visual verification)
+sdk/                # cross-compile wrappers (build_armel.sh / build_armhf.sh)
+                    # + pb-demo/main.c (the libinkview task shim) + SDK
+scripts/            # run.sh (headless emulator), run-visible-pb.sh
+                    # (emulator+viewer), run-visible-sdl.sh (SDL desktop),
+                    # setup.sh (bootstrap), install-device.sh /
+                    # install-koreader-device.sh (real device),
+                    # install-koreader.sh (emulator KOReader),
+                    # uninstall-device.sh, test.sh, dev tools, legacy/
+api/                # mock Kavita REST API server (+ tests)
+tests/              # e2e suites: emulator (bookshelf.py) and SDL
+                    # (offline_sdl, cover_warm_sdl) + support framework
 pbemu/              # git submodule: the emulator project this app runs in
 ```
 
@@ -59,39 +64,36 @@ pbemu/pbemu install U633_6.8.2817         # once: stage the firmware
 
 If something in the emulator misbehaves (shim, informer, viewer,
 fake-fb, ...), the fix belongs in the submodule: edit inside `pbemu/`,
-commit there, push it, and bump the submodule pointer here:
+commit there, push it, and bump the submodule pointer here.
 
-```sh
-cd pbemu
-# ...make the fix, test it...
-git push origin <branch>
-cd ..
-git add pbemu && git commit -m "submodule: bump pbemu (…)"
-```
-
-The cross-compile glue (`sdk/build_armel.sh`, in this repo) builds the
-app against the firmware rootfs staged in the pbemu submodule via
-`PBEMU_FIRMWARE_DIR` (see the Makefile).
+The cross-compile glue (`sdk/build_armel.sh`, in this repo) links the
+Rust staticlib against the firmware rootfs staged in the pbemu
+submodule via `PBEMU_FIRMWARE_DIR` (see the Makefile).
 
 ## Build
 
-The app is C, linked against a Rust native library (`eh_lib`) that handles
-the book metadata/cover extraction (and more as it grows).  First-time setup
-needs the two ARM Rust targets (the emulator/device build is soft-float
-armel; the InkPad One is hard-float armhf):
+First-time setup needs two ARM Rust targets plus cargo-zigbuild and zig
+(the shim's C and sqlite's bundled C cross-compile through zig, pinned
+to the firmware's glibc):
 
 ```sh
 rustup target add armv7-unknown-linux-gnueabi armv7-unknown-linux-gnueabihf
+cargo install cargo-zigbuild          # distro zig works too
 ```
 
-Then a normal `make` builds the Rust staticlibs (via `scripts/build-rust.sh`)
-and links the app:
+Then:
 
 ```sh
-make                       # → build/bookshelf.app
+make                       # → build/bookshelf.app      (emulator + armel devices)
 make armhf                 # → build/bookshelf.armhf.app (InkPad One)
-make pc                    # → build/bookshelf.pc (host SDL, uses x86_64 staticlib)
+make pc                    # → build/bookshelf.pc        (host SDL, visible window)
+make test-host             # → build/bookshelf.test      (headless IPC host)
+make lint                  # clippy + python lints
 ```
+
+`bookshelf.app` is linked by `sdk/build_armel.sh`: the eh_pb staticlib +
+`sdk/pb-demo/main.c` (a ~40-line libinkview task shim) against the
+firmware's libc/libinkview.
 
 ## Run in the emulator
 
@@ -103,14 +105,14 @@ pbemu/pbemu stop              # stop the emulator
 
 ## Run as a desktop app (SDL)
 
-The same app source also builds natively for the PC — a Wayland/X11
-window rendered by SDL2 (the `eh_plat_sdl` backend behind the platform
-seam).  Requires SDL2/SDL2_ttf/SDL2_image/libcurl dev packages.
-
 ```sh
 ./scripts/run-visible-sdl.sh  # make pc + start the API + open the SDL window
 # or: make pc; ./build/bookshelf.pc
 ```
+
+Set `EH_SOCKET=/path/to.sock` to expose the headless IPC control plane
+(`tap x y`, `type TEXT`, `kb_commit`, `hash`, `shot PATH`, `state`,
+`quit`) — the same newline protocol the e2e suite drives.
 
 ## Install on a real device
 
@@ -120,22 +122,24 @@ seam).  Requires SDL2/SDL2_ttf/SDL2_image/libcurl dev packages.
 ./scripts/uninstall-device.sh <device-ip>                    # remove the custom bookshelf
 ```
 
+Settings → "System app" promotes the running binary to the firmware's
+home-task override path (`EH_SYSAPP_DIR` overrides it for testing);
+toggling again removes it.
+
 ## Development tools
 
 ```sh
 ./scripts/setup.sh                    # one-time bootstrap: submodule, venv, pbdev
                                       # image, firmware, SDK, emulator artifacts
 python3 scripts/build_ol_corpus.py    # build a mock-book corpus (JSONL) from Open
-                                      # Library dumps → .cover-cache/mock_books.jsonl
-                                      # (served by the mock provider via PBEMU_MOCK_CORPUS)
-python3 scripts/click_first_book.py   # open the first staged book in the emulator and
-                                      # capture page-1/page-10 screenshots into screenshots/
+                                      # Library dumps (served by the mock provider
+                                      # via PBEMU_MOCK_CORPUS)
+python3 scripts/click_first_book.py   # open the first staged book in the emulator
 ```
 
-`scripts/legacy/` holds superseded on-device helper scripts (e.g. the
-`bookshelf-wrapper.sh` startup hook that older installs deployed to
-`/mnt/ext1/system/bin/bookshelf.app`); they are kept for reference and
-for uninstalling from devices that still carry them.
+`scripts/legacy/` holds superseded on-device helper scripts; they are
+kept for reference and for uninstalling from devices that still carry
+them.
 
 ## Tests
 
@@ -144,6 +148,10 @@ for uninstalling from devices that still carry them.
 ./scripts/test.sh --pbemu    # ... plus the pbemu submodule's own suite
 ./scripts/test.sh -- -k offline   # pass pytest args through to the e2e suite
 # or: make test
+
+# SDL (native PC) suites — fast, no emulator:
+EH_TEST_BACKEND=sdl pbemu/.venv/bin/python -m pytest \
+  tests/test_bookshelf.py tests/test_offline_sdl.py tests/test_cover_warm_sdl.py
 ```
 
 The emulator e2e suite needs podman, the staged firmware

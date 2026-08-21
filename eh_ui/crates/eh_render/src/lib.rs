@@ -10,6 +10,7 @@
 //! fills for everything), the system strip primitives, glyph strings via
 //! `fontdue`, and a nearest-neighbour image blit (for scaled covers).
 
+#![allow(clippy::too_many_arguments, clippy::type_complexity)]
 use core::ops::Range;
 
 use eh_hal::{PixelFormat, Rect};
@@ -305,7 +306,7 @@ impl<'a> Surface<'a> {
         let height = self.height;
         let inv_base = 255 - gray as u32;
         for gy in 0..h {
-            let py = (y as i32 + gy as i32) as u32;
+            let py = (y + gy as i32) as u32;
             if py >= height { continue; }
             // Compute row bounds once per row; index within a row is cheaper
             // than re-borrowing self per pixel.
@@ -313,7 +314,7 @@ impl<'a> Surface<'a> {
             for gx in 0..w {
                 let c = coverage[(gy as usize) * (w as usize) + (gx as usize)];
                 if c == 0 { continue; }
-                let px = (x as i32 + gx as i32) as u32;
+                let px = (x + gx as i32) as u32;
                 if px >= width { continue; }
                 let inv = 255 - c as u32;
                 let gg = gray as u32;

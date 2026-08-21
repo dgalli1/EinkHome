@@ -110,10 +110,10 @@ pub fn text_center_fit(&mut self, cx: i32, baseline: i32, size: f32, s: &str, ma
         let budget = (half * 2) as f32 - ell;
         let chars: Vec<char> = s.chars().collect();
         let mut cut_len = chars.len();
-        while self.font.width(&s[..byte_len(&s, cut_len)], size) > budget && cut_len > 0 {
+        while self.font.width(&s[..byte_len(s, cut_len)], size) > budget && cut_len > 0 {
             cut_len -= 1;
         }
-        let shown = format!("{}…", &s[..byte_len(&s, cut_len)]);
+        let shown = format!("{}…", &s[..byte_len(s, cut_len)]);
         let w2 = self.font.width(&shown, size) as i32;
         let x = cx - w2 / 2;
         self.text(x, baseline, size, &shown, gray);
@@ -215,6 +215,12 @@ impl Widget for Label {
 /// Used by the shell's nested layout (top-bar / grid / pager bands).
 pub struct Group {
     pub rect: Option<Rect>,
+}
+
+impl Default for Group {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Group {
@@ -462,7 +468,7 @@ impl<B: Framebuffer> Screen<B> {
         let h = self.content_h;
         let stride = self.fb.stride();
 
-        let root_children: Vec<_> = self.root_nodes.iter().copied().collect();
+        let root_children: Vec<_> = self.root_nodes.to_vec();
         self.layout.set_root_children(&root_children);
         self.layout.compute(w as f32, h as f32);
 

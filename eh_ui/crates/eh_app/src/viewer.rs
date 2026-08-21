@@ -88,7 +88,7 @@ fn log_path() -> std::path::PathBuf {
 /// only checks the frame changed; the wrap cost is bounded).
 pub fn draw_log_viewer<B: Framebuffer>(surf: &mut eh_render::Surface, app: &mut App<B>, dirty: &mut Vec<Rect>) {
     let w = surf.width();
-    let h = app.content_bottom as u32;
+    let h = app.content_bottom;
     dirty.push(Rect { x: 0, y: 0, w, h });
     surf.fill_gray(Rect { x: 0, y: 0, w, h }, GRAY_WHITE);
     draw_header(surf, "Log");
@@ -109,7 +109,7 @@ pub fn draw_log_viewer<B: Framebuffer>(surf: &mut eh_render::Surface, app: &mut 
 /// The licenses list (rows at the harness's y = 96+16+index*110).
 pub fn draw_licenses<B: Framebuffer>(surf: &mut eh_render::Surface, app: &mut App<B>, dirty: &mut Vec<Rect>) {
     let w = surf.width();
-    let h = app.content_bottom as u32;
+    let h = app.content_bottom;
     dirty.push(Rect { x: 0, y: 0, w, h });
     surf.fill_gray(Rect { x: 0, y: 0, w, h }, GRAY_WHITE);
     draw_header(surf, "Licenses");
@@ -117,7 +117,7 @@ pub fn draw_licenses<B: Framebuffer>(surf: &mut eh_render::Surface, app: &mut Ap
     let font = crate::shelf::shelf_font();
     let mut glyph = eh_render::Glyph::new();
     for (i, lic) in LICENSES.iter().enumerate() {
-        let ry = (96 + 16 + (i as u32) * 110) as u32;
+        let ry = 96 + 16 + (i as u32) * 110;
         surf.rect_outline(Rect { x: 32, y: ry, w: w - 64, h: 110 - 12 }, 2, GRAY_BLACK);
         draw_text(surf, font, 24.0, lic.name, 48, (ry + 34) as i32, GRAY_BLACK, &mut glyph);
         let summary: String = lic.summary.chars().take(60).collect();
@@ -129,7 +129,7 @@ pub fn draw_licenses<B: Framebuffer>(surf: &mut eh_render::Surface, app: &mut Ap
 /// One license's full text.
 pub fn draw_license_detail<B: Framebuffer>(surf: &mut eh_render::Surface, app: &mut App<B>, dirty: &mut Vec<Rect>) {
     let w = surf.width();
-    let h = app.content_bottom as u32;
+    let h = app.content_bottom;
     dirty.push(Rect { x: 0, y: 0, w, h });
     surf.fill_gray(Rect { x: 0, y: 0, w, h }, GRAY_WHITE);
     let name = app.license_selected.and_then(|i| LICENSES.get(i)).map(|l| l.name).unwrap_or("License");

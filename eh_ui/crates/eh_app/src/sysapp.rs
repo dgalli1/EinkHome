@@ -11,7 +11,6 @@
 //! successful unpromote).
 
 use crate::app::App;
-use crate::config::Config;
 use eh_hal::Framebuffer;
 use std::io::Write;
 use std::path::{Path, PathBuf};

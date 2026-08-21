@@ -59,13 +59,7 @@ for fw in "$@"; do
 		AHF="${REPO_ROOT}/build/bookshelf.armhf.app"
 		if [ ! -f "${AHF}" ]; then
 			echo "  building armhf binary"
-			_SRCS=$(awk '/^[[:space:]]*(core|data|ui|action|vendor)\// {
-				sub(/^[[:space:]]*/, ""); sub(/[[:space:]]*\\?[[:space:]]*$/, "");
-				printf "%s/app/%s ", "'"${REPO_ROOT}"'", $0 }' \
-				"${REPO_ROOT}/Makefile")
-			PBEMU_FIRMWARE_DIR="${PBEMU_DIR}/${fw}" \
-				"${REPO_ROOT}/sdk/build_armhf.sh" ${_SRCS} \
-				--output "${AHF}" >/dev/null 2>&1 || true
+			make armhf >/dev/null 2>&1 || true
 		fi
 		PBEMU_APP_BINARY="${AHF}"
 	fi

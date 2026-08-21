@@ -66,16 +66,13 @@ impl Config {
                 return Some(p.to_path_buf());
             }
         }
-        for p in [
+        [
             PathBuf::from("/mnt/ext1/system/bin/bookshelf.cfg"),
             PathBuf::from("/etc/pbemu/bookshelf.cfg"),
             PathBuf::from("/tmp/bookshelf.cfg"),
-        ] {
-            if p.exists() {
-                return Some(p);
-            }
-        }
-        None
+        ]
+        .into_iter()
+        .find(|p| p.exists())
     }
 
     /// Persist the config as a plain `key=value` list (C

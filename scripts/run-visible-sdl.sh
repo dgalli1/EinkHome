@@ -6,7 +6,7 @@
 # for the host with the SDL render backend (eh_plat_sdl.c).
 #
 # Steps (shared bootstrap in lib-run.sh):
-#   1. Build the PC binary (build/bookshelf.pc) via sdk/build_pc.sh.
+#   1. Build the PC binary (build/bookshelf.pc) — `make pc` builds
 #   2. (Re)start the API server on 127.0.0.1:8765 — the same mock/everyday
 #      server, so the synced library populates in the window.
 #   3. Write build/bookshelf.cfg pointing at the API.

@@ -23,7 +23,7 @@ pub const ROWS_Y0: u32 = 112;
 
 /// Draw the shared overlay header (C eh_draw_overlay_header): white bar,
 /// bottom rule, back chevron in the shared touch box, centred title.
-pub fn draw_header(surf: &mut eh_render::Surface, title: &str, _dirty: &mut Vec<Rect>) {
+pub fn draw_header(surf: &mut eh_render::Surface, title: &str, _dirty: &mut [Rect]) {
     let w = surf.width();
     surf.fill_gray(Rect { x: 0, y: 0, w, h: HEADER_H }, GRAY_WHITE);
     surf.hline(0, HEADER_H - 2, w, 2, GRAY_BLACK);
@@ -56,7 +56,7 @@ pub fn back_rect() -> Rect {
 /// Draw the settings page; records row rects into `app.settings_rows`.
 pub fn draw<B: Framebuffer>(surf: &mut eh_render::Surface, app: &mut App<B>, dirty: &mut Vec<Rect>) {
     let w = surf.width();
-    let h = app.content_bottom as u32;
+    let h = app.content_bottom;
     dirty.push(Rect { x: 0, y: 0, w, h });
     surf.fill_gray(Rect { x: 0, y: 0, w, h }, GRAY_WHITE);
     draw_header(surf, "Settings", dirty);

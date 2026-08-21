@@ -13,81 +13,31 @@ concurrency:
 permissions:
   contents: read
 
-# Static-analysis gate: clang-tidy + cppcheck + lizard (complexity/dup)
-# on the C app; ruff + mypy + coverage on the Python.  Everything here
-# runs on a plain hosted runner — no firmware, no emulator boot.
-#
-# clang-tidy needs a compile DB for the SDL (host) backend; the
-# generator (scripts/gen-compile-commands.py) resolves -I/defines via
-# pkg-config, so the SDL dev headers + libcurl/sqlite/zlib dev packages
-# must be installed (and the `clang` driver, which clang-tidy uses to
-# parse).  cppcheck runs inside the pbdev container, so podman + the
-# pbdev image are required; lizard runs in a throwaway venv (ubuntu's
-# system python is externally managed, so pip needs the venv).
+# Static-analysis gate: clippy on the Rust workspace; ruff + mypy +
+# coverage on the Python.  Everything here runs on a plain hosted
+# runner — no firmware, no emulator boot.
 jobs:
-  c:
-    name: C (clang-tidy, cppcheck, lizard)
+  rust:
+    name: Rust (clippy)
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
         with:
           submodules: true
-      - name: Install clang-tidy + SDL dev headers
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends clang clang-tidy \
-            libsdl2-dev libsdl2-ttf-dev libsdl2-image-dev \
-            libcurl4-openssl-dev libsqlite3-dev zlib1g-dev
-      - name: Record pbemu submodule revision
-        id: pbemu-rev
-        run: echo "sha=$(git -C pbemu rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-      - name: Install podman
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends podman catatonit slirp4netns fuse-overlayfs uidmap
-      - name: Cache pbemu venv
-        id: cache-venv
-        uses: actions/cache@v4
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          path: pbemu/.venv
-          key: pbemu-venv-${{ steps.pbemu-rev.outputs.sha }}-${{ hashFiles('pbemu/pyproject.toml') }}
-      - name: Set up pbemu venv (for pbdev image build)
-        if: steps.cache-venv.outputs.cache-hit != 'true'
-        run: cd pbemu && ./setup-venv.sh
-      - name: Cache pbdev podman image
-        id: cache-image
-        uses: actions/cache@v4
+          targets: armv7-unknown-linux-gnueabi armv7-unknown-linux-gnueabihf
+      - uses: taiki-e/install-action@v2
         with:
-          path: .cache/pbdev-image.tar
-          key: pbdev-image-${{ steps.pbemu-rev.outputs.sha }}-${{ hashFiles('pbemu/Dockerfile') }}-${{ runner.arch }}
-      - name: Load pbdev image from cache
-        if: steps.cache-image.outputs.cache-hit == 'true'
-        run: podman load -i .cache/pbdev-image.tar
-      - name: Build pbdev image (for cppcheck)
-        if: steps.cache-image.outputs.cache-hit != 'true'
-        run: cd pbemu && .venv/bin/python -m pbemu image
-      - name: Save pbdev image to cache
-        if: steps.cache-image.outputs.cache-hit != 'true'
-        run: |
-          mkdir -p .cache
-          podman save pbdev -o .cache/pbdev-image.tar
-      - name: Cache PocketBook SDK
-        id: cache-sdk
-        uses: actions/cache@v4
+          tool: cargo-zigbuild
+      - name: Install zig
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends zig
+      - uses: Swatinem/rust-cache@v2
         with:
-          path: sdk/pocketbook-sdk-b288
-          key: pb-sdk-b288-${{ hashFiles('sdk/install-sdk.sh') }}
-      - name: Install PocketBook SDK (compile DB)
-        if: steps.cache-sdk.outputs.cache-hit != 'true'
-        run: ./sdk/install-sdk.sh
-      - name: Lizard in a venv (system python is externally managed)
-        run: |
-          python3 -m venv /tmp/lizardvenv
-          /tmp/lizardvenv/bin/pip -q install lizard
-          echo "/tmp/lizardvenv/bin" >> "$GITHUB_PATH"
-      - name: Run make lint-c
-        run: make lint-c
+          workspaces: eh_ui
+      - name: Run make clippy
+        run: make clippy
 
   python:
     name: Python (ruff, mypy, coverage)

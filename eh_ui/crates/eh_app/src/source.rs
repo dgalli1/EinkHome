@@ -32,7 +32,7 @@ fn source_label(s: Source) -> &'static str {
 pub fn draw<B: eh_hal::Framebuffer>(surf: &mut eh_render::Surface, app: &mut App<B>, dirty: &mut Vec<Rect>) {
     use eh_shell::{GRAY_BLACK, GRAY_DGRAY, GRAY_LGRAY, GRAY_WHITE};
     let w = surf.width();
-    let h = app.content_bottom as u32;
+    let h = app.content_bottom;
     dirty.push(Rect { x: 0, y: 0, w, h });
 
     let (px, py, pw, ph) = sheet(w, h);

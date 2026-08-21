@@ -15,6 +15,7 @@
 //! The shelf screen renders real books (title/author/cover) instead of
 //! placeholder tiles, driven by the sync + store layers.
 
+#![allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub mod app;
 pub mod appui;
 pub mod client;
@@ -33,16 +34,6 @@ pub mod sysapp;
 pub mod util;
 pub mod viewer;
 
-#[cfg(test)]
-pub mod testutil {
-    use crate::client::BookMeta;
-
-    /// A BookMeta fixture with just an id + title.
-    pub fn book(id: &str, title: &str) -> BookMeta {
-        BookMeta { id: id.into(), title: title.into(), ..Default::default() }
-    }
-}
-
 /// Simple diagnostic logger.  On the device this writes to the same
 /// guest-writable path the demo used; on host it prints to stderr.  Hook
 /// point for the real logging backend later.
@@ -60,5 +51,15 @@ pub fn log(msg: &str) {
             use std::io::Write;
             let _ = writeln!(f, "{msg}");
         }
+    }
+}
+
+#[cfg(test)]
+pub mod testutil {
+    use crate::client::BookMeta;
+
+    /// A BookMeta fixture with just an id + title.
+    pub fn book(id: &str, title: &str) -> BookMeta {
+        BookMeta { id: id.into(), title: title.into(), ..Default::default() }
     }
 }

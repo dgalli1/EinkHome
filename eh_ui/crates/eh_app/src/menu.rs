@@ -29,7 +29,7 @@ pub fn draw<B: eh_hal::Framebuffer>(surf: &mut eh_render::Surface, app: &mut App
     use eh_shell::{GRAY_BLACK, GRAY_DGRAY, GRAY_WHITE};
     let _t0 = std::time::Instant::now();
     let w = surf.width();
-    let h = app.content_bottom as u32;
+    let h = app.content_bottom;
     dirty.push(Rect { x: 0, y: 0, w, h });
 
     // Dim the shelf behind the drawer (C: a BLACK FillArea of the whole

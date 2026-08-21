@@ -285,8 +285,7 @@ impl Store {
         // Trim history to EH_SEARCH_HISTORY_MAX.
         self.conn.execute_batch(&format!(
             "DELETE FROM search_history WHERE rowid NOT IN \
-             (SELECT rowid FROM search_history ORDER BY ts DESC LIMIT {})",
-            EH_SEARCH_HISTORY_MAX
+             (SELECT rowid FROM search_history ORDER BY ts DESC LIMIT {EH_SEARCH_HISTORY_MAX})"
         ))?;
         Ok(())
     }
@@ -338,7 +337,7 @@ impl Store {
 
         // LIKE fallback.
         let pat = escape_like(query);
-        let like_query = format!("%{}%", pat);
+        let like_query = format!("%{pat}%");
         self.search_like_sql(&like_query, limit, offset)
     }
 
@@ -353,7 +352,7 @@ impl Store {
             " LIMIT ?2 OFFSET ?3"
         ))?;
         let rows = stmt
-            .query_map(params![fts_q, limit as i64, offset as i64], |r| row_to_book(r))?
+            .query_map(params![fts_q, limit as i64, offset as i64], row_to_book)?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(rows)
     }
@@ -386,10 +385,8 @@ impl Store {
         {
             let mut q = self.conn.prepare("SELECT term FROM suggest WHERE book_id=?1")?;
             let rows = q.query_map([book_id], |r| r.get::<_, String>(0))?;
-            for row in rows {
-                if let Ok(t) = row {
-                    old.push(t);
-                }
+            for t in rows.flatten() {
+                old.push(t);
             }
         }
         // Delete old edges.
@@ -441,10 +438,8 @@ impl Store {
             }
         }
         // Fallback: edge-table GROUP BY.
-        let sql = format!(
-            "SELECT term FROM suggest WHERE term >= ?1 AND term < ?2 \
-             GROUP BY term ORDER BY COUNT(*) DESC, term ASC LIMIT ?3"
-        );
+        let sql = "SELECT term FROM suggest WHERE term >= ?1 AND term < ?2 \
+             GROUP BY term ORDER BY COUNT(*) DESC, term ASC LIMIT ?3".to_string();
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt
             .query_map(params![norm, bound, limit as i64], |r| r.get::<_, String>(0))?
@@ -844,7 +839,7 @@ pub fn year_of(ts: i64) -> Option<String> {
     let doe = days - era * 146097;
     let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
     let y = yoe + era * 400;
-    Some(format!("{}", y))
+    Some(format!("{y}"))
 }
 
 /// Escape LIKE special chars (% _ \).
@@ -872,9 +867,9 @@ fn build_fts_query(q: &str) -> String {
     }
     let mut out = String::with_capacity(raw.len() + 4);
     out.push('"');
-    let mut words = raw.split_whitespace().peekable();
+    let words = raw.split_whitespace().peekable();
     let mut first = true;
-    while let Some(word) = words.next() {
+    for word in words {
         if !first {
             out.push(' ');
         }

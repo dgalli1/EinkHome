@@ -48,7 +48,7 @@ pub fn init(app_dir: Option<&str>) {
         if let Some(f) = file.as_mut() {
             let argv0 = std::env::args().next().unwrap_or_else(|| "(null)".into());
             // The banner must appear exactly once per process.
-            let _ = write!(f, "--- bookshelf.app log opened (argv0={argv0}) ---\n");
+            let _ = writeln!(f, "--- bookshelf.app log opened (argv0={argv0}) ---");
         }
         Mutex::new(file)
     });

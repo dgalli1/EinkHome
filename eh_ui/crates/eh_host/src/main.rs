@@ -169,7 +169,7 @@ fn handle_line(app: &mut App<SdlFb>, line: &str) -> Outcome {
         // A real backend key through the scancode path (C sdl_on_key_down):
         // F11 cycles the resolution — the dummy-driver test runs at a fixed
         // 1072x1448, so it is accepted and ignored here.
-        "keydown" => match a.map(|s| s.parse::<u32>().ok()).flatten() {
+        "keydown" => match a.and_then(|s| s.parse::<u32>().ok()) {
             Some(68) => Outcome::Reply("ok\n".into()), // SDL_SCANCODE_F11
             Some(sc) => {
                 if let Some(key) = scancode_to_key(sc) {

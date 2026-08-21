@@ -118,6 +118,12 @@ pub struct InkviewFb {
     _p: PhantomData<usize>,
 }
 
+impl Default for InkviewFb {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl InkviewFb {
     /// Bind to the firmware canvas.  Call after `InitInkview`.
     ///

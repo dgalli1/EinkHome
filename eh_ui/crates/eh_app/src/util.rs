@@ -19,7 +19,7 @@ fn bearer(token: &str) -> String {
 pub fn get_text(agent: &Agent, base: &str, path: &str, token: &str) -> Result<String, String> {
     let mut text = String::new();
     agent
-        .get(&format!("{}{}", base, path))
+        .get(&format!("{base}{path}"))
         .set("Authorization", &bearer(token))
         .call()
         .map_err(|e| ureq_err(&e))?
@@ -34,7 +34,7 @@ pub fn get_text(agent: &Agent, base: &str, path: &str, token: &str) -> Result<St
 pub fn get_bytes(agent: &Agent, base: &str, path: &str, token: &str) -> Result<Vec<u8>, String> {
     let mut bytes = Vec::new();
     agent
-        .get(&format!("{}{}", base, path))
+        .get(&format!("{base}{path}"))
         .set("Authorization", &bearer(token))
         .call()
         .map_err(|e| ureq_err(&e))?
@@ -50,7 +50,7 @@ pub fn get_bytes(agent: &Agent, base: &str, path: &str, token: &str) -> Result<V
 pub fn get_bytes_max(agent: &Agent, base: &str, path: &str, token: &str, max: u64) -> Result<Vec<u8>, String> {
     let mut bytes = Vec::new();
     agent
-        .get(&format!("{}{}", base, path))
+        .get(&format!("{base}{path}"))
         .set("Authorization", &bearer(token))
         .call()
         .map_err(|e| ureq_err(&e))?
@@ -71,7 +71,7 @@ pub fn post_text(
 ) -> Result<String, String> {
     let mut text = String::new();
     agent
-        .post(&format!("{}{}", base, path))
+        .post(&format!("{base}{path}"))
         .set("Authorization", &bearer(token))
         .set("Content-Type", "application/json")
         .send_string(body)

@@ -127,7 +127,7 @@ impl ApiClient {
 
     /// `GET /api/v1/books?limit=N` → paginated `items` array.
     pub fn list_books(&self, limit: u32) -> Result<Vec<BookMeta>, String> {
-        let text = self.get(&format!("/api/v1/books?limit={}", limit))?;
+        let text = self.get(&format!("/api/v1/books?limit={limit}"))?;
         #[derive(Deserialize)]
         struct Frame {
             #[serde(default)]
@@ -141,7 +141,7 @@ impl ApiClient {
     /// `POST /api/v1/sync/delta` — the metadata-only diff (cursor = last
     /// applied nextCursor, 0 = full first sync).
     pub fn delta(&self, cursor: i64, limit: u32) -> Result<Delta, String> {
-        let body = format!("{{\"cursor\":{},\"limit\":{}}}", cursor, limit);
+        let body = format!("{{\"cursor\":{cursor},\"limit\":{limit}}}");
         let text = self.post("/api/v1/sync/delta", &body)?;
         serde_json::from_str(&text).map_err(|e| format!("bad delta json: {e}"))
     }

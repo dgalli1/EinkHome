@@ -213,7 +213,7 @@ fn key_to_code(k: Keycode) -> Option<KeyCode> {
 /// Convert RGBA->RGB PPM (P6).
 pub fn dump_ppm(buf: &[u8], w: u32, h: u32, path: &str) -> std::io::Result<()> {
     let mut out = Vec::with_capacity(buf.len() * 3 / 4 + 32);
-    out.extend_from_slice(format!("P6\n{} {}\n255\n", w, h).as_bytes());
+    out.extend_from_slice(format!("P6\n{w} {h}\n255\n").as_bytes());
     for i in 0..(w as usize * h as usize) {
         out.push(buf[i * 4]);
         out.push(buf[i * 4 + 1]);

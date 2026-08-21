@@ -116,7 +116,7 @@ impl Widget for TopBar {
         // them): after the left button, after the source button, and the
         // left edges of the four right buttons.
         if !self.state.search {
-            ctx.vline((BTN_PAD + BTN_SIZE + 4) as u32, rect.y, rect.h, 2, col);
+            ctx.vline(BTN_PAD + BTN_SIZE + 4, rect.y, rect.h, 2, col);
             ctx.vline((SOURCE_BTN_X + SOURCE_BTN_W) as u32, rect.y, rect.h, 2, col);
             for k in 1..=4 {
                 let x = w - (BTN_PAD + k * BTN_SIZE) as i32;

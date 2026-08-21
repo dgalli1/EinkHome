@@ -133,7 +133,7 @@ fn decode_jpeg(jpeg: &[u8]) -> Result<(u32, u32, Vec<u8>), String> {
             pixels.chunks_exact(4).flat_map(|px| [px[0], px[1], px[2]]).collect()
         }
         _ => {
-            return Err(format!("jpeg: unexpected pixel count"));
+            return Err("jpeg: unexpected pixel count".to_string());
         }
     };
     Ok((w, h, rgb))

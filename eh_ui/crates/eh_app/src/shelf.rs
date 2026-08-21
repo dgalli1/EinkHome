@@ -4,10 +4,10 @@
 //! the on-disk/cover cache, so the grid shows real titles/authors/art.  This
 //! is the vertical slice that replaces the demo's placeholder tiles.
 //!
-//! Cover art is fetched BEFORE building the widgets (the caller passes books
-//! + their decoded covers), so the shell stays free of image-lifetime
-//! concerns — [`apply_cover_art`] mutates a `Cover` through a downcast the
-//! caller drives once.
+//! Cover art is fetched BEFORE building the widgets (the caller passes
+//!   books + their decoded covers), so the shell stays free of
+//!   image-lifetime concerns — [`apply_cover_art`] mutates a `Cover`
+//!   through a downcast the caller drives once.
 
 use std::path::Path;
 
@@ -357,8 +357,8 @@ pub fn grid_geom(screen_w: u32, content_bottom: u32) -> GridGeom {
     let avail_h = bot.saturating_sub(TOP_BAR_H + crate::appui::TOP_BAR_PAD + 8);
     let cols = grid_cols(avail_w);
     let rows = grid_rows(avail_h);
-    let cell_w = (avail_w / cols).min(CELL_MAX_W).max(CELL_MIN_W);
-    let cell_h = (avail_h / rows).min(CELL_MAX_H).max(CELL_MIN_H);
+    let cell_w = (avail_w / cols).clamp(CELL_MIN_W, CELL_MAX_W);
+    let cell_h = (avail_h / rows).clamp(CELL_MIN_H, CELL_MAX_H);
     GridGeom { cols, rows, cell_w, cell_h }
 }
 
@@ -501,5 +501,5 @@ fn text_left_fit(ctx: &mut DrawCtx, x: i32, baseline: i32, size: f32, s: &str, m
     while ctx.font.width(&shown, size) > budget && !shown.is_empty() {
         shown.pop();
     }
-    ctx.text(x, baseline, size, &format!("{}…", shown), gray);
+    ctx.text(x, baseline, size, &format!("{shown}…"), gray);
 }
