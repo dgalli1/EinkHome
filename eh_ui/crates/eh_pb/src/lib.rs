@@ -65,19 +65,22 @@ fn init_once() {
     arm_tick();
 }
 
-/// Inkview weak-timer handler: repaint + drain any in-flight downloads.
-/// The timer is permanently re-armed (a weak one-shot fires once per arm),
-/// so a download started at ANY time after boot is caught; presenting only
-/// runs while a batch is active.
+/// Inkview weak-timer handler: poll the live-suggest tick, repaint + drain
+/// any in-flight downloads.  The timer is permanently re-armed (a weak
+/// one-shot fires once per arm), so work started at ANY time after boot is
+/// caught; presenting only runs while something changed.
 extern "C" fn eh_pb_tick(_data: *mut std::ffi::c_void) {
     use eh_app::app::Overlay;
-    let active = APP.with(|a| {
-        a.borrow()
-            .as_ref()
-            .map(|app| app.downloader.pending > 0 || matches!(app.overlay, Overlay::Download))
-            .unwrap_or(false)
+    let mut due = false;
+    APP.with(|a| {
+        if let Some(app) = a.borrow_mut().as_mut() {
+            // The 200 ms suggest poll (C suggest_debounce_tick); cheap
+            // no-op while the search keyboard is closed.
+            due |= app.tick();
+            due |= app.downloader.pending > 0 || matches!(app.overlay, Overlay::Download);
+        }
     });
-    if active {
+    if due {
         APP.with(|a| {
             if let Some(app) = a.borrow_mut().as_mut() {
                 app.present();

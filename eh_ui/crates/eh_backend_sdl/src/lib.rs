@@ -27,6 +27,12 @@ pub struct SdlFb {
     pub width: u32,
     pub height: u32,
     scale: f32,
+    /// Fake keyboard state (the C SDL backend's `g_kb`): the OpenKeyboard
+    /// buffer lives here so tests can type into it live (`type_text`) and
+    /// commit or cancel it exactly like a RETURN press / dismissal.
+    kb_buf: Vec<u8>,
+    kb_open: bool,
+    kb_on_done: Option<fn(&[u8])>,
 }
 
 impl SdlFb {
@@ -56,7 +62,31 @@ impl SdlFb {
             width,
             height,
             scale,
+            kb_buf: Vec::new(),
+            kb_open: false,
+            kb_on_done: None,
         })
+    }
+
+    /// Append text to the open keyboard buffer (the C `AppendIpcText`, the
+    /// IPC "type" command).  No-op when no keyboard is open.
+    pub fn kb_type_text(&mut self, s: &str) {
+        if self.kb_open {
+            self.kb_buf.extend_from_slice(s.as_bytes());
+        }
+    }
+
+    /// Commit the open keyboard exactly like a real RETURN press: close it
+    /// and fire the app's handler with the buffer (the IPC "kb_commit").
+    pub fn kb_commit(&mut self) {
+        if self.kb_open {
+            let f = self.kb_on_done.take();
+            self.kb_open = false;
+            let buf = std::mem::take(&mut self.kb_buf);
+            if let Some(f) = f {
+                f(&buf);
+            }
+        }
     }
 
     /// Drain the SDL event pump into the internal queue; call once per frame.
@@ -119,6 +149,27 @@ impl Framebuffer for SdlFb {
         let _ = self.texture.update(None, &self.buf, self.stride());
         let _ = self.canvas.copy(&self.texture, None, None);
         self.canvas.present();
+    }
+    fn open_keyboard(&mut self, _title: &str, initial: &str, on_done: fn(&[u8])) {
+        // No on-screen keyboard is rendered (like the C SDL build): the
+        // buffer is armed so tests can type/commit over the control plane.
+        self.kb_buf = initial.as_bytes().to_vec();
+        self.kb_on_done = Some(on_done);
+        self.kb_open = true;
+    }
+    fn live_keyboard_text(&self) -> Option<String> {
+        if self.kb_open {
+            Some(String::from_utf8_lossy(&self.kb_buf).into_owned())
+        } else {
+            None
+        }
+    }
+    fn cancel_keyboard(&mut self) {
+        if self.kb_open {
+            self.kb_open = false;
+            self.kb_on_done = None;
+            self.kb_buf.clear();
+        }
     }
 }
 

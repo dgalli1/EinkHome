@@ -141,6 +141,7 @@ dependencies = [
 name = "eh_demo"
 version = "0.1.0"
 dependencies = [
+ "eh_app",
  "eh_backend_linuxfb",
  "eh_backend_sdl",
  "eh_hal",

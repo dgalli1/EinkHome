@@ -115,6 +115,9 @@ pub enum PageAction {
 /// The standard firmware reader path (C eh_plat_standard_reader).
 pub const STANDARD_READER: &str = "/ebrmain/bin/eink-reader.app";
 
+/// Suggestion rows shown in the live band (C EH_SUGGEST_MAX_HITS).
+pub const SUGGEST_MAX_HITS: usize = 10;
+
 /// The active library source (C `BsSourceMode`, EH_SOURCE_*).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Source {
@@ -254,6 +257,9 @@ pub struct App<B: Framebuffer> {
     pub search_kb: bool,
     /// Live suggestion terms for the current keyboard buffer.
     pub suggestions: Vec<String>,
+    /// Last keyboard buffer the suggest tick acted on (C g_last_suggest_q):
+    /// the 200 ms poll only re-queries the store when the buffer moved.
+    pub suggest_q: String,
     /// Group/sort chooser row rects (drawn in the chooser sheet overlays).
     pub chooser_rects: Vec<Rect>,
     /// Download queue + worker + completion channel.
@@ -374,6 +380,7 @@ impl<B: Framebuffer> App<B> {
             reader_path: "auto".to_string(),
             search_kb: false,
             suggestions: Vec::new(),
+            suggest_q: String::new(),
             chooser_rects: Vec::new(),
             downloader: crate::downloads::Downloader::new(),
             dl_single: false,
@@ -625,8 +632,11 @@ impl<B: Framebuffer> App<B> {
             }
             Some((KbField::Search, text)) => {
                 let changed = text != self.query;
+                // The keyboard is closing: tear the live suggestion band
+                // down (C eh_keyboard_handler: ClearTimerByName + nsuggest=0).
                 self.search_kb = false;
                 self.suggestions.clear();
+                self.suggest_q.clear();
                 if changed {
                     self.commit_search(&text);
                 } else if self.tab == Tab::Search {
@@ -636,6 +646,37 @@ impl<B: Framebuffer> App<B> {
                 true
             }
         }
+    }
+
+    /// The 200 ms suggest tick (C suggest_debounce_tick): while the search
+    /// keyboard is open, poll the live keyboard buffer — the firmware's
+    /// text-change callback never fires on this build — and re-query the
+    /// suggestion index only when the buffer moved.  Returns true when the
+    /// band changed and a repaint is due.  The caller owns the cadence
+    /// (the facade's weak timer; the C app re-arms SetWeakTimerEx here).
+    pub fn tick(&mut self) -> bool {
+        if !self.search_kb || self.tab != Tab::Search {
+            return false;
+        }
+        let Some(text) = self.screen().framebuffer().live_keyboard_text() else {
+            return false;
+        };
+        if text == self.suggest_q {
+            return false; // nothing typed since the last tick
+        }
+        self.suggest_q = text;
+        let rows = self
+            .store
+            .suggest_list(&self.suggest_q, crate::app::SUGGEST_MAX_HITS)
+            .unwrap_or_default();
+        if rows == self.suggestions {
+            return false; // buffer moved but the hits did not (C `changed` check)
+        }
+        self.suggestions = rows;
+        // Rebuild so the band shows the new rows (or restores the history
+        // list when the hits emptied); present() flushes from `dirty`.
+        self.refresh_shelf();
+        true
     }
 
     /// Back (hardware key): close the topmost overlay; on the search tab
@@ -746,9 +787,19 @@ impl<B: Framebuffer> App<B> {
     }
 
     /// Leave Search back to the library shelf, keeping the query filter.
+    /// A still-open keyboard is cancelled first (C eh_evt_back_search_drill:
+    /// CloseKeyboard, then the tab switch; the handler tears the band down).
     fn leave_search(&mut self) {
-        self.search_kb = false;
-        self.suggestions.clear();
+        if self.search_kb {
+            self.screen()
+                .framebuffer_mut()
+                .cancel_keyboard();
+            // The cancelled keyboard never delivers a commit, so drain the
+            // band state here (the C handler's teardown).
+            self.search_kb = false;
+            self.suggestions.clear();
+            self.suggest_q.clear();
+        }
         self.tab = Tab::Library;
         self.page = 0;
         self.refresh_shelf();
@@ -795,16 +846,25 @@ impl<B: Framebuffer> App<B> {
         crate::logger::log(&format!("[bookshelf] search commit: query=`{term}`"));
         self.tab = Tab::Library;
         self.page = 0;
+        // Re-project the materialised view under the new query filter
+        // BEFORE redrawing (the C commit path's eh_view_rebuild).
+        self.rebuild_view();
         self.refresh_shelf();
     }
 
     /// Search-tab body taps: the input row opens the keyboard; a history
     /// row re-runs that stored query (C eh_hit_search_input / history tap).
+    /// While the keyboard is open (C eh_pu_handle_search_kb) a suggestion
+    /// or history row tap cancels the keyboard and commits the term —
+    /// CloseKeyboard() delivers no commit, so the app performs it — and
+    /// any other tap above the keyboard dismisses it.
     fn tap_search_body(&mut self, x: i32, y: i32) {
         let n = self.screen().widgets.len();
         let last = n.saturating_sub(1);
         // Input row is widget index 1 (bordered box inset like its draw).
-        if n > 1 {
+        // With the keyboard already open a tap here dismisses it (C:
+        // outside-band branch), it never re-opens.
+        if !self.search_kb && n > 1 {
             let r = self.screen().widget_rect(1);
             if x >= r.x as i32 + 16
                 && x < (r.x + r.w) as i32 - 16
@@ -815,8 +875,10 @@ impl<B: Framebuffer> App<B> {
                 return;
             }
         }
-        // History rows are widget indices 2..last (parallel to the store's
-        // newest-first list, so row i maps to term i-2).
+        // Rows are widget indices 2..last.  With the keyboard open and
+        // suggestions showing, the rows parallel self.suggestions (the
+        // band replaced the history list); otherwise the store's
+        // newest-first history list (row i maps to term i-2).
         let mut hit: Option<usize> = None;
         let mut rects: Vec<Rect> = Vec::new();
         for i in 2..last {
@@ -829,12 +891,43 @@ impl<B: Framebuffer> App<B> {
             }
         }
         if let Some(idx) = hit {
-            let terms = self.store.search_list(1000, 0).unwrap_or_default();
-            if let Some(t) = terms.get(idx) {
-                let t = t.clone();
-                crate::logger::log(&format!("[bookshelf] search history tap: query=`{t}`"));
+            let terms = if self.search_kb && !self.suggestions.is_empty() {
+                crate::logger::log(&format!(
+                    "[bookshelf] suggest tap: term=`{}`",
+                    self.suggestions[idx]
+                ));
+                Some(self.suggestions[idx].clone())
+            } else {
+                self.store
+                    .search_list(1000, 0)
+                    .unwrap_or_default()
+                    .get(idx)
+                    .map(|t| {
+                        crate::logger::log(&format!("[bookshelf] search history tap: query=`{t}`"));
+                        t.clone()
+                    })
+            };
+            if let Some(t) = terms {
+                if self.search_kb {
+                    // Cancel first: the firmware close must not deliver a
+                    // commit racing ours (C CloseKeyboard + app-side commit).
+                    self.search_kb = false;
+                    self.suggestions.clear();
+                    self.suggest_q.clear();
+                    self.screen().framebuffer_mut().cancel_keyboard();
+                }
                 self.commit_search(&t);
             }
+            return;
+        }
+        // Outside the rows with the keyboard open: dismiss it, staying on
+        // the Search page (the bar returns to normal style).
+        if self.search_kb {
+            self.search_kb = false;
+            self.suggestions.clear();
+            self.suggest_q.clear();
+            self.screen().framebuffer_mut().cancel_keyboard();
+            self.refresh_shelf();
         }
     }
 
@@ -846,6 +939,9 @@ impl<B: Framebuffer> App<B> {
         kb_arm(KbField::Search);
         self.search_kb = true;
         self.suggestions.clear();
+        // Reset the tick cache so the first poll acts even when the
+        // pre-filled buffer matches the old query (C g_last_suggest_q[0]=0).
+        self.suggest_q.clear();
         // Rebuild the search page to show the inverted input bar.
         self.refresh_shelf();
         self.screen()
@@ -1470,9 +1566,14 @@ impl<B: Framebuffer> App<B> {
         let offset = self.page * rows_per;
         crate::logger::log("[bookshelf] draw_search_tab");
         let history = self.store.search_list(rows_per, offset).unwrap_or_default();
+        // While the keyboard is open with hits, the suggestion band
+        // replaces the history list (C suggest_debounce_tick →
+        // eh_draw_suggestions); empty hits keep the history visible.
+        let using_suggestions = self.search_kb && !self.suggestions.is_empty();
+        let rows = if using_suggestions { &self.suggestions } else { &history };
         let (page, pages, query, content_bottom, syncing) =
             (self.page, self.pages, self.query.clone(), self.content_bottom, self.syncing);
-        shelf::build_search(fb, &query, page, pages, &history, content_bottom, syncing, self.search_kb)
+        shelf::build_search(fb, &query, page, pages, rows, content_bottom, syncing, self.search_kb)
     }
 
     /// Flip to `page` (clamped): fetch the page's covers into the cache
@@ -1728,6 +1829,245 @@ mod tests {
         assert_eq!(per_page(eh_layout::Breakpoint::Narrow), 6);
         assert_eq!(per_page(eh_layout::Breakpoint::Std), 15);
         assert_eq!(per_page(eh_layout::Breakpoint::Wide), 24);
+    }
+
+    // ── live suggest flow (C suggest_debounce_tick + eh_pu_handle_search_kb)
+
+    use std::cell::RefCell;
+
+    /// Test framebuffer with a fake keyboard: `open_keyboard` arms the
+    /// buffer, `live_keyboard_text` exposes it while open, and
+    /// `cancel_keyboard` drops it WITHOUT firing the commit callback —
+    /// the contract the inkview backend implements over the firmware.
+    struct FakeKb {
+        px: Vec<u8>,
+        buf: RefCell<Vec<u8>>,
+        open: RefCell<bool>,
+        on_done: RefCell<Option<fn(&[u8])>>,
+        cancelled: RefCell<bool>,
+    }
+
+    impl FakeKb {
+        fn new(w: u32, h: u32) -> Self {
+            Self {
+                px: vec![0xFF; (w * h) as usize],
+                buf: RefCell::new(Vec::new()),
+                open: RefCell::new(false),
+                on_done: RefCell::new(None),
+                cancelled: RefCell::new(false),
+            }
+        }
+        fn type_text(&self, s: &str) {
+            self.buf.borrow_mut().extend_from_slice(s.as_bytes());
+        }
+        /// Simulate RETURN: fire the commit callback with the buffer.
+        fn commit(&self) {
+            let f = self.on_done.borrow_mut().take();
+            *self.open.borrow_mut() = false;
+            if let Some(f) = f {
+                let b = self.buf.borrow().clone();
+                f(&b);
+            }
+        }
+    }
+
+    impl Framebuffer for FakeKb {
+        fn screen(&self) -> eh_hal::Screen {
+            eh_hal::Screen::full(1072, 1448)
+        }
+        fn format(&self) -> eh_hal::PixelFormat {
+            eh_hal::PixelFormat::Grayscale8
+        }
+        fn surface_mut(&mut self) -> &mut [u8] {
+            &mut self.px
+        }
+        fn stride(&self) -> usize {
+            1072
+        }
+        fn refresh(&mut self, _r: Rect, _m: eh_hal::RefreshMode) {}
+        fn mark_dirty(&mut self, _r: Rect) {}
+        fn poll_event(&mut self) -> Option<InputEvent> {
+            None
+        }
+        fn wait_for_event(&mut self, _ms: u32) {}
+        fn present(&mut self, _m: eh_hal::RefreshMode) {}
+        fn open_keyboard(&mut self, _title: &str, initial: &str, on_done: fn(&[u8])) {
+            *self.buf.borrow_mut() = initial.as_bytes().to_vec();
+            *self.on_done.borrow_mut() = Some(on_done);
+            *self.open.borrow_mut() = true;
+        }
+        fn live_keyboard_text(&self) -> Option<String> {
+            if *self.open.borrow() {
+                Some(String::from_utf8_lossy(&self.buf.borrow()).into_owned())
+            } else {
+                None
+            }
+        }
+        fn cancel_keyboard(&mut self) {
+            *self.open.borrow_mut() = false;
+            self.on_done.borrow_mut().take();
+            *self.cancelled.borrow_mut() = true;
+        }
+    }
+
+    /// An App over a FakeKb in a scratch dir, seeded with one suggestion
+    /// term ("potter") so prefix queries have something to find.
+    fn mk_app(tag: &str) -> App<FakeKb> {
+        let dir = std::env::temp_dir().join(format!("eh_app_tick_{}_{}", tag, std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let fb = FakeKb::new(1072, 1448);
+        let app = App::new(fb, Config::default(), None, &dir);
+        app.store.suggest_set("b1", &["potter".into(), "harry potter".into()]).unwrap();
+        app
+    }
+
+    fn kb(app: &mut App<FakeKb>) -> &FakeKb {
+        app.screen().framebuffer()
+    }
+
+    fn tap(app: &mut App<FakeKb>, x: i32, y: i32) {
+        app.on_event(&InputEvent::PointerDown { x, y });
+        app.on_event(&InputEvent::PointerUp { x, y });
+    }
+
+    #[test]
+    fn tick_polls_buffer_and_debounces() {
+        let mut app = mk_app("poll");
+        app.enter_search();
+        app.edit_search();
+        assert!(app.search_kb);
+
+        // No buffer movement yet: the first tick acts but finds nothing
+        // for an empty prefix (store skips len < 2).
+        assert!(!app.tick());
+        assert!(app.suggestions.is_empty());
+
+        kb(&mut app).type_text("pott");
+        assert!(app.tick(), "first buffer move must query the store");
+        assert_eq!(app.suggestions, vec!["potter"]);
+        app.present(); // the facade repaints a due tick before more input
+
+        // Same buffer again: debounced (C g_last_suggest_q compare).
+        assert!(!app.tick());
+
+        // Buffer moves ("pott" -> "potter"): re-query, but the hits are
+        // identical so the band stays quiet (C `changed` check).
+        kb(&mut app).type_text("er");
+        assert!(!app.tick());
+        assert_eq!(app.suggestions, vec!["potter"]);
+
+        // Buffer moves to a prefix with no hits: the band empties
+        // (C restores the history list).
+        kb(&mut app).type_text("xyz");
+        assert!(app.tick());
+        assert!(app.suggestions.is_empty());
+
+        // A second tick on the same buffer stays quiet.
+        assert!(!app.tick());
+    }
+
+    #[test]
+    fn tick_inactive_without_open_keyboard() {
+        let mut app = mk_app("closed");
+        app.enter_search();
+        assert!(!app.search_kb);
+        assert!(!app.tick(), "tick must be a no-op while no keyboard is open");
+    }
+
+    #[test]
+    fn commit_via_keyboard_done_filters_grid() {
+        let mut app = mk_app("done");
+        app.enter_search();
+        app.edit_search();
+        kb(&mut app).type_text("potter");
+        // The C kb_commit IPC: close + fire the handler with the buffer.
+        kb(&mut app).commit();
+        app.present(); // drains the pending commit
+        assert!(!app.search_kb);
+        assert_eq!(app.query, "potter");
+        assert_eq!(app.tab, Tab::Library);
+    }
+
+    #[test]
+    fn suggest_tap_cancels_keyboard_and_commits_term() {
+        let mut app = mk_app("taptap");
+        app.enter_search();
+        app.edit_search();
+        kb(&mut app).type_text("pott");
+        assert!(app.tick());
+        assert_eq!(app.suggestions, vec!["potter"]);
+        app.present(); // compute the rebuilt page's layout before tapping
+
+        // Tap the first row widget (index 2: [0] top bar, [1] input).
+        let r = app.screen().widget_rect(2);
+        tap(&mut app, (r.x + r.w / 2) as i32, (r.y + r.h / 2) as i32);
+
+        // C CloseKeyboard + app-side commit: keyboard cancelled (no commit
+        // callback fired), the tapped term filters the shelf.
+        assert!(*kb(&mut app).cancelled.borrow(), "keyboard must be cancelled, not committed");
+        assert!(!app.search_kb);
+        assert!(app.suggestions.is_empty());
+        assert_eq!(app.query, "potter");
+        assert_eq!(app.tab, Tab::Library);
+    }
+
+    #[test]
+    fn outside_tap_dismisses_keyboard_staying_on_search() {
+        let mut app = mk_app("outside");
+        app.enter_search();
+        app.edit_search();
+        kb(&mut app).type_text("pott");
+        assert!(app.tick());
+        app.present(); // layout for the tap target
+
+        // Tap the input row itself: with the keyboard open this is the
+        // C outside-band branch — dismiss, stay on Search, keep query.
+        let r = app.screen().widget_rect(1);
+        tap(&mut app, (r.x + r.w / 2) as i32, (r.y + r.h / 2) as i32);
+
+        assert!(*kb(&mut app).cancelled.borrow());
+        assert!(!app.search_kb);
+        assert_eq!(app.tab, Tab::Search);
+        assert_eq!(app.query, "", "dismissal must not commit");
+    }
+
+    #[test]
+    fn back_key_while_keyboard_open_returns_to_library() {
+        let mut app = mk_app("backkey");
+        app.enter_search();
+        app.edit_search();
+        kb(&mut app).type_text("pott");
+        assert!(app.tick());
+        app.present();
+
+        app.on_event(&InputEvent::KeyDown { key: KeyCode::Back });
+
+        assert!(*kb(&mut app).cancelled.borrow());
+        assert!(!app.search_kb);
+        assert_eq!(app.tab, Tab::Library);
+        assert_eq!(app.query, "");
+    }
+
+    #[test]
+    fn leave_search_with_open_history_rows_still_tappable() {
+        // With the keyboard open but NO suggestions, the band shows the
+        // history list and a tap there runs that search (C else-branch).
+        let mut app = mk_app("hist");
+        app.store.search_add("dune").unwrap();
+        app.enter_search();
+        app.edit_search();
+        kb(&mut app).type_text("zz"); // no hits for "zz"
+        assert!(!app.tick(), "empty hits == empty band: no repaint due");
+        assert!(app.suggestions.is_empty());
+        app.present();
+
+        let r = app.screen().widget_rect(2); // first history row
+        tap(&mut app, (r.x + r.w / 2) as i32, (r.y + r.h / 2) as i32);
+
+        assert!(*kb(&mut app).cancelled.borrow());
+        assert_eq!(app.query, "dune");
+        assert_eq!(app.tab, Tab::Library);
     }
 }
 /// The modal download-progress popup (C eh_draw_dl_popup): a dim + a

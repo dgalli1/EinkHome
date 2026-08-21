@@ -8,6 +8,9 @@
 
 #![no_std]
 
+extern crate alloc;
+use alloc::string::String;
+
 /// Physical pixel geometry of a display.
 ///
 /// On PocketBook the firmware's type-1 system panel occupies the bottom strip
@@ -227,4 +230,18 @@ pub trait Framebuffer {
     fn open_keyboard(&mut self, _title: &str, initial: &str, on_done: fn(&[u8])) {
         on_done(initial.as_bytes());
     }
+
+    /// The live keyboard buffer while a keyboard is open (the C app polls
+    /// `eh_g_search_kb_buf` on its 200 ms suggest tick — the firmware's
+    /// change callback never fires).  `None` when no keyboard is open or
+    /// the platform cannot expose the buffer.
+    fn live_keyboard_text(&self) -> Option<String> {
+        None
+    }
+
+    /// Close an open keyboard WITHOUT firing the commit callback (the C
+    /// `CloseKeyboard()`: the handler receives the pre-edit text — used by
+    /// the suggestion-tap path, where the app commits the tapped term
+    /// itself after the keyboard is gone).
+    fn cancel_keyboard(&mut self) {}
 }

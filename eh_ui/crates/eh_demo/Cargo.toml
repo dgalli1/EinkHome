@@ -19,10 +19,11 @@ eh_hal = { path = "../eh_hal" }
 eh_render = { path = "../eh_render" }
 eh_layout = { path = "../eh_layout" }
 eh_shell = { path = "../eh_shell" }
+eh_app = { path = "../eh_app", optional = true }
 eh_backend_sdl = { path = "../eh_backend_sdl", optional = true }
 eh_backend_linuxfb = { path = "../eh_backend_linuxfb", optional = true }
 
 [features]
 default = []
-sdl = ["dep:eh_backend_sdl"]
+sdl = ["dep:eh_backend_sdl", "dep:eh_app"]
 linuxfb = ["dep:eh_backend_linuxfb"]

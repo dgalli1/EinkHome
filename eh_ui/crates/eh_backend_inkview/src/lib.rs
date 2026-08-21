@@ -62,6 +62,8 @@ mod imp {
     #[allow(dead_code)]
     pub unsafe extern "C" fn OpenKeyboard(_title: *const u8, _buf: *mut i8, _max: i32, _flags: i32, _h: extern "C" fn(*mut i8)) {}
     #[allow(dead_code)]
+    pub unsafe extern "C" fn CloseKeyboard() {}
+    #[allow(dead_code)]
     pub unsafe extern "C" fn SetWeakTimerEx(_name: *const u8, _h: extern "C" fn(*mut core::ffi::c_void), _d: *mut core::ffi::c_void, _ms: i32) -> i32 { 0 }
 }
 #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
@@ -83,13 +85,14 @@ mod imp {
         pub(super) fn OpenBook(path: *const u8, parameters: *const u8, flags: i32) -> i32;
         pub(super) fn NewTaskEx(path: *const u8, args: *mut *mut u8, appname: *const u8, name: *const u8, icon: *const core::ffi::c_void, flags: u32, run_as_reader: i32) -> i32;
         pub(super) fn OpenKeyboard(title: *const u8, buffer: *mut i8, maxlen: i32, flags: i32, hproc: extern "C" fn(*mut i8));
+        pub(super) fn CloseKeyboard();
         pub(super) fn SetWeakTimerEx(name: *const u8, handler: extern "C" fn(*mut core::ffi::c_void), data: *mut core::ffi::c_void, ms: i32) -> i32;
     }
 }
 
 // Re-expose the imports uniformly.
 #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
-use imp::{DrawPanel, FullUpdate, GetCanvas, InitInkview, InkViewMain, NewTaskEx, OpenBook, OpenKeyboard, PanelHeight, PartialUpdate, Repaint, ScreenHeight, ScreenWidth, SetWeakTimerEx, iv_update_panel};
+use imp::{CloseKeyboard, DrawPanel, FullUpdate, GetCanvas, InitInkview, InkViewMain, NewTaskEx, OpenBook, OpenKeyboard, PanelHeight, PartialUpdate, Repaint, ScreenHeight, ScreenWidth, SetWeakTimerEx, iv_update_panel};
 #[cfg(not(any(target_arch = "arm", target_arch = "aarch64")))]
 use imp::{DrawPanel, FullUpdate, GetCanvas, InitInkview, InkViewMain, NewTaskEx, OpenBook, PanelHeight, PartialUpdate, Repaint, ScreenHeight, ScreenWidth, SetWeakTimerEx, iv_update_panel};
 
@@ -212,6 +215,10 @@ impl Framebuffer for InkviewFb {
     fn open_keyboard(&mut self, title: &str, initial: &str, on_done: fn(&[u8])) {
         #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
         {
+            // KBD_PASSEVENTS keeps pointer events flowing to the app while
+            // the keyboard is up (the C app relies on this for the
+            // suggestion-tap / outside-tap-dismiss handling).
+            const KBD_PASSEVENTS: i32 = 0x8000;
             let t = std::ffi::CString::new(title).unwrap_or_default();
             KB.with(|k| {
                 let mut g = k.borrow_mut();
@@ -222,7 +229,8 @@ impl Framebuffer for InkviewFb {
                     *g = Some((buf, on_done));
                     let (b, _) = g.as_ref().unwrap();
                     unsafe {
-                        OpenKeyboard(t.as_ptr() as *const u8, b.as_ptr() as *mut i8, 260, 0, kb_commit_handler);
+                        OpenKeyboard(t.as_ptr() as *const u8, b.as_ptr() as *mut i8, 260,
+                                     KBD_PASSEVENTS, kb_commit_handler);
                     }
                 }
             });
@@ -232,6 +240,41 @@ impl Framebuffer for InkviewFb {
             let _ = title;
             on_done(initial.as_bytes()); // host: no keyboard — cancel with initial value
         }
+    }
+
+    fn live_keyboard_text(&self) -> Option<String> {
+        #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
+        {
+            KB.with(|k| {
+                k.borrow().as_ref().and_then(|(buf, _)| {
+                    let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+                    std::str::from_utf8(&buf[..end])
+                        .ok()
+                        .map(|s| s.to_string())
+                })
+            })
+        }
+        #[cfg(not(any(target_arch = "arm", target_arch = "aarch64")))]
+        {
+            None
+        }
+    }
+
+    fn cancel_keyboard(&mut self) {
+        #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
+        {
+            // CloseKeyboard() fires the handler with the pre-edit text on
+            // the firmware; dropping our KB entry first makes the handler
+            // a no-op so the commit callback never runs (the C app's
+            // suggestion-tap path commits the term itself afterwards).
+            KB.with(|k| {
+                if k.borrow_mut().take().is_some() {
+                    unsafe { CloseKeyboard(); }
+                }
+            });
+        }
+        #[cfg(not(any(target_arch = "arm", target_arch = "aarch64")))]
+        {}
     }
 }
 
