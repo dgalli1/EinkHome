@@ -40,12 +40,22 @@ struct ICanvas {
     addr: *mut u8,
 }
 
+/// Header of the firmware `ibitmap` (width/height/depth/scanline u16s,
+/// flexible `data[]` at offset 8 — layout contract of the SDK header).
+#[repr(C)]
+struct IBitmapHdr {
+    width: u16,
+    height: u16,
+    depth: u16,
+    scanline: u16,
+}
+
 // The firmware symbols only exist on-arm; host builds stub them so the crate
 // still compiles (the SDL/linuxfb backends are the host path anyway).
 #[cfg(not(any(target_arch = "arm", target_arch = "aarch64")))]
 #[allow(non_snake_case)]
 mod imp {
-    use super::ICanvas;
+    use super::{IBitmapHdr, ICanvas};
     pub unsafe extern "C" fn InkViewMain(cb: extern "C" fn(i32, i32, i32) -> i32) { let _ = cb; }
     pub unsafe extern "C" fn InitInkview(_f: i32) {}
     pub unsafe extern "C" fn GetCanvas() -> *const ICanvas { std::ptr::null() }
@@ -65,6 +75,32 @@ mod imp {
     pub unsafe extern "C" fn CloseKeyboard() {}
     #[allow(dead_code)]
     pub unsafe extern "C" fn SetWeakTimerEx(_name: *const u8, _h: extern "C" fn(*mut core::ffi::c_void), _d: *mut core::ffi::c_void, _ms: i32) -> i32 { 0 }
+    #[allow(dead_code)]
+    pub unsafe extern "C" fn QueryNetwork() -> i32 { 0 }
+    #[allow(dead_code)]
+    pub unsafe extern "C" fn GetBatteryPower() -> i32 { -1 }
+    #[allow(dead_code)]
+    pub unsafe extern "C" fn BanSleep(_sec: i32) {}
+    #[allow(dead_code)]
+    pub unsafe extern "C" fn GetDeviceModel() -> *mut u8 { std::ptr::null_mut() }
+    #[allow(dead_code)]
+    pub unsafe extern "C" fn GetSoftwareVersion() -> *mut u8 { std::ptr::null_mut() }
+    #[allow(dead_code)]
+    pub unsafe extern "C" fn device_number() -> u32 { 0 }
+    #[allow(dead_code)]
+    pub unsafe extern "C" fn device_has_touchpanel() -> bool { false }
+    #[allow(dead_code)]
+    pub unsafe extern "C" fn device_has_audio() -> bool { false }
+    #[allow(dead_code)]
+    pub unsafe extern "C" fn iv_ipc_cmd(_typ: core::ffi::c_long, _param: core::ffi::c_long) -> core::ffi::c_long { 0 }
+    #[allow(dead_code)]
+    pub unsafe extern "C" fn OpenControlPanel(_ctx: *mut core::ffi::c_void) {}
+    #[allow(dead_code)]
+    pub unsafe extern "C" fn GetResource(_name: *const u8, _deflt: *const IBitmapHdr) -> *mut IBitmapHdr { std::ptr::null_mut() }
+    #[allow(dead_code)]
+    pub unsafe extern "C" fn GetFrontlightState() -> i32 { -1 }
+    #[allow(dead_code)]
+    pub unsafe extern "C" fn GetFrontlightEnabled() -> i32 { 0 }
 }
 #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
 #[allow(non_snake_case)]
@@ -87,14 +123,27 @@ mod imp {
         pub(super) fn OpenKeyboard(title: *const u8, buffer: *mut i8, maxlen: i32, flags: i32, hproc: extern "C" fn(*mut i8));
         pub(super) fn CloseKeyboard();
         pub(super) fn SetWeakTimerEx(name: *const u8, handler: extern "C" fn(*mut core::ffi::c_void), data: *mut core::ffi::c_void, ms: i32) -> i32;
+        pub(super) fn QueryNetwork() -> i32;
+        pub(super) fn GetBatteryPower() -> i32;
+        pub(super) fn BanSleep(sec: i32);
+        pub(super) fn GetDeviceModel() -> *mut u8;
+        pub(super) fn GetSoftwareVersion() -> *mut u8;
+        pub(super) fn device_number() -> u32;
+        pub(super) fn device_has_touchpanel() -> bool;
+        pub(super) fn device_has_audio() -> bool;
+        pub(super) fn iv_ipc_cmd(typ: core::ffi::c_long, param: core::ffi::c_long) -> core::ffi::c_long;
+        pub(super) fn OpenControlPanel(ctx: *mut core::ffi::c_void);
+        pub(super) fn GetResource(name: *const u8, deflt: *const IBitmapHdr) -> *mut IBitmapHdr;
+        pub(super) fn GetFrontlightState() -> i32;
+        pub(super) fn GetFrontlightEnabled() -> i32;
     }
 }
 
 // Re-expose the imports uniformly.
 #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
-use imp::{CloseKeyboard, DrawPanel, FullUpdate, GetCanvas, InitInkview, InkViewMain, NewTaskEx, OpenBook, OpenKeyboard, PanelHeight, PartialUpdate, Repaint, ScreenHeight, ScreenWidth, SetWeakTimerEx, iv_update_panel};
+use imp::{BanSleep, CloseKeyboard, DrawPanel, FullUpdate, GetBatteryPower, GetCanvas, GetDeviceModel, GetFrontlightEnabled, GetFrontlightState, GetResource, GetSoftwareVersion, InitInkview, InkViewMain, NewTaskEx, OpenBook, OpenControlPanel, OpenKeyboard, PanelHeight, PartialUpdate, QueryNetwork, Repaint, ScreenHeight, ScreenWidth, SetWeakTimerEx, device_has_audio, device_has_touchpanel, device_number, iv_ipc_cmd, iv_update_panel};
 #[cfg(not(any(target_arch = "arm", target_arch = "aarch64")))]
-use imp::{DrawPanel, FullUpdate, GetCanvas, InitInkview, InkViewMain, NewTaskEx, OpenBook, PanelHeight, PartialUpdate, Repaint, ScreenHeight, ScreenWidth, SetWeakTimerEx, iv_update_panel};
+use imp::{BanSleep, DrawPanel, FullUpdate, GetBatteryPower, GetCanvas, GetDeviceModel, GetFrontlightEnabled, GetFrontlightState, GetResource, GetSoftwareVersion, InitInkview, InkViewMain, NewTaskEx, OpenBook, OpenControlPanel, PanelHeight, PartialUpdate, QueryNetwork, Repaint, ScreenHeight, ScreenWidth, SetWeakTimerEx, device_has_audio, device_has_touchpanel, device_number, iv_ipc_cmd, iv_update_panel};
 
 /// Boot the inkview library exactly like the stock bookshelf: register, then
 /// hand the event loop a callback.  `on_event` receives raw (evt, par1, par2)
@@ -215,8 +264,9 @@ impl Framebuffer for InkviewFb {
     fn open_book(&mut self, path: &str, title: &str) -> bool {
         InkviewFb::open_book(self, path, title)
     }
-    fn launch_app(&mut self, path: &str, name: &str) -> bool {
-        InkviewFb::launch_app(self, path, name)
+
+    fn launch_app(&mut self, path: &str, name: &str, args: &[String]) -> bool {
+        InkviewFb::launch_app(self, path, name, args)
     }
     fn open_keyboard(&mut self, title: &str, initial: &str, on_done: fn(&[u8])) {
         #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
@@ -292,6 +342,147 @@ impl Framebuffer for InkviewFb {
         }
         self.panel_h == 0
     }
+
+    /// C eh_plat_net_active: `(QueryNetwork() & 0xf00) != 0`.  The hal
+    /// default `true` would make the device sync with WiFi off.
+    fn net_active(&self) -> bool {
+        // C eh_plat_net_active: the high byte carries the connection-state
+        // flags; nonzero means an active connection.
+        let q = unsafe { QueryNetwork() };
+        q & 0xf00 != 0
+    }
+
+    /// C eh_plat_battery_power: `GetBatteryPower()` (percent; negative =
+    /// unknown on this vintage).
+    fn battery_level(&self) -> Option<u8> {
+        let v = unsafe { GetBatteryPower() };
+        if v < 0 { None } else { Some(v.min(100) as u8) }
+    }
+
+    /// Firmware frontlight probe: `GetFrontlightState()` (0..=100, negative
+    /// = unreadable/unsupported) with the `GetFrontlightEnabled()` flag as
+    /// the fallback when the state cannot be read.
+    fn frontlight_on(&self) -> bool {
+        let st = unsafe { GetFrontlightState() };
+        if st > 0 {
+            return true;
+        }
+        if st == 0 {
+            return false;
+        }
+        unsafe { GetFrontlightEnabled() != 0 }
+    }
+
+    /// C BanSleep: the anti-suspend ban is re-armed until expiry.
+    fn ban_sleep(&self, secs: u32) {
+        unsafe { BanSleep(secs.min(i32::MAX as u32) as i32) }
+    }
+
+    /// C eh_plat_start_services verbatim: `iv_ipc_cmd(MSG_START_SERVICES,
+    /// 0)` — the stock bookshelf's exact transport to monitor.app (the
+    /// monitor socket lives inside libinkview's iv_ipc_cmd).  Without it a
+    /// fresh boot runs only scanner + this app.
+    fn start_services(&self) {
+        const MSG_START_SERVICES: core::ffi::c_long = 0x600;
+        unsafe { iv_ipc_cmd(MSG_START_SERVICES, 0) };
+    }
+
+    /// C OpenControlPanel(NULL): the system-bar tap action.
+    fn open_control_panel(&self) {
+        unsafe { OpenControlPanel(std::ptr::null_mut()) }
+    }
+
+    /// C eh_plat_device_profile probes (capability-based launcher
+    /// conditionals: "1030" / "notouch" / "all" + has_audio).
+    fn device_profile(&self) -> eh_hal::DeviceProfile {
+        unsafe {
+            eh_hal::DeviceProfile {
+                device_number: device_number(),
+                has_touchpanel: device_has_touchpanel(),
+                has_audio: device_has_audio(),
+            }
+        }
+    }
+
+    /// C GetResource(name, NULL): the firmware theme store the stock
+    /// launcher resolves its icons through before LoadPNG.
+    fn theme_resource(&self, name: &str) -> Option<eh_hal::ThemeBitmap> {
+        let c = std::ffi::CString::new(name).ok()?;
+        unsafe {
+            let bm = GetResource(c.as_ptr() as *const u8, std::ptr::null());
+            if bm.is_null() {
+                return None;
+            }
+            let hdr: IBitmapHdr = std::ptr::read(bm as *const IBitmapHdr);
+            let len = hdr.scanline as usize * hdr.height as usize;
+            let data = core::slice::from_raw_parts((bm as *const u8).add(core::mem::size_of::<IBitmapHdr>()), len).to_vec();
+            Some(eh_hal::ThemeBitmap { width: hdr.width, height: hdr.height, depth: hdr.depth, scanline: hdr.scanline, data })
+        }
+    }
+}
+
+
+fn launch_app_impl(path: &str, name: &str, args: &[String]) -> bool {
+    let base = path.rsplit('/').next().unwrap_or(path);
+    // NewTaskEx may read argv asynchronously (the emulator task
+    // system / launched app), so the C strings must outlive the call:
+    // keep the owners in a static until the next launch (the C app
+    // passes a heap argv it never frees).
+    let mut holder = LAUNCH_ARG_OWN.lock().unwrap();
+    let p = std::ffi::CString::new(path).unwrap_or_default();
+    let b = std::ffi::CString::new(base).unwrap_or_default();
+    let n = std::ffi::CString::new(name).unwrap_or_default();
+    let cargs: Vec<std::ffi::CString> = args
+        .iter()
+        .map(|a| std::ffi::CString::new(a.as_str()).unwrap_or_default())
+        .collect();
+    let mut ptrs: Vec<*mut u8> = Vec::with_capacity(cargs.len() + 2);
+    ptrs.push(p.as_ptr() as *mut u8);
+    ptrs.extend(cargs.iter().map(|c| c.as_ptr() as *mut u8));
+    ptrs.push(std::ptr::null_mut());
+    let rc = unsafe {
+        NewTaskEx(
+            p.as_ptr() as *const u8,
+            ptrs.as_ptr() as *mut *mut u8,
+            b.as_ptr() as *const u8,
+            n.as_ptr() as *const u8,
+            std::ptr::null(),
+            0xA5, // TASK_HIDDEN|NOUPDATEONFOCUS|SINGLEINSTANCE|OUTOFSTACK|MAKEACTIVE
+            0,
+        )
+    };
+    // Keep the buffers alive until the next launch.
+    let mut owned = Vec::with_capacity(cargs.len() + 3);
+    owned.push(p);
+    owned.push(b);
+    owned.push(n);
+    owned.extend(cargs);
+    *holder = Some(owned);
+    rc == 0
+}
+
+/// Device model + firmware version for the boot identity log (C
+/// `eh_plat_log_identity`; "?" when a probe returns nothing — the codename
+/// is diagnostics only, conditionals resolve from device_profile).
+pub fn device_identity() -> (String, String) {
+    unsafe fn c_str(p: *mut u8) -> Option<String> {
+        if p.is_null() {
+            return None;
+        }
+        let mut len = 0usize;
+        while *p.add(len) != 0 {
+            len += 1;
+        }
+        std::str::from_utf8(core::slice::from_raw_parts(p, len))
+            .ok()
+            .map(|s| s.to_string())
+    }
+    unsafe {
+        (
+            c_str(GetDeviceModel()).filter(|s| !s.is_empty()).unwrap_or_else(|| "?".into()),
+            c_str(GetSoftwareVersion()).filter(|s| !s.is_empty()).unwrap_or_else(|| "?".into()),
+        )
+    }
 }
 
 impl InkviewFb {
@@ -321,38 +512,14 @@ impl InkviewFb {
         unsafe { OpenBook(c.as_ptr() as *const u8, std::ptr::null(), 1) == 0 }
     }
 
-    /// Launch a launcher app (NewTaskEx with the stock bookshelf's task
-    pub fn launch_app(&mut self, path: &str, name: &str) -> bool {
-        let base = path.rsplit('/').next().unwrap_or(path);
-        // NewTaskEx may read argv asynchronously (the emulator task
-        // system / launched app), so the C strings must outlive the call:
-        // keep the owners in a static until the next launch (the C app
-        // passes a heap argv it never frees).
-        let mut holder = LAUNCH_ARG_OWN.lock().unwrap();
-        let p = std::ffi::CString::new(path).unwrap_or_default();
-        let b = std::ffi::CString::new(base).unwrap_or_default();
-        let n = std::ffi::CString::new(name).unwrap_or_default();
-        let ptrs = [p.as_ptr() as *mut u8, std::ptr::null_mut()];
-        let rc = unsafe {
-            NewTaskEx(
-                p.as_ptr() as *const u8,
-                ptrs.as_ptr() as *mut *mut u8,
-                b.as_ptr() as *const u8,
-                n.as_ptr() as *const u8,
-                std::ptr::null(),
-                0xA5, // TASK_HIDDEN|NOUPDATEONFOCUS|SINGLEINSTANCE|OUTOFSTACK|MAKEACTIVE
-                0,
-            )
-        };
-        // Keep the buffers alive until the next launch.
-        *holder = Some([p, b, n]);
-        rc == 0
+    pub fn launch_app(&mut self, path: &str, name: &str, args: &[String]) -> bool {
+        launch_app_impl(path, name, args)
     }
 }
 
 /// Owners of the C strings passed to NewTaskEx (kept alive until the next
 /// launch — the task system may read argv asynchronously).
-static LAUNCH_ARG_OWN: std::sync::Mutex<Option<[std::ffi::CString; 3]>> = std::sync::Mutex::new(None);
+static LAUNCH_ARG_OWN: std::sync::Mutex<Option<Vec<std::ffi::CString>>> = std::sync::Mutex::new(None);
 
 // Keyboard commit state: the firmware's keyboard handler is a single
 // global function pointer, so the in-flight (buffer, on_done) pair lives

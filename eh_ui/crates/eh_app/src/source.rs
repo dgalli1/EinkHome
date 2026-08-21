@@ -22,9 +22,9 @@ pub fn sheet(w: u32, h: u32) -> (u32, u32, u32, u32) {
 
 fn source_label(s: Source) -> &'static str {
     match s {
-        Source::Kavita => "Kavita",
-        Source::Local => "Local",
-        Source::Folder => "Folder",
+        Source::Kavita => crate::i18n::tr("source.kavita"),
+        Source::Local => crate::i18n::tr("source.local"),
+        Source::Folder => crate::i18n::tr("source.folder"),
     }
 }
 
@@ -47,7 +47,7 @@ pub fn draw<B: eh_hal::Framebuffer>(surf: &mut eh_render::Surface, app: &mut App
     // Inline title + divider.
     let font = crate::shelf::shelf_font();
     let mut glyph = eh_render::Glyph::new();
-    eh_render::draw_text(surf, font, 32.0, "Source", (px + 24) as i32, (py + 18) as i32, GRAY_BLACK, &mut glyph);
+    eh_render::draw_text(surf, font, 32.0, crate::i18n::tr("source.title"), (px + 24) as i32, (py + 18) as i32, GRAY_BLACK, &mut glyph);
     surf.hline(px + 24, py + 64, pw - 48, 2, GRAY_LGRAY);
 
     // Three text-only rows.
@@ -79,11 +79,11 @@ fn source_index(s: Source) -> usize {
 }
 
 /// Tap dispatch (C eh_on_tap_source): a tap outside the sheet closes the
-/// chooser; a row tap switches source, persists it, runs the sync (Kavita
-/// only) and redraws.  Local/Folder data paths aren't ported yet — they
-/// persist the selection and log (house rule: never fake state).
+/// chooser; a row tap switches source, persists it, and runs the source's
+/// data path — Kavita syncs, Local kicks the storage-root import, Folder
+/// opens the directory browser as the shelf body.
 pub fn tap<B: eh_hal::Framebuffer>(app: &mut App<B>, x: i32, y: i32) {
-    let w = app.screen().framebuffer().screen().width;
+    let w = app.screen_width();
     let h = app.content_bottom;
     let (px, py, pw, ph) = sheet(w, h);
     app.overlay = crate::app::Overlay::None;
@@ -103,18 +103,22 @@ pub fn tap<B: eh_hal::Framebuffer>(app: &mut App<B>, x: i32, y: i32) {
     app.config.source = Some(new.config_value());
     app.save_config();
     crate::log(&format!("[eh_app] source switched to {}", source_label(new)));
+    app.tab = crate::app::Tab::Library;
+    app.page = 0;
     match new {
         Source::Kavita => {
-            app.tab = crate::app::Tab::Library;
-            app.page = 0;
-            app.do_sync();
+            app.browser.open = false;
+            app.resync();
         }
-        _ => {
-            crate::log(&format!(
-                "[eh_app] source={}: local/folder data path not yet ported (still showing the Kavita library)",
-                source_label(new)
-            ));
+        Source::Local => {
+            // The import applies on a later tick and rebuilds the view
+            // (C eh_local_import_scanner → async apply chain).
+            app.browser.open = false;
+            crate::local::kick_import(app);
             app.refresh_shelf();
+        }
+        Source::Folder => {
+            crate::local::start_browse(app);
         }
     }
 }

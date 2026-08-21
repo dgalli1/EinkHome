@@ -107,81 +107,88 @@ def _start_api_server(
         else (EINKHOME_ROOT / "build" / "pbemu-api-test.log")
     )
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    log_fh = open(log_path, "w", encoding="utf-8")  # noqa: SIM115
     cfg_path = (
         Path(config)
         if config is not None
         else (EINKHOME_ROOT / "tests" / "support" / "server-test.json")
     )
-    proc = subprocess.Popen(
-        [
-            sys.executable,
-            "-m",
-            "api.api.server",
-            "--host",
-            "0.0.0.0",
-            "--port",
-            str(port),
-            "--provider",
-            "mock",
-            "--config",
-            str(cfg_path),
-        ],
-        # The server code lives in this repo (api/ on PYTHONPATH), but it
-        # runs with the submodule as cwd so the config's firmware-relative
-        # paths (books_dir: U633_6.8.2817/.live/...) resolve correctly.
-        cwd=PBEMU_ROOT,
-        env=_api_env(),
-        stdout=log_fh,
-        stderr=subprocess.STDOUT,
-    )
-    # Wait for server to be ready
-    deadline = time.monotonic() + 10.0
-    while time.monotonic() < deadline:
-        try:
-            import urllib.request
+    # Parallel xdist workers each probe a free port, close it, then spawn
+    # the server — a classic bind/close/bind TOCTOU: two workers can probe
+    # the same port and the later spawn dies with EADDRINUSE.  Serialize
+    # the probe→bind window across workers (the servers themselves then
+    # run fully in parallel).  The port stays as chosen: callers build
+    # the app's API config from it.
+    from filelock import FileLock
 
-            req = urllib.request.Request(
-                f"http://127.0.0.1:{port}/api/v1/healthz",
-                headers={"Authorization": f"Bearer {API_TOKEN}"},
+    lock = FileLock(str(EINKHOME_ROOT / "build" / ".api-port.lock"), timeout=120)
+    last_log = ""
+    for _attempt in range(3):
+        with lock:
+            log_fh = open(log_path, "w", encoding="utf-8")  # noqa: SIM115
+            proc = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-m",
+                    "api.api.server",
+                    "--host",
+                    "0.0.0.0",
+                    "--port",
+                    str(port),
+                    "--provider",
+                    "mock",
+                    "--config",
+                    str(cfg_path),
+                ],
+                # The server code lives in this repo (api/ on PYTHONPATH),
+                # but it runs with the submodule as cwd so the config's
+                # firmware-relative paths (books_dir:
+                # U633_6.8.2817/.live/...) resolve correctly.
+                cwd=PBEMU_ROOT,
+                env=_api_env(),
+                stdout=log_fh,
+                stderr=subprocess.STDOUT,
             )
-            with urllib.request.urlopen(req, timeout=2) as resp:
-                body = json.loads(resp.read().decode("utf-8"))
-        except Exception:  # noqa: BLE001 — server not up yet; keep polling
-            time.sleep(0.3)
-            continue
-        # The reply must come from the process we just spawned: a server
-        # left over from an earlier (interrupted) run may still be
-        # answering on the test port while our fresh process never bound
-        # it (EADDRINUSE).  Testing against that stale server would run
-        # the suite against dead code, so kill it and fail loudly.
-        if body.get("pid") != proc.pid:
-            stale_pid = body.get("pid")
-            if isinstance(stale_pid, int) and stale_pid > 0:
-                # The stale server reports its own pid via healthz;
-                # terminate it so the next run gets a fresh listener.
+            deadline = time.monotonic() + 10.0
+            raced = False
+            while time.monotonic() < deadline:
                 try:
-                    os.kill(stale_pid, signal.SIGTERM)
+                    import urllib.request
+
+                    req = urllib.request.Request(
+                        f"http://127.0.0.1:{port}/api/v1/healthz",
+                        headers={"Authorization": f"Bearer {API_TOKEN}"},
+                    )
+                    with urllib.request.urlopen(req, timeout=2) as resp:
+                        body = json.loads(resp.read().decode("utf-8"))
+                except Exception:  # noqa: BLE001 — not up yet; keep polling
+                    if proc.poll() is not None:
+                        break  # died (EADDRINUSE) — retry below
                     time.sleep(0.3)
-                    os.kill(stale_pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-                except PermissionError:
-                    pass
-            proc.kill()  # our spawn lost the port race; reap it
+                    continue
+                # The reply must come from the process we just spawned: a
+                # stale server answering here would run the suite against
+                # dead code.  Kill it and retry (the port frees up).
+                if body.get("pid") != proc.pid:
+                    stale_pid = body.get("pid")
+                    if isinstance(stale_pid, int) and stale_pid > 0:
+                        try:
+                            os.kill(stale_pid, signal.SIGTERM)
+                            time.sleep(0.3)
+                            os.kill(stale_pid, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
+                        except PermissionError:
+                            pass
+                    raced = True
+                    break
+                return proc
+            last_log = log_path.read_text()
+            if proc.poll() is None:
+                proc.kill()
             proc.wait()
-            raise RuntimeError(
-                f"stale API server (pid {stale_pid}) answered on port "
-                f"{port} instead of the freshly spawned server "
-                f"(pid {proc.pid}); killed the stale listener. Log:\n"
-                f"{log_path.read_text()}"
-            )
-        return proc
-    proc.kill()
-    proc.wait()
-    raise RuntimeError(
-        f"API server did not start within 10s. Log:\n{log_path.read_text()}"
-    )
+            if not raced and "Address already in use" not in last_log:
+                break  # a real startup failure — report it
+    raise RuntimeError(f"API server did not start on port {port}. Log:\n{last_log}")
 
 
 def _stop_api_server(proc: subprocess.Popen) -> None:  # type: ignore[type-arg]

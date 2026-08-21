@@ -32,6 +32,13 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 # (the raw /cover endpoint — 240x360 JPEGs for Kavita).  Single-threaded
 # decoder (no rayon) keeps the embedded footprint small.
 png = "0.17"
+
+# Local-library metadata extraction (C rust_extract replacement): epub is a
+# zip container whose OPF carries title/author; fb2 is plain XML.  Both
+# parsers are pure Rust.  zip runs with default features trimmed (deflate
+# only) so the armv7 cross-build stays free of C compression backends.
+quick-xml = "0.37"
+zip = { version = "2", default-features = false, features = ["deflate"] }
 jpeg-decoder = { version = "0.3", default-features = false }
 
 [dev-dependencies]

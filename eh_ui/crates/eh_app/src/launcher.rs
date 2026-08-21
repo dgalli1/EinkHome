@@ -19,6 +19,8 @@ use crate::app::{App, LauncherItem, Overlay};
 /// Grid rhythm (C EH_LAUNCHER_*).
 pub const COLS: u32 = 3;
 pub const CELL_H: u32 = 232;
+/// Per-item launch arguments (C EH_LAUNCHER_MAX_PARAMS).
+pub const LAUNCHER_MAX_PARAMS: usize = 4;
 pub const ICON_SZ: u32 = 120;
 pub const GROUP_H: u32 = 64;
 pub const MARGIN: u32 = 16;
@@ -67,34 +69,261 @@ fn load_json(paths: &[&str]) -> Option<Value> {
     None
 }
 
-/// A desktop-config value: a plain string, an `{"path": ...}` object, or a
-/// device/partner/localization object (the C app's eh_lc_resolve,
-/// simplified to the first string it finds).
-fn lc_str(v: &Value) -> String {
-    match v {
-        Value::String(s) => s.clone(),
-        Value::Object(o) => {
-            for key in ["path", "value", "all"] {
-                if let Some(Value::String(s)) = o.get(key) {
-                    return s.clone();
-                }
-            }
-            o.values()
-                .find_map(|v| match v {
-                    Value::String(s) => Some(s.clone()),
-                    _ => None,
-                })
-                .unwrap_or_default()
+/// The device profile feeding the seven-dimension conditional resolution
+/// (C BsLcProfile / eh_g_lcprof).  Built once per launcher build from the
+/// hal's device profile + the configured language; `globalcfg` is a
+/// resolution dimension only, not a stored value.
+pub(crate) struct LcProfile {
+    device: String,
+    partner: String,
+    has_audio: String,
+    has_cloud: String,
+    language: String,
+    localization: String,
+}
+
+impl LcProfile {
+    /// Neutral profile (C eh_g_lcprof's static init) with the device
+    /// identity and language from the hal/config when available.
+    pub(crate) fn from_env<B: Framebuffer>(app: &mut App<B>) -> Self {
+        let prof = app.device_profile();
+        Self {
+            device: prof.device_number.to_string(),
+            partner: "pocketbook".into(),
+            has_audio: if prof.has_audio { "true" } else { "false" }.into(),
+            has_cloud: "false".into(),
+            language: app
+                .config
+                .language
+                .clone()
+                .unwrap_or_else(|| "en".into()),
+            localization: "WW".into(),
         }
-        _ => String::new(),
+    }
+
+    /// The profile-mapped key for one dimension (C eh_lc_prof_val;
+    /// `globalcfg` has no profile value).
+    fn val(&self, dim: &str) -> Option<&str> {
+        match dim {
+            "device" => Some(&self.device),
+            "partner" => Some(&self.partner),
+            "has_audio" => Some(&self.has_audio),
+            "has_cloud" => Some(&self.has_cloud),
+            "language" => Some(&self.language),
+            "localization" => Some(&self.localization),
+            _ => None,
+        }
     }
 }
 
-fn lc_visible(v: &Value) -> bool {
-    match v {
-        Value::String(s) => s != "0",
-        _ => true,
+/// The seven dimensions tried, in order, when an object value is met (C
+/// eh_lc_dims).
+const LC_DIMS: [&str; 7] = [
+    "device",
+    "partner",
+    "has_audio",
+    "has_cloud",
+    "language",
+    "localization",
+    "globalcfg",
+];
+
+/// Pick which key of a dimension object resolves (C eh_lc_pick_key): the
+/// wanted key when present, else "all", else "default", else the first.
+fn lc_pick_key<'a>(
+    obj: &'a serde_json::Map<String, Value>,
+    want: Option<&'a str>,
+) -> Option<&'a str> {
+    let mut first: Option<&str> = None;
+    let mut all = false;
+    let mut def = false;
+    for k in obj.keys() {
+        if first.is_none() {
+            first = Some(k);
+        }
+        if want == Some(k.as_str()) {
+            return want;
+        }
+        if k == "all" {
+            all = true;
+        }
+        if k == "default" {
+            def = true;
+        }
     }
+    if all {
+        return Some("all");
+    }
+    if def {
+        return Some("default");
+    }
+    first
+}
+
+/// The conditional-resolution engine (C eh_lc_resolve): a string copies
+/// verbatim; an object resolves along the first present dimension key, or
+/// — when no dimension matches — falls back per the current dimension
+/// (`globalcfg` picks the first member carrying a "default"; others pick
+/// the profile-mapped key).
+pub(crate) fn lc_resolve(v: &Value, cur_dim: Option<&str>, prof: &LcProfile, out: &mut String) {
+    out.clear();
+    match v {
+        Value::String(s) => out.push_str(s),
+        Value::Object(obj) => {
+            for d in LC_DIMS {
+                if let Some(vp) = obj.get(d) {
+                    lc_resolve(vp, Some(d), prof, out);
+                    return;
+                }
+            }
+            let Some(cur) = cur_dim else {
+                // No current dimension: resolve the fallback key with a
+                // NULL dimension (C lc_resolve_fallback).
+                if let Some(k) = lc_pick_key(obj, None) {
+                    lc_resolve(&obj[k], None, prof, out);
+                }
+                return;
+            };
+            if cur == "globalcfg" {
+                // C lc_resolve_globalcfg: the first member whose value is
+                // an object carrying a "default" wins — its "default"
+                // child (any JSON type) is resolved with the same dim.
+                for m in obj.values() {
+                    if let Value::Object(mo) = m {
+                        if let Some(defp) = mo.get("default") {
+                            lc_resolve(defp, cur_dim, prof, out);
+                            return;
+                        }
+                    }
+                }
+                return;
+            }
+            // Current dimension set: resolve the profile-mapped key (C
+            // lc_resolve_dim).
+            let want = prof.val(cur);
+            if let Some(k) = lc_pick_key(obj, want) {
+                lc_resolve(&obj[k], cur_dim, prof, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Conditional visibility (C eh_lc_resolve_bool): a JSON bool is taken
+/// verbatim; a resolvable string is hidden only for the explicit falsey
+/// spellings "0"/"false"/"no"/"off" (case-insensitive) — an empty value
+/// (missing key) and anything else stays visible.
+pub(crate) fn lc_visible(v: &Value, prof: &LcProfile) -> bool {
+    if let Value::Bool(b) = v {
+        return *b;
+    }
+    let mut buf = String::new();
+    lc_resolve(v, None, prof, &mut buf);
+    !matches!(buf.to_ascii_lowercase().as_str(), "0" | "false" | "no" | "off")
+}
+
+/// The @Token translation table (C eh_lc_token_en) — the firmware's
+/// group/app name tokens with their English labels.
+fn lc_token_en(tok: &str) -> Option<&'static str> {
+    Some(match tok {
+        "@Audio_books" => "Audio books",
+        "@Browser" => "Browser",
+        "@BookStoreShortName" => "Book Store",
+        "@Legimi" => "Legimi",
+        "@Calc" => "Calculator",
+        "@Calendar" => "Calendar",
+        "@Chess" => "Chess",
+        "@coloring" => "Coloring",
+        "@Sudoku" => "Sudoku",
+        "@digital_frame" => "Digital Frame",
+        "@Gallery" => "Gallery",
+        "@Library" => "Library",
+        "@Notes" => "Notes",
+        "@Onleihe" => "Onleihe",
+        "@Audio_player" => "Music",
+        "@Pocketnews" => "RSS News",
+        "@Settings" => "Settings",
+        "@Snake" => "Snake",
+        "@Scribble" => "Scribble",
+        "@SendToPocketbook" => "Send to PB",
+        "@Dictionary" => "Dictionary",
+        "@Dropbox" => "Dropbox",
+        "@Empik_store" => "Empik",
+        "@Klondike" => "Solitaire",
+        "@Kosynka" => "Solitaire",
+        "@PBOnleiheLibrary" => "Onleihe",
+        "@General" => "General",
+        "@Games" => "Games",
+        "@Users" => "Users",
+        "@Empty" => "Empty",
+        _ => return None,
+    })
+}
+
+/// Raw resolved title → display text (C eh_lc_translate): an @Token maps
+/// through the table (unknown tokens drop the @); otherwise `_` becomes a
+/// space and the letter after each break is upper-cased.
+pub(crate) fn lc_translate(raw: &str) -> String {
+    if raw.is_empty() {
+        return String::new();
+    }
+    let mut raw = raw;
+    if let Some(stripped) = raw.strip_prefix('@') {
+        if let Some(en) = lc_token_en(raw) {
+            return en.to_string();
+        }
+        raw = stripped;
+    }
+    let mut out = String::with_capacity(raw.len());
+    let mut cap_next = true;
+    for c in raw.chars() {
+        if c == '_' {
+            out.push(' ');
+            cap_next = true;
+        } else if cap_next && c.is_ascii_lowercase() {
+            out.push(c.to_ascii_uppercase());
+            cap_next = false;
+        } else {
+            out.push(c);
+            cap_next = false;
+        }
+    }
+    out
+}
+
+/// Resolve + translate a display title (C launcher_set_title's body).
+fn lc_title(v: &Value, prof: &LcProfile) -> String {
+    let mut raw = String::new();
+    lc_resolve(v, None, prof, &mut raw);
+    lc_translate(&raw)
+}
+
+/// Copy the optional "params"/"param" argument list into the item (C
+/// launcher_set_params): an array of strings capped at
+/// [`LAUNCHER_MAX_PARAMS`], or a single string becoming the one argument.
+fn lc_params(def: &Value) -> Vec<String> {
+    let mut par = def.get("params");
+    if !par.is_some_and(|p| p.is_array()) {
+        par = def.get("param");
+    }
+    match par {
+        Some(Value::Array(a)) => a
+            .iter()
+            .filter_map(|q| q.as_str())
+            .take(LAUNCHER_MAX_PARAMS)
+            .map(|s| s.to_string())
+            .collect(),
+        Some(Value::String(s)) => vec![s.clone()],
+        _ => Vec::new(),
+    }
+}
+
+/// Resolve a path/icon value to a plain string (no @Token/_ translation —
+/// C resolves those fields with eh_lc_resolve only).
+fn lc_resolve_str(v: &Value, prof: &LcProfile) -> String {
+    let mut s = String::new();
+    lc_resolve(v, None, prof, &mut s);
+    s
 }
 
 fn add_header(items: &mut Vec<LauncherItem>, text: &str, already: &mut bool) {
@@ -121,6 +350,7 @@ fn has_user_header(items: &[LauncherItem]) -> bool {
 /// empty (nothing to launch anywhere).
 pub fn build<B: Framebuffer>(app: &mut App<B>) -> bool {
     app.launcher_items.clear();
+    let prof = LcProfile::from_env(app);
 
     let (db_paths, vw_paths) = desktop_paths();
     let db_paths: Vec<&str> = db_paths.iter().map(|s| s.as_str()).collect();
@@ -135,7 +365,7 @@ pub fn build<B: Framebuffer>(app: &mut App<B>) -> bool {
                 let Some(apps_arr) = g.get("apps").and_then(|a| a.as_array()) else {
                     continue;
                 };
-                let title = g.get("title").map(lc_str).filter(|t| !t.is_empty());
+                let title = g.get("title").map(|t| lc_title(t, &prof)).filter(|t| !t.is_empty());
                 if let Some(t) = title {
                     // C pb_build_groups: a header row per titled group,
                     // unconditional (no cross-group dedup).
@@ -149,19 +379,20 @@ pub fn build<B: Framebuffer>(app: &mut App<B>) -> bool {
                         continue;
                     };
                     if let Some(vis) = def.get("visible") {
-                        if !lc_visible(vis) {
+                        if !lc_visible(vis, &prof) {
                             continue;
                         }
                     }
                     let text = def
                         .get("title")
-                        .map(lc_str)
+                        .map(|t| lc_title(t, &prof))
                         .filter(|t| !t.is_empty())
                         .unwrap_or_else(|| id.to_string());
                     let it = LauncherItem {
                         text,
-                        path: def.get("path").map(lc_str).unwrap_or_default(),
-                        icon: def.get("icon").map(lc_str).unwrap_or_default(),
+                        path: def.get("path").map(|v| lc_resolve_str(v, &prof)).unwrap_or_default(),
+                        icon: def.get("icon").map(|v| lc_resolve_str(v, &prof)).unwrap_or_default(),
+                        params: lc_params(def),
                         ..Default::default()
                     };
                     if !it.path.is_empty() && !has_path(&app.launcher_items, &it.path) {
@@ -178,20 +409,26 @@ pub fn build<B: Framebuffer>(app: &mut App<B>) -> bool {
                     continue;
                 }
                 if let Some(vis) = val.get("visible") {
-                    if !lc_visible(vis) {
+                    if !lc_visible(vis, &prof) {
                         continue;
                     }
                 }
                 add_header(&mut app.launcher_items, "Users", &mut hdr);
+                // C pb_build_user_app resolves the U_* title verbatim
+                // (no @Token/_→space translation) and takes no params.
                 let text = val
                     .get("title")
-                    .map(lc_str)
+                    .map(|t| {
+                        let mut s = String::new();
+                        lc_resolve(t, None, &prof, &mut s);
+                        s
+                    })
                     .filter(|t| !t.is_empty())
                     .unwrap_or_else(|| key.clone());
                 let it = LauncherItem {
                     text,
-                    path: val.get("path").map(lc_str).unwrap_or_default(),
-                    icon: val.get("icon").map(lc_str).unwrap_or_default(),
+                    path: val.get("path").map(|v| lc_resolve_str(v, &prof)).unwrap_or_default(),
+                    icon: val.get("icon").map(|v| lc_resolve_str(v, &prof)).unwrap_or_default(),
                     ..Default::default()
                 };
                 if !it.path.is_empty() && !has_path(&app.launcher_items, &it.path) {
@@ -224,6 +461,7 @@ pub fn build<B: Framebuffer>(app: &mut App<B>) -> bool {
                 text: name.trim_end_matches(".app").to_string(),
                 path,
                 icon: String::new(),
+                params: Vec::new(),
             });
         }
     }
@@ -311,6 +549,7 @@ fn scan_desktop_apps<B: Framebuffer>(app: &mut App<B>) {
                 },
                 path: cmd,
                 icon,
+                params: Vec::new(),
             });
         }
     }
@@ -321,7 +560,7 @@ fn scan_desktop_apps<B: Framebuffer>(app: &mut App<B>) {
 /// is parallel to `launcher_items` (C's BsLauncherItem carries its own
 /// x/y/w/h), so draw and hit share one geometry.
 pub fn layout<B: Framebuffer>(app: &mut App<B>) {
-    let w = app.screen().framebuffer().screen().width;
+    let w = app.screen_width();
     let cell_w = (w - 2 * MARGIN) / COLS;
     let mut col = 0u32;
     let mut y = 0i32;
@@ -375,7 +614,7 @@ pub fn draw<B: Framebuffer>(surf: &mut eh_render::Surface, app: &mut App<B>, dir
     let h = app.content_bottom;
     dirty.push(Rect { x: 0, y: 0, w, h });
     surf.fill_gray(Rect { x: 0, y: 0, w, h }, GRAY_WHITE);
-    crate::settings::draw_header(surf, "Applications", dirty);
+    crate::settings::draw_header(surf, crate::i18n::tr("launcher.title"), dirty);
 
     let (body_top, body_h) = body_rect(app);
     let (scroll, max_scroll) = scroll_state(app);
@@ -385,7 +624,7 @@ pub fn draw<B: Framebuffer>(surf: &mut eh_render::Surface, app: &mut App<B>, dir
     let fmt = surf.format();
 
     if app.launcher_items.is_empty() {
-        let msg = "No applications";
+        let msg = crate::i18n::tr("launcher.empty");
         let tw = font.width(msg, 32.0) as i32;
         draw_text(surf, font, 32.0, msg, (w as i32 - tw) / 2, (body_top + body_h / 2) as i32, GRAY_BLACK, &mut glyph);
         return;
@@ -459,7 +698,17 @@ fn draw_icon<B: eh_hal::Framebuffer>(
     let x0 = cx - (ICON_SZ as i32) / 2;
     let y0 = cy - (ICON_SZ as i32) / 2;
     let mut ok = false;
-    let art = app.icon_cache.get(icon).cloned().or_else(|| {
+    // Theme names resolve through the firmware store first (C eh_launcher:
+    // GetResource before LoadPNG); file paths fall through to the PNG
+    // decode below.
+    let themed = if !icon.is_empty() && !icon.starts_with('/') {
+        app.theme_resource(icon).and_then(|tb| {
+            tb.to_rgb().map(|rgb| (tb.width as u32, tb.height as u32, rgb))
+        })
+    } else {
+        None
+    };
+    let art = themed.or_else(|| {
         if icon.is_empty() || !icon.starts_with('/') {
             return None;
         }
@@ -543,7 +792,7 @@ pub fn tap_launcher<B: Framebuffer>(x: i32, y: i32, app: &mut App<B>) {
         app.launcher_rects.clear();
         return;
     }
-    let w = app.screen().framebuffer().screen().width;
+    let w = app.screen_width();
     // Corner scroll buttons (bottom band).
     if y >= (app.content_bottom - SCROLL_H) as i32 {
         let (scroll, max) = scroll_state(app);
@@ -579,11 +828,158 @@ pub fn tap_launcher<B: Framebuffer>(x: i32, y: i32, app: &mut App<B>) {
             let it = it.clone();
             app.overlay = Overlay::None;
             app.launcher_rects.clear();
-            crate::log(&format!("[eh_app] launching app path={}", it.path));
-            if !app.screen().framebuffer_mut().launch_app(&it.path, &it.text) {
+            // C eh_launch_app: argv[0] is the app path, then the item's
+            // params (NewTaskEx passes the array through as-is).
+            crate::log(&format!(
+                "[eh_app] launching app path={} params={}",
+                it.path,
+                it.params.len()
+            ));
+            if !app
+                .screen()
+                .framebuffer_mut()
+                .launch_app(&it.path, &it.text, &it.params)
+            {
                 crate::log("[eh_app] launch failed (no task system on this platform)");
             }
             return;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn prof() -> LcProfile {
+        LcProfile {
+            device: "741".into(),
+            partner: "pocketbook".into(),
+            has_audio: "true".into(),
+            has_cloud: "false".into(),
+            language: "en".into(),
+            localization: "WW".into(),
+        }
+    }
+
+    fn resolve(v: &Value) -> String {
+        let mut s = String::new();
+        lc_resolve(v, None, &prof(), &mut s);
+        s
+    }
+
+    #[test]
+    fn visible_truth_table() {
+        let p = prof();
+        // Explicit falsey spellings hide; JSON false hides.
+        for v in [json!("0"), json!("false"), json!("no"), json!("off"), json!(false)] {
+            assert!(!lc_visible(&v, &p), "must be hidden: {v}");
+        }
+        // An empty value (missing key) and anything else stays visible —
+        // including truthy spellings and unknown dimension objects.
+        for v in [
+            json!(""),
+            json!("1"),
+            json!("true"),
+            json!("yes"),
+            json!({"device": {"741": "on"}}),
+        ] {
+            assert!(lc_visible(&v, &p), "must be visible: {v}");
+        }
+    }
+
+    #[test]
+    fn resolves_profile_dimensions() {
+        assert_eq!(
+            resolve(&json!({"has_audio": {"true": "/audio.app", "false": "/plain.app"}})),
+            "/audio.app"
+        );
+        let mut p = prof();
+        p.has_audio = "false".into();
+        let mut s = String::new();
+        lc_resolve(
+            &json!({"has_audio": {"true": "/audio.app", "false": "/plain.app"}}),
+            None,
+            &p,
+            &mut s,
+        );
+        assert_eq!(s, "/plain.app");
+        // Language + localization dims.
+        assert_eq!(
+            resolve(&json!({"language": {"de": "Bücher", "en": "Books", "all": "Books"}})),
+            "Books"
+        );
+        let mut de = prof();
+        de.language = "de".into();
+        let mut s = String::new();
+        lc_resolve(
+            &json!({"language": {"de": "Bücher", "en": "Books"}}),
+            None,
+            &de,
+            &mut s,
+        );
+        assert_eq!(s, "Bücher");
+    }
+
+    #[test]
+    fn falls_back_to_all_then_default_then_first() {
+        // Wanted key absent → "all" wins over "default" over first.
+        assert_eq!(resolve(&json!({"partner": {"all": "A", "default": "D", "zzz": "Z"}})), "A");
+        assert_eq!(resolve(&json!({"partner": {"default": "D", "zzz": "Z"}})), "D");
+        assert_eq!(resolve(&json!({"partner": {"zzz": "Z"}})), "Z");
+        // A profile-matched key beats the fallbacks.
+        assert_eq!(
+            resolve(&json!({"device": {"741": "mine", "all": "any", "default": "def"}})),
+            "mine"
+        );
+    }
+
+    #[test]
+    fn globalcfg_takes_first_member_with_default() {
+        let v = json!({
+            "reader_a": {"enabled": "no"},
+            "reader_b": {"default": {"font": "droid"}}
+        });
+        let mut s = String::new();
+        lc_resolve(&v, Some("globalcfg"), &prof(), &mut s);
+        // Resolves INTO the chosen member's value with the same dim.
+        assert_eq!(s, "");
+        let v2 = json!({"x": {"default": "picked"}});
+        let mut s2 = String::new();
+        lc_resolve(&v2, Some("globalcfg"), &prof(), &mut s2);
+        assert_eq!(s2, "picked");
+    }
+
+    #[test]
+    fn token_table_and_title_casing() {
+        assert_eq!(lc_translate("@Gallery"), "Gallery");
+        assert_eq!(lc_translate("@Audio_player"), "Music");
+        assert_eq!(lc_translate("@Klondike"), "Solitaire");
+        // Unknown token: drop the @, then _→space title-casing.
+        assert_eq!(lc_translate("@chess_master"), "Chess Master");
+        assert_eq!(lc_translate("digital_frame"), "Digital Frame");
+        assert_eq!(lc_translate(""), "");
+    }
+
+    #[test]
+    fn params_parse_and_cap() {
+        // Array capped at EH_LAUNCHER_MAX_PARAMS.
+        let def = json!({"params": ["a", "b", "c", "d", "e", "f"]});
+        let got = lc_params(&def);
+        assert_eq!(got.len(), LAUNCHER_MAX_PARAMS);
+        assert_eq!(got, vec!["a", "b", "c", "d"]);
+        // C only honours a bare-string form via "param" (a string
+        // "params" is overwritten by the "param" lookup and lost when
+        // "param" is absent — launcher_set_params verbatim).
+        assert_eq!(lc_params(&json!({"param": "solo"})), vec!["solo"]);
+        assert_eq!(lc_params(&json!({"params": "lost"})), Vec::<String>::new());
+        assert_eq!(lc_params(&json!({"param": ["x"]})), vec!["x"]);
+        assert_eq!(lc_params(&json!({})), Vec::<String>::new());
+        // Non-string members are skipped (C only snprintf's strings).
+        assert_eq!(
+            lc_params(&json!({"params": [1, "keep", null]})),
+            vec!["keep"]
+        );
     }
 }

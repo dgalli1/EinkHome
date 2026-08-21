@@ -59,22 +59,26 @@ pub fn draw<B: Framebuffer>(surf: &mut eh_render::Surface, app: &mut App<B>, dir
     let h = app.content_bottom;
     dirty.push(Rect { x: 0, y: 0, w, h });
     surf.fill_gray(Rect { x: 0, y: 0, w, h }, GRAY_WHITE);
-    draw_header(surf, "Settings", dirty);
+    draw_header(surf, crate::i18n::tr("settings.title"), dirty);
 
     app.settings_rows.clear();
     let font = crate::shelf::shelf_font();
     let mut glyph = eh_render::Glyph::new();
 
     let dl = app.config.downloads_dir.clone().unwrap_or_default();
-    let reader_val = if app.reader_pref == 1 { "Standard".to_string() } else { "Auto".to_string() };
+    let reader_val = app.reader_label(); // Auto + every detected reader (C eh_settings_reader_label)
     // Live install state (C eh_sysapp_detect): toggling flips the row.
-    let sysapp_val = if crate::sysapp::detect() { "On" } else { "Off" };
+    let sysapp_val = if crate::sysapp::detect() {
+        crate::i18n::tr("settings.sysapp_on")
+    } else {
+        crate::i18n::tr("settings.sysapp_off")
+    };
     let rows: [(SettingsRow, &str, &str); 5] = [
-        (SettingsRow::ApiHost, "API host", &app.config.api_url),
-        (SettingsRow::ApiKey, "API key", &app.config.api_token),
-        (SettingsRow::ReaderApp, "Reader app", &reader_val),
-        (SettingsRow::DownloadFolder, "Download folder", &dl),
-        (SettingsRow::SystemApp, "System app", sysapp_val),
+        (SettingsRow::ApiHost, crate::i18n::tr("settings.api_host"), &app.config.api_url),
+        (SettingsRow::ApiKey, crate::i18n::tr("settings.api_key"), &app.config.api_token),
+        (SettingsRow::ReaderApp, crate::i18n::tr("settings.reader"), &reader_val),
+        (SettingsRow::DownloadFolder, crate::i18n::tr("settings.dl_dir"), &dl),
+        (SettingsRow::SystemApp, crate::i18n::tr("settings.system_app"), sysapp_val),
     ];
     let mut y = ROWS_Y0 as i32;
     for (row, label, value) in rows.iter() {
@@ -100,9 +104,9 @@ pub fn draw<B: Framebuffer>(surf: &mut eh_render::Surface, app: &mut App<B>, dir
     // Buttons (C eh_settings_draw_button): filled Save, outlined
     // Show logs + Licenses.
     for (row, label, filled) in [
-        (SettingsRow::Save, "Save", true),
-        (SettingsRow::ShowLogs, "Show logs", false),
-        (SettingsRow::Licenses, "Licenses", false),
+        (SettingsRow::Save, crate::i18n::tr("settings.save"), true),
+        (SettingsRow::ShowLogs, crate::i18n::tr("settings.logs"), false),
+        (SettingsRow::Licenses, crate::i18n::tr("settings.licenses"), false),
     ] {
         let ry = y as u32;
         surf.fill_gray(
@@ -135,7 +139,7 @@ pub fn tap_settings<B: Framebuffer>(x: i32, y: i32, app: &mut App<B>) {
             SettingsRow::ApiHost => app.edit_field(KbField::ApiHost),
             SettingsRow::ApiKey => app.edit_field(KbField::ApiKey),
             SettingsRow::Save => {
-                app.save_config();
+                app.settings_apply(); // CoreAgent hook: C eh_settings_apply side effects
             }
             SettingsRow::ReaderApp => {
                 app.cycle_reader();

@@ -20,23 +20,28 @@ use eh_backend_sdl::ipc::Ipc;
 use eh_backend_sdl::SdlFb;
 use eh_hal::{Framebuffer, InputEvent, KeyCode};
 
-const W0: u32 = 1072;
-const H0: u32 = 1448;
+
+/// The three PocketBook screen classes the app adapts to (C
+/// g_resolutions); F11 cycles them at runtime, EH_RES picks one up front.
+const RESOLUTIONS: [(u32, u32); 3] = [(758, 1024), (1072, 1448), (1404, 1872)];
+/// Index of the default element (C PC_RES_DEFAULT).
+const RES_DEFAULT: usize = 1;
 
 fn main() -> Result<(), String> {
-    let (width, height) = res_from_env();
+    let (width, height, mut res_idx) = res_from_env();
     let dir = std::env::current_dir().map_err(|e| e.to_string())?;
     // Log chain (C eh_log_open): $PBEMU_LOG_DIR → app dir → /tmp.
     eh_app::logger::init(Some(&dir.to_string_lossy()));
     // The PC build has no firmware panel (C PanelHeight() == 0).
     eh_app::logger::evt_init(0, width, height);
 
+    // Layered load (C eh_load_config_file): argv0-dir cfg (run-visible-sdl
+    // writes build/bookshelf.cfg next to the binary) → /etc/pbemu → /tmp
+    // write-root, then ./bookshelf.cfg (the e2e harness contract) wins per
+    // key.
+    let argv0 = std::env::args().next();
     let cfg_path = dir.join("bookshelf.cfg");
-    let mut config = if cfg_path.exists() {
-        Config::load(&cfg_path).unwrap_or_default()
-    } else {
-        Config::default()
-    };
+    let mut config = Config::load_for_run(&dir, argv0.as_deref());
     // Env override (the C app's PBEMU_API_URL; the harness's EH_API_URL).
     if let Ok(url) = std::env::var("PBEMU_API_URL").or_else(|_| std::env::var("EH_API_URL")) {
         if !url.is_empty() {
@@ -77,6 +82,27 @@ fn main() -> Result<(), String> {
         // ── SDL events
         app.screen().framebuffer_mut().pump_events();
         while let Some(ev) = app.screen().framebuffer_mut().poll_event() {
+            // F11 (the backend surfaces it as Unknown(0x7A)): cycle the
+            // logical canvas to the next screen class (C sdl_set_resolution
+            // on EVT key), then have the app relayout against the new
+            // ScreenWidth/Height and present.
+            if matches!(
+                &ev,
+                InputEvent::KeyDown {
+                    key: KeyCode::Unknown(0x7A)
+                }
+            ) {
+                res_idx = (res_idx + 1) % RESOLUTIONS.len();
+                let (w, h) = RESOLUTIONS[res_idx];
+                if let Err(e) = app.screen().framebuffer_mut().set_resolution(w, h) {
+                    eprintln!("[pc] resolution switch failed: {e}");
+                    continue;
+                }
+                eprintln!("[pc] resolution -> {w}x{h}");
+                app.relayout();
+                app.present();
+                continue;
+            }
             app.on_event(&ev);
             app.present();
         }
@@ -93,13 +119,36 @@ fn main() -> Result<(), String> {
     }
 }
 
-fn res_from_env() -> (u32, u32) {
-    match std::env::var("EH_RES").ok() {
-        Some(r) => r
-            .split_once('x')
-            .and_then(|(w, h)| Some((w.parse().ok()?, h.parse().ok()?)))
-            .unwrap_or((W0, H0)),
-        None => (W0, H0),
+/// Resolve the initial resolution from the EH_RES launch flag before the
+/// window exists (C sdl_resolve_initial_resolution): "WxH" or a bare
+/// width — the first matching element of RESOLUTIONS wins; anything
+/// unknown keeps the default.  Returns (w, h, index).
+fn res_from_env() -> (u32, u32, usize) {
+    let default = RESOLUTIONS[RES_DEFAULT];
+    let Some(e) = std::env::var("EH_RES").ok().filter(|v| !v.is_empty()) else {
+        return (default.0, default.1, RES_DEFAULT);
+    };
+    let parsed = match e.split_once('x') {
+        Some((w, h)) => w
+            .parse::<u32>()
+            .ok()
+            .zip(h.parse::<u32>().ok())
+            .map(|(w, h)| (w, Some(h))),
+        None => e.parse::<u32>().ok().map(|w| (w, None)),
+    };
+    let Some((w, h)) = parsed else {
+        eprintln!("[pc] EH_RES={e}: malformed, ignoring");
+        return (default.0, default.1, RES_DEFAULT);
+    };
+    if let Some(i) = RESOLUTIONS
+        .iter()
+        .position(|&(rw, rh)| rw == w && h.is_none_or(|h| rh == h))
+    {
+        eprintln!("[pc] EH_RES={e} -> {}x{}", RESOLUTIONS[i].0, RESOLUTIONS[i].1);
+        (RESOLUTIONS[i].0, RESOLUTIONS[i].1, i)
+    } else {
+        eprintln!("[pc] EH_RES={e}: no supported match, keeping {default:?}");
+        (default.0, default.1, RES_DEFAULT)
     }
 }
 
@@ -268,7 +317,7 @@ fn fnv1a_64(data: &[u8]) -> u64 {
 /// base state stays), so Download reports NONE.
 fn overlay_int(o: Overlay) -> i32 {
     match o {
-        Overlay::None | Overlay::Download => 0,
+        Overlay::None | Overlay::Download | Overlay::Sync => 0,
         Overlay::Source => 1,
         Overlay::More => 2,
         Overlay::GroupChooser => 3,

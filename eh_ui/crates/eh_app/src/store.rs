@@ -190,6 +190,79 @@ impl Store {
         Ok(())
     }
 
+    /// Drop every book of one source (C eh_store_delete_source): local
+    /// imports replace wholesale, so a re-scan never leaves stale entries
+    /// behind.  FTS rows go first, while the books rows still exist.
+    pub fn delete_source(&self, source: &str) -> rusqlite::Result<()> {
+        if !self.no_fts {
+            let _ = self.conn.execute(
+                "DELETE FROM search_fts WHERE rowid IN \
+                 (SELECT rowid FROM books WHERE source=?1)",
+                [source],
+            );
+        }
+        self.conn
+            .execute("DELETE FROM books WHERE source=?1", [source])?;
+        Ok(())
+    }
+
+    /// Extracted-metadata cache hit for a local book (C
+    /// eh_store_local_meta_get): Some((title, author)) when known, so a
+    /// rescan never re-parses a book whose metadata is already stored.
+    pub fn local_meta_get(&self, id: &str) -> Option<(String, String)> {
+        self.conn
+            .query_row(
+                "SELECT title, author FROM local_meta WHERE id=?1",
+                [id],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+            )
+            .ok()
+    }
+
+    pub fn local_meta_put(&self, id: &str, title: &str, author: &str) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO local_meta(id, title, author) VALUES(?1, ?2, ?3)",
+            params![id, title, author],
+        )?;
+        Ok(())
+    }
+
+    /// Upsert a fully-built Book row (the local/folder import path: the
+    /// caller has already resolved downloaded/local_path/source — C
+    /// eh_store_upsert_book with the record filled by local_file_to_book).
+    pub fn upsert_book_row(&self, b: &Book) -> rusqlite::Result<()> {
+        self.conn.execute(
+            concat!(
+                "INSERT OR REPLACE INTO books(",
+                "id,title,author,series,series_id,series_idx,",
+                "ext,size,downloaded,local_path,added_at,",
+                "filename,source,search_text,genre)",
+                " VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)"
+            ),
+            params![
+                b.id,
+                b.title,
+                b.author,
+                b.series,
+                b.series_id,
+                b.series_idx,
+                b.ext,
+                b.size,
+                b.downloaded as i64,
+                b.local_path,
+                b.added_at,
+                b.filename,
+                if b.source.is_empty() { "kavita" } else { &b.source },
+                b.search_text,
+                b.genre,
+            ],
+        )?;
+        if !self.no_fts {
+            self.fts_sync_row(&b.id);
+        }
+        Ok(())
+    }
+
     /// One book by id (the press action re-reads the row for the current
     /// `downloaded`/`local_path`/`filename` before acting).
     pub fn get_book(&self, id: &str) -> rusqlite::Result<Option<Book>> {
@@ -523,15 +596,16 @@ impl Store {
 
     /// Rebuild the materialised `view` table from the current books,
     /// grouped by `group` and ordered by `sort`, filtered by `query`
-    /// within `scope`.  Returns the total rows (C view_rebuild returns
-    /// n_stacks, stored in g_view_total).
+    /// within the pinned drill scopes (one per drilled level).  Returns
+    /// the total rows (C view_rebuild returns n_stacks, stored in
+    /// g_view_total).
     pub fn view_rebuild(
         &self,
         group: i64,
         sort: i64,
         drill: i64,
         query: &str,
-        _scope: &str,
+        scopes: &[&str],
     ) -> rusqlite::Result<i64> {
         fn group_key(b: &Book, g: GroupPreset) -> String {
             match g {
@@ -544,6 +618,15 @@ impl Store {
                 GroupPreset::Year => year_of(b.added_at).unwrap_or_default(),
                 GroupPreset::Genre => b.genre.trim().to_string(),
                 GroupPreset::None => String::new(),
+            }
+        }
+
+        /// Dimension key at a drill LEVEL (C dim_at): only Author>Series
+        /// nests — level 0 groups by author, level 1 by series_id.
+        fn dim_key(b: &Book, g: GroupPreset, level: usize) -> String {
+            match g {
+                GroupPreset::AuthorSeries if level >= 1 => b.series_id.trim().to_string(),
+                _ => group_key(b, g),
             }
         }
 
@@ -598,24 +681,58 @@ impl Store {
         let result = (|| -> rusqlite::Result<i64> {
             let mut pos = 0i64;
             if drilled {
-                // When drilled, show flat books of the tapped card's group
-                // scope (C eh_g_group_scope); empty scope keeps the old
-                // first-book fallback.
-                let key = if _scope.is_empty() {
-                    group_key(&all.first().cloned().unwrap_or_default(), group)
+                // Pin every drilled level's scope against ITS OWN dimension
+                // (C view_append_drill_conds + dim_at(group, L)): an empty
+                // value matches books whose key is empty.
+                let levels = (drill as usize).min(2);
+                for l in 0..levels {
+                    let want = scopes.get(l).copied().unwrap_or("");
+                    all.retain(|b| {
+                        let k = dim_key(b, group, l);
+                        if want.is_empty() { k.is_empty() } else { k == want }
+                    });
+                }
+                if levels < group_levels(group) {
+                    // A deeper dimension still groups: stack cards (at the
+                    // first member's sort position) + flat singles of the
+                    // NEXT dimension among the survivors (C
+                    // view_rebuild_group at drill level > 0).
+                    let mut groups: std::collections::HashMap<String, Vec<Book>> = Default::default();
+                    for b in &all {
+                        groups.entry(dim_key(b, group, levels)).or_default().push(b.clone());
+                    }
+                    let mut seen: std::collections::HashSet<String> = Default::default();
+                    for b in &all {
+                        let k = dim_key(b, group, levels);
+                        if !seen.insert(k.clone()) {
+                            continue;
+                        }
+                        let members = &groups[&k];
+                        if members.len() > 1 {
+                            let label = group_label(members, group);
+                            self.conn.execute(
+                                "INSERT INTO view(pos,kind,book_id,series_id,series_name,series_count) VALUES(?1,?2,?3,?4,?5,?6)",
+                                rusqlite::params![pos, 1, members[0].id, k, label, members.len() as i64],
+                            )?;
+                        } else {
+                            self.conn.execute(
+                                "INSERT INTO view(pos,kind,book_id,series_id,series_name,series_count) VALUES(?1,?2,?3,?4,?5,?6)",
+                                rusqlite::params![pos, 0, b.id, b.series_id, b.title, 1],
+                            )?;
+                        }
+                        pos += 1;
+                    }
                 } else {
-                    _scope.to_string()
-                };
-                all.retain(|b| group_key(b, group) == key);
-                for b in &all {
-                    self.conn.execute(
-                        "INSERT INTO view(pos,kind,book_id,series_id,series_name,series_count) VALUES(?1,?2,?3,?4,?5,?6)",
-                        rusqlite::params![pos, 0, b.id, b.series_id, b.title, 1],
-                    )?;
-                    pos += 1;
+                    // Leaf level: flat books of the fully scoped selection.
+                    for b in &all {
+                        self.conn.execute(
+                            "INSERT INTO view(pos,kind,book_id,series_id,series_name,series_count) VALUES(?1,?2,?3,?4,?5,?6)",
+                            rusqlite::params![pos, 0, b.id, b.series_id, b.title, 1],
+                        )?;
+                        pos += 1;
+                    }
                 }
             } else if grouped {
-                // One stack card per multi-book group, AT ITS FIRST
                 // MEMBER'S POSITION in the active sort, so cards
                 // interleave with the flat single-member tiles instead of
                 // landing after them (C view_rebuild_group).  series_id
@@ -724,6 +841,16 @@ impl Store {
                 })
             })?
             .collect::<Result<Vec<_>, _>>()
+    }
+}
+
+/// How many dimensions a grouping preset drills through (C group_levels):
+/// only Author > Series nests two deep (C EH_GROUP_MAX_LEVELS).
+fn group_levels(g: GroupPreset) -> usize {
+    match g {
+        GroupPreset::AuthorSeries => 2,
+        GroupPreset::None => 0,
+        _ => 1,
     }
 }
 
@@ -941,6 +1068,9 @@ fn apply_schema(conn: &Connection) -> rusqlite::Result<()> {
         " filename TEXT, source TEXT, search_text TEXT, genre TEXT);",
         "CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT);",
         "CREATE TABLE IF NOT EXISTS search_history(term TEXT PRIMARY KEY, ts INTEGER);",
+        "CREATE TABLE IF NOT EXISTS local_meta(",
+        " id TEXT PRIMARY KEY,",
+        " title TEXT, author TEXT);",
         "CREATE TABLE IF NOT EXISTS view(",
         " pos INTEGER PRIMARY KEY, kind INTEGER, book_id TEXT, series_id TEXT,",
         " series_name TEXT, series_count INTEGER);",
@@ -1073,7 +1203,7 @@ mod tests {
                 })
                 .unwrap();
         }
-        let n = store.view_rebuild(0, 0, 0, "", "").unwrap();
+        let n = store.view_rebuild(0, 0, 0, "", &[]).unwrap();
         assert_eq!(n, 4);
         let kinds: Vec<i64> = store
             .view_page(10, 0)
@@ -1103,7 +1233,7 @@ mod tests {
                 .unwrap();
         }
         // group=2 = Author; cards at their first member's sort position.
-        let n = store.view_rebuild(2, 0, 0, "", "").unwrap();
+        let n = store.view_rebuild(2, 0, 0, "", &[]).unwrap();
         assert_eq!(n, 2);
         let kinds: Vec<i64> = store
             .view_page(10, 0)
@@ -1151,8 +1281,50 @@ mod tests {
                 })
                 .unwrap();
         }
-        let n = store.view_rebuild(2, 3, 0, "", "").unwrap(); // group=Author
+        let n = store.view_rebuild(2, 3, 0, "", &[]).unwrap(); // group=Author
         assert_eq!(n, 1, "single author collapses to 1 stack");
+    }
+
+    #[test]
+    fn authorseries_drills_two_levels() {
+        use crate::client::BookMeta;
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("t.db")).unwrap();
+        // Two series under author "Ann", one lone book by "Bob".
+        for (id, author, series, sid) in [
+            ("a1", "Ann", "Alpha", "s-alpha"),
+            ("a2", "Ann", "Alpha", "s-alpha"),
+            ("b1", "Ann", "Beta", "s-beta"),
+            ("z1", "Bob", "", ""),
+        ] {
+            store
+                .upsert_book(&BookMeta {
+                    id: id.into(),
+                    title: id.into(),
+                    authors: vec![author.into()],
+                    series: (!series.is_empty()).then(|| series.to_string()),
+                    series_id: (!sid.is_empty()).then(|| sid.to_string()),
+                    ..Default::default()
+                })
+                .unwrap();
+        }
+        // Level 0: author stacks (Ann card + Bob flat).
+        let n = store.view_rebuild(1, 0, 0, "", &[]).unwrap(); // group=AuthorSeries
+        assert_eq!(n, 2);
+        // Drill into Ann (level 1): series stacks WITHIN the author —
+        // Bob's book must not leak through the level-0 scope.
+        let n = store.view_rebuild(1, 0, 1, "", &["Ann"]).unwrap();
+        assert_eq!(n, 2, "two series cards under Ann");
+        let rows = store.view_page(10, 0).unwrap();
+        // Alpha is a 2-book stack; Beta has a single member so it stays a
+        // flat tile at its own sort position.
+        assert!(rows.iter().any(|r| r.kind == 1 && r.series_id == "s-alpha" && r.series_count == 2));
+        assert!(rows.iter().any(|r| r.kind == 0 && r.series_id == "s-beta"));
+        let n = store.view_rebuild(1, 0, 2, "", &["Ann", "s-alpha"]).unwrap();
+        assert_eq!(n, 2);
+        let rows = store.view_page(10, 0).unwrap();
+        assert!(rows.iter().all(|r| r.kind == 0));
+        assert!(rows.iter().all(|r| r.series_id == "s-alpha"));
     }
 
     #[test]
@@ -1217,4 +1389,62 @@ mod tests {
         let b = store.get_book("n1").unwrap().unwrap();
         assert!(b.search_text.is_empty(), "null search_text should store empty string");
     }
+    #[test]
+    fn delete_source_and_local_meta_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("t.db")).unwrap();
+        store
+            .upsert_book(&BookMeta { id: "k1".into(), title: "Kavita".into(), ..Default::default() })
+            .unwrap();
+        let local = Book {
+            id: "fld_abc".into(),
+            title: "Local".into(),
+            ext: "epub".into(),
+            downloaded: true,
+            local_path: "/mnt/ext1/a.epub".into(),
+            filename: "a.epub".into(),
+            source: "local".into(),
+            ..Default::default()
+        };
+        store.upsert_book_row(&local).unwrap();
+        assert_eq!(store.count().unwrap(), 2);
+
+        // Metadata cache roundtrip (C eh_store_local_meta_get/put).
+        assert!(store.local_meta_get("fld_abc").is_none());
+        store.local_meta_put("fld_abc", "T", "A").unwrap();
+        assert_eq!(store.local_meta_get("fld_abc"), Some(("T".into(), "A".into())));
+
+        // A local re-import replaces the source wholesale; Kavita survives.
+        store.delete_source("local").unwrap();
+        assert_eq!(store.count().unwrap(), 1);
+        assert_eq!(store.get_book("k1").unwrap().unwrap().title, "Kavita");
+        assert!(store.get_book("fld_abc").unwrap().is_none());
+    }
+
+    #[test]
+    fn upsert_book_row_writes_full_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("t.db")).unwrap();
+        let b = Book {
+            id: "fld_x".into(),
+            title: "Meta Title".into(),
+            author: "Meta Author".into(),
+            ext: "fb2".into(),
+            size: 1234,
+            downloaded: true,
+            local_path: "/mnt/ext1/x.fb2".into(),
+            filename: "x.fb2".into(),
+            source: "local".into(),
+            ..Default::default()
+        };
+        store.upsert_book_row(&b).unwrap();
+        let got = store.get_book("fld_x").unwrap().unwrap();
+        assert_eq!(got.title, "Meta Title");
+        assert_eq!(got.author, "Meta Author");
+        assert_eq!(got.ext, "fb2");
+        assert_eq!(got.size, 1234);
+        assert!(got.downloaded);
+        assert_eq!(got.source, "local");
+    }
 }
+

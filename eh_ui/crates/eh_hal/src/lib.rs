@@ -10,6 +10,7 @@
 
 extern crate alloc;
 use alloc::string::String;
+use alloc::vec::Vec;
 
 /// Physical pixel geometry of a display.
 ///
@@ -219,8 +220,10 @@ pub trait Framebuffer {
     }
 
     /// Launch another on-device application (the launcher's action).
-    /// Default: not available on this platform.
-    fn launch_app(&mut self, _path: &str, _name: &str) -> bool {
+    /// `args` are the item's launch parameters (C NewTaskEx passes the
+    /// argv array through as-is: argv[0] is the app path).  Default: not
+    /// available on this platform.
+    fn launch_app(&mut self, _path: &str, _name: &str, _args: &[String]) -> bool {
         false
     }
 
@@ -260,4 +263,108 @@ pub trait Framebuffer {
     /// the suggestion-tap path, where the app commits the tapped term
     /// itself after the keyboard is gone).
     fn cancel_keyboard(&mut self) {}
+
+    /// Battery charge in percent (0..=100), or `None` when the platform
+    /// cannot report it (C `eh_plat_battery_power` → `GetBatteryPower`).
+    fn battery_level(&self) -> Option<u8> {
+        None
+    }
+
+    /// True when the frontlight is lit (firmware probe; feeds the self-drawn
+    /// status strip's bulb glyph).
+    fn frontlight_on(&self) -> bool {
+        false
+    }
+
+    /// Ban auto-suspend for the next `secs` seconds (C `BanSleep(sec)`:
+    /// the ban is re-armed until expiry — used so the device cannot sleep
+    /// mid-sync).
+    fn ban_sleep(&self, _secs: u32) {}
+
+    /// Ask monitor.app to start the resident firmware services (the stock
+    /// bookshelf sends MSG_START_SERVICES over iv_ipc_cmd during init;
+    /// without it a fresh boot runs only scanner + this app).
+    fn start_services(&self) {}
+
+    /// Open the firmware control panel / task manager (C
+    /// `OpenControlPanel(NULL)`: the system-bar tap action).
+    fn open_control_panel(&self) {}
+
+    /// Probe the device capability profile (launcher conditional resolution).
+    fn device_profile(&self) -> DeviceProfile {
+        DeviceProfile::default()
+    }
+
+    /// Resolve a named firmware theme bitmap (C `GetResource(name, NULL)`).
+    /// `None` when the name is unknown or the platform has no theme store.
+    fn theme_resource(&self, _name: &str) -> Option<ThemeBitmap> {
+        None
+    }
+}
+
+/// Device capability profile (the C `eh_plat_device_profile` probes).  Raw
+/// firmware identity used for launcher conditional resolution; neutral
+/// defaults match every conditional ("all").
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DeviceProfile {
+    /// Firmware device number (`device_number()`; e.g. 1030 = PB Enotes).
+    pub device_number: u32,
+    pub has_touchpanel: bool,
+    pub has_audio: bool,
+}
+
+/// A firmware theme bitmap resolved by [`Framebuffer::theme_resource`] (the
+/// C `GetResource` seam the stock launcher resolves its icons through).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ThemeBitmap {
+    pub width: u16,
+    pub height: u16,
+    /// Bits per pixel as the firmware reports it: 8 = paletted grayscale
+    /// rows (inkview's standard gray palette), 32 = ARGB rows.
+    pub depth: u16,
+    /// Bytes per row (may exceed `width * depth / 8`).
+    pub scanline: u16,
+    /// Raw scanline-major pixel data (`scanline * height` bytes).
+    pub data: Vec<u8>,
+}
+
+impl ThemeBitmap {
+    /// Expand the raw bitmap into tightly-packed RGB triples (`width *
+    /// height * 3`), the renderer's `blit_image` input.  Depth 8: each byte
+    /// IS the gray level (inkview's standard 8bpp bitmaps index a grayscale
+    /// palette).  Depth 32: rows are little-endian 0xAARRGGBB (bytes b, g,
+    /// r, a — the LoadPNG layout).  Other depths → `None`.
+    pub fn to_rgb(&self) -> Option<Vec<u8>> {
+        let w = self.width as usize;
+        let h = self.height as usize;
+        let sl = self.scanline as usize;
+        match self.depth {
+            8 => {
+                let mut out = Vec::with_capacity(w * h * 3);
+                for y in 0..h {
+                    for x in 0..w {
+                        let g = self.data.get(y * sl + x).copied().unwrap_or(255);
+                        out.extend_from_slice(&[g, g, g]);
+                    }
+                }
+                Some(out)
+            }
+            32 => {
+                let mut out = Vec::with_capacity(w * h * 3);
+                for y in 0..h {
+                    for x in 0..w {
+                        let o = y * sl + x * 4;
+                        let (b, g, r) = (
+                            *self.data.get(o)?,
+                            *self.data.get(o + 1)?,
+                            *self.data.get(o + 2)?,
+                        );
+                        out.extend_from_slice(&[r, g, b]);
+                    }
+                }
+                Some(out)
+            }
+            _ => None,
+        }
+    }
 }

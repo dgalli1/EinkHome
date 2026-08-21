@@ -38,7 +38,16 @@ fn init_once() {
     let s = fb.screen();
     // The e2e harness reads bookshelf.log + the EVT_INIT geometry line.
     eh_app::logger::init(Some(APP_DIR));
+    // C eh_plat_log_identity: model + firmware version telemetry once at
+    // boot (diagnostics only — conditionals resolve from device_profile).
+    let (model, fw) = eh_backend_inkview::device_identity();
+    eh_app::logger::log(&format!("[bookshelf] model={model} fw={fw}"));
     eh_app::logger::evt_init(s.height.saturating_sub(s.content_height()), s.width, s.height);
+    // C eh_plat_start_services (the stock bookshelf's initsync kick): ask
+    // monitor.app to start the resident firmware services
+    // (reader_controller/taskmgr/control_panel/explorer) so a fresh boot
+    // is not scanner + this app only.
+    fb.start_services();
     // Establish the firmware panel content once at boot (C app's
     // eh_plat_panel_init), so the native clock/battery painters have
     // something to stamp before our first content-area refresh.

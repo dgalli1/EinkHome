@@ -1,8 +1,9 @@
-//! The "…" More menu drawer (C eh_draw_overlay_more): a black dim over the
-//! shelf, a right-anchored white 3/4-width card with a 1px left divider,
-//! and a plain row list (Group by / Sort by / Download all / Settings /
-//! Applications) starting at the first button.  Rows are 88px tall with a
-//! 12px gap (the C EH_MORE_ITEM_H rhythm).
+//! The "…" More menu drawer (C eh_draw_overlay_more): an LGRAY hatch dim
+//! over the shelf (eh_shell::dim_hatch), a right-anchored white
+//! 3/4-width card with a 1px left divider, and a plain row list (Group by
+//! / Sort by / Download all / Settings / Applications) starting at the
+//! first button.  Rows are 88px tall with a 12px gap (the C
+//! EH_MORE_ITEM_H rhythm).
 
 use eh_hal::Rect;
 
@@ -13,13 +14,24 @@ pub const Y0: u32 = 96;
 pub const ITEM_H: u32 = 88;
 pub const ROW_GAP: u32 = 12;
 
-fn labels() -> [(MenuRow, &'static str, Option<&'static str>); 5] {
+pub(crate) fn labels() -> [(MenuRow, &'static str, Option<&'static str>); 5] {
+    // All strings via i18n (C eh_draw_overlay_more): the group summary
+    // value mirrors the C `vals[0]` slot, the sort value the C
+    // `eh_i18n(sort_label())`.
     [
-        (MenuRow::GroupBy, "Group by", Some("None")),
-        (MenuRow::SortBy, "Sort by", Some("Recent")),
-        (MenuRow::DownloadAll, "Download all", None),
-        (MenuRow::Settings, "Settings", None),
-        (MenuRow::Applications, "Applications", None),
+        (
+            MenuRow::GroupBy,
+            crate::i18n::tr("action.group_by"),
+            Some(crate::i18n::tr("group.none")),
+        ),
+        (
+            MenuRow::SortBy,
+            crate::i18n::tr("action.sort_by"),
+            Some(crate::i18n::tr("sort.recent")),
+        ),
+        (MenuRow::DownloadAll, crate::i18n::tr("action.download_all"), None),
+        (MenuRow::Settings, crate::i18n::tr("action.settings"), None),
+        (MenuRow::Applications, crate::i18n::tr("action.apps"), None),
     ]
 }
 
@@ -32,12 +44,12 @@ pub fn draw<B: eh_hal::Framebuffer>(surf: &mut eh_render::Surface, app: &mut App
     let h = app.content_bottom;
     dirty.push(Rect { x: 0, y: 0, w, h });
 
-    // Dim the shelf behind the drawer (C: a BLACK FillArea of the whole
-    // content area under the card — e-ink has no alpha, so the C app
-    // draws the dim as a full black fill and the card white on top).
+    // Dim the shelf behind the drawer with the shared LGRAY every-other-
+    // line hatch (C eh_dim_content(0)): the background stays readable
+    // behind the card, unlike a solid black fill.
     let pw = (w as i32 * 3) / 4;
     let px = w - pw as u32;
-    surf.fill_gray(Rect { x: 0, y: 0, w, h }, GRAY_BLACK);
+    eh_shell::dim_hatch(surf, 0, h);
     surf.fill_gray(Rect { x: px, y: 0, w: pw as u32, h }, GRAY_WHITE);
     surf.vline(px, 0, h, 2, GRAY_BLACK);
 

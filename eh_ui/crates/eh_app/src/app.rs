@@ -45,13 +45,16 @@ pub enum SettingsRow {
 }
 
 /// A launcher entry (C BsLauncherItem): a group header (group=true) or an
-/// app cell with its firmware icon path + launch path.
+/// app cell with its firmware icon path, launch path, and the optional
+/// per-item launch arguments ("params"/"param", capped at
+/// eh_launcher.rs's LAUNCHER_MAX_PARAMS).
 #[derive(Clone, Default)]
 pub struct LauncherItem {
     pub group: bool,
     pub text: String,
     pub path: String,
     pub icon: String,
+    pub params: Vec<String>,
 }
 
 /// Overlay state (the C app's `overlay` family, collapsed to the screens
@@ -69,6 +72,8 @@ pub enum Overlay {
     Source,
     /// The modal download-progress popup.
     Download,
+    /// The modal sync-progress sheet (C eh_draw_sync_popup).
+    Sync,
     /// The long-press context menu sheet (Open/Download/Delete or
     /// series Download-all/Delete).
     Context,
@@ -102,6 +107,63 @@ pub enum ChooserKind {
     Sort,
 }
 
+/// Stage of the sync-progress sheet (C EH_SYNC_STAGE_META/SCAN/COVERS/
+/// DONE/FAIL).
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum SyncStage {
+    /// Pulling metadata batches.
+    Meta,
+    /// The local-source library scan.
+    Scan,
+    /// The post-sync cover warm pass.
+    Covers,
+    /// Flashed briefly before the sheet auto-closes.
+    Done,
+    /// The chain failed; the error shows before the auto-close.
+    Fail,
+}
+
+/// State machine for the sync-progress sheet (C eh_g_state.sync_popup +
+/// sync_stage/sync_round/sync_scan + the `bsyncp` weak timer).
+#[derive(Clone, Debug)]
+pub struct SyncPopup {
+    pub open: bool,
+    pub stage: SyncStage,
+    /// Metadata batch counter (C sync_round, shown as `batch N`).
+    pub round: u32,
+    /// Books scanned by the local import (C sync_scan).
+    pub scanned: u32,
+    /// Cover-pass counters for the striped bar (C eh_cover_warm_progress).
+    pub covers_done: u32,
+    pub covers_total: u32,
+    /// The failure text for the Fail stage line.
+    pub error: String,
+    /// When the current stage was entered (drives the auto-close timing).
+    pub stage_at: Option<std::time::Instant>,
+}
+
+impl Default for SyncPopup {
+    fn default() -> Self {
+        Self {
+            open: false,
+            stage: SyncStage::Meta,
+            round: 0,
+            scanned: 0,
+            covers_done: 0,
+            covers_total: 0,
+            error: String::new(),
+            stage_at: None,
+        }
+    }
+}
+
+/// Sync-sheet height (C popup_geom(..., 190)).
+pub(crate) const SYNC_SHEET_H: u32 = 190;
+/// Auto-close delays ported from eh_popups.c: the Done line flashes for
+/// 900 ms before the sheet closes; the Fail line shows for 1500 ms.
+const SYNC_DONE_CLOSE_MS: u64 = 900;
+const SYNC_FAIL_CLOSE_MS: u64 = 1500;
+
 /// The pager's four page actions (the C contract: -1/-3/-4/-2 →
 /// prev/first/last/next).
 #[derive(Clone, Copy, PartialEq)]
@@ -114,6 +176,66 @@ pub enum PageAction {
 
 /// The standard firmware reader path (C eh_plat_standard_reader).
 pub const STANDARD_READER: &str = "/ebrmain/bin/eink-reader.app";
+
+/// The third-party reader path (C eh_plat_koreader_path): present only
+/// when the user installed it under /mnt/ext1/applications.
+pub const KOREADER_PATH: &str = "/mnt/ext1/applications/koreader.app";
+
+/// Probe the known reader binaries (C eh_detect_readers): returns the
+/// paths that are actually executable, in offer order.  The standard
+/// reader is always in the firmware image; KOReader only when installed.
+pub fn detect_readers() -> Vec<&'static str> {
+    let executable = |p: &str| {
+        std::fs::metadata(p)
+            .map(|m| {
+                use std::os::unix::fs::PermissionsExt;
+                m.permissions().mode() & 0o111 != 0
+            })
+            .unwrap_or(false)
+    };
+    let out: Vec<&'static str> = [(STANDARD_READER, "Standard"), (KOREADER_PATH, "KOReader")]
+        .into_iter()
+        .filter(|(p, label)| {
+            let ok = executable(p);
+            crate::logger::log(&format!(
+                "[bookshelf] reader {}: {} ({p})",
+                if ok { "detected" } else { "not found" },
+                label
+            ));
+            ok
+        })
+        .map(|(p, _)| p)
+        .collect();
+    // Host/PC fallback (no firmware readers on the filesystem): offer the
+    // standard reader so the row still cycles Auto → Standard.
+    if out.is_empty() {
+        vec![STANDARD_READER]
+    } else {
+        out
+    }
+}
+
+/// Human label of a detected reader path (C eh_g_readers[].label).
+pub fn reader_label_of(path: &str) -> &'static str {
+    match path {
+        KOREADER_PATH => "KOReader",
+        _ => "Standard",
+    }
+}
+
+/// Map a stored `reader=` value back to a preference index given the
+/// detected readers (C eh_reader_pref_from_path): "auto"/""/NULL → 0
+/// (server open-with); a path matching a detected reader → its 1-based
+/// index; anything else (e.g. a reader that was uninstalled) → 0.
+pub fn reader_pref_from_path(value: &str, readers: &[&str]) -> i32 {
+    if value.is_empty() || value == "auto" {
+        return 0;
+    }
+    readers
+        .iter()
+        .position(|p| *p == value)
+        .map_or(0, |i| i as i32 + 1)
+}
 
 /// Suggestion rows shown in the live band (C EH_SUGGEST_MAX_HITS).
 pub const SUGGEST_MAX_HITS: usize = 10;
@@ -198,6 +320,14 @@ pub(crate) fn kb_take_pending() -> Option<(KbField, String)> {
 /// The bookshelf app bound to one framebuffer backend.
 pub struct App<B: Framebuffer> {
     screen: Option<Screen<B>>,
+    /// Framebuffer facts cached so overlay draws (which run while
+    /// `screen` is take()n inside present) never need `screen()` — a
+    /// re-entrant `screen()` there panics.  Refreshed whenever the screen
+    /// is alive (see [`App::sync_fb_cache`]).
+    fb_screen_w: u32,
+    fb_net_active: bool,
+    fb_profile: eh_hal::DeviceProfile,
+    theme_cache: std::collections::HashMap<String, Option<eh_hal::ThemeBitmap>>,
     /// The bottom of the app's content area (C `eh_content_bottom()`): the
     /// screen height minus the self-drawn status strip on devices where the
     /// firmware panel painter is inactive.
@@ -214,6 +344,9 @@ pub struct App<B: Framebuffer> {
     pub config: Config,
     pub cfg_path: Option<PathBuf>,
     pub covers_dir: PathBuf,
+    /// Reading progress per local path (C g_progress): reloaded from the
+    /// firmware explorer db on init and show/foreground.
+    pub progress: crate::progress::ProgressMap,
     pub page: usize,
     pub pages: usize,
     /// The current page's entries; the grid widgets mirror these.
@@ -241,17 +374,23 @@ pub struct App<B: Framebuffer> {
     /// True between the manual-sync trigger and its completion (drives the
     /// top-bar sync glyph).
     pub syncing: bool,
+    /// Rotation (deg) of the top-bar sync glyph while a sync/download is
+    /// in flight (C eh_g_state.sync_angle; the tick advances it 15°/s).
+    pub sync_angle: i32,
     /// Source-chooser row rects (parallel to the three rows).
     pub source_rows: Vec<Rect>,
     /// Active grouping preset + drill level (C eh_g_group / drill).
     pub group: crate::store::GroupPreset,
     pub sort: crate::store::SortMode,
     pub drill: u32,
-    /// Page of the level a drill left (C eh_g_saved_pages): restored on
-    /// drill-back so the user lands where they left off.
-    pub drill_saved_page: usize,
-    /// The drilled group's raw scope value (author / series_id / genre).
-    pub group_scope: String,
+    /// Per-level saved pages + raw scope values + display names for the
+    /// nested group drill (C eh_g_saved_pages[] / eh_g_drill_values[],
+    /// EH_GROUP_MAX_LEVELS): level L's page is remembered when its card is
+    /// tapped, and restored on drill-back so the user lands where they
+    /// left off.  The deepest non-empty name feeds the top-bar title.
+    pub drill_saved_pages: [usize; 2],
+    pub drill_values: [String; 2],
+    pub drill_names: [String; 2],
     /// Reader preference (C eh_g_state.reader_pref): 0 = Auto, 1 = the
     /// standard eink reader.
     pub reader_pref: i32,
@@ -286,13 +425,23 @@ pub struct App<B: Framebuffer> {
     /// (path, title) to auto-open in the reader once a single-book download
     /// drains (C: single press → download → launch reader).
     pub dl_autopen: Option<(String, String)>,
+    /// Download-all top-up queue: undownloaded books staged but not yet
+    /// enqueued (C batch_enqueue_slice's bounded-slice cursor).
+    pub dl_batch_queue: std::collections::VecDeque<Book>,
+    /// Ids the current download-all batch already tried and failed
+    /// (C g_dl_batch_failed_ids): keeps the top-up from re-enqueueing
+    /// failing books forever.
+    pub dl_batch_failed: std::collections::HashSet<String>,
     pub context_items: Vec<ContextAction>,
     pub context_rects: Vec<Rect>,
     /// Series set by long-press (for the `context menu open series=N` log).
     pub context_series: u32,
     /// The license currently shown in the detail page (licenses viewer).
     pub license_selected: Option<usize>,
-    pub license_rects: Vec<Rect>,
+    /// First visible row of the log tail (<0 = pinned to the newest end,
+    /// C eh_g_state.log_scroll) / of the licenses list or detail.
+    pub log_scroll: i32,
+    pub lic_scroll: i32,
     /// Decoded launcher icon art by path (decoded once; the emulator PNG
     /// decode is ~100ms each, so per-frame re-decoding froze the render).
     pub icon_cache: std::collections::HashMap<String, (u32, u32, Vec<u8>)>,
@@ -311,6 +460,28 @@ pub struct App<B: Framebuffer> {
     pub dirty: bool,
     /// The overlay the last present drew (skip detection).
     pub last_overlay: Overlay,
+    /// Folder-source browser state (C BR_MODE_BROWSER: path/scroll/rows).
+    pub browser: crate::local::Browser,
+    /// In-flight local import scan (worker → main-thread apply), with its
+    /// chain generation so a re-kick invalidates a stale result
+    /// (C g_local_scan_gen).
+    pub(crate) local_scan:
+        Option<std::sync::mpsc::Receiver<(u32, Vec<crate::local::LocalBook>)>>,
+    pub(crate) local_gen: u32,
+    /// Path of the store DB — the async sync worker opens its own handle
+    /// on the same file (Store::open's legacy import is once-guarded by
+    /// the `.migrated` rename; the FTS backfill no-ops when populated).
+    db_path: PathBuf,
+    /// Event stream from the in-flight sync worker (None when idle).
+    pub(crate) sync_rx: Option<std::sync::mpsc::Receiver<crate::sync::SyncMsg>>,
+    /// Cancel flag shared with the worker (settings_apply sets it before
+    /// rebuilding endpoints — C eh_sync_abort's generation bump).
+    pub(crate) sync_cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Sync-progress sheet state (visible while overlay == Overlay::Sync).
+    pub sync_popup: SyncPopup,
+    /// Total ids queued by the current cover-warm pass (denominator for
+    /// the popup's covers bar; C eh_cover_warm_progress's total).
+    pub(crate) warm_total: usize,
 }
 
 /// Books per shelf page by breakpoint (the C app's per-breakpoint grid).
@@ -363,6 +534,14 @@ impl<B: Framebuffer> App<B> {
             let _ = std::fs::create_dir_all(&downloads_dir);
         }
         let config = Self::ensure_config(&config, cfg_path.as_deref(), &downloads_dir);
+        // Language resolution (C cfg load + eh_evt_detect_lang): the
+        // config value seeds the chain; device global.cfg / $LANG may
+        // still override it inside i18n::init.
+        crate::i18n::init(config.language.as_deref());
+        // Boot-time reconciliation (C eh_refresh_downloaded_flags_boot_start
+        // + sweep_stale_parts): sweep orphan .part fragments, then resync
+        // every book's downloaded flag with what is actually on disk.
+        crate::downloads::refresh_downloaded_flags(&store, &downloads_dir);
         let screen = Screen::new(fb, shelf::shelf_font());
         let (content_bottom, self_panel) = {
             let s = screen.framebuffer().screen();
@@ -379,6 +558,10 @@ impl<B: Framebuffer> App<B> {
         let source = Source::from_config(&config.source);
         let mut app = Self {
             screen: Some(screen),
+            fb_screen_w: 0,
+            fb_net_active: true,
+            fb_profile: eh_hal::DeviceProfile::default(),
+            theme_cache: std::collections::HashMap::new(),
             content_bottom,
             self_panel,
             last_panel_min: -1,
@@ -387,6 +570,12 @@ impl<B: Framebuffer> App<B> {
             config,
             cfg_path,
             covers_dir,
+            source_rows: Vec::new(),
+            group: crate::store::GroupPreset::None,
+            sort: crate::store::SortMode::Title,
+            dl_batch_failed: std::collections::HashSet::new(),
+            context_items: Vec::new(),
+            progress: crate::progress::reload(),
             page: 0,
             pages: 0,
             entries: Vec::new(),
@@ -403,12 +592,10 @@ impl<B: Framebuffer> App<B> {
             tab: Tab::Library,
             query: String::new(),
             syncing: false,
-            source_rows: Vec::new(),
-            group: crate::store::GroupPreset::None,
-            sort: crate::store::SortMode::Title,
+            drill_saved_pages: [0; 2],
+            drill_values: [String::new(), String::new()],
+            drill_names: [String::new(), String::new()],
             drill: 0,
-            drill_saved_page: 0,
-            group_scope: String::new(),
             reader_pref: 0,
             reader_path: "auto".to_string(),
             search_kb: false,
@@ -427,11 +614,13 @@ impl<B: Framebuffer> App<B> {
             dl_failed: 0,
             dl_total: 0,
             dl_autopen: None,
-            context_items: Vec::new(),
+            dl_batch_queue: std::collections::VecDeque::new(),
+            sync_angle: 0,
+            log_scroll: -1,
+            lic_scroll: 0,
             context_rects: Vec::new(),
             context_series: 0,
             license_selected: None,
-            license_rects: Vec::new(),
             icon_cache: std::collections::HashMap::new(),
             context_book: None,
             context_scope: String::new(),
@@ -441,9 +630,18 @@ impl<B: Framebuffer> App<B> {
             press_start: None,
             drag_y: None,
             drag_total: 0,
+            browser: Default::default(),
+            local_scan: None,
+            local_gen: 0,
             dirty: true,
             last_overlay: Overlay::None,
+            db_path,
+            sync_rx: None,
+            sync_cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            sync_popup: SyncPopup::default(),
+            warm_total: 0,
         };
+        app.sync_fb_cache();
         app.boot();
         app
     }
@@ -466,9 +664,9 @@ impl<B: Framebuffer> App<B> {
         let _ = kb_take_pending();
         kb_arm(field);
         let (title, init) = match field {
-            KbField::ApiHost => ("API host", initial.as_str()),
-            KbField::ApiKey => ("API key", initial.as_str()),
-            KbField::Search => ("Search", initial.as_str()),
+            KbField::ApiHost => (crate::i18n::tr("settings.api_host"), initial.as_str()),
+            KbField::ApiKey => (crate::i18n::tr("settings.api_key"), initial.as_str()),
+            KbField::Search => (crate::i18n::tr("tab.search"), initial.as_str()),
         };
         // The commit handler lives in eh_backend_inkview (static fn
         // pointer); it pushes into app's thread_local and we drain on the
@@ -494,6 +692,7 @@ impl<B: Framebuffer> App<B> {
             .into_iter()
             .map(|b| b.id)
             .collect();
+        self.warm_total = self.warm_queue.len();
     }
 
     /// Drain the warm pass: at most one fetch handed to a background
@@ -524,17 +723,28 @@ impl<B: Framebuffer> App<B> {
     fn boot(&mut self) {
         self.resolve_reader();
         let online = self.screen().framebuffer().net_active();
-        if self.source != Source::Kavita || online {
-            crate::logger::log("[bookshelf] do_sync ENTER");
-            if let Err(e) = crate::sync::sync(&self.client, &self.store, 50) {
-                crate::logger::log(&format!("[bookshelf] do_sync FAILED: {e}"));
-                crate::log(&format!("[eh_app] sync failed: {e} (showing cached library)"));
+        match self.source {
+            // The Local source kicks the async storage-root import instead
+            // of a remote sync (C EVT_INIT → eh_local_import_scanner); the
+            // apply lands on a later tick.
+            Source::Local => crate::local::kick_import(self),
+            Source::Folder => {} // the browser is the shelf body; no sync
+            Source::Kavita => {
+                if online {
+                    // Async like C's one-shot initsync timer: the worker
+                    // streams events; tick() applies the terminal one
+                    // (rebuild + warm pass) once the chain lands.
+                    self.start_sync(false);
+                }
             }
         }
         // Materialise the default view (flat, recent order) — the shelf
         // reads from `view`, and the group/sort choosers rebuild it.
-        let (g, s, d, q, sc) = (self.group, self.sort, self.drill, self.query.clone(), self.group_scope.clone());
-        let total = self.store.view_rebuild(self.group as i64, self.sort as i64, self.drill as i64, &q, &sc).unwrap_or(0);
+        let (g, s, d, q) = (self.group, self.sort, self.drill, self.query.clone());
+        let total = {
+            let scopes = self.drill_scopes();
+            self.store.view_rebuild(g as i64, s as i64, d as i64, &q, &scopes).unwrap_or(0)
+        };
         crate::logger::log(&format!(
             "[bookshelf] view_rebuild: view={} sort={} group={} drill={}",
             total, s as i64, g as i64, d
@@ -586,6 +796,45 @@ impl<B: Framebuffer> App<B> {
 
     // ── screen access ─────────────────────────────────────────────────
 
+
+    /// Refresh the framebuffer caches from the live screen; call after
+    /// building/moving the screen so overlay draws (which run while the
+    /// screen is take()n) can use the cached values.
+    fn sync_fb_cache(&mut self) {
+        if let Some(s) = self.screen.as_mut() {
+            let fb = s.framebuffer();
+            self.fb_screen_w = fb.screen().width;
+            self.fb_profile = fb.device_profile();
+            self.fb_net_active = fb.net_active();
+        }
+    }
+    /// Screen width safe to call from overlay draws (screen may be
+    /// take()n during present).
+    pub fn screen_width(&self) -> u32 {
+        self.screen
+            .as_ref()
+            .map(|s| s.framebuffer().screen().width)
+            .unwrap_or(self.fb_screen_w)
+    }
+
+    /// Device profile safe to call from overlay draws.
+    pub(crate) fn device_profile(&mut self) -> eh_hal::DeviceProfile {
+        self.sync_fb_cache();
+        self.fb_profile
+    }
+
+    /// Theme-resource lookup safe to call from overlay draws: resolves
+    /// through the framebuffer when it is alive, else replays the cache.
+    pub(crate) fn theme_resource(&mut self, name: &str) -> Option<eh_hal::ThemeBitmap> {
+        if self.screen.is_some() {
+            self.sync_fb_cache();
+            let t = self.screen.as_mut().unwrap().framebuffer().theme_resource(name);
+            self.theme_cache.insert(name.to_string(), t.clone());
+            t
+        } else {
+            self.theme_cache.get(name).cloned().flatten()
+        }
+    }
     pub fn screen(&mut self) -> &mut Screen<B> {
         self.screen.as_mut().expect("screen built")
     }
@@ -635,6 +884,7 @@ impl<B: Framebuffer> App<B> {
                     Overlay::Launcher => crate::launcher::draw(&mut surf, self, &mut dirty),
                     Overlay::Source => crate::source::draw(&mut surf, self, &mut dirty),
                     Overlay::Download => draw_download_popup(&mut surf, self, &mut dirty),
+                    Overlay::Sync => draw_sync_popup(&mut surf, self, &mut dirty),
                     Overlay::Context => draw_context_menu(&mut surf, self, &mut dirty),
                     Overlay::GroupChooser => draw_chooser_sheet(&mut surf, self, &mut dirty, ChooserKind::Group),
                     Overlay::SortChooser => draw_chooser_sheet(&mut surf, self, &mut dirty, ChooserKind::Sort),
@@ -680,6 +930,16 @@ impl<B: Framebuffer> App<B> {
             // sheet), matching the stock bookshelf (C eh_evt_keypress).
             InputEvent::KeyDown { key: key @ (KeyCode::PrevPage | KeyCode::NextPage) } => {
                 if self.overlay == Overlay::None {
+                    // Folder source: the browser body pages its listing
+                    // (C eh_evt_keypress → eh_browse_page).
+                    if self.source == Source::Folder && self.browser.open {
+                        let dir = match key {
+                            KeyCode::NextPage => 1,
+                            _ => -1,
+                        };
+                        crate::local::browse_page(self, dir);
+                        return;
+                    }
                     let target = match key {
                         KeyCode::NextPage => self.page + 1,
                         _ => self.page.saturating_sub(1),
@@ -744,6 +1004,11 @@ impl<B: Framebuffer> App<B> {
                     self.tap_overlay(x, y);
                 }
             }
+            // EVT_SHOW / EVT_FOREGROUND (C eh_evt_show): a full redraw —
+            // the user may have been reading with the integrated reader
+            // or KOReader while we were away, so refresh their progress
+            // first, then repaint everything.
+            InputEvent::WidgetShown => self.reload_progress(),
             _ => {}
         }
     }
@@ -798,8 +1063,23 @@ impl<B: Framebuffer> App<B> {
     pub fn tick(&mut self) -> bool {
         // Background full-library cover-warm pass (one fetch per tick).
         self.cover_warm_tick();
+        // Drain a finished local-source import (C apply chain's main-thread
+        // slice): replaces the 'local' source and rebuilds the view.
+        crate::local::poll_import(self);
+        // Drain the async sync worker (C's wkr done-callbacks + bsyncp
+        // close tick): applies events to the popup state machine and
+        // lands the terminal rebuild on the main thread.
+        if self.sync_poll() {
+            self.dirty = true; // the present() skip would swallow the update
+        }
+        let due = self.sync_spin_tick();
+        if due {
+            // The glyph rotated: the top bar needs a repaint (the facade
+            // presents every tick; present() skips when not dirty).
+            self.dirty = true;
+        }
         if !self.search_kb || self.tab != Tab::Search {
-            return false;
+            return due;
         }
         let Some(text) = self.screen().framebuffer().live_keyboard_text() else {
             return false;
@@ -819,6 +1099,19 @@ impl<B: Framebuffer> App<B> {
         // Rebuild so the band shows the new rows (or restores the history
         // list when the hits emptied); present() flushes from `dirty`.
         self.refresh_shelf();
+        true
+    }
+
+    /// Advance the top-bar sync glyph rotation while a sync or download is
+    /// in flight (C sync_spin_tick): 15°/s.  The facade ticks every 200 ms,
+    /// so +3° per active tick matches the C cadence; returns true when the
+    /// angle moved and the top bar needs a repaint.
+    fn sync_spin_tick(&mut self) -> bool {
+        if !(self.syncing || self.downloader.pending > 0) {
+            self.sync_angle = 0; // nothing in flight — the glyph rests
+            return false;
+        }
+        self.sync_angle = (self.sync_angle + 3) % 360;
         true
     }
 
@@ -842,6 +1135,11 @@ impl<B: Framebuffer> App<B> {
             self.drill_back();
             return;
         }
+        // Folder source: Back ascends one level; at the browser root it
+        // falls through (C eh_browse_up's "caller decides" contract).
+        if self.source == Source::Folder && self.browser.open && crate::local::browse_up(self) {
+            return;
+        }
         if self.tab == Tab::Search {
             self.leave_search();
         }
@@ -852,6 +1150,14 @@ impl<B: Framebuffer> App<B> {
     /// the top bar, the last widget the pager, the rest are the covers
     /// (or, on the search tab, the input row + history rows).
     fn tap_screen(&mut self, x: i32, y: i32) {
+        // System-bar tap (C eh_pu_handle_chrome_system): any tap in the
+        // status-strip band below the content area hands the tap to the
+        // firmware control panel.
+        if y >= self.content_bottom as i32 {
+            crate::logger::log("[bookshelf] system bar tapped -> control panel");
+            self.screen().framebuffer().open_control_panel();
+            return;
+        }
         let topbar = self.screen().widget_rect(0);
         let last = self.screen().widgets.len().saturating_sub(1);
         let pager = self.screen().widget_rect(last);
@@ -862,6 +1168,11 @@ impl<B: Framebuffer> App<B> {
         }
         if y >= pager.y as i32 && y < pager.y as i32 + pager.h as i32 {
             self.tap_pager(x, y, pager);
+            return;
+        }
+        // Folder source: the browser owns the body (C eh_on_tap_browse).
+        if self.source == Source::Folder && self.browser.open {
+            crate::local::tap_browse(self, x, y);
             return;
         }
         if self.tab == Tab::Search {
@@ -959,22 +1270,249 @@ impl<B: Framebuffer> App<B> {
         self.refresh_shelf();
     }
 
-    /// Manual library sync (C top-bar sync icon, which==2).
+    /// Manual library sync (C top-bar sync icon, which==2 → eh_do_sync +
+    /// eh_sync_popup_open).  While a sync is already in flight a tap just
+    /// re-opens the sheet over the live run (C eh_sync_popup_open keeps
+    /// the running counters).
     pub(crate) fn do_sync(&mut self) {
+        if self.syncing {
+            self.sync_popup_open();
+            return;
+        }
         crate::logger::log("[bookshelf] do_sync ENTER");
+        self.start_sync(true);
+    }
+
+    /// Silent re-sync used by settings_apply / the source chooser (C calls
+    /// eh_do_sync directly there — no progress sheet).
+    pub(crate) fn resync(&mut self) {
+        if self.syncing {
+            return;
+        }
+        crate::logger::log("[bookshelf] do_sync ENTER");
+        self.start_sync(false);
+    }
+
+    /// Spawn the sync worker thread.  Threading model (the boring safe
+    /// option): the worker owns ONLY a cloned HTTP client and its own
+    /// independently-opened [`Store`] handle on the same DB file; it
+    /// streams [`crate::sync::SyncMsg`]s over an mpsc channel that
+    /// [`App::tick`] drains on the UI thread.  Chosen over
+    /// `Arc<Mutex<Store>>` because the App renders from its store every
+    /// frame — a shared mutex would stall draws behind whole-round
+    /// transactions — and SQLite's 2 s busy_timeout (set in Store::open)
+    /// absorbs the rare commit collision between the two connections.
+    fn start_sync(&mut self, popup: bool) {
+        // Initial anti-suspend ban (C eh_do_sync's eh_sync_keep_awake);
+        // per-round re-arms come back as SyncMsg::BanSleep.
+        self.screen()
+            .framebuffer()
+            .ban_sleep(crate::sync::EH_SYNC_BAN_SLEEP_SEC as u32);
+        let (tx, rx) = std::sync::mpsc::channel::<crate::sync::SyncMsg>();
+        self.sync_rx = Some(rx);
+        self.sync_cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         self.syncing = true;
-        let res = crate::sync::sync(&self.client, &self.store, 50);
+        if popup {
+            self.sync_popup_open();
+        }
+        let client = self.client.clone();
+        let db_path = self.db_path.clone();
+        let cancel = std::sync::Arc::clone(&self.sync_cancel);
+        let spawned = std::thread::Builder::new()
+            .name("sync".into())
+            .spawn(move || {
+                // The worker's own store handle; see the threading note.
+                let store = match Store::open(&db_path) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        let _ = tx.send(crate::sync::SyncMsg::Event(
+                            crate::sync::SyncEvent::Failed(format!("store open: {e}")),
+                        ));
+                        return;
+                    }
+                };
+                let _ = crate::sync::sync(
+                    &client,
+                    &store,
+                    50,
+                    &cancel,
+                    &mut |ev| {
+                        let _ = tx.send(crate::sync::SyncMsg::Event(ev));
+                    },
+                    Some(&mut |secs| {
+                        let _ = tx.send(crate::sync::SyncMsg::BanSleep(secs));
+                    }),
+                );
+            });
+        if spawned.is_err() {
+            self.sync_rx = None;
+            self.syncing = false;
+            crate::log("[eh_app] sync worker spawn failed");
+        }
+    }
+
+    /// Abort any in-flight sync chain (C eh_sync_abort): set the cancel
+    /// flag — checked between rounds AND after each fetch, so an aborted
+    /// round never applies — and detach the stale event stream.  Called
+    /// from settings_apply BEFORE the endpoint URLs are rebuilt.
+    pub(crate) fn sync_abort(&mut self) {
+        use std::sync::atomic::Ordering;
+        self.sync_cancel.store(true, Ordering::Relaxed);
+        self.sync_rx = None;
         self.syncing = false;
-        match res {
-            Ok(n) => {
-                let cursor = self.store.cursor().unwrap_or(0);
-                crate::logger::log(&format!("[bookshelf] do_sync: rounds=1 cursor={cursor} (books={n})"));
-                crate::log(&format!("[eh_app] manual sync: {n} books in store"));
-                self.rebuild_view();
+    }
+
+    /// Open the sync-progress sheet (C eh_sync_popup_open).
+    fn sync_popup_open(&mut self) {
+        if self.sync_popup.open && self.overlay == Overlay::Sync {
+            return;
+        }
+        // Re-opening the sheet over a LIVE run keeps the running counters
+        // (C eh_sync_popup_open resets only when no sync is running, so
+        // the progress lines never jump backwards).
+        let live = self.syncing;
+        let mut p = std::mem::take(&mut self.sync_popup);
+        p.open = true;
+        p.stage = SyncStage::Meta;
+        p.stage_at = Some(std::time::Instant::now());
+        if !live {
+            p.round = 0;
+            p.scanned = 0;
+            p.covers_done = 0;
+            p.covers_total = 0;
+            p.error.clear();
+        }
+        self.sync_popup = p;
+        self.set_overlay(Overlay::Sync);
+    }
+
+    /// Drain the sync worker's messages + advance the sheet's auto-close
+    /// timers.  Returns true when the frame changed and a repaint is due.
+    fn sync_poll(&mut self) -> bool {
+        let msgs: Vec<crate::sync::SyncMsg> =
+            self.sync_rx.as_ref().map_or_else(Vec::new, |rx| rx.try_iter().collect());
+        let mut changed = !msgs.is_empty();
+        for m in msgs {
+            match m {
+                crate::sync::SyncMsg::BanSleep(secs) => {
+                    // The hal handle lives on the UI thread; perform the
+                    // worker's re-arm request here (C called BanSleep on
+                    // the main thread too).
+                    self.screen().framebuffer().ban_sleep(secs);
+                }
+                crate::sync::SyncMsg::Event(ev) => changed |= self.apply_sync_event(ev),
             }
-            Err(e) => crate::log(&format!("[eh_app] sync failed: {e}")),
+        }
+        if self.sync_popup.open {
+            changed |= self.sync_popup_close_tick();
+        }
+        changed
+    }
+
+    /// Apply one worker event to the popup state machine + terminal
+    /// bookkeeping (port of finish_sync / sync_round_outcome_fail's UI
+    /// side).  Returns true when the frame changed.
+    fn apply_sync_event(&mut self, ev: crate::sync::SyncEvent) -> bool {
+        match ev {
+            crate::sync::SyncEvent::Start => false, // the sheet opened at the trigger
+            crate::sync::SyncEvent::MetaBatch { done, .. } => {
+                self.sync_popup.stage = SyncStage::Meta;
+                self.sync_popup.round = done;
+                self.sync_popup.stage_at = Some(std::time::Instant::now());
+                true
+            }
+            crate::sync::SyncEvent::ScanLocal => {
+                self.sync_popup.stage = SyncStage::Scan;
+                self.sync_popup.stage_at = Some(std::time::Instant::now());
+                true
+            }
+            crate::sync::SyncEvent::Covers { done, total } => {
+                self.sync_popup.stage = SyncStage::Covers;
+                self.sync_popup.covers_done = done;
+                self.sync_popup.covers_total = total;
+                true
+            }
+            crate::sync::SyncEvent::Complete { rounds } => {
+                crate::logger::log(&format!(
+                    "[bookshelf] do_sync: rounds={rounds} cursor={} (books={})",
+                    self.store.cursor().unwrap_or(0),
+                    self.store.count().unwrap_or(0)
+                ));
+                self.finish_sync(true)
+            }
+            crate::sync::SyncEvent::Failed(e) => {
+                crate::logger::log(&format!("[bookshelf] do_sync FAILED: {e}"));
+                self.sync_popup.error = e;
+                self.finish_sync(false)
+            }
+        }
+    }
+
+    /// Terminal bookkeeping for a sync chain (C finish_sync +
+    /// eh_sync_popup_finish/fail): stop the spinner, rebuild the view,
+    /// hand off to the cover warm pass, stage the popup auto-close.
+    fn finish_sync(&mut self, ok: bool) -> bool {
+        self.syncing = false;
+        self.sync_rx = None;
+        // A source switch whose sync applies nothing must still re-project
+        // the view under the new source (C keeps this unconditional too).
+        self.rebuild_view();
+        if self.source == Source::Kavita {
+            self.cover_warm_start();
+        }
+        if self.sync_popup.open {
+            self.sync_popup.stage = if ok { SyncStage::Covers } else { SyncStage::Fail };
+            self.sync_popup.stage_at = Some(std::time::Instant::now());
         }
         self.refresh_shelf();
+        true
+    }
+
+    /// Advance the sheet's auto-close (C sync_popup_close_tick): while the
+    /// cover warm pass still drains, stay on COVERS so the striped bar
+    /// moves; once drained flash DONE for SYNC_DONE_CLOSE_MS; FAIL shows
+    /// the error for SYNC_FAIL_CLOSE_MS.  Returns true when the frame
+    /// changed.
+    fn sync_popup_close_tick(&mut self) -> bool {
+        let Some(at) = self.sync_popup.stage_at else { return false };
+        match self.sync_popup.stage {
+            SyncStage::Fail => {
+                if at.elapsed() >= std::time::Duration::from_millis(SYNC_FAIL_CLOSE_MS) {
+                    self.set_overlay(Overlay::None); // also clears popup.open
+                    return true;
+                }
+                false
+            }
+            SyncStage::Covers => {
+                let (done, total) = self.warm_progress();
+                if total > 0 && done < total {
+                    if done != self.sync_popup.covers_done {
+                        self.sync_popup.covers_done = done;
+                        self.sync_popup.covers_total = total;
+                        return true; // the bar advanced
+                    }
+                    return false;
+                }
+                self.sync_popup.stage = SyncStage::Done;
+                self.sync_popup.stage_at = Some(std::time::Instant::now());
+                true
+            }
+            SyncStage::Done => {
+                if at.elapsed() >= std::time::Duration::from_millis(SYNC_DONE_CLOSE_MS) {
+                    self.set_overlay(Overlay::None);
+                    return true;
+                }
+                false
+            }
+            SyncStage::Meta | SyncStage::Scan => false, // modal while running
+        }
+    }
+
+    /// Cover-warm progress (done, total) for the popup's covers bar
+    /// (C eh_cover_warm_progress).
+    fn warm_progress(&self) -> (u32, u32) {
+        let total = self.warm_total as u32;
+        (total.saturating_sub(self.warm_queue.len() as u32), total)
     }
 
     /// Apply a committed search query (C eh_keyboard_handler non-empty
@@ -992,11 +1530,25 @@ impl<B: Framebuffer> App<B> {
         }
         crate::logger::log(&format!("[bookshelf] search commit: query=`{term}`"));
         self.tab = Tab::Library;
-        self.page = 0;
-        // Re-project the materialised view under the new query filter
-        // BEFORE redrawing (the C commit path's eh_view_rebuild).
-        self.rebuild_view();
         self.refresh_shelf();
+    }
+
+    /// True while the full-library warm pass still has covers to fetch
+    /// (C eh_cover_warm_active); offline counts as drained — the pass is
+    /// gated off offline and would otherwise pin the sheet forever.
+    pub(crate) fn cover_warm_active(&mut self) -> bool {
+        if self.warm_queue.is_empty() {
+            return false;
+        }
+        // Safe from overlay draws (screen take()n during present): use
+        // the live probe when available, else the cached value.
+        if self.screen.is_some() {
+            let net = self.screen.as_mut().unwrap().framebuffer().net_active();
+            self.fb_net_active = net;
+            net
+        } else {
+            self.fb_net_active
+        }
     }
 
     /// Search-tab body taps: the input row opens the keyboard; a history
@@ -1202,6 +1754,20 @@ impl<B: Framebuffer> App<B> {
         self.set_overlay(Overlay::Download);
     }
 
+    /// Abort every open download (C eh_cancel_downloads): void the
+    /// in-flight fetch (its .part is never renamed), drop the queue +
+    /// batch state, and close the popup.
+    pub fn cancel_downloads(&mut self) {
+        crate::logger::log("[bookshelf] cancel_downloads");
+        self.downloader.cancel_all();
+        self.dl_batch_queue.clear();
+        self.dl_batch_failed.clear();
+        self.dl_single = false;
+        self.dl_batch_all = false;
+        self.dl_autopen = None;
+        self.set_overlay(Overlay::None);
+    }
+
     /// Drain completed downloads into the store, and when the queue empties
     /// close the popup + auto-open the reader for a single-book press.
     fn drain_downloads(&mut self) {
@@ -1225,9 +1791,16 @@ impl<B: Framebuffer> App<B> {
                     "[bookshelf] dl_progress done={} failed={} total={} active={}",
                     self.dl_done, self.dl_failed, self.dl_total, self.downloader.pending
                 ));
+                if !d.ok {
+                    // C batch_note_failed: the top-up never re-enqueues a
+                    // book this batch already tried and failed.
+                    self.dl_batch_failed.insert(d.id.clone());
+                }
+                // Top the bounded queue up as jobs finish (C dl_advance).
+                self.top_up_batch();
             }
         }
-        if self.downloader.pending == 0 && self.overlay == Overlay::Download {
+        if self.downloader.pending == 0 && self.dl_batch_queue.is_empty() && self.overlay == Overlay::Download {
             if self.dl_single {
                 // Single-book press: close the popup + auto-open the reader.
                 self.set_overlay(Overlay::None);
@@ -1251,26 +1824,65 @@ impl<B: Framebuffer> App<B> {
         }
     }
 
-    /// Download every book in the library (C More → Download all), show the
-    /// modal popup, drain one-per-tick until empty.
+    /// Download every not-yet-downloaded book (C More → Download all /
+    /// eh_download_all_start): only downloaded=0 rows join the batch, the
+    /// queue stays bounded and tops up as jobs finish, failures are
+    /// remembered so they can't loop, and nothing opens when there is
+    /// nothing to fetch.
     fn download_all(&mut self) {
         let n = self.store.count().unwrap_or(0) as usize;
-        let books = self.store.list_books(n, 0).unwrap_or_default();
-        let dl = self.downloads_dir();
-        for b in &books {
-            let cur = book_local_path(b, &dl);
-            self.downloader
-                .enqueue(&self.config.api_url, &self.config.api_token, &b.id, &cur.to_string_lossy());
+        let targets: Vec<Book> = self
+            .store
+            .list_books(n, 0)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|b| !b.downloaded)
+            .collect();
+        if targets.is_empty() {
+            crate::logger::log("[bookshelf] download-all nothing to download");
+            return;
         }
-        crate::logger::log(&format!("[bookshelf] download-all queued={}", books.len()));
-        crate::logger::log("[bookshelf] draw_dl_popup");
-        self.set_overlay(Overlay::Download);
         self.dl_single = false;
         self.dl_batch_all = true;
         self.dl_done = 0;
         self.dl_failed = 0;
-        self.dl_total = books.len();
+        self.dl_total = targets.len();
         self.dl_autopen = None;
+        // New batch: drop the previous batch's failed-id set and stage the
+        // targets for the bounded top-up (C download_all_start).
+        self.dl_batch_failed.clear();
+        self.dl_batch_queue = targets.into_iter().collect();
+        self.top_up_batch();
+        crate::logger::log(&format!("[bookshelf] download-all queued={}", self.dl_total));
+        crate::logger::log("[bookshelf] draw_dl_popup");
+        self.set_overlay(Overlay::Download);
+    }
+
+    /// In-flight window of the download-all batch (C keeps its whole
+    /// queue bounded by EH_MAX_DOWNLOADS; the Rust worker channel is
+    /// unbounded, so the window lives here).
+    const DL_BATCH_WINDOW: usize = 8;
+
+    /// Bounded download-all top-up (C dl_advance_batch →
+    /// batch_enqueue_slice): keep DL_BATCH_WINDOW jobs queued/in flight,
+    /// pulling staged undownloaded books and skipping ids this batch
+    /// already failed (C batch_note_failed / batch_failed_id).
+    fn top_up_batch(&mut self) {
+        let dl = self.downloads_dir();
+        while self.downloader.pending < Self::DL_BATCH_WINDOW {
+            match self.dl_batch_queue.pop_front() {
+                Some(b) => {
+                    if self.dl_batch_failed.contains(&b.id) {
+                        continue;
+                    }
+                    let cur = book_local_path(&b, &dl);
+                    let base = self.config.api_url.clone();
+                    let token = self.config.api_token.clone();
+                    self.downloader.enqueue(&base, &token, &b.id, &cur.to_string_lossy());
+                }
+                None => break,
+            }
+        }
     }
 
     /// A long-press at (x, y): if it lands on a book tile, open the context
@@ -1406,8 +2018,9 @@ impl<B: Framebuffer> App<B> {
         let dl = self.downloads_dir();
         for b in &books {
             let cur = book_local_path(b, &dl);
-            self.downloader
-                .enqueue(&self.config.api_url, &self.config.api_token, &b.id, &cur.to_string_lossy());
+            // Via enqueue_download so an id already queued/in flight is a
+            // dedup no-op (C eh_find_download guard), not a double fetch.
+            self.enqueue_download(&b.id, &cur);
         }
         crate::logger::log("[bookshelf] draw_dl_popup");
         self.set_overlay(Overlay::Download);
@@ -1429,14 +2042,56 @@ impl<B: Framebuffer> App<B> {
         }
     }
 
-    /// Launch the reader (C eh_launch_reader → eh_plat_launch_reader: the
-    /// default reader is the firmware's OpenBook path; a configured
-    /// third-party reader would go through launch_app).
-    fn open_reader(&mut self, path: &Path, title: &str) {
-        crate::logger::log(&format!("[bookshelf] launching reader via OpenBook: {}", path.display()));
-        crate::log(&format!("[eh_app] opening reader path={}", path.display()));
-        if !self.screen().framebuffer_mut().open_book(&path.to_string_lossy(), title) {
-            crate::log("[eh_app] reader launch failed (no reader on this platform)");
+    /// Launch the reader (C eh_launch_reader → eh_plat_launch_reader).
+    /// The standard reader — and the auto default — goes through
+    /// OpenBook(), the firmware's canonical book-open path; only an
+    /// explicitly selected third-party reader (KOReader) is exec'd via
+    /// launch_app with the book path as argv[1] (argv[0] must be the
+    /// program path: the task launcher passes args through as-is).
+    pub(crate) fn open_reader(&mut self, path: &Path, title: &str) {
+        let path_str = path.to_string_lossy().to_string();
+        let readers = detect_readers();
+        // C eh_launch_reader: the configured preference resolves against
+        // the detected readers list before the firmware OpenBook fallback.
+        let reader_path = if self.reader_pref > 0 && (self.reader_pref as usize) <= readers.len() {
+            Some(readers[self.reader_pref as usize - 1])
+        } else {
+            None
+        };
+        let ok = match reader_path {
+            Some(rp) if rp != STANDARD_READER => {
+                crate::logger::log(&format!(
+                    "[bookshelf] launching reader app={} path={}",
+                    rp.rsplit('/').next().unwrap_or(rp),
+                    path.display()
+                ));
+                crate::log(&format!("[eh_app] opening reader app={rp} path={}", path.display()));
+                self.screen()
+                    .framebuffer_mut()
+                    .launch_app(rp, title, &[path_str.clone()])
+            }
+            _ => {
+                crate::logger::log(&format!(
+                    "[bookshelf] launching reader via OpenBook: {}",
+                    path.display()
+                ));
+                crate::log(&format!("[eh_app] opening reader path={}", path.display()));
+                self.screen().framebuffer_mut().open_book(&path_str, title)
+            }
+        };
+        if !ok {
+            /*
+             * Same hourglass intent as the launcher (C eh_launch_reader):
+             * the reader draws over it once it becomes the foreground
+             * task, so a slow reader start reads as work-in-progress
+             * instead of a dead tap.  On launch failure no reader will
+             * ever draw over it — the C app hides the hourglass and
+             * repaints the shelf; this port has no hourglass overlay to
+             * drop, so we close the sheet WITHOUT a redraw and let the
+             * next present bring the shelf back.
+             */
+            crate::log("[eh_app] reader launch failed");
+            self.overlay = Overlay::None;
         }
     }
 
@@ -1452,11 +2107,11 @@ impl<B: Framebuffer> App<B> {
         if a && s {
             out.push(GroupPreset::AuthorSeries);
         }
-        if s {
-            out.push(GroupPreset::Series);
-        }
         if a {
             out.push(GroupPreset::Author);
+        }
+        if s {
+            out.push(GroupPreset::Series);
         }
         if y {
             out.push(GroupPreset::Year);
@@ -1469,12 +2124,14 @@ impl<B: Framebuffer> App<B> {
 
     /// Rebuild the materialised view for the active group/sort/drill and
     /// log the C `view_rebuild: view=… sort=… group=… drill=…` marker.
-    fn rebuild_view(&mut self) {
-        let (group, sort, drill, q, scope) = (self.group, self.sort, self.drill, self.query.clone(), self.group_scope.clone());
-        let total = self
-            .store
-            .view_rebuild(group as i64, sort as i64, drill as i64, &q, &scope)
-            .unwrap_or(0);
+    pub(crate) fn rebuild_view(&mut self) {
+        let (group, sort, drill, q) = (self.group, self.sort, self.drill, self.query.clone());
+        let total = {
+            let scopes = self.drill_scopes();
+            self.store
+                .view_rebuild(group as i64, sort as i64, drill as i64, &q, &scopes)
+                .unwrap_or(0)
+        };
         crate::logger::log(&format!(
             "[bookshelf] view_rebuild: view={} sort={} group={} drill={}",
             total, sort as i64, group as i64, drill
@@ -1506,7 +2163,8 @@ impl<B: Framebuffer> App<B> {
                         if let Some(g) = offer.get(i) {
                             self.group = *g;
                             self.drill = 0;
-                            self.group_scope.clear();
+                            self.drill_values = Default::default();
+                            self.drill_names = Default::default();
                             self.rebuild_view();
                         }
                     }
@@ -1531,24 +2189,41 @@ impl<B: Framebuffer> App<B> {
         self.set_overlay(Overlay::None);
     }
 
-    /// Drill into a tapped stack card (or a flat row's group scope).
+    /// The pinned drill scopes for the store, level 0..drill (C
+    /// eh_g_drill_values[0..eh_g_drill_level]).
+    fn drill_scopes(&self) -> Vec<&str> {
+        self.drill_values[..self.drill as usize].iter().map(String::as_str).collect()
+    }
+
+    /// Drill into a tapped stack card (C eh_group_drill): record the
+    /// group's value at the next drill level, so the shelf regroups within
+    /// that group (or shows flat books at the preset's last level), and
+    /// remember the page of the level we're leaving so drill-back lands
+    /// back where they were.
     fn drill_into_card(&mut self, view_row: &crate::store::ViewRow) {
-        // Remember the page of the level we're leaving so drill-back
-        // lands back where they were (C eh_group_drill).
-        self.drill_saved_page = self.page;
-        self.drill = 1;
-        self.group_scope = view_row.series_id.clone();
+        const MAX_LEVELS: u32 = 2; // C EH_GROUP_MAX_LEVELS (Author -> Series)
+        if self.drill >= MAX_LEVELS {
+            return;
+        }
+        let lvl = self.drill as usize;
+        self.drill_saved_pages[lvl] = self.page;
+        self.drill_values[lvl] = view_row.series_id.clone();
+        self.drill_names[lvl] = view_row.series_name.clone();
+        self.drill += 1;
         self.page = 0;
         self.rebuild_view();
     }
 
     /// Back: pop the drill level (C eh_group_drill_back), restoring the
-    /// saved page of the level we return into.
+    /// saved page of the level we return into, so back from a deep drill
+    /// continues where the user left off.
     fn drill_back(&mut self) {
         if self.drill > 0 {
-            self.drill = 0;
-            self.group_scope.clear();
-            self.page = self.drill_saved_page;
+            self.drill -= 1;
+            let lvl = self.drill as usize;
+            self.drill_values[lvl].clear();
+            self.drill_names[lvl].clear();
+            self.page = self.drill_saved_pages[lvl];
             self.rebuild_view();
         }
     }
@@ -1557,35 +2232,64 @@ impl<B: Framebuffer> App<B> {
     /// eh_reader_pref_from_path) + log the C `reader_pref=N (cfg \`path\`)`
     /// marker the persist test greps for.
     fn resolve_reader(&mut self) {
+        let readers = detect_readers();
         let cfg = self.config.reader.clone().unwrap_or_default();
-        let pref: i32 = if cfg.contains("eink-reader") { 1 } else { 0 };
+        let pref = reader_pref_from_path(&cfg, &readers);
         self.reader_pref = pref;
-        self.reader_path = if pref == 1 { STANDARD_READER.to_string() } else { cfg.clone() };
-        crate::logger::log(&format!(
-            "[bookshelf] reader_pref={pref} (cfg `{}`)",
-            if pref == 1 { STANDARD_READER.to_string() } else { cfg }
-        ));
+        self.reader_path = if pref > 0 {
+            readers[pref as usize - 1].to_string()
+        } else {
+            "auto".to_string()
+        };
+        crate::logger::log(&format!("[bookshelf] reader_pref={pref} (cfg `{cfg}`)"));
     }
 
-    /// Cycle the reader preference (C eh_settings reader row tap): Auto
-    /// -> Standard -> Auto with the single detected reader.
+    /// Cycle the reader preference (C eh_input.c reader row tap): Auto →
+    /// each detected reader in offer order → Auto.
     pub fn cycle_reader(&mut self) {
-        self.reader_pref = if self.reader_pref == 0 { 1 } else { 0 };
-        if self.reader_pref == 1 {
-            self.config.reader = Some(STANDARD_READER.to_string());
-            self.reader_path = STANDARD_READER.to_string();
+        let readers = detect_readers();
+        self.reader_pref = (self.reader_pref + 1) % (readers.len() as i32 + 1);
+        self.apply_reader_pref(&readers);
+        self.dirty = true;
+        crate::logger::log(&format!("[bookshelf] reader_pref={}", self.reader_pref));
+    }
+
+    /// Persist + log the current preference against `readers` (the label
+    /// shown in the settings row comes from [`App::reader_label`]).
+    fn apply_reader_pref(&mut self, readers: &[&str]) {
+        if self.reader_pref > 0 && (self.reader_pref as usize) <= readers.len() {
+            let path = readers[self.reader_pref as usize - 1];
+            self.config.reader = Some(path.to_string());
+            self.reader_path = path.to_string();
         } else {
+            // A stale index (the reader was uninstalled) falls back to Auto.
+            self.reader_pref = 0;
             self.config.reader = None;
             self.reader_path = "auto".to_string();
         }
-        self.dirty = true;
-        crate::logger::log(&format!("[bookshelf] reader_pref={}", self.reader_pref));
+    }
+
+    /// The settings row's value for the reader preference (C
+    /// eh_settings_reader_label): the selected reader's label, or Auto.
+    pub fn reader_label(&self) -> String {
+        if self.reader_pref > 0 {
+            let readers = detect_readers();
+            if let Some(p) = readers.get(self.reader_pref as usize - 1) {
+                return reader_label_of(p).to_string();
+            }
+        }
+        crate::i18n::tr("settings.reader_auto").to_string()
     }
 
     /// Change the active overlay, marking the frame dirty (the present
     /// skip must repaint when the overlay changes).
     fn set_overlay(&mut self, o: Overlay) {
         if o != self.overlay {
+            // Leaving the sync sheet retires its state machine (the C
+            // popup flag lives in eh_g_state; ours rides the overlay).
+            if self.overlay == Overlay::Sync {
+                self.sync_popup.open = false;
+            }
             self.dirty = true;
         }
         self.overlay = o;
@@ -1610,10 +2314,24 @@ impl<B: Framebuffer> App<B> {
         }
     }
 
-    /// The centered top-bar title (C top_bar_title): the query on a
-    /// filtered shelf, "Search" on the search page, else nothing.
+    /// The centered top-bar title (C top_bar_title): the deepest drilled
+    /// series/group name, the query on a filtered shelf, else nothing.
     fn top_title(&self) -> &str {
+        for name in self.drill_names[..self.drill as usize].iter().rev() {
+            if !name.is_empty() {
+                return name;
+            }
+        }
         if self.query.is_empty() { "" } else { &self.query }
+    }
+
+    /// Re-read the reading-progress map from the firmware explorer db and
+    /// repaint the shelf (the C eh_evt_show → eh_progress_reload flow).
+    /// Public so lifecycle plumbing (EVT_SHOW/FOREGROUND delivery) can
+    /// drive it too.
+    pub fn reload_progress(&mut self) {
+        self.progress = crate::progress::reload();
+        self.refresh_shelf();
     }
 
     /// Rebuild the shelf at the current page (the caller presents).
@@ -1652,6 +2370,16 @@ impl<B: Framebuffer> App<B> {
 
     /// The library shelf (grid or list) at the current page.
     fn build_library_page(&mut self, fb: B, width: u32) -> Screen<B> {
+        // Folder source: the directory browser IS the shelf body
+        // (C BR_MODE_BROWSER); the top bar carries the current path.
+        if self.source == Source::Folder && self.browser.open {
+            self.pages = 1;
+            self.entries.clear();
+            let browser = std::mem::take(&mut self.browser);
+            let screen = crate::local::build_browse_page(fb, &browser, self.content_bottom);
+            self.browser = browser;
+            return screen;
+        }
         let per = self.page_size(width);
         let total = self.view_total_books();
         self.pages = if total == 0 { 1 } else { total.div_ceil(per) };
@@ -1663,7 +2391,8 @@ impl<B: Framebuffer> App<B> {
         let pages = self.pages;
         let content_bottom = self.content_bottom;
         let title = self.top_title().to_string();
-        let (view_mode, source, syncing, drilled) = (self.view_mode, self.source, self.syncing, self.drill > 0);
+        let (view_mode, source, syncing, drilled, sync_angle) =
+            (self.view_mode, self.source, self.syncing, self.drill > 0, self.sync_angle);
         shelf::build_shelf(
             fb,
             &title,
@@ -1676,6 +2405,7 @@ impl<B: Framebuffer> App<B> {
             source,  // source
             false,   // not the search tab
             syncing,
+            sync_angle,
         )
     }
 
@@ -1706,7 +2436,8 @@ impl<B: Framebuffer> App<B> {
                 }
                 let stack = v.kind == 1;
                 let scope = if stack { v.series_id.clone() } else { String::new() };
-                ShelfEntry { book, art, stack, stack_label: v.series_name, stack_count: v.series_count, stack_scope: scope }
+                let progress = crate::progress::percent(&self.progress, &book.local_path);
+                ShelfEntry { book, art, stack, stack_label: v.series_name, stack_count: v.series_count, stack_scope: scope, progress }
             })
             .collect()
     }
@@ -1774,13 +2505,49 @@ impl<B: Framebuffer> App<B> {
                 crate::logger::log(&format!(
                     "[bookshelf] settings: reader_pref={} (cfg `{}`)",
                     self.reader_pref,
-                    if self.reader_pref == 1 { STANDARD_READER } else { "auto" }
+                    self.reader_path,
                 ));
             }
         }
     }
-}
 
+    /// The Save button's full side-effect chain (C eh_settings_apply):
+    /// persist, rebuild the endpoint URLs from the (possibly edited)
+    /// api_base/api_token, then re-sync so the shelf reflects the new
+    /// server immediately.
+    pub fn settings_apply(&mut self) {
+        // C aborts any in-flight sync chain BEFORE the endpoints are
+        // rebuilt (eh_sync_abort): the worker stops between rounds — and
+        // drops a fetched-but-unapplied round — so it never fetches from
+        // the new URL with the old cursor nor applies a stale response on
+        // top of the new configuration.
+        self.sync_abort();
+        self.save_config();
+        self.client = ApiClient::new(&self.config.api_url, &self.config.api_token);
+        if self.source != Source::Folder {
+            self.resync();
+        }
+
+        self.set_overlay(Overlay::None);
+    }
+
+    /// Re-derive the layout geometry from the framebuffer after a live
+    /// resolution switch (C sdl_set_resolution's EVT_REPAINT: the app
+    /// relayouts against the new ScreenWidth/Height), then rebuild the
+    /// current page.
+    pub fn relayout(&mut self) {
+        let s = self.screen().framebuffer().screen();
+        if self.screen().framebuffer().needs_self_panel() {
+            self.content_bottom = s.height.saturating_sub(106);
+            self.self_panel = 106;
+        } else {
+            self.content_bottom = s.content_height();
+            self.self_panel = 0;
+        }
+        self.refresh_shelf();
+        self.dirty = true;
+    }
+}
 /// The local path a book downloads to (C eh_book_local_path verbatim): the
 /// provider's filename sanitized to a bare basename (slashes → `_`,
 /// control chars dropped), else `<id>.<ext>` (or bare `<id>` with no
@@ -1860,10 +2627,22 @@ impl<B: Framebuffer> App<B> {
             Overlay::GroupChooser => self.tap_chooser(x, y, ChooserKind::Group),
             Overlay::SortChooser => self.tap_chooser(x, y, ChooserKind::Sort),
             Overlay::LogViewer | Overlay::Licenses | Overlay::LicenseDetail => crate::viewer::tap(x, y, self),
-            // The download popup is modal while a batch is in flight; once
-            // the queue drains, any tap dismisses it (C behavior).
             Overlay::Download => {
-                if self.downloader.pending == 0 {
+                // The X button aborts every open download (C eh_main's
+                // eh_dl_cancel_rect hit → eh_cancel_downloads); any other
+                // tap dismisses only a drained popup (modal in flight).
+                let scr = self.screen().framebuffer().screen();
+                let cx = dl_cancel_rect(scr.width, self.content_bottom);
+                if cx.contains(x, y) {
+                    self.cancel_downloads();
+                } else if self.downloader.pending == 0 {
+                    self.set_overlay(Overlay::None);
+                }
+            }
+            Overlay::Sync => {
+                // Modal while the sync runs (C pins the sheet); once the
+                // chain finished or failed, any tap dismisses it.
+                if !self.syncing {
                     self.set_overlay(Overlay::None);
                 }
             }
@@ -1921,6 +2700,10 @@ fn panel_minute() -> i64 {
 /// band with the real clock + battery glyph, flushed as a band-only
 /// partial update (the e-ink discipline — never a full refresh).
 fn stamp_self_panel<B: Framebuffer>(fb: &mut B, y0: u32, panel: u32) {
+    // Platform probes first (they read the device, not pixels — the
+    // surface borrow below takes fb exclusively).
+    let battery = fb.battery_level();
+    let frontlight = fb.frontlight_on();
     let s = fb.screen();
     let h = panel as i32;
     let fmt = fb.format();
@@ -1934,15 +2717,59 @@ fn stamp_self_panel<B: Framebuffer>(fb: &mut B, y0: u32, panel: u32) {
     let top = y0 as i32 + h / 2;
     let clock = clock_label();
     eh_render::draw_text(&mut surf, font, 40.0, &clock, 24, top - 12, GRAY_BLACK, &mut glyph);
-    // Battery glyph at the right edge (the C app's shape).
+    // Frontlight bulb (C eh_draw_system_strip: circle with short rays),
+    // drawn only when the light is actually on.
+    if frontlight {
+        let lx = s.width as i32 - 176;
+        let ly = y0 as i32 + h / 2;
+        surf.circle_outline(lx, ly, 12, 2, GRAY_BLACK);
+        for a in 0..8u32 {
+            let ang = a as f64 * core::f64::consts::PI / 4.0 + core::f64::consts::PI / 8.0;
+            surf.line(
+                lx + (16.0 * ang.cos()) as i32,
+                ly + (16.0 * ang.sin()) as i32,
+                lx + (22.0 * ang.cos()) as i32,
+                ly + (22.0 * ang.sin()) as i32,
+                2,
+                GRAY_BLACK,
+            );
+        }
+    }
+
+    // Battery: outline + nub + fill proportional to charge (the C app's
+    // shape; an unknown level draws empty, like the C lvl<0 clamp).
     let bw = 84u32;
     let bh = 40u32;
     let bx = s.width.saturating_sub(116);
     let by = y0 + (panel.saturating_sub(bh)) / 2;
     surf.rect_outline(Rect { x: bx, y: by, w: bw, h: bh }, 3, GRAY_BLACK);
-    surf.fill_gray(Rect { x: bx + 4, y: by + 4, w: (bw - 8) / 2, h: bh - 8 }, GRAY_BLACK);
+    surf.fill_gray(Rect { x: bx + bw + 1, y: by + bh / 2 - 7, w: 6, h: 14 }, GRAY_BLACK);
+    let lvl = battery.unwrap_or(0) as u32;
+    let fw = (bw - 8) * lvl.min(100) / 100;
+    if fw > 0 {
+        surf.fill_gray(Rect { x: bx + 4, y: by + 4, w: fw, h: bh - 8 }, GRAY_BLACK);
+    }
     fb.refresh(Rect { x: 0, y: y0, w: s.width, h: panel }, eh_hal::RefreshMode::Partial);
 }
+/// Size of the download-popup X button (C EH_DL_CANCEL_SIZE).
+pub const DL_CANCEL_SIZE: u32 = 48;
+
+/// The download-popup cancel-button rect (C eh_dl_cancel_rect mirrored
+/// onto this popup's sheet geometry): right edge of the sheet, aligned
+/// with the status line.  Draw + tap share this, so they never drift.
+pub fn dl_cancel_rect(w: u32, h: u32) -> Rect {
+    let pw = w * 3 / 4;
+    let ph = 160u32;
+    let px = (w - pw) / 2;
+    let py = h.saturating_sub(ph) / 2;
+    Rect {
+        x: px + pw - DL_CANCEL_SIZE - 24,
+        y: py + 96,
+        w: DL_CANCEL_SIZE,
+        h: DL_CANCEL_SIZE,
+    }
+}
+
 /// The modal download-progress popup (C eh_draw_dl_popup): a dim + a
 /// centered white sheet showing the remaining count (the count changes as
 /// the queue drains, so the frame changes during a batch — the e2e
@@ -1952,7 +2779,9 @@ fn draw_download_popup<B: Framebuffer>(surf: &mut eh_render::Surface, app: &mut 
     let w = surf.width();
     let h = app.content_bottom;
     dirty.push(Rect { x: 0, y: 0, w, h });
-    surf.fill_gray(Rect { x: 0, y: 0, w, h }, GRAY_BLACK);
+    // Dim starting BELOW the top bar (C eh_dim_content(EH_TOP_BAR_H)): the
+    // icons — the spinning sync glyph among them — stay fully visible.
+    eh_shell::dim_hatch(surf, crate::appui::TOP_BAR_H, h);
     let pw = w * 3 / 4;
     let ph = 160u32;
     let px = (w - pw) / 2;
@@ -1961,13 +2790,143 @@ fn draw_download_popup<B: Framebuffer>(surf: &mut eh_render::Surface, app: &mut 
     surf.rect_outline(Rect { x: px, y: py, w: pw, h: ph }, 2, GRAY_BLACK);
     let font = crate::shelf::shelf_font();
     let mut g = eh_render::Glyph::new();
-    eh_render::draw_text(surf, font, 28.0, "Downloading\u{2026}", (px + 32) as i32, (py + 72) as i32, GRAY_BLACK, &mut g);
+    eh_render::draw_text(
+        surf,
+        font,
+        28.0,
+        crate::i18n::tr("dl.in_progress"),
+        (px + 32) as i32,
+        (py + 72) as i32,
+        GRAY_BLACK,
+        &mut g,
+    );
     let label = if app.dl_total > 0 && !app.dl_batch_all {
-        format!("{} downloaded, {} failed", app.dl_done, app.dl_failed)
+        format!(
+            "{}, {}",
+            crate::i18n::trn("dl.complete", &[app.dl_done as i64]),
+            crate::i18n::trn("dl.failed_count", &[app.dl_failed as i64])
+        )
     } else {
-        format!("{} remaining", app.downloader.pending)
+        crate::i18n::trn("dl.remaining", &[app.downloader.pending as i64])
     };
     eh_render::draw_text(surf, font, 24.0, &label, (px + 32) as i32, (py + 120) as i32, GRAY_BLACK, &mut g);
+    // Cancel X button (C draw_dl_popup_sheet's boxed X).
+    let cr = dl_cancel_rect(w, h);
+    surf.fill_gray(cr, GRAY_WHITE);
+    surf.rect_outline(cr, 2, GRAY_BLACK);
+    surf.line(
+        (cr.x + 12) as i32,
+        (cr.y + 12) as i32,
+        (cr.x + cr.w - 12) as i32,
+        (cr.y + cr.h - 12) as i32,
+        3,
+        GRAY_BLACK,
+    );
+    surf.line(
+        (cr.x + cr.w - 12) as i32,
+        (cr.y + 12) as i32,
+        (cr.x + 12) as i32,
+        (cr.y + cr.h - 12) as i32,
+        3,
+        GRAY_BLACK,
+    );
+}
+
+/// The modal sync-progress sheet (C eh_draw_sync_popup /
+/// draw_sync_popup_sheet): a dim below the top bar + a centred 190px
+/// sheet — title band, the phase line, the counter subline, and during
+/// the covers stage a striped progress bar.
+fn draw_sync_popup<B: Framebuffer>(surf: &mut eh_render::Surface, app: &mut App<B>, dirty: &mut Vec<Rect>) {
+    use eh_shell::{GRAY_BLACK, GRAY_DGRAY, GRAY_LGRAY, GRAY_WHITE};
+    let w = surf.width();
+    let h = app.content_bottom;
+    dirty.push(Rect { x: 0, y: 0, w, h });
+    // Dim starting BELOW the top bar (C eh_dim_content(EH_TOP_BAR_H)): the
+    // icons — the spinning sync glyph among them — stay fully visible.
+    eh_shell::dim_hatch(surf, crate::appui::TOP_BAR_H, h);
+    let pw = w * 3 / 4;
+    let ph = SYNC_SHEET_H;
+    let px = (w - pw) / 2;
+    let py = h.saturating_sub(ph) / 2;
+    surf.fill_gray(Rect { x: px, y: py, w: pw, h: ph }, GRAY_WHITE);
+    // C draws the border twice (outer + inset); an outline of 2 covers it.
+    surf.rect_outline(Rect { x: px, y: py, w: pw, h: ph }, 2, GRAY_BLACK);
+    const PAD: u32 = 24; // C EH_CTX_PAD
+    const TITLE_H: u32 = 72; // C EH_CTX_TITLE_H
+    let font = crate::shelf::shelf_font();
+    let mut g = eh_render::Glyph::new();
+    eh_render::draw_text(
+        surf,
+        font,
+        30.0,
+        crate::i18n::tr("action.sync"),
+        (px + PAD) as i32,
+        (py + 18) as i32,
+        GRAY_BLACK,
+        &mut g,
+    );
+    surf.hline(px + PAD, py + TITLE_H - 1, pw - 2 * PAD, 2, GRAY_LGRAY);
+
+    // Whether the cover warm pass has drained — computed before the popup
+    // borrow (the probe needs &mut self).
+    let warm_drained = !app.cover_warm_active();
+    let p = &app.sync_popup;
+    let line;
+    let subline;
+    match p.stage {
+        SyncStage::Meta => {
+            line = crate::i18n::tr("sync.meta").to_string();
+            subline = crate::i18n::trn("sync.batch", &[p.round as i64]);
+        }
+        SyncStage::Scan => {
+            line = crate::i18n::tr("sync.scan").to_string();
+            subline = crate::i18n::trn("sync.books", &[p.scanned as i64]);
+        }
+        SyncStage::Covers => {
+            line = crate::i18n::tr("sync.covers").to_string();
+            if p.covers_total > 0 {
+                subline = crate::i18n::trn(
+                    "sync.cover_count",
+                    &[p.covers_done as i64, p.covers_total as i64],
+                );
+            } else {
+                subline = crate::i18n::tr("sync.covers").to_string();
+            }
+        }
+        SyncStage::Fail => {
+            line = crate::i18n::tr("status.fail").to_string();
+            subline = p.error.clone();
+        }
+        SyncStage::Done => {
+            line = crate::i18n::tr("sync.done").to_string();
+            subline = crate::i18n::trn("sync.books", &[app.store.count().unwrap_or(0)]);
+        }
+    }
+    eh_render::draw_text(surf, font, 28.0, &line, (px + PAD) as i32, (py + TITLE_H + 24) as i32, GRAY_BLACK, &mut g);
+    eh_render::draw_text(surf, font, 24.0, &subline, (px + PAD) as i32, (py + TITLE_H + 68) as i32, GRAY_DGRAY, &mut g);
+
+    // Covers stage: progress bar under the counter (C draw_sync_popup_
+    // sheet: bar top TITLE_H+96, h 12), filled by done/total with a
+    // striped overlay over the unfilled part while covers still load.
+    if p.stage == SyncStage::Covers && p.covers_total > 0 {
+        let bar = Rect { x: px + PAD, y: py + TITLE_H + 96, w: pw - 48, h: 12 };
+        surf.fill_gray(bar, GRAY_WHITE);
+        surf.rect_outline(bar, 1, GRAY_BLACK);
+        let fill = (p.covers_done * (bar.w - 2)) / p.covers_total;
+        if fill > 0 {
+            surf.fill_gray(
+                Rect { x: bar.x + 1, y: bar.y + 1, w: fill.min(bar.w - 2), h: bar.h - 2 },
+                GRAY_BLACK,
+            );
+        }
+        let drained = warm_drained;
+        let from = bar.x + 1 + fill;
+        let mut sx = from;
+        while sx + 3 < bar.x + bar.w - 1 && !drained {
+            surf.line(sx as i32, (bar.y + 1) as i32, (sx + 2) as i32, (bar.y + bar.h - 2) as i32, 1, GRAY_DGRAY);
+            sx += 6;
+        }
+    }
 }
 
 /// The long-press context menu (C eh_draw_context): a centered white sheet
@@ -1979,7 +2938,7 @@ fn draw_context_menu<B: Framebuffer>(surf: &mut eh_render::Surface, app: &mut Ap
     let h = surf.height();
     crate::logger::log(&format!("[eh_app] ctx draw w={w} h={h} content_bottom={}", app.content_bottom));
     dirty.push(Rect { x: 0, y: 0, w, h });
-    surf.fill_gray(Rect { x: 0, y: 0, w, h }, GRAY_BLACK);
+    eh_shell::dim_hatch(surf, 0, h); // LGRAY hatch (C eh_dim_content(0))
     let n = app.context_items.len().max(1);
     let pw = w * 3 / 4;
     let ph = (72 + n * 96 + 24) as u32;
@@ -1994,11 +2953,11 @@ fn draw_context_menu<B: Framebuffer>(surf: &mut eh_render::Surface, app: &mut Ap
     for (i, act) in app.context_items.iter().enumerate() {
         let iy = py + 72 + (i as u32) * 96;
         let label: &str = match act {
-            ContextAction::Open => "Open",
-            ContextAction::Download => "Download",
-            ContextAction::Delete => "Delete",
-            ContextAction::DownloadAll => "Download all",
-            ContextAction::DeleteAll => "Delete series",
+            ContextAction::Open => crate::i18n::tr("ctx.open"),
+            ContextAction::Download => crate::i18n::tr("ctx.download"),
+            ContextAction::Delete => crate::i18n::tr("ctx.delete"),
+            ContextAction::DownloadAll => crate::i18n::tr("ctx.download_all"),
+            ContextAction::DeleteAll => crate::i18n::tr("ctx.delete_series"),
         };
         surf.fill_gray(Rect { x: px + 12, y: iy, w: pw - 24, h: 84 }, GRAY_WHITE);
         surf.rect_outline(Rect { x: px + 12, y: iy, w: pw - 24, h: 84 }, 1, GRAY_BLACK);
@@ -2020,17 +2979,19 @@ fn draw_chooser_sheet<B: Framebuffer>(
     let w = surf.width();
     let h = app.content_bottom;
     dirty.push(Rect { x: 0, y: 0, w, h });
-    surf.fill_gray(Rect { x: 0, y: 0, w, h }, GRAY_BLACK);
+    eh_shell::dim_hatch(surf, 0, h); // LGRAY hatch (C eh_dim_content(0))
     let (n, labels, title): (usize, Vec<String>, &str) = match kind {
         ChooserKind::Group => {
             let offer = app.group_offer();
             (
                 offer.len(),
-                offer.iter().map(|g| GROUP_LABELS[*g as usize].to_string()).collect(),
-                "Group by",
+                offer.iter().map(|g| crate::i18n::tr(GROUP_KEYS[*g as usize]).to_string()).collect(),
+                crate::i18n::tr("action.group_by"),
             )
         }
-        ChooserKind::Sort => (4, SORT_LABELS.iter().map(|s| s.to_string()).collect(), "Sort by"),
+        ChooserKind::Sort => {
+            (4, SORT_KEYS.iter().map(|k| crate::i18n::tr(k).to_string()).collect(), crate::i18n::tr("action.sort_by"))
+        }
     };
     let pw = w * 3 / 4;
     let ph = (72 + n as u32 * 96 + 24).max(1);
@@ -2053,11 +3014,21 @@ fn draw_chooser_sheet<B: Framebuffer>(
 }
 
 
-/// Labels of the group-chooser rows, in the C order (None, [Author>Series],
-/// Series, Author, Year, Genre) — the harness reads the store to map a
-/// chosen dimension to its row index, so the order must match.
-const GROUP_LABELS: [&str; 6] = ["All books", "Author > Series", "Series", "Author", "Year", "Genre"];
-const SORT_LABELS: [&str; 4] = ["Title A-Z", "By author", "By series", "Recent"];
+/// i18n keys of the group-chooser rows, in the C order (None,
+/// [Author>Series], Series, Author, Year, Genre) — the harness reads the
+/// store to map a chosen dimension to its row index, so the order must
+/// match; the drawn text comes from crate::i18n::tr at draw time.
+/// Indexed by [`crate::store::GroupPreset`] value (None=0, AuthorSeries=1,
+/// Author=2, Year=3, Genre=4, Series=5).
+const GROUP_KEYS: [&str; 6] = [
+    "group.all",
+    "group.author_series",
+    "group.author",
+    "group.year",
+    "group.genre",
+    "group.series",
+];
+const SORT_KEYS: [&str; 4] = ["sort.title_az", "sort.author", "sort.series", "sort.recent"];
 
 #[cfg(test)]
 mod tests {
@@ -2380,4 +3351,336 @@ mod tests {
         assert_eq!(app.query, "dune");
         assert_eq!(app.tab, Tab::Library);
     }
+
+    // ── downloads: batch filter/top-up, cancel X, boot reconciliation ──
+
+    /// A BookMeta with just enough shape for upsert_book + local paths.
+    fn meta(id: &str) -> crate::client::BookMeta {
+        crate::client::BookMeta {
+            id: id.into(),
+            title: format!("T{id}"),
+            filename: Some(format!("{id}.epub")),
+            format: Some("epub".into()),
+            ..Default::default()
+        }
+    }
+
+    /// An App in a scratch dir with a HERMETIC downloads dir and an inert
+    /// downloader (no worker thread, no network).  Returns app + dl dir.
+    fn mk_dl_app(tag: &str) -> (App<FakeKb>, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("eh_app_dl_{}_{}", tag, std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let dl = dir.join("dl");
+        std::fs::create_dir_all(&dl).unwrap();
+        let cfg = Config {
+            downloads_dir: Some(dl.to_string_lossy().into_owned()),
+            ..Default::default()
+        };
+        let mut app = App::new(FakeKb::new(1072, 1448), cfg, None, &dir);
+        app.downloader = crate::downloads::Downloader::inert();
+        (app, dl)
+    }
+
+    #[test]
+    fn download_all_excludes_downloaded_books() {
+        let (mut app, _dl) = mk_dl_app("excl");
+        app.store.upsert_book(&meta("a")).unwrap();
+        app.store.upsert_book(&meta("b")).unwrap();
+        app.store.set_downloaded("a", true, "").unwrap();
+        app.download_all();
+        assert_eq!(app.downloader.pending, 1, "only the undownloaded book joins");
+        assert_eq!(app.downloader.live_ids(), vec!["b".to_string()]);
+        assert_eq!(app.overlay, Overlay::Download);
+    }
+
+    #[test]
+    fn download_all_noop_when_nothing_undownloaded() {
+        let (mut app, _dl) = mk_dl_app("noop");
+        app.store.upsert_book(&meta("a")).unwrap();
+        app.store.set_downloaded("a", true, "").unwrap();
+        app.download_all();
+        assert_eq!(app.overlay, Overlay::None, "no popup without work (C eh_download_all_start)");
+        assert_eq!(app.downloader.pending, 0);
+    }
+
+    #[test]
+    fn download_all_bounds_queue_and_tops_up() {
+        let (mut app, _dl) = mk_dl_app("topup");
+        for i in 0..12 {
+            app.store.upsert_book(&meta(&format!("b{i}"))).unwrap();
+        }
+        app.download_all();
+        assert_eq!(app.downloader.pending, App::<FakeKb>::DL_BATCH_WINDOW, "queue stays bounded");
+        assert_eq!(app.dl_batch_queue.len(), 12 - App::<FakeKb>::DL_BATCH_WINDOW);
+        assert_eq!(app.dl_total, 12);
+        // One job settles successfully: the window tops back up.
+        app.downloader.pending -= 1;
+        app.top_up_batch();
+        assert_eq!(app.downloader.pending, App::<FakeKb>::DL_BATCH_WINDOW, "window refilled");
+        assert_eq!(app.dl_batch_queue.len(), 3, "12 - window - 1 topped up");
+    }
+
+    #[test]
+    fn failed_batch_ids_are_not_reenqueued() {
+        let (mut app, _dl) = mk_dl_app("failed");
+        app.store.upsert_book(&meta("x")).unwrap();
+        app.download_all();
+        assert_eq!(app.downloader.pending, 1);
+        // Simulate the drain's failure settle for x.
+        app.downloader.pending -= 1;
+        app.dl_failed += 1;
+        app.dl_batch_failed.insert("x".into());
+        app.top_up_batch();
+        assert_eq!(app.downloader.live_ids(), vec!["x".to_string()], "settled entry stays until drained");
+        assert!(app.dl_batch_queue.is_empty());
+    }
+
+    #[test]
+    fn download_popup_x_cancels_and_closes() {
+        let (mut app, dl) = mk_dl_app("xtap");
+        app.store.upsert_book(&meta("a")).unwrap();
+        let b = app.store.get_book("a").unwrap().unwrap();
+        let cur = book_local_path(&b, dl.to_str().unwrap());
+        app.enqueue_download(&b.id, &cur);
+        assert_eq!(app.overlay, Overlay::Download);
+        assert_eq!(app.downloader.pending, 1);
+        let r = dl_cancel_rect(1072, app.content_bottom);
+        app.tap_overlay((r.x + r.w / 2) as i32, (r.y + r.h / 2) as i32);
+        assert_eq!(app.overlay, Overlay::None, "X cancels AND closes (C eh_cancel_downloads)");
+        assert_eq!(app.downloader.pending, 0);
+        assert!(!app.dl_batch_all && app.dl_batch_queue.is_empty());
+    }
+
+    #[test]
+    fn boot_reconciles_downloaded_flags() {
+        // Pre-seed a store whose flags disagree with disk, then boot:
+        // present files keep downloaded=1, missing files are cleared
+        // (C eh_refresh_downloaded_flags).
+        let dir = std::env::temp_dir().join(format!("eh_app_boot_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let dl = dir.join("dl");
+        std::fs::create_dir_all(&dl).unwrap();
+        {
+            let store =
+                Store::open(&dir.join(Store::LIB_DB_FILENAME)).expect("seed store");
+            store.upsert_book(&meta("keep")).unwrap();
+            store.upsert_book(&meta("gone")).unwrap();
+            store.set_downloaded("keep", true, "").unwrap();
+            store.set_downloaded("gone", true, "").unwrap();
+        }
+        std::fs::write(dl.join("keep.epub"), b"x").unwrap();
+        let cfg = Config {
+            downloads_dir: Some(dl.to_string_lossy().into_owned()),
+            ..Default::default()
+        };
+        let mut app = App::new(FakeKb::new(1072, 1448), cfg, None, &dir);
+        app.downloader = crate::downloads::Downloader::inert();
+        assert!(app.store.get_book("keep").unwrap().unwrap().downloaded);
+        assert!(
+            !app.store.get_book("gone").unwrap().unwrap().downloaded,
+            "stale flag must be cleared at boot"
+        );
+    }
+
+    #[test]
+    fn reader_pref_resolution_order() {
+        let readers = [
+            "/ebrmain/bin/eink-reader.app",
+            "/mnt/ext1/applications/koreader.app",
+        ];
+        // auto / empty → 0 (server open-with)
+        assert_eq!(reader_pref_from_path("auto", &readers), 0);
+        assert_eq!(reader_pref_from_path("", &readers), 0);
+        // A path matching a detected reader → its 1-based index.
+        assert_eq!(reader_pref_from_path(readers[0], &readers), 1);
+        assert_eq!(reader_pref_from_path(readers[1], &readers), 2);
+        // Anything else (uninstalled reader) → 0.
+        assert_eq!(
+            reader_pref_from_path("/mnt/ext1/applications/gone.app", &readers),
+            0
+        );
+    }
+
+    #[test]
+    fn drill_stack_push_pop_restores_pages_and_title() {
+        let mut app = mk_app("drill");
+        // Seed enough tiles that every drilled level has multiple pages
+        // (grid = 6/page at the test panel): 40 lone authors + Ann with 20
+        // two-book series.  Level 0 shows 41 tiles, level 1 (inside Ann)
+        // 20 series cards, level 2 one series' 2 books.
+        use crate::client::BookMeta;
+        for i in 0..40 {
+            app.store.upsert_book(&BookMeta {
+                id: format!("l{i}"),
+                title: format!("Lone {i}"),
+                authors: vec![format!("A{i}")],
+                ..Default::default()
+            }).unwrap();
+        }
+        for i in 0..20 {
+            for k in 0..2 {
+                app.store.upsert_book(&BookMeta {
+                    id: format!("s{i}-{k}"),
+                    title: format!("Book {i}/{k}"),
+                    authors: vec!["Ann".into()],
+                    series: Some(format!("Series {i:02}")),
+                    series_id: Some(format!("sid-{i:02}")),
+                    ..Default::default()
+                }).unwrap();
+            }
+        }
+        app.group = crate::store::GroupPreset::AuthorSeries;
+        app.rebuild_view();
+        app.page = 3;
+        let author = crate::store::ViewRow {
+            kind: 1,
+            book_id: "s00-0".into(),
+            series_id: "Ann".into(),
+            series_name: "Ann".into(),
+            series_count: 40,
+        };
+        // Level 0 → 1: the level's page is saved, the view resets to 0.
+        app.drill_into_card(&author);
+        assert_eq!(app.drill, 1);
+        assert_eq!(app.drill_saved_pages[0], 3);
+        assert_eq!(app.drill_values[0], "Ann");
+        assert_eq!(app.drill_names[0], "Ann");
+        assert_eq!(app.page, 0);
+
+        // Level 1 → 2 (series within the author): page inside level 1.
+        app.goto_page(2);
+        assert_eq!(app.page, 2, "level 1 must span >2 pages");
+        let series = crate::store::ViewRow {
+            kind: 1,
+            book_id: "s50-0".into(),
+            series_id: "sid-05".into(),
+            series_name: "Series 05".into(),
+            series_count: 2,
+        };
+        app.drill_into_card(&series);
+        assert_eq!(app.drill, 2);
+        // EH_GROUP_MAX_LEVELS: a deeper drill is refused.
+        app.drill_into_card(&series);
+        assert_eq!(app.drill, 2);
+        // The title shows the deepest drilled name.
+        assert_eq!(app.top_title(), "Series 05");
+
+        // Back pops ONE level at a time and restores that level's page.
+        app.drill_back();
+        assert_eq!(app.drill, 1);
+        assert!(app.drill_values[1].is_empty());
+        assert_eq!(app.page, 2);
+        assert_eq!(app.top_title(), "Ann");
+        app.drill_back();
+        assert_eq!(app.drill, 0);
+        assert_eq!(app.page, 3);
+        assert_eq!(app.top_title(), "");
+    }
+
+    #[test]
+    fn reader_cycle_order_auto_then_detected() {
+        let mut app = mk_app("cycle");
+        // Host fallback: nothing on this filesystem → exactly one reader
+        // (Standard), so the row cycles Auto -> Standard -> Auto.
+        app.cycle_reader();
+        assert_eq!(app.reader_pref, 1);
+        assert_eq!(app.reader_label(), "Standard");
+        assert_eq!(app.config.reader.as_deref(), Some(STANDARD_READER));
+        app.cycle_reader();
+        assert_eq!(app.reader_pref, 0);
+        assert_eq!(app.reader_label(), crate::i18n::tr("settings.reader_auto"));
+        assert_eq!(app.config.reader, None);
+    }
+
+    /// Drive the sync-popup state machine without a worker: the events
+    /// are applied exactly as tick() would deliver them (the mocked
+    /// multi-round event-sequence test lives in sync.rs).
+    #[test]
+    fn sync_popup_state_machine_transitions() {
+        let mut app = mk_app("syncpopup");
+        app.do_sync(); // opens the sheet over the (failing-fast) worker
+        assert_eq!(app.overlay, Overlay::Sync);
+        assert!(app.sync_popup.open);
+        assert_eq!(app.sync_popup.stage, SyncStage::Meta);
+        assert!(app.syncing);
+
+        // Modal while the sync runs: a tap must not dismiss.
+        tap(&mut app, 536, 700);
+        assert_eq!(app.overlay, Overlay::Sync);
+
+        app.apply_sync_event(crate::sync::SyncEvent::MetaBatch { done: 2, total: 0 });
+        assert_eq!(app.sync_popup.stage, SyncStage::Meta);
+        assert_eq!(app.sync_popup.round, 2);
+        app.apply_sync_event(crate::sync::SyncEvent::ScanLocal);
+        assert_eq!(app.sync_popup.stage, SyncStage::Scan);
+        app.apply_sync_event(crate::sync::SyncEvent::Covers { done: 3, total: 10 });
+        assert_eq!(app.sync_popup.stage, SyncStage::Covers);
+        assert_eq!((app.sync_popup.covers_done, app.sync_popup.covers_total), (3, 10));
+
+        // Complete: the sheet moves to COVERS (warm pass), then flashes
+        // DONE and auto-closes (C eh_sync_popup_finish → close tick).
+        app.apply_sync_event(crate::sync::SyncEvent::Complete { rounds: 0 });
+        assert!(!app.syncing, "spinner stops at the terminal event");
+        assert!(app.sync_rx.is_none(), "event stream detached at completion");
+        assert_eq!(app.sync_popup.stage, SyncStage::Covers);
+        // No warm pass queued → the next tick flashes Done, the next one
+        // (after the 900 ms delay) closes.
+        assert!(app.sync_popup_close_tick());
+        assert_eq!(app.sync_popup.stage, SyncStage::Done);
+        assert!(app.sync_popup.open);
+        app.sync_popup.stage_at = Some(std::time::Instant::now()
+            - std::time::Duration::from_millis(SYNC_DONE_CLOSE_MS + 1));
+        assert!(app.sync_popup_close_tick());
+        assert!(!app.sync_popup.open);
+        assert_eq!(app.overlay, Overlay::None);
+    }
+
+    #[test]
+    fn sync_popup_tap_dismisses_only_after_finish() {
+        let mut app = mk_app("syncdismiss");
+        app.sync_popup_open();
+        app.syncing = true; // simulate the live run
+        tap(&mut app, 536, 700);
+        assert_eq!(app.overlay, Overlay::Sync, "modal while the sync runs");
+        app.apply_sync_event(crate::sync::SyncEvent::Failed("boom".into()));
+        assert!(!app.syncing);
+        assert_eq!(app.sync_popup.stage, SyncStage::Fail);
+        assert_eq!(app.sync_popup.error, "boom");
+        // Tap-to-dismiss after finish (C eh_popups tap path).
+        tap(&mut app, 536, 700);
+        assert_eq!(app.overlay, Overlay::None);
+    }
+
+    #[test]
+    fn sync_popup_fail_auto_closes_after_1500ms() {
+        let mut app = mk_app("syncfailclose");
+        app.sync_popup_open();
+        app.apply_sync_event(crate::sync::SyncEvent::Failed("no server".into()));
+        assert_eq!(app.sync_popup.stage, SyncStage::Fail);
+        assert!(app.sync_popup.open);
+        // Not yet expired: stays up.
+        assert!(!app.sync_popup_close_tick());
+        assert!(app.sync_popup.open);
+        app.sync_popup.stage_at = Some(std::time::Instant::now()
+            - std::time::Duration::from_millis(SYNC_FAIL_CLOSE_MS + 1));
+        assert!(app.sync_popup_close_tick());
+        assert!(!app.sync_popup.open);
+        assert_eq!(app.overlay, Overlay::None);
+    }
+
+    #[test]
+    fn settings_apply_aborts_the_in_flight_chain_first() {
+        let mut app = mk_app("syncabort");
+        // Simulate a live chain: fresh flag + attached stream.
+        app.sync_cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        app.syncing = true;
+        let in_flight = std::sync::Arc::clone(&app.sync_cancel);
+        app.settings_apply();
+        assert!(in_flight.load(std::sync::atomic::Ordering::Relaxed),
+            "cancel flag set before the endpoints are rebuilt (C eh_sync_abort)");
+        assert!(app.syncing, "a fresh chain starts against the rebuilt endpoints");
+        assert!(app.sync_rx.is_some(), "the fresh chain's stream is attached");
+    }
+
 }

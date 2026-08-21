@@ -32,6 +32,10 @@ eh_run_env
 cleanup_on_error() { eh_run_cleanup; }
 # On the SDL path the app runs in the foreground; Ctrl-C (INT) should stop
 # everything too.  EXIT alone is installed for the shared error cleanup.
+# SDL2's Wayland backend has a long-standing focus/taskbar quirk (the
+# compositor refuses to raise/focus the window from the taskbar); routing
+# through XWayland is the standard workaround.  Override wins.
+export SDL_VIDEODRIVER="${SDL_VIDEODRIVER:-x11}"
 trap cleanup_on_error EXIT
 
 DO_BUILD=1

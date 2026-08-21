@@ -41,6 +41,9 @@ pub struct TopBarState {
     /// title; the source button and right icon stack are hidden.
     pub search: bool,
     pub syncing: bool,
+    /// Rotation (deg) of the sync glyph while a sync/download is in
+    /// flight (C eh_g_state.sync_angle; sync_spin_tick advances it 15°/s).
+    pub sync_angle: i32,
     pub title: String,
 }
 
@@ -104,7 +107,7 @@ impl Widget for TopBar {
         if !self.state.search {
             draw_search_icon(ctx, w - 344, cy, col);
             draw_layout_icon(ctx, w - 248, cy, self.state.view_mode, col);
-            draw_sync_icon(ctx, w - 152, cy, self.state.syncing, col);
+            draw_sync_icon(ctx, w - 152, cy, self.state.sync_angle, col);
             // Menu hamburger in the corner button.
             let menu_cx = (rect.x + rect.w - BTN_PAD - BTN_SIZE / 2) as i32;
             ctx.fill(Rect::from_xy(menu_cx - 24, cy - 21, 48, 6), col);
@@ -155,9 +158,9 @@ fn draw_source_button(ctx: &mut DrawCtx, _w: i32, _y0: i32, cy: i32, source: Sou
 /// Short label of the active source (C source_short_label).
 fn source_label(source: Source) -> &'static str {
     match source {
-        Source::Local => "Local",
-        Source::Folder => "Folder",
-        Source::Kavita => "Kavita",
+        Source::Local => crate::i18n::tr("source.local"),
+        Source::Folder => crate::i18n::tr("source.folder"),
+        Source::Kavita => crate::i18n::tr("source.kavita"),
     }
 }
 
@@ -252,15 +255,16 @@ fn draw_layout_icon(ctx: &mut DrawCtx, cx0: i32, cy: i32, view_mode: ViewMode, c
     }
 }
 
-/// Sync (refresh) button left of the menu: two arc arrows.  A stable glyph
-/// when idle; the C app rotates while a sync/download is in flight.
-fn draw_sync_icon(ctx: &mut DrawCtx, cx0: i32, cy: i32, active: bool, col: u8) {
+/// Sync (refresh) button left of the menu: two arc arrows.  `angle` is
+/// the current rotation in degrees — idle the app passes 0 (a stable
+/// glyph); while a sync/download is in flight the tick advances it 15°/s
+/// and the arcs spin (C eh_draw_sync_icon / sync_spin_tick).
+fn draw_sync_icon(ctx: &mut DrawCtx, cx0: i32, cy: i32, angle: i32, col: u8) {
     let r = 22;
     // A continuous double-arrow arc: two opposing 120° arcs (C: half*180°),
     // each with an arrowhead at its end.
-    let _ = active;
     for half in 0..2 {
-        let a0 = (half * 180) as f64; // degrees
+        let a0 = ((angle % 360) + half * 180) as f64; // degrees
         let mut px = 0i32;
         let mut py = 0i32;
         let mut ex = 0i32;
@@ -441,8 +445,14 @@ impl Widget for SearchInput {
         ctx.line(gx + 9, gy + 10, gx + 22, gy + 23, 2, glyph_col);
         ctx.line(gx + 10, gy + 9, gx + 23, gy + 22, 2, glyph_col);
         // Query text (or placeholder).
-        let text = if self.text.is_empty() { "search…" } else { self.text.as_str() };
+        let text = if self.text.is_empty() { crate::i18n::tr("search.ph") } else { self.text.as_str() };
         ctx.text((bx + 68) as i32, (by + 18) as i32, 28.0, text, glyph_col);
+        // Edit cursor while the keyboard is open (C draw_search_input_text):
+        // a white line right after the query.
+        if self.active && !self.text.is_empty() {
+            let cursor_x = (bx + 68) as i32 + ctx.font.width(text, 28.0) as i32 + 1;
+            ctx.vline(cursor_x as u32, by + 6, bh - 12, 2, GRAY_WHITE);
+        }
     }
     fn dirty(&self, out: &mut Vec<Rect>) {
         if let Some(r) = self.rect {

@@ -38,19 +38,33 @@ pub struct ShelfEntry {
     /// The raw group value (author / series_id / genre / year) this card
     /// drills into.
     pub stack_scope: String,
+    /// Percent read (0..=100) from the firmware explorer db; 0 hides the
+    /// cover progress bar entirely (C eh_progress_percent semantics).
+    pub progress: u8,
 }
 
-/// One stack-card tile (C eh_draw_thumbnail stack branch): a bordered card
-/// centred in the tile showing the group label + member count.
+/// One stack-card tile (C eh_draw_thumbnail stack branch): the two offset
+/// page sheets behind (C eh_draw_series_stack_back), the representative
+/// book's cover art on top, and the count badge over the art (C
+/// eh_draw_series_stack_badge) with the group label beneath.
 pub struct StackCard {
     pub label: String,
     pub count: i64,
+    /// The representative book's decoded cover (rgb, w, h), if cached.
+    pub img: Option<Vec<u8>>,
+    pub img_w: u32,
+    pub img_h: u32,
     rect: Option<Rect>,
 }
 
 impl StackCard {
     pub fn new(label: impl Into<String>, count: i64) -> Self {
-        Self { label: label.into(), count, rect: None }
+        Self { label: label.into(), count, img: None, img_w: 0, img_h: 0, rect: None }
+    }
+    pub fn set_image(&mut self, data: Vec<u8>, w: u32, h: u32) {
+        self.img = Some(data);
+        self.img_w = w;
+        self.img_h = h;
     }
 }
 
@@ -58,21 +72,43 @@ impl Widget for StackCard {
     fn draw(&mut self, ctx: &mut DrawCtx, rect: Rect) {
         self.rect = Some(rect);
         ctx.fill(rect, GRAY_WHITE);
-        let border = 2u32;
         let pad = 8u32;
-        if rect.w > pad * 2 + 4 && rect.h > pad * 2 + 4 {
-            ctx.outline(
-                Rect { x: rect.x + pad, y: rect.y + pad, w: rect.w - pad * 2, h: rect.h - pad * 2 },
-                border,
-                GRAY_BLACK,
-            );
+        let step = 5i32; // C eh_draw_series_stack_back's offset step
+        // Cover area inside the tile (C eh_cover_rect's inset).
+        let cx = rect.x as i32 + pad as i32;
+        let cy = rect.y as i32 + pad as i32;
+        let cw = rect.w.saturating_sub(pad * 2) as i32;
+        let ch = rect.h.saturating_sub(pad * 2) as i32;
+        if cw > step * 3 && ch > step * 3 {
+            // Back page sheet (furthest up-left), then the front sheet.
+            for off in [2 * step, step] {
+                ctx.outline(
+                    Rect { x: (cx - off) as u32, y: (cy - off) as u32, w: cw as u32, h: ch as u32 },
+                    2,
+                    GRAY_BLACK,
+                );
+            }
+            let art = Rect { x: cx as u32, y: cy as u32, w: cw as u32, h: ch as u32 };
+            if let (Some(img), true) = (&self.img, cw > 4 && ch > 4) {
+                ctx.blit(img, self.img_w, self.img_h, PixelFormat::Rgb24, art);
+            } else {
+                ctx.fill(art, GRAY_WHITE);
+            }
+            // Outline the cover rect so it reads as the top book.
+            ctx.outline(art, 2, GRAY_BLACK);
+            // Count badge over the art, top-right (white digits on black).
+            let badge = format!("{}", self.count);
+            let bw = ctx.font.width(&badge, 20.0) as u32 + 12;
+            let bh = 26u32;
+            let bx = cx + cw - bw as i32 - 2;
+            let by = cy + 2;
+            ctx.fill(Rect { x: bx as u32, y: by as u32, w: bw, h: bh }, GRAY_BLACK);
+            ctx.text(bx + 6, by + 20, 20.0, &badge, GRAY_WHITE);
         }
-        let cx = rect.x as i32 + rect.w as i32 / 2;
-        let cy = rect.y as i32 + rect.h as i32 / 2;
+        // Group label beneath the stack.
+        let ccx = rect.x as i32 + rect.w as i32 / 2;
         let max_w = rect.w.saturating_sub(12) as i32;
-        ctx.text_center_fit(cx, cy - 8, 20.0, &self.label, max_w, GRAY_BLACK);
-        let sub = format!("{} books", self.count);
-        ctx.text_center_fit(cx, cy + 26, 16.0, &sub, max_w, GRAY_DGRAY);
+        ctx.text_center_fit(ccx, (rect.y + rect.h - 10) as i32, 20.0, &self.label, max_w, GRAY_BLACK);
     }
     fn dirty(&self, out: &mut Vec<Rect>) {
         if let Some(r) = self.rect {
@@ -93,12 +129,14 @@ pub struct ListCell {
     pub img_h: u32,
     pub title: String,
     pub author: String,
+    /// Percent read (0..=100); >0 draws the bar over the thumb bottom.
+    pub progress: u8,
     rect: Option<Rect>,
 }
 
 impl ListCell {
     pub fn new(title: impl Into<String>) -> Self {
-        Self { img: None, img_w: 0, img_h: 0, title: title.into(), author: String::new(), rect: None }
+        Self { img: None, img_w: 0, img_h: 0, title: title.into(), author: String::new(), progress: 0, rect: None }
     }
     pub fn set_image(&mut self, data: Vec<u8>, w: u32, h: u32) {
         self.img = Some(data);
@@ -126,6 +164,11 @@ impl Widget for ListCell {
             ctx.line(tx, ty, tx + cww, ty + chh, 2, GRAY_LGRAY); // diagonal placeholder
             ctx.line(tx + cww, ty, tx, ty + chh, 2, GRAY_LGRAY);
         }
+        // Reading progress: black bar at the thumb's bottom edge (the C
+        // list branch draws draw_progress_bar over the small cover).
+        if self.progress > 0 {
+            draw_progress_bar(ctx, tx, ty, cww, chh, self.progress as i32);
+        }
         // Title / author beside the thumb (C: DEFAULTFONTB 30 / DEFAULTFONT 24,
         // left-aligned at the C text origin).
         let text_x = tx + cww + 16;
@@ -142,6 +185,66 @@ impl Widget for ListCell {
     }
     fn hit(&self, x: i32, y: i32) -> bool {
         matches!(self.rect, Some(r) if (x as u32) >= r.x && (x as u32) < r.x + r.w && (y as u32) >= r.y && (y as u32) < r.y + r.h)
+    }
+}
+
+/// A grid-mode cover tile plus its reading-progress bar (the C
+/// draw_thumbnail_fonts grid branch paints draw_progress_bar over the
+/// cover's bottom edge).
+struct CoverTile {
+    cover: Cover,
+    progress: u8,
+}
+
+impl Widget for CoverTile {
+    fn draw(&mut self, ctx: &mut DrawCtx, rect: Rect) {
+        self.cover.draw(ctx, rect);
+        if self.progress > 0 {
+            // The shell's Cover paints its art across the top ~78% of the
+            // tile (its letterboxed cover area) — anchor the bar there,
+            // mirroring the C eh_cover_rect cover-card bottom edge.
+            let img_h = (rect.h as f32 * 0.78) as i32;
+            draw_progress_bar(ctx, rect.x as i32, rect.y as i32, rect.w as i32, img_h, self.progress as i32);
+        }
+    }
+    fn dirty(&self, out: &mut Vec<Rect>) {
+        self.cover.dirty(out);
+    }
+    fn hit(&self, x: i32, y: i32) -> bool {
+        self.cover.hit(x, y)
+    }
+}
+
+/// Bar height by cover width (C draw_progress_bar): 10px on covers ≥150px
+/// wide, 6px on small thumbs.
+pub fn progress_bar_h(width: i32) -> i32 {
+    if width >= 150 { 10 } else { 6 }
+}
+
+/// Inner fill width for `pct` (C: fill = cw*pct/100, drawn only once it
+/// leaves a ≥1px white margin on each side).
+pub fn progress_fill_w(width: i32, pct: i32) -> i32 {
+    width * pct.clamp(0, 100) / 100
+}
+
+/// Reading-progress bar inside the bottom edge of a cover (port of C
+/// eh_grid.c draw_progress_bar): a thin white track with black outline and
+/// a black fill proportional to the percent read (0..100).
+fn draw_progress_bar(ctx: &mut DrawCtx, x: i32, y: i32, w: i32, h: i32, pct: i32) {
+    if w <= 0 || h <= 0 || x < 0 || y < 0 {
+        return;
+    }
+    let bar_h = progress_bar_h(w).min(h);
+    let by = y + h - bar_h;
+    let track = Rect { x: x as u32, y: by as u32, w: w as u32, h: bar_h as u32 };
+    ctx.fill(track, GRAY_WHITE);
+    ctx.outline(track, 1, GRAY_BLACK);
+    let fill = progress_fill_w(w, pct);
+    if fill >= 2 && bar_h >= 3 {
+        ctx.fill(
+            Rect { x: x as u32 + 1, y: by as u32 + 1, w: (fill - 2) as u32, h: (bar_h - 2) as u32 },
+            GRAY_BLACK,
+        );
     }
 }
 
@@ -162,6 +265,9 @@ pub fn build_shelf<B: Framebuffer>(
     source: crate::app::Source,
     search_tab: bool,
     syncing: bool,
+    // Current sync-glyph rotation (deg) — 0 idle, advancing while a
+    // sync/download is in flight (C sync_spin_tick).
+    sync_angle: i32,
 ) -> Screen<B> {
     let font = load_font();
     let mut screen = Screen::new(fb, font);
@@ -175,6 +281,7 @@ pub fn build_shelf<B: Framebuffer>(
         view_mode,
         search: search_tab,
         syncing,
+        sync_angle,
         title: title.to_string(),
     };
     screen.add_styled(
@@ -220,7 +327,10 @@ pub fn build_shelf<B: Framebuffer>(
             let row_h = if entries.is_empty() { grid_h } else { g.cell_h };
             for e in entries {
                 if e.stack {
-                    let c = StackCard::new(e.stack_label.clone(), e.stack_count);
+                    let mut c = StackCard::new(e.stack_label.clone(), e.stack_count);
+                    if let Some((rgb, w, h)) = &e.art {
+                        c.set_image(rgb.clone(), *w, *h);
+                    }
                     let style = Style {
                         size: taffy::geometry::Size {
                             width: Dimension::percent(1.0 / cols as f32),
@@ -245,13 +355,15 @@ pub fn build_shelf<B: Framebuffer>(
                     },
                     ..Style::default()
                 };
-                screen.add_to(grid, Box::new(c), style);
+                let tile = CoverTile { cover: c, progress: e.progress };
+                screen.add_to(grid, Box::new(tile), style);
             }
         }
         crate::app::ViewMode::List => {
             for e in entries {
                 let mut c = ListCell::new(e.book.title.clone());
                 c.author = e.book.author.clone();
+                c.progress = e.progress;
                 if let Some((rgb, w, h)) = &e.art {
                     c.set_image(rgb.clone(), *w, *h);
                 }
@@ -297,7 +409,7 @@ pub fn load_page(
         .into_iter()
         .map(|book| {
             let art = fetch_cover(client, covers_dir, &book.id).ok().flatten();
-            ShelfEntry { book, art, stack: false, stack_label: String::new(), stack_count: 0, stack_scope: String::new() }
+            ShelfEntry { book, art, stack: false, stack_label: String::new(), stack_count: 0, stack_scope: String::new(), progress: 0 }
         })
         .collect()
 }
@@ -406,7 +518,8 @@ pub fn build_search<B: Framebuffer>(
         view_mode: crate::app::ViewMode::Grid,
         search: true,
         syncing,
-        title: "Search".to_string(),
+        sync_angle: 0,
+        title: crate::i18n::tr("tab.search").to_string(),
     };
     screen.add_styled(
         Box::new(TopBar::new(tb_state)),
@@ -445,7 +558,7 @@ pub fn build_search<B: Framebuffer>(
         ..Style::default()
     });
     if history.is_empty() {
-        let mut w = HistoryRow::new("No recent searches");
+        let mut w = HistoryRow::new(crate::i18n::tr("search.empty"));
         w.hint = true;
         screen.add_to(
             body,
@@ -502,4 +615,42 @@ fn text_left_fit(ctx: &mut DrawCtx, x: i32, baseline: i32, size: f32, s: &str, m
         shown.pop();
     }
     ctx.text(x, baseline, size, &format!("{shown}…"), gray);
+}
+
+#[cfg(test)]
+mod progress_bar_tests {
+    use super::*;
+
+    #[test]
+    fn bar_height_switches_at_150px() {
+        // C draw_progress_bar: 10px on wide covers, 6px on small thumbs.
+        assert_eq!(progress_bar_h(150), 10);
+        assert_eq!(progress_bar_h(400), 10);
+        assert_eq!(progress_bar_h(149), 6);
+        assert_eq!(progress_bar_h(85), 6);
+    }
+
+    #[test]
+    fn fill_width_is_proportional_and_clamped() {
+        // C: fill = cw * pct / 100 (integer division floors).
+        assert_eq!(progress_fill_w(300, 50), 150);
+        assert_eq!(progress_fill_w(300, 33), 99);
+        assert_eq!(progress_fill_w(85, 100), 85);
+        assert_eq!(progress_fill_w(85, 0), 0);
+        // Out-of-range percents clamp before scaling (C clamps first).
+        assert_eq!(progress_fill_w(300, -20), 0);
+        assert_eq!(progress_fill_w(300, 140), 300);
+    }
+
+    #[test]
+    fn fill_never_leaves_the_track() {
+        for w in [1i32, 6, 85, 149, 150, 280, 420] {
+            let f = progress_fill_w(w, 100);
+            assert!(f <= w);
+            // The drawn inner fill keeps a ≥1px white margin per side.
+            if f >= 2 {
+                assert!(f - 2 <= w - 2);
+            }
+        }
+    }
 }
