@@ -155,6 +155,15 @@ name = "eh_hal"
 version = "0.1.0"
 
 [[package]]
+name = "eh_host"
+version = "0.1.0"
+dependencies = [
+ "eh_app",
+ "eh_backend_sdl",
+ "eh_hal",
+]
+
+[[package]]
 name = "eh_layout"
 version = "0.1.0"
 dependencies = [

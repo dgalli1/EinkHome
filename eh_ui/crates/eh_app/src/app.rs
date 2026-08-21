@@ -247,6 +247,9 @@ pub struct App<B: Framebuffer> {
     pub group: crate::store::GroupPreset,
     pub sort: crate::store::SortMode,
     pub drill: u32,
+    /// Page of the level a drill left (C eh_g_saved_pages): restored on
+    /// drill-back so the user lands where they left off.
+    pub drill_saved_page: usize,
     /// The drilled group's raw scope value (author / series_id / genre).
     pub group_scope: String,
     /// Reader preference (C eh_g_state.reader_pref): 0 = Auto, 1 = the
@@ -260,6 +263,12 @@ pub struct App<B: Framebuffer> {
     /// Last keyboard buffer the suggest tick acted on (C g_last_suggest_q):
     /// the 200 ms poll only re-queries the store when the buffer moved.
     pub suggest_q: String,
+    /// Full-library cover-warm queue (C eh_cover_warm_start): remote ids
+    /// still to fetch, one drained per tick while online.
+    pub warm_queue: Vec<String>,
+    /// The settings row (or search input) currently owning the on-screen
+    /// keyboard — the draw inverts the editing row (C eh_g_kb_field).
+    pub kb_editing: Option<KbField>,
     /// Group/sort chooser row rects (drawn in the chooser sheet overlays).
     pub chooser_rects: Vec<Rect>,
     /// Download queue + worker + completion channel.
@@ -313,6 +322,23 @@ pub fn per_page(bp: eh_layout::Breakpoint) -> usize {
     }
 }
 
+/// True when `path` exists (or was just created) and accepts a write
+/// probe — the C `access(wanted, W_OK)` + mkdir dance.
+fn ensure_writable_dir(path: &str) -> bool {
+    if let Err(e) = std::fs::create_dir_all(path) {
+        crate::log(&format!("[eh_app] create {path} failed: {e}"));
+        return false;
+    }
+    let probe = format!("{path}/.eh-probe");
+    match std::fs::OpenOptions::new().write(true).create_new(true).open(&probe) {
+        Ok(_) => {
+            let _ = std::fs::remove_file(&probe);
+            true
+        }
+        Err(_) => false,
+    }
+}
+
 impl<B: Framebuffer> App<B> {
     /// Build the app and render the first shelf page (a fresh store syncs
     /// the full library from the API first; a warm store is instant).
@@ -322,23 +348,29 @@ impl<B: Framebuffer> App<B> {
         let store = Store::open(&db_path)
             .unwrap_or_else(|e| panic!("open store at {}: {e}", db_path.display()));
         let covers_dir = cover::resolve_covers_dir(app_dir);
-        let downloads_dir = config
+        let mut downloads_dir = config
             .downloads_dir
             .clone()
             .unwrap_or_else(|| "/mnt/ext1/Downloads".to_string());
-        if let Err(e) = std::fs::create_dir_all(&downloads_dir) {
-            crate::log(&format!("[eh_app] create downloads dir failed: {e}"));
+        // C eh_resolve_downloads_dir: a downloads dir we cannot create or
+        // write (first run on the host, non-root guest) falls through to
+        // the platform scratch root so downloads still work.
+        if !ensure_writable_dir(&downloads_dir) {
+            crate::log(&format!(
+                "[eh_app] downloads dir {downloads_dir} unusable; falling back to /tmp"
+            ));
+            downloads_dir = "/tmp".to_string();
+            let _ = std::fs::create_dir_all(&downloads_dir);
         }
         let config = Self::ensure_config(&config, cfg_path.as_deref(), &downloads_dir);
         let screen = Screen::new(fb, shelf::shelf_font());
         let (content_bottom, self_panel) = {
             let s = screen.framebuffer().screen();
-            let panel = s.height.saturating_sub(s.content_height());
-            // Live devices with no firmware panel reserve the 106px
-            // self-drawn status strip (C: EH_SELF_PANEL_H); devices where
-            // the firmware owns the panel (or emulators) use the content
-            // area as-is.
-            if panel == 0 {
+            // Live devices with no firmware panel painter draw their own
+            // 106px status strip (C eh_plat_panel_height's *self_panel);
+            // the SDL/PC build and firmware-panel platforms use the
+            // content area as-is.  The BACKEND owns the decision.
+            if screen.framebuffer().needs_self_panel() {
                 (s.height.saturating_sub(106), 106)
             } else {
                 (s.content_height(), 0)
@@ -373,14 +405,20 @@ impl<B: Framebuffer> App<B> {
             syncing: false,
             source_rows: Vec::new(),
             group: crate::store::GroupPreset::None,
-            sort: crate::store::SortMode::Recent,
+            sort: crate::store::SortMode::Title,
             drill: 0,
+            drill_saved_page: 0,
             group_scope: String::new(),
             reader_pref: 0,
             reader_path: "auto".to_string(),
             search_kb: false,
             suggestions: Vec::new(),
+            kb_editing: None,
             suggest_q: String::new(),
+            // Full-library cover-warm pass (C eh_cover_warm_start):
+            // remote book ids still needing a cover fetch, popped one
+            // per app tick while online.
+            warm_queue: Vec::new(),
             chooser_rects: Vec::new(),
             downloader: crate::downloads::Downloader::new(),
             dl_single: false,
@@ -410,13 +448,90 @@ impl<B: Framebuffer> App<B> {
         app
     }
 
-    /// Boot: sync the library delta, then build the first shelf page.
+    /// Open the firmware keyboard on a settings field (C
+    /// eh_input.c:435/453): the commit is async — the handler stashes the
+    /// text and [`App::on_event`] drains it.
+    pub fn edit_field(&mut self, field: KbField) {
+        use crate::app::{kb_arm, kb_take_pending};
+        // The draw inverts the row owning the keyboard (C
+        // eh_settings_draw_row's `editing`).
+        self.kb_editing = Some(field);
+        self.dirty = true;
+        let initial = match field {
+            KbField::ApiHost => self.config.api_url.clone(),
+            KbField::ApiKey => self.config.api_token.clone(),
+            KbField::Search => self.query.clone(),
+        };
+        // Any stale pending commit is discarded (a new edit supersedes it).
+        let _ = kb_take_pending();
+        kb_arm(field);
+        let (title, init) = match field {
+            KbField::ApiHost => ("API host", initial.as_str()),
+            KbField::ApiKey => ("API key", initial.as_str()),
+            KbField::Search => ("Search", initial.as_str()),
+        };
+        // The commit handler lives in eh_backend_inkview (static fn
+        // pointer); it pushes into app's thread_local and we drain on the
+        // next event.
+        self.screen()
+            .framebuffer_mut()
+            .open_keyboard(title, init, crate::app::kb_commit);
+    }
+
+    /// Start the background full-library cover-warm pass (C
+    /// eh_cover_warm_start, run after a remote sync on the Kavita
+    /// source): every server book's cover lands in the on-disk cache so
+    /// offline launches still show real covers — not just the pages the
+    /// user happened to view.
+    fn cover_warm_start(&mut self) {
+        if self.source != Source::Kavita {
+            return;
+        }
+        self.warm_queue = self
+            .store
+            .list_books(1_000_000, 0)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|b| b.id)
+            .collect();
+    }
+
+    /// Drain the warm pass: at most one fetch handed to a background
+    /// thread per call (the C pass arms its bcov weak timer per fetch),
+    /// skipped entirely offline.  The network call MUST NOT run on the
+    /// UI thread — a blocking fetch here stalls event processing for the
+    /// whole request duration and the shell feels dead after boot.
+    fn cover_warm_tick(&mut self) {
+        if self.warm_queue.is_empty() || !self.screen().framebuffer().net_active() {
+            return;
+        }
+        while let Some(id) = self.warm_queue.pop() {
+            if cover::load_cached(&self.covers_dir, &id).is_some() {
+                continue;
+            }
+            let client = self.client.clone();
+            let covers_dir = self.covers_dir.clone();
+            let _ = std::thread::Builder::new()
+                .name("cover-warm".into())
+                .spawn(move || {
+                    let _ = cover::fetch(&client, &covers_dir, &id);
+                });
+            break;
+        }
+    }
+    /// Boot: sync the library delta (only when online or the source is
+    /// local-only — C eh_evt_init), then build the first shelf page.
+
+
     fn boot(&mut self) {
-        crate::logger::log("[bookshelf] do_sync ENTER");
         self.resolve_reader();
-        if let Err(e) = crate::sync::sync(&self.client, &self.store, 50) {
-            crate::logger::log(&format!("[bookshelf] do_sync FAILED: {e}"));
-            crate::log(&format!("[eh_app] sync failed: {e} (showing cached library)"));
+        let online = self.screen().framebuffer().net_active();
+        if self.source != Source::Kavita || online {
+            crate::logger::log("[bookshelf] do_sync ENTER");
+            if let Err(e) = crate::sync::sync(&self.client, &self.store, 50) {
+                crate::logger::log(&format!("[bookshelf] do_sync FAILED: {e}"));
+                crate::log(&format!("[eh_app] sync failed: {e} (showing cached library)"));
+            }
         }
         // Materialise the default view (flat, recent order) — the shelf
         // reads from `view`, and the group/sort choosers rebuild it.
@@ -427,14 +542,19 @@ impl<B: Framebuffer> App<B> {
             total, s as i64, g as i64, d
         ));
         self.refresh_shelf();
-        // C cover-warm pass: fetch the visible page's covers into the cache
-        // so the next launch renders from disk (the offline suite waits for
-        // cached covers after an online boot).  Idempotent (fetch skips
-        // cache hits); best-effort on a dead API.
-        let ids: Vec<String> = self.entries.iter().map(|e| e.book.id.clone()).collect();
-        for id in ids {
-            if cover::load_cached(&self.covers_dir, &id).is_none() {
-                let _ = cover::fetch(&self.client, &self.covers_dir, &id);
+        // Full-library cover-warm pass (C: eh_cover_warm_start after a
+        // remote sync on the Kavita source) — every server cover lands in
+        // the cache in the background, drained by cover_warm_tick.
+        self.cover_warm_start();
+        // The visible page's covers first (the C on-page fetch path), so
+        // the initial shelf shows art without waiting for the background
+        // pass to reach them; skipped entirely offline.
+        if online {
+            let ids: Vec<String> = self.entries.iter().map(|e| e.book.id.clone()).collect();
+            for id in ids {
+                if cover::load_cached(&self.covers_dir, &id).is_none() {
+                    let _ = cover::fetch(&self.client, &self.covers_dir, &id);
+                }
             }
         }
     }
@@ -554,6 +674,25 @@ impl<B: Framebuffer> App<B> {
         }
         match ev {
             InputEvent::KeyDown { key: KeyCode::Back } => self.back(),
+            // Home is a no-op while foregrounded (C eh_evt_keypress: the
+            // taskmanager handles it; closing here would read as a crash).
+            InputEvent::KeyDown { key: KeyCode::Home } => {}
+            // Page-turn buttons paginate the shelf; with an overlay open
+            // they fall through to the Back logic (close the topmost
+            // sheet), matching the stock bookshelf (C eh_evt_keypress).
+            InputEvent::KeyDown { key: key @ (KeyCode::PrevPage | KeyCode::NextPage) } => {
+                if self.overlay == Overlay::None {
+                    let target = match key {
+                        KeyCode::NextPage => self.page + 1,
+                        _ => self.page.saturating_sub(1),
+                    };
+                    if target < self.pages {
+                        self.goto_page(target);
+                    }
+                } else {
+                    self.back();
+                }
+            }
             InputEvent::PointerDown { x, y } => {
                 self.press_pos = Some((*x, *y));
                 self.press_start = Some(std::time::Instant::now());
@@ -621,13 +760,17 @@ impl<B: Framebuffer> App<B> {
             Some((KbField::ApiHost, text)) => {
                 self.config.api_url = normalize_host(&text);
                 self.client = ApiClient::new(&self.config.api_url, &self.config.api_token);
+                self.kb_editing = None;
                 self.save_config();
+                self.dirty = true;
                 true
             }
             Some((KbField::ApiKey, text)) => {
                 self.config.api_token = text;
                 self.client = ApiClient::new(&self.config.api_url, &self.config.api_token);
+                self.kb_editing = None;
                 self.save_config();
+                self.dirty = true;
                 true
             }
             Some((KbField::Search, text)) => {
@@ -655,6 +798,8 @@ impl<B: Framebuffer> App<B> {
     /// band changed and a repaint is due.  The caller owns the cadence
     /// (the facade's weak timer; the C app re-arms SetWeakTimerEx here).
     pub fn tick(&mut self) -> bool {
+        // Background full-library cover-warm pass (one fetch per tick).
+        self.cover_warm_tick();
         if !self.search_kb || self.tab != Tab::Search {
             return false;
         }
@@ -752,10 +897,14 @@ impl<B: Framebuffer> App<B> {
         use crate::appui::{BTN_PAD, BTN_SIZE, SOURCE_BTN_X, SOURCE_BTN_W};
         let r = self.screen().widget_rect(0);
         let w = r.w as i32;
-        // Left button.
+        // Left button: back chevron (search / drilled) or house.
         if x >= BTN_PAD as i32 && x < (BTN_PAD + BTN_SIZE) as i32 {
             if self.tab == Tab::Search {
                 self.leave_search();
+            } else if self.drill > 0 {
+                // While drilled the house is replaced by the back
+                // chevron; tapping it pops one drill level (C eh_drill_back).
+                self.drill_back();
             }
             return;
         }
@@ -875,13 +1024,15 @@ impl<B: Framebuffer> App<B> {
                 return;
             }
         }
-        // Rows are widget indices 2..last.  With the keyboard open and
-        // suggestions showing, the rows parallel self.suggestions (the
-        // band replaced the history list); otherwise the store's
-        // newest-first history list (row i maps to term i-2).
+        // History ROWS are widget indices 3..last: index 2 is the body
+        // CONTAINER (it spans the whole body, so treating it as a row
+        // would swallow every tap below the input).  With the keyboard
+        // open and suggestions showing, the rows parallel self.suggestions
+        // (the band replaced the history list); otherwise the store's
+        // newest-first history list.
         let mut hit: Option<usize> = None;
         let mut rects: Vec<Rect> = Vec::new();
-        for i in 2..last {
+        for i in 3..last {
             rects.push(self.screen().widget_rect(i));
         }
         for (i, r) in rects.iter().enumerate() {
@@ -1384,16 +1535,22 @@ impl<B: Framebuffer> App<B> {
 
     /// Drill into a tapped stack card (or a flat row's group scope).
     fn drill_into_card(&mut self, view_row: &crate::store::ViewRow) {
+        // Remember the page of the level we're leaving so drill-back
+        // lands back where they were (C eh_group_drill).
+        self.drill_saved_page = self.page;
         self.drill = 1;
         self.group_scope = view_row.series_id.clone();
+        self.page = 0;
         self.rebuild_view();
     }
 
-    /// Back: pop the drill level (C eh_group_drill_back).
+    /// Back: pop the drill level (C eh_group_drill_back), restoring the
+    /// saved page of the level we return into.
     fn drill_back(&mut self) {
         if self.drill > 0 {
             self.drill = 0;
             self.group_scope.clear();
+            self.page = self.drill_saved_page;
             self.rebuild_view();
         }
     }
@@ -1437,17 +1594,21 @@ impl<B: Framebuffer> App<B> {
     }
 
     /// The shelf page size for the current view mode + panel width.  Grid
-    /// uses the breakpoint table; list is always 1 column of fixed-height
-    /// rows that fit the band below the top bar / above the pager.
+    /// uses the C mode-aware grid dims (3×2 on the standard panel); list is
+    /// always 1 column of fixed-height rows that fit above the pager.
     fn page_size(&self, width: u32) -> usize {
         match self.view_mode {
             ViewMode::List => {
-                let band = (self.content_bottom as i32 - TOP_BAR_H as i32 - crate::appui::TOP_BAR_PAD as i32
+                let band = (self.content_bottom as i32 - TOP_BAR_H as i32
+                    - crate::appui::TOP_BAR_PAD as i32
                     - PAGER_H as i32 - 8)
                     .max(1) as u32;
                 (band / shelf::LIST_ROW_H).max(1) as usize
             }
-            ViewMode::Grid => per_page(eh_layout::Breakpoint::from_width(width)),
+            ViewMode::Grid => {
+                let g = shelf::grid_geom(width, self.content_bottom);
+                (g.cols * g.rows) as usize
+            }
         }
     }
 
@@ -1471,14 +1632,18 @@ impl<B: Framebuffer> App<B> {
         };
         screen.content_h = self.content_bottom;
         self.screen = Some(screen);
-        // C draw_grid marker (the e2e harness's wait-for-grid token)
-        // with the projected tile total.
-        let sw = self.screen().framebuffer().screen().width;
-        let view = self.view_total_books();
-        crate::logger::log(&format!(
-            "[bookshelf] draw_grid view={view} page={} cell={}x0 top=96 bot={}",
-            self.page, sw, self.content_bottom
-        ));
+        // C draw_grid marker (the e2e harness's wait-for-grid token) with
+        // the projected tile total — LIBRARY only: the C Search page logs
+        // draw_search_tab instead, and the harness reads a draw_grid in a
+        // search-invocation slice as "jumped to the library".
+        if self.tab == Tab::Library {
+            let sw = self.screen().framebuffer().screen().width;
+            let view = self.view_total_books();
+            crate::logger::log(&format!(
+                "[bookshelf] draw_grid view={view} page={} cell={}x0 top=96 bot={}",
+                self.page, sw, self.content_bottom
+            ));
+        }
         crate::log(&format!(
             "[eh_app] shelf page={}/{} entries={}",
             self.page + 1,
@@ -1590,8 +1755,12 @@ impl<B: Framebuffer> App<B> {
         } else {
             self.store.search(&self.query, per, page * per).unwrap_or_default()
         };
-        for b in &books {
-            let _ = cover::fetch(&self.client, &self.covers_dir, &b.id);
+        // C cover-warm pass — network-gated: an offline flip renders the
+        // cached covers only (no remote fetches, C eh_plat_net_active).
+        if self.screen().framebuffer().net_active() {
+            for b in &books {
+                let _ = cover::fetch(&self.client, &self.covers_dir, &b.id);
+            }
         }
         self.refresh_shelf();
     }
@@ -1825,10 +1994,16 @@ mod tests {
     }
 
     #[test]
-    fn pages_per_breakpoint() {
-        assert_eq!(per_page(eh_layout::Breakpoint::Narrow), 6);
-        assert_eq!(per_page(eh_layout::Breakpoint::Std), 15);
-        assert_eq!(per_page(eh_layout::Breakpoint::Wide), 24);
+    fn grid_dims_match_c_panel() {
+        // The C app at 1072x1448 (SDL/emulator panel): 3×2 = 6 per page,
+        // cells clamped to 352×600 (C eh_view_cols/rows + eh_grid_geom).
+        let g = crate::shelf::grid_geom(1072, 1342);
+        assert_eq!((g.cols, g.rows), (3, 2));
+        assert_eq!((g.cell_w, g.cell_h), (352, 565));
+        // Wide class: 4 columns once 4 minimum cells + 240 fit.
+        assert_eq!(crate::shelf::grid_cols(1404 - 16), 4);
+        // Very tall class: 3 rows (avail_h >= 3*280+560).
+        assert_eq!(crate::shelf::grid_rows(1872 - 96 - 96 - 108 - 8), 3);
     }
 
     // ── live suggest flow (C suggest_debounce_tick + eh_pu_handle_search_kb)
@@ -1999,8 +2174,9 @@ mod tests {
         assert_eq!(app.suggestions, vec!["potter"]);
         app.present(); // compute the rebuilt page's layout before tapping
 
-        // Tap the first row widget (index 2: [0] top bar, [1] input).
-        let r = app.screen().widget_rect(2);
+        // Tap the first row widget (index 3: [0] top bar, [1] input,
+        // [2] body container).
+        let r = app.screen().widget_rect(3);
         tap(&mut app, (r.x + r.w / 2) as i32, (r.y + r.h / 2) as i32);
 
         // C CloseKeyboard + app-side commit: keyboard cancelled (no commit
@@ -2010,6 +2186,26 @@ mod tests {
         assert!(app.suggestions.is_empty());
         assert_eq!(app.query, "potter");
         assert_eq!(app.tab, Tab::Library);
+    }
+
+    #[test]
+    fn outside_tap_below_history_rows_does_not_commit() {
+        // Device regression: with ONE history row the body below it is
+        // blank; a tap there must dismiss the keyboard, never re-run the
+        // stored term (the row widget's rect must not swallow the body).
+        let mut app = mk_app("outside500");
+        app.store.search_add("alpha").unwrap();
+        app.enter_search();
+        app.edit_search();
+        app.present(); // layout with the (empty-suggestion) history list
+
+        let r = app.screen().widget_rect(3);
+        assert_eq!(r.h, 96, "history row must keep its fixed 96px height");
+        tap(&mut app, 536, 500);
+
+        assert_eq!(app.query, "", "outside tap must not commit");
+        assert_eq!(app.tab, Tab::Search);
+        assert!(!app.search_kb);
     }
 
     #[test]
@@ -2062,7 +2258,7 @@ mod tests {
         assert!(app.suggestions.is_empty());
         app.present();
 
-        let r = app.screen().widget_rect(2); // first history row
+        let r = app.screen().widget_rect(3); // first history row
         tap(&mut app, (r.x + r.w / 2) as i32, (r.y + r.h / 2) as i32);
 
         assert!(*kb(&mut app).cancelled.borrow());

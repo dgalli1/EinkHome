@@ -16,6 +16,8 @@ use sdl2::render::{Canvas, Texture};
 use sdl2::video::Window;
 use sdl2::{EventPump, Sdl};
 
+pub mod ipc;
+
 pub struct SdlFb {
     sdl: Sdl,
     canvas: Canvas<Window>,
@@ -170,6 +172,11 @@ impl Framebuffer for SdlFb {
             self.kb_on_done = None;
             self.kb_buf.clear();
         }
+    }
+    fn net_active(&self) -> bool {
+        // The C SDL QueryNetwork: EH_OFFLINE reports no active connection
+        // so the app boots from the on-disk store (the offline e2e suite).
+        std::env::var("EH_OFFLINE").map(|v| v.is_empty()).unwrap_or(true)
     }
 }
 

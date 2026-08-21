@@ -239,6 +239,22 @@ pub trait Framebuffer {
         None
     }
 
+    /// True when the device has an ACTIVE network connection (the C
+    /// `eh_plat_net_active`).  The boot auto-sync and remote cover
+    /// fetches are gated on this: an offline launch renders the cached
+    /// library instead of nagging / stalling on the network.
+    fn net_active(&self) -> bool {
+        true
+    }
+
+    /// Whether the app must draw its own status strip: true on devices
+    /// where the firmware panel painter is absent (C
+    /// `eh_plat_panel_height`'s `*self_panel`), false on the SDL/PC build
+    /// and where the firmware owns the panel band.
+    fn needs_self_panel(&self) -> bool {
+        false
+    }
+
     /// Close an open keyboard WITHOUT firing the commit callback (the C
     /// `CloseKeyboard()`: the handler receives the pre-edit text — used by
     /// the suggestion-tap path, where the app commits the tapped term

@@ -466,6 +466,11 @@ impl Store {
     /// Whether the store has any books with timestamps, series, etc.
     /// Returns (has_author_data, has_series_data, has_year_data, has_genre_data).
     pub fn dim_availability(&self) -> rusqlite::Result<(bool, bool, bool, bool)> {
+        let a: bool = self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM books WHERE author IS NOT NULL AND author!='')",
+            [],
+            |r| r.get(0),
+        )?;
         let y: bool = self.conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM books WHERE added_at IS NOT NULL AND added_at>0)",
             [],
@@ -476,7 +481,12 @@ impl Store {
             [],
             |r| r.get(0),
         )?;
-        Ok((true, s, y, true))
+        let g: bool = self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM books WHERE genre IS NOT NULL AND genre!='')",
+            [],
+            |r| r.get(0),
+        )?;
+        Ok((a, s, y, g))
     }
 
     // ── FTS helpers ────────────────────────────────────────────────────
@@ -530,9 +540,10 @@ impl Store {
     ) -> rusqlite::Result<i64> {
         fn group_key(b: &Book, g: GroupPreset) -> String {
             match g {
-                GroupPreset::Author => b.author.trim().to_string(),
-                GroupPreset::AuthorSeries => {
-                    format!("{}|{}", b.author.trim(), b.series_id.trim())
+                // C dim_at: the Author>Series preset's LEVEL-0 dimension
+                // is author alone (series only at a deeper drill).
+                GroupPreset::Author | GroupPreset::AuthorSeries => {
+                    b.author.trim().to_string()
                 }
                 GroupPreset::Series => b.series_id.trim().to_string(),
                 GroupPreset::Year => year_of(b.added_at).unwrap_or_default(),
@@ -558,18 +569,31 @@ impl Store {
             });
         }
 
-        // Sort.
+        // Sort — the C view_order() comparators verbatim, including the
+        // tie-breaks (NOCASE folds; the series sort deliberately has NO
+        // title tie-break, so a series-less library orders by id).
         all.sort_by(|a, b| {
             let c = match sort {
-                SortMode::Title => a.title.cmp(&b.title),
-                SortMode::Author => a.author.cmp(&b.author).then(a.title.cmp(&b.title)),
-                SortMode::Series => {
-                    a.series
-                        .cmp(&b.series)
-                        .then(a.series_idx.partial_cmp(&b.series_idx).unwrap_or(std::cmp::Ordering::Equal))
-                        .then(a.title.cmp(&b.title))
+                SortMode::Title => a.title.to_lowercase().cmp(&b.title.to_lowercase()),
+                SortMode::Author => a
+                    .author
+                    .to_lowercase()
+                    .cmp(&b.author.to_lowercase())
+                    .then_with(|| a.title.to_lowercase().cmp(&b.title.to_lowercase())),
+                SortMode::Series => a
+                    .series
+                    .to_lowercase()
+                    .cmp(&b.series.to_lowercase())
+                    .then_with(|| {
+                        a.series_idx
+                            .partial_cmp(&b.series_idx)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    }),
+                SortMode::Recent => {
+                    b.added_at.cmp(&a.added_at).then_with(|| {
+                        a.title.to_lowercase().cmp(&b.title.to_lowercase())
+                    })
                 }
-                SortMode::Recent => b.added_at.cmp(&a.added_at).then(a.title.cmp(&b.title)),
             };
             c.then(a.id.cmp(&b.id))
         });
@@ -578,37 +602,57 @@ impl Store {
         self.conn.execute("BEGIN", [])?;
         let result = (|| -> rusqlite::Result<i64> {
             let mut pos = 0i64;
-            if grouped {
-                use std::collections::HashMap;
-                let mut groups: HashMap<String, Vec<Book>> = HashMap::new();
-                if drilled {
-                    // When drilled, show flat books of the matching group.
-                    let key = group_key(&all.first().cloned().unwrap_or_default(), group);
-                    all.retain(|b| group_key(b, group) == key);
-                    for b in &all {
+            if drilled {
+                // When drilled, show flat books of the tapped card's group
+                // scope (C eh_g_group_scope); empty scope keeps the old
+                // first-book fallback.
+                let key = if _scope.is_empty() {
+                    group_key(&all.first().cloned().unwrap_or_default(), group)
+                } else {
+                    _scope.to_string()
+                };
+                all.retain(|b| group_key(b, group) == key);
+                for b in &all {
+                    self.conn.execute(
+                        "INSERT INTO view(pos,kind,book_id,series_id,series_name,series_count) VALUES(?1,?2,?3,?4,?5,?6)",
+                        rusqlite::params![pos, 0, b.id, b.series_id, b.title, 1],
+                    )?;
+                    pos += 1;
+                }
+            } else if grouped {
+                // One stack card per multi-book group, AT ITS FIRST
+                // MEMBER'S POSITION in the active sort, so cards
+                // interleave with the flat single-member tiles instead of
+                // landing after them (C view_rebuild_group).  series_id
+                // carries the raw group value so a card tap can drill.
+                let mut groups: std::collections::HashMap<String, Vec<Book>> = Default::default();
+                for b in &all {
+                    groups.entry(group_key(b, group)).or_default().push(b.clone());
+                }
+                let mut seen: std::collections::HashSet<String> = Default::default();
+                for b in &all {
+                    let k = group_key(b, group);
+                    if !seen.insert(k.clone()) {
+                        continue; // covered by its card or lone tile
+                    }
+                    let members = &groups[&k];
+                    if members.len() > 1 {
+                        let label = group_label(members, group);
+                        self.conn.execute(
+                            "INSERT INTO view(pos,kind,book_id,series_id,series_name,series_count) VALUES(?1,?2,?3,?4,?5,?6)",
+                            rusqlite::params![pos, 1, members[0].id, k, label, members.len() as i64],
+                        )?;
+                    } else {
                         self.conn.execute(
                             "INSERT INTO view(pos,kind,book_id,series_id,series_name,series_count) VALUES(?1,?2,?3,?4,?5,?6)",
                             rusqlite::params![pos, 0, b.id, b.series_id, b.title, 1],
                         )?;
-                        pos += 1;
                     }
-                } else {
-                    for b in &all {
-                        let k = group_key(b, group);
-                        groups.entry(k).or_default().push(b.clone());
-                    }
-                    for (_k, members) in &groups {
-                        let kind = if members.len() > 1 { 1 } else { 0 };
-                        let sid = members[0].series_id.clone();
-                        let label = group_label(members, group);
-                        self.conn.execute(
-                            "INSERT INTO view(pos,kind,book_id,series_id,series_name,series_count) VALUES(?1,?2,?3,?4,?5,?6)",
-                            rusqlite::params![pos, kind, members[0].id, sid, label, members.len() as i64],
-                        )?;
-                        pos += 1;
-                    }
+                    pos += 1;
                 }
             } else {
+                // No grouping ("All books", or the leaf of a drill):
+                // every book as an individual tile in sort order.
                 for b in &all {
                     self.conn.execute(
                         "INSERT INTO view(pos,kind,book_id,series_id,series_name,series_count) VALUES(?1,?2,?3,?4,?5,?6)",
@@ -1016,6 +1060,63 @@ mod tests {
         let list = store.list_books(10, 0).unwrap();
         assert_eq!(list[0].id, "newer");
         assert_eq!(list[1].id, "older");
+    }
+
+    #[test]
+    fn ungrouped_view_lists_every_book_flat() {
+        // Regression: the card-interleave rewrite collapsed the
+        // no-grouping projection into a single group (group_key(None) is
+        // "" for every book), so the whole library rendered as ONE card.
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("t.db")).unwrap();
+        for i in 0..4 {
+            store
+                .upsert_book(&BookMeta {
+                    id: format!("k{i}"),
+                    title: format!("Book {i}"),
+                    ..Default::default()
+                })
+                .unwrap();
+        }
+        let n = store.view_rebuild(0, 0, 0, "", "").unwrap();
+        assert_eq!(n, 4);
+        let kinds: Vec<i64> = store
+            .view_page(10, 0)
+            .unwrap()
+            .iter()
+            .map(|r| r.kind)
+            .collect();
+        assert_eq!(kinds, vec![0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn grouped_view_makes_interleaved_cards() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("t.db")).unwrap();
+        for (id, author) in [
+            ("a1", "Ann"),
+            ("a2", "Ann"),
+            ("b1", "Bob"),
+        ] {
+            store
+                .upsert_book(&BookMeta {
+                    id: id.into(),
+                    title: id.into(),
+                    authors: vec![author.into()],
+                    ..Default::default()
+                })
+                .unwrap();
+        }
+        // group=2 = Author; cards at their first member's sort position.
+        let n = store.view_rebuild(2, 0, 0, "", "").unwrap();
+        assert_eq!(n, 2);
+        let kinds: Vec<i64> = store
+            .view_page(10, 0)
+            .unwrap()
+            .iter()
+            .map(|r| r.kind)
+            .collect();
+        assert_eq!(kinds, vec![1, 0]);
     }
 
     #[test]

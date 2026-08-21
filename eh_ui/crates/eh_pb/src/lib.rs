@@ -70,23 +70,18 @@ fn init_once() {
 /// one-shot fires once per arm), so work started at ANY time after boot is
 /// caught; presenting only runs while something changed.
 extern "C" fn eh_pb_tick(_data: *mut std::ffi::c_void) {
-    use eh_app::app::Overlay;
-    let mut due = false;
     APP.with(|a| {
         if let Some(app) = a.borrow_mut().as_mut() {
             // The 200 ms suggest poll (C suggest_debounce_tick); cheap
             // no-op while the search keyboard is closed.
-            due |= app.tick();
-            due |= app.downloader.pending > 0 || matches!(app.overlay, Overlay::Download);
+            app.tick();
+            // ALWAYS present: present() drains a keyboard commit that the
+            // firmware delivered AFTER the tap's own flush (the return-key
+            // tap reaches the app first, the handler fires second), and
+            // early-returns for free when nothing changed.
+            app.present();
         }
     });
-    if due {
-        APP.with(|a| {
-            if let Some(app) = a.borrow_mut().as_mut() {
-                app.present();
-            }
-        });
-    }
     arm_tick();
 }
 

@@ -554,9 +554,9 @@ def test_layout_toggle_button(fresh_bookshelf):
     """The top-bar layout icon toggles grid/list (the drawer no longer
     carries separate Grid/List rows)."""
     bs = fresh_bookshelf
-    h = bs.frame_hash()
+    before = bs.frame_hash()
     bs.tap_at(*bs._g.layout_icon_center())
-    assert bs.frame_hash() != h, "layout toggle did not change the view"
+    bs.wait_hash_change(before)
     bs.assert_no_crash()
 
 
@@ -865,9 +865,10 @@ def test_launcher_tap_app_launches_task(fresh_bookshelf):
     bs.tap_at(*bs.geom.more_item_center(MORE_APPS))
     bs.wait_hash_change(before)
     before = bs.frame_hash()
+    before_log = bs.current_log()
     bs.tap_launcher_app(0)
     bs.wait_hash_change(before)
-    bs.assert_log_contains("launching app path=")
+    _wait_log_slice(bs, before_log, "launching app path=")
 
 
 # ── search ────────────────────────────────────────────────────────────
@@ -910,10 +911,13 @@ def test_search_commit_filters_grid(fresh_bookshelf):
     bs.tap_search_and_verify()
     time.sleep(0.5)
     kb = bs.tap_search_input_and_verify()
+    before_log = bs.current_log()
     bs.type_text("alpha", commit=True)
     bs.wait_hash_change(kb)
     # The committed query reached the filter (pre-fix this was empty).
-    bs.assert_log_contains("query=`alpha`")
+    # Poll: the commit's log lines land a beat after the frame the hash
+    # wait above observed.
+    _wait_log_slice(bs, before_log, "query=`alpha`")
 
 
 def test_search_history_persists_and_reruns(fresh_bookshelf):
@@ -1207,7 +1211,7 @@ def test_group_by_single_level_stacks_and_drill(fresh_bookshelf):
     before = bs.current_log()
     h = bs.frame_hash()
     bs.tap_book(0)
-    assert bs.frame_hash() != h, "stack card tap did not change the view"
+    bs.wait_hash_change(h)
     _wait_log_slice(bs, before, "drill=1")
 
     # Back returns to the grouped stacks.
@@ -1599,6 +1603,29 @@ def _wait_log_count(bs: BookshelfSession, needle: str, count: int, *, timeout: f
         time.sleep(0.5)
     got = bs.current_log().count(needle)
     raise AssertionError(f"log contains {needle!r} {got}x, expected >= {count}")
+
+
+def _wait_draw_grid_view(bs: BookshelfSession, before: str, want: int, *, timeout: float = 8.0) -> int:
+    """Poll until the last draw_grid marker in the post-*before* slice
+    reports *want* books, returning it.  The commit's view_rebuild +
+    draw_grid lines land in the guest log a beat after the suggest-tap
+    marker the caller just polled for — a single read can race them."""
+    import time
+    deadline = time.monotonic() + timeout
+    view = None
+    while time.monotonic() < deadline:
+        cur = bs.current_log()
+        sl = cur[len(before):]
+        if "draw_grid" in sl:
+            view, _ = _last_draw_grid(sl)
+            if view == want:
+                return view
+        time.sleep(0.2)
+        tail = bs.current_log()[-600:]
+    raise AssertionError(
+        f"draw_grid never settled to view={want} (last {view}); "
+        f"loglen={len(bs.current_log())} beforelen={len(before)} tail:\n{tail}"
+    )
 
 
 def _wait_log_slice(bs: BookshelfSession, before: str, needle: str, *, timeout: float = 8.0) -> None:
@@ -2309,8 +2336,7 @@ def test_search_suggestions_live_and_commit(fresh_bookshelf):
         _wait_log_slice(bs, before, "suggest tap: term=`potter`")
         # The tapped term committed (app-side, history-tap sequence)
         # and the grid filtered to exactly the Potter book.
-        view, _ = _last_draw_grid(bs.current_log())
-        assert view == 1, f"grid not filtered to the potter book: view={view}"
+        _wait_draw_grid_view(bs, before, 1)
 
         # ── Phase 2: phrase completion ("harry po" -> "harry potter") ──
         bs.tap_search_and_verify()
@@ -2328,8 +2354,7 @@ def test_search_suggestions_live_and_commit(fresh_bookshelf):
         before = bs.current_log()
         bs.tap_at(*bs.geom.suggestion_row_center(0))
         _wait_log_slice(bs, before, "suggest tap: term=`harry potter`")
-        view, _ = _last_draw_grid(bs.current_log())
-        assert view == 1, f"phrase search not filtered: view={view}"
+        _wait_draw_grid_view(bs, before, 1)
     finally:
         hp.unlink(missing_ok=True)
 
@@ -2366,7 +2391,6 @@ def test_search_folded_suggestion_finds_diacritic_title(fresh_bookshelf):
         before = bs.current_log()
         bs.tap_at(*bs.geom.suggestion_row_center(0))
         _wait_log_slice(bs, before, "suggest tap: term=`songgong`")
-        view, _ = _last_draw_grid(bs.current_log())
-        assert view == 1, f"folded search found no book: view={view}"
+        _wait_draw_grid_view(bs, before, 1)
     finally:
         hp.unlink(missing_ok=True)

@@ -229,12 +229,13 @@ def _build_bookshelf() -> Path:
 
 
 def _newest_src_mtime() -> float:
-    """Newest mtime across the app sources + build scripts (for the SDL
-    test binary freshness check)."""
+    """Newest mtime across the Rust app sources (for the SDL test
+    binary freshness check)."""
     newest = 0.0
     for base in (
-        EINKHOME_ROOT / "app",
-        EINKHOME_ROOT / "sdk",
+        EINKHOME_ROOT / "eh_ui" / "Cargo.toml",
+        EINKHOME_ROOT / "eh_ui" / "Cargo.lock",
+        EINKHOME_ROOT / "eh_ui" / "crates",
         EINKHOME_ROOT / "Makefile",
     ):
         if base.is_file():
@@ -273,23 +274,26 @@ def _ensure_sdl_test_binary() -> Path:
             _SDL_TEST_OUT.stat().st_mtime >= _newest_src_mtime()
         ):
             return _SDL_TEST_OUT
-        env = os.environ.copy()
-        env["EH_ENABLE_TEST_IPC"] = "1"
-        # The host Rust extraction library (eh_lib) is linked as the
-        # trailing EXTRA arg, exactly like the `make pc` target.
-        rust_lib = EINKHOME_ROOT / "build" / "libeh_lib_host.a"
+        # The Rust host (eh_host's bookshelf.test bin) carries the IPC
+        # control plane unconditionally — no EH_ENABLE_TEST_IPC flag.
         proc = subprocess.run(
-            ["bash", "sdk/build_pc.sh", "--output", "build/bookshelf.test",
-             str(rust_lib)],
-            cwd=EINKHOME_ROOT,
+            ["cargo", "build", "--release", "-p", "eh_host"],
+            cwd=EINKHOME_ROOT / "eh_ui",
             check=False,
             capture_output=True,
             text=True,
-            env=env,
         )
         if proc.returncode != 0:
             sys.stderr.write(proc.stderr or "")
             proc.check_returncode()
+        # Atomic install: a leaked prior instance keeps the old inode
+        # busy ("Text file busy" on a plain overwrite); replace instead.
+        tmp_out = _SDL_TEST_OUT.with_name(_SDL_TEST_OUT.name + ".new")
+        shutil.copy2(
+            EINKHOME_ROOT / "eh_ui" / "target" / "release" / "bookshelf-test",
+            tmp_out,
+        )
+        os.replace(tmp_out, _SDL_TEST_OUT)
     finally:
         fcntl.flock(lock_fh, fcntl.LOCK_UN)
         lock_fh.close()

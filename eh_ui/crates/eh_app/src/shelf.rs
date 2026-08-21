@@ -190,22 +190,34 @@ pub fn build_shelf<B: Framebuffer>(
     );
 
     // --- grid container (fills remaining vertical space, wraps covers) ---
+    let screen_w = screen.framebuffer().screen().width;
+    // --- grid container (fills remaining vertical space, wraps covers).
+    // The 8px side margin is the C grid's left/right inset: cells sized
+    // 1/cols of (w-16) then land exactly on the C tile rects.
     let grid = screen.add_container(Style {
         flex_grow: 1.0,
         flex_shrink: 1.0,
         flex_wrap: taffy::style::FlexWrap::Wrap,
+        align_items: Some(taffy::style::AlignItems::FLEX_START),
+        padding: taffy::geometry::Rect {
+            left: taffy::style::LengthPercentage::length(8.0),
+            right: taffy::style::LengthPercentage::length(8.0),
+            top: taffy::style::LengthPercentage::length(0.0),
+            bottom: taffy::style::LengthPercentage::length(0.0),
+        },
         ..Style::default()
     });
 
-    // Rows sized to the band left between the chrome bands.  Grid mode uses
-    // the breakpoint column count and sizes rows to fill the body; list mode
-    // is a single full-width column of fixed-height (LIST_ROW_H) rows.
+    // Grid mode mirrors the C eh_grid_geom exactly: the mode-aware
+    // column/row counts (3×2 on the standard panel), clamped cell sizes
+    // and an 8px side margin — the tile rects the e2e taps assume.  List
+    // mode is a single full-width column of fixed-height (LIST_ROW_H) rows.
     let grid_h = (content_h as i32 - TOP_BAR_H as i32 - PAGER_H as i32).max(1) as u32;
+    let g = grid_geom(screen_w, content_h);
     match view_mode {
         crate::app::ViewMode::Grid => {
-            let cols = columns_for(screen.breakpoint);
-            let rows = if entries.is_empty() { 1 } else { (entries.len() as u32 + cols - 1) / cols };
-            let row_h = grid_h / rows;
+            let cols = g.cols;
+            let row_h = if entries.is_empty() { grid_h } else { g.cell_h };
             for e in entries {
                 if e.stack {
                     let c = StackCard::new(e.stack_label.clone(), e.stack_count);
@@ -310,6 +322,54 @@ pub fn columns_for(bp: eh_layout::Breakpoint) -> u32 {
     }
 }
 
+// ── C grid geometry (eh_grid.c) ─────────────────────────────────────
+// The tile layout the e2e tap targets are written against: mode-aware
+// column/row counts, min/max-clamped cells, and the 8px side inset.
+
+pub const CELL_MIN_W: u32 = 280;
+pub const CELL_MIN_H: u32 = 280;
+/// C EH_CELL_MAX_W / EH_CELL_MAX_H (the wide-panel clamps).
+pub const CELL_MAX_W: u32 = 420;
+pub const CELL_MAX_H: u32 = 600;
+
+/// C eh_view_cols (grid mode): 4 on the 1404px class, 3 on standard
+/// panels, 2 when three minimum-width covers cannot fit.
+pub fn grid_cols(avail_w: u32) -> u32 {
+    if avail_w >= 4 * CELL_MIN_W + 240 {
+        4
+    } else if avail_w >= 3 * CELL_MIN_W {
+        3
+    } else {
+        2
+    }
+}
+
+/// C eh_view_rows (grid mode): three rows only on the very tall class.
+pub fn grid_rows(avail_h: u32) -> u32 {
+    if avail_h >= 3 * CELL_MIN_H + 560 { 3 } else { 2 }
+}
+
+/// The active grid's column/row counts and clamped cell size (C
+/// eh_view_cols × eh_view_rows × eh_grid_geom, grid mode).
+pub fn grid_geom(screen_w: u32, content_bottom: u32) -> GridGeom {
+    let avail_w = screen_w.saturating_sub(16);
+    let bot = content_bottom.saturating_sub(PAGER_H);
+    let avail_h = bot.saturating_sub(TOP_BAR_H + crate::appui::TOP_BAR_PAD + 8);
+    let cols = grid_cols(avail_w);
+    let rows = grid_rows(avail_h);
+    let cell_w = (avail_w / cols).min(CELL_MAX_W).max(CELL_MIN_W);
+    let cell_h = (avail_h / rows).min(CELL_MAX_H).max(CELL_MIN_H);
+    GridGeom { cols, rows, cell_w, cell_h }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct GridGeom {
+    pub cols: u32,
+    pub rows: u32,
+    pub cell_w: u32,
+    pub cell_h: u32,
+}
+
 pub(crate) fn load_font() -> &'static Font {
     let f = Font::from_bytes(include_bytes!("../../../fonts/DejaVuSans.ttf"))
         .expect("embed font");
@@ -378,6 +438,10 @@ pub fn build_search<B: Framebuffer>(
         flex_grow: 1.0,
         flex_shrink: 1.0,
         flex_wrap: taffy::style::FlexWrap::Wrap,
+        // Rows keep their fixed 96px height: without this the wrap
+        // container's default cross-axis stretch blows a short history
+        // list up over the whole body (a tap anywhere then commits).
+        align_items: Some(taffy::style::AlignItems::FLEX_START),
         ..Style::default()
     });
     if history.is_empty() {

@@ -222,6 +222,14 @@ pub fn build<B: Framebuffer>(app: &mut App<B>) -> bool {
         }
     }
 
+
+    // Host fallback (the C SDL build's freedesktop discovery): when the
+    // firmware desktop configs and the ext1 scan yield nothing, list the
+    // standard .desktop application dirs so the launcher still opens.
+    if app.launcher_items.is_empty() {
+        scan_desktop_apps(app);
+    }
+
     layout(app);
     crate::log(&format!(
         "[eh_app] launcher built: {} items, body_h={}",
@@ -229,6 +237,77 @@ pub fn build<B: Framebuffer>(app: &mut App<B>) -> bool {
         app.launcher_body_h
     ));
     !app.launcher_items.is_empty()
+}
+
+/// Scan the freedesktop application dirs (C eh_plat_launcher_build on the
+/// SDL backend): /usr/share/applications then $HOME/.local/share/
+/// applications, mapping Name=/Exec=/Icon= onto launcher items and
+/// skipping Hidden/NoDisplay/non-application entries.
+fn scan_desktop_apps<B: Framebuffer>(app: &mut App<B>) {
+    let mut dirs = vec!["/usr/share/applications".to_string()];
+    if let Ok(home) = std::env::var("HOME") {
+        dirs.push(format!("{home}/.local/share/applications"));
+    }
+    for dir in dirs {
+        let Ok(rd) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        let mut files: Vec<String> = rd
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| n.ends_with(".desktop"))
+            .collect();
+        files.sort();
+        for name in files {
+            let Ok(text) = std::fs::read_to_string(format!("{dir}/{name}")) else {
+                continue;
+            };
+            let mut entry_type = String::new();
+            let mut hidden = false;
+            let mut no_display = false;
+            let mut title = String::new();
+            let mut exec = String::new();
+            let mut icon = String::new();
+            for line in text.lines() {
+                let Some((key, val)) = line.split_once('=') else {
+                    continue;
+                };
+                match key.trim() {
+                    "Type" => entry_type = val.trim().to_string(),
+                    "Hidden" => hidden = val.trim() == "true",
+                    "NoDisplay" => no_display = val.trim() == "true",
+                    "Name" => title = val.trim().to_string(),
+                    "Exec" => exec = val.trim().to_string(),
+                    "Icon" => icon = val.trim().to_string(),
+                    _ => {}
+                }
+            }
+            if entry_type != "Application" || hidden || no_display {
+                continue;
+            }
+            // Exec's first argv token is the launch path (C
+            // parse_desktop_exec); strip quotes.
+            let cmd = exec
+                .split_whitespace()
+                .next()
+                .unwrap_or("")
+                .trim_matches('"')
+                .to_string();
+            if cmd.is_empty() {
+                continue;
+            }
+            app.launcher_items.push(LauncherItem {
+                group: false,
+                text: if title.is_empty() {
+                    name.trim_end_matches(".desktop").to_string()
+                } else {
+                    title
+                },
+                path: cmd,
+                icon,
+            });
+        }
+    }
 }
 
 /// Lay every item out in one continuous column (C eh_launcher_layout):

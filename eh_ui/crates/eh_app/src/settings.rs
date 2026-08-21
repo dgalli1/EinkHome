@@ -67,22 +67,32 @@ pub fn draw<B: Framebuffer>(surf: &mut eh_render::Surface, app: &mut App<B>, dir
 
     let dl = app.config.downloads_dir.clone().unwrap_or_default();
     let reader_val = if app.reader_pref == 1 { "Standard".to_string() } else { "Auto".to_string() };
+    // Live install state (C eh_sysapp_detect): toggling flips the row.
+    let sysapp_val = if crate::sysapp::detect() { "On" } else { "Off" };
     let rows: [(SettingsRow, &str, &str); 5] = [
         (SettingsRow::ApiHost, "API host", &app.config.api_url),
         (SettingsRow::ApiKey, "API key", &app.config.api_token),
         (SettingsRow::ReaderApp, "Reader app", &reader_val),
         (SettingsRow::DownloadFolder, "Download folder", &dl),
-        (SettingsRow::SystemApp, "System app", "Off"),
+        (SettingsRow::SystemApp, "System app", sysapp_val),
     ];
     let mut y = ROWS_Y0 as i32;
     for (row, label, value) in rows.iter() {
         // Row card (C eh_settings_draw_row: 32px margins, 120-12 tall,
-        // label on top, value below).
+        // label on top, value below).  The row owning the keyboard draws
+        // inverted (BLACK card, WHITE text — the C `editing` flag).
+        let editing = matches!(
+            (app.kb_editing, row),
+            (Some(KbField::ApiHost), SettingsRow::ApiHost)
+                | (Some(KbField::ApiKey), SettingsRow::ApiKey)
+        );
+        let (card_col, text_col, value_col) =
+            if editing { (GRAY_BLACK, GRAY_WHITE, GRAY_WHITE) } else { (GRAY_WHITE, GRAY_BLACK, GRAY_DGRAY) };
         let ry = y as u32;
-        surf.fill_gray(Rect { x: MARGIN, y: ry, w: w - 2 * MARGIN, h: ROW_H - 12 }, GRAY_WHITE);
+        surf.fill_gray(Rect { x: MARGIN, y: ry, w: w - 2 * MARGIN, h: ROW_H - 12 }, card_col);
         surf.rect_outline(Rect { x: MARGIN, y: ry, w: w - 2 * MARGIN, h: ROW_H - 12 }, 2, GRAY_BLACK);
-        draw_text(surf, font, 26.0, label, (MARGIN + 16) as i32, ry as i32 + 40, GRAY_BLACK, &mut glyph);
-        draw_text(surf, font, 30.0, value, (MARGIN + 16) as i32, ry as i32 + 82, GRAY_DGRAY, &mut glyph);
+        draw_text(surf, font, 26.0, label, (MARGIN + 16) as i32, ry as i32 + 40, text_col, &mut glyph);
+        draw_text(surf, font, 30.0, value, (MARGIN + 16) as i32, ry as i32 + 82, value_col, &mut glyph);
         app.settings_rows.push((Rect { x: MARGIN, y: ry, w: w - 2 * MARGIN, h: ROW_H - 12 }, *row));
         y += ROW_H as i32;
     }
@@ -138,40 +148,25 @@ pub fn tap_settings<B: Framebuffer>(x: i32, y: i32, app: &mut App<B>) {
                 app.overlay = crate::app::Overlay::Licenses;
                 app.dirty = true;
             }
-            SettingsRow::DownloadFolder | SettingsRow::SystemApp => {
-                crate::log(&format!("[eh_app] settings: {row:?} not ported yet"));
+            SettingsRow::DownloadFolder => {
+                crate::log("[eh_app] settings: DownloadFolder not ported yet");
+            }
+            SettingsRow::SystemApp => {
+                // Toggle: promote the running binary, or unpromote when
+                // already installed (C eh_settings_toggle_sysapp).
+                if crate::sysapp::detect() {
+                    crate::sysapp::unpromote();
+                    crate::logger::log(
+                        "[bookshelf] sysapp: removed from system — stock home returns after reboot",
+                    );
+                } else if crate::sysapp::promote(app) {
+                    crate::logger::log(
+                        "[bookshelf] sysapp: installed as system app — reboot to boot EinkHome as the home screen",
+                    );
+                }
+                app.dirty = true;
             }
         }
         return;
-    }
-}
-
-impl<B: Framebuffer> App<B> {
-    /// Open the firmware keyboard on a settings field (C
-    /// eh_input.c:435/453): the commit is async — the handler stashes the
-    /// text and [`App::on_event`] drains it.
-    pub fn edit_field(&mut self, field: KbField) {
-        use crate::app::{kb_arm, kb_take_pending};
-        let initial = match field {
-            KbField::ApiHost => self.config.api_url.clone(),
-            KbField::ApiKey => self.config.api_token.clone(),
-            KbField::Search => self.query.clone(),
-        };
-        // Any stale pending commit is discarded (a new edit supersedes it).
-        let _ = kb_take_pending();
-        kb_arm(field);
-        let (title, init) = match field {
-            KbField::ApiHost => ("API host", initial.as_str()),
-            KbField::ApiKey => ("API key", initial.as_str()),
-            KbField::Search => ("Search", initial.as_str()),
-        };
-        // The commit handler lives in eh_backend_inkview (static fn
-        // pointer); it pushes into app's thread_local and we drain on the
-        // next event.
-        self.screen().framebuffer_mut().open_keyboard(
-            title,
-            init,
-            crate::app::kb_commit,
-        );
     }
 }

@@ -228,7 +228,7 @@ impl Framebuffer for InkviewFb {
                     buf[..n].copy_from_slice(&initial.as_bytes()[..n]);
                     *g = Some((buf, on_done));
                     let (b, _) = g.as_ref().unwrap();
-                    unsafe {
+                                        unsafe {
                         OpenKeyboard(t.as_ptr() as *const u8, b.as_ptr() as *mut i8, 260,
                                      KBD_PASSEVENTS, kb_commit_handler);
                     }
@@ -275,6 +275,16 @@ impl Framebuffer for InkviewFb {
         }
         #[cfg(not(any(target_arch = "arm", target_arch = "aarch64")))]
         {}
+    }
+
+    fn needs_self_panel(&self) -> bool {
+        // C eh_plat_panel_height: no firmware panel painter (live device,
+        // PanelHeight()==0) → the app draws the 106px strip itself.
+        // PBEMU_SELF_PANEL forces it on for emulator testing.
+        if std::env::var_os("PBEMU_SELF_PANEL").is_some() {
+            return true;
+        }
+        self.panel_h == 0
     }
 }
 
@@ -349,7 +359,7 @@ thread_local! {
 #[allow(non_snake_case)]
 #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
 extern "C" fn kb_commit_handler(buf: *mut i8) {
-    if buf.is_null() {
+        if buf.is_null() {
         return;
     }
     let s = unsafe { std::ffi::CStr::from_ptr(buf as *const u8) }.to_bytes().to_vec();

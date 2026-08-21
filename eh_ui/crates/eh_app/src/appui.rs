@@ -94,7 +94,10 @@ impl Widget for TopBar {
             (left_w + band_w / 2, band_w)
         };
         if !self.state.title.is_empty() {
-            ctx.text_center_fit(center, y0 + 28, 44.0, &self.state.title, budget, col);
+            // C draws the 40px title with its TOP at y0+(TOP_BAR_H-40)/2
+            // (DrawString is top-anchored); our draw_text takes the
+            // BASELINE, so add the ascent (~40px at 44px).
+            ctx.text_center_fit(center, y0 + 28 + 40, 44.0, &self.state.title, budget, col);
         }
 
         // Right icon stack, hidden on the search tab.

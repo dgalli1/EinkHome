@@ -69,7 +69,12 @@ pub fn fetch(client: &ApiClient, covers_dir: &Path, id: &str) -> Result<Vec<u8>,
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
-    std::fs::write(&path, &bytes).map_err(|e| e.to_string())?;
+    // Atomic install: a reader on another thread (the warm pass fetches
+    // off-thread while the UI decodes) must never see a truncated file —
+    // a partial image aborts the whole process under panic=abort.
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, &bytes).map_err(|e| e.to_string())?;
+    std::fs::rename(&tmp, &path).map_err(|e| e.to_string())?;
     Ok(bytes)
 }
 
@@ -82,11 +87,17 @@ use std::io::Cursor;
 /// stores a normalized copy (PNG when re-encoded, or the source bytes).
 /// The shell's Cover consumes raw RGB.
 pub fn decode_rgb(bytes: &[u8]) -> Result<(u32, u32, Vec<u8>), String> {
-    if bytes.starts_with(b"\xff\xd8") {
-        decode_jpeg(bytes)
-    } else {
-        decode_png(bytes)
-    }
+    // The PNG/JPEG decoders can panic on malformed input (a truncated
+    // cache file read mid-write); a panic here would abort the whole
+    // process, so fence them and degrade to a decode error.
+    let res = std::panic::catch_unwind(|| {
+        if bytes.starts_with(b"\xff\xd8") {
+            decode_jpeg(bytes)
+        } else {
+            decode_png(bytes)
+        }
+    });
+    res.unwrap_or_else(|_| Err("decoder panicked on malformed input".into()))
 }
 
 fn decode_png(png: &[u8]) -> Result<(u32, u32, Vec<u8>), String> {
