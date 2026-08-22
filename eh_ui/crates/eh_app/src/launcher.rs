@@ -754,7 +754,11 @@ fn draw_icon<B: eh_hal::Framebuffer>(
 
 /// Center the app label in the cell, wrapping to two lines at the last
 /// space or ellipsizing (C launcher_draw_app_label's fallbacks).
-fn draw_label(surf: &mut eh_render::Surface, font: &eh_render::Font, glyph: &mut eh_render::Glyph, text: &str, cx: i32, ly: i32, maxw: i32) {
+fn draw_label(surf: &mut eh_render::Surface, font: &eh_render::Font, glyph: &mut eh_render::Glyph, text: &str, cx: i32, c_top: i32, maxw: i32) {
+    // C launcher_draw_app_label passes the glyph TOP; draw_text takes a
+    // baseline — convert once (24px font ascent ≈ 20px) so the label
+    // sits below the icon box instead of overlapping it.
+    let ly = c_top + 20;
     if font.width(text, 24.0) as i32 <= maxw {
         let tw = font.width(text, 24.0) as i32;
         draw_text(surf, font, 24.0, text, cx - tw / 2, ly, GRAY_BLACK, glyph);

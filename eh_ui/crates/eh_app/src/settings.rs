@@ -91,7 +91,7 @@ pub fn draw<B: Framebuffer>(surf: &mut eh_render::Surface, app: &mut App<B>, dir
                 | (Some(KbField::ApiKey), SettingsRow::ApiKey)
         );
         let (card_col, text_col, value_col) =
-            if editing { (GRAY_BLACK, GRAY_WHITE, GRAY_WHITE) } else { (GRAY_WHITE, GRAY_BLACK, GRAY_DGRAY) };
+            if editing { (GRAY_BLACK, GRAY_WHITE, GRAY_WHITE) } else { (GRAY_WHITE, GRAY_BLACK, GRAY_BLACK) };
         let ry = y as u32;
         surf.fill_gray(Rect { x: MARGIN, y: ry, w: w - 2 * MARGIN, h: ROW_H - 12 }, card_col);
         surf.rect_outline(Rect { x: MARGIN, y: ry, w: w - 2 * MARGIN, h: ROW_H - 12 }, 2, GRAY_BLACK);

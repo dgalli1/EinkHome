@@ -474,13 +474,18 @@ impl<B: Framebuffer> Screen<B> {
 
         self.dirty.clear();
 
-        // E-ink semantics: the panel background is white, and every widget
-        // fills its own rect white (top bar / tiles / pager cover the whole
-        // content band), so no full-canvas pre-fill is needed — the C app
-        // paints per-widget too.  A full-canvas fill here is ~4.6MB through
-        // qemu on the emulator (~90ms), which delayed every redraw flush.
+        // C parity: every page draw paints the WHOLE content area first
+        // (C eh_draw_* start with FillArea(white)).  Without it, a page
+        // with fewer/shorter widgets than the previous one (e.g. Search
+        // after the shelf) leaves stale pixels in the uncovered band —
+        // visible on e-ink and in the SDL buffer alike.  The old qemu
+        // fill-cost concern doesn't apply to native builds.
         let content = Rect { x: 0, y: 0, w, h };
         let fmt = self.fb.format();
+        {
+            let mut surf = Surface::new(self.fb.surface_mut(), w, h, stride, fmt);
+            surf.fill_gray(content, GRAY_WHITE);
+        }
 
         for i in 0..self.widgets.len() {
             let rect = self.layout.rect(self.nodes[i]);
