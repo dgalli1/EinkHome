@@ -70,8 +70,9 @@ fn build_covers<B: Framebuffer>(screen: &mut Screen<B>, bp: Breakpoint) {
 }
 
 fn load_font() -> &'static Font {
-    let f = Font::from_bytes(FONT).expect("embed font");
-    Box::leak(Box::new(f))
+    static FACE: std::sync::LazyLock<Font> =
+        std::sync::LazyLock::new(|| Font::from_bytes(FONT).expect("embed font"));
+    &FACE
 }
 
 /// Draw the self-owned status strip (clock + battery).  Portable replacement

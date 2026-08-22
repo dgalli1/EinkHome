@@ -750,6 +750,9 @@ pub struct Browser {
     pub scroll: usize,
     pub entries: Vec<BrowseEntry>,
     pub open: bool,
+    /// BR_MODE_PICKER: the Settings download-folder chooser — only
+    /// directories are listed and a tap commits that directory.
+    pub picker: bool,
 }
 
 impl Browser {
@@ -787,6 +790,9 @@ impl Browser {
             let name = name.to_string_lossy().into_owned();
             if name.starts_with('.') {
                 continue;
+            }
+            if self.picker && !e.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                continue; // the folder picker lists directories only
             }
             let Ok(ft) = e.file_type() else { continue };
             let path = e.path();
@@ -942,6 +948,7 @@ impl Widget for BrowseRow {
 pub fn build_browse_page<B: Framebuffer>(fb: B, browser: &Browser, content_bottom: u32) -> Screen<B> {
     let font = crate::shelf::shelf_font();
     let mut screen = Screen::new(fb, font);
+    screen.bg_fill = true;  // browser rows may not cover the band
     screen.layout_mut().root_flex_column();
     let tb = TopBar::new(TopBarState {
         back: false,
@@ -1030,6 +1037,36 @@ pub fn browse_up<B: Framebuffer>(app: &mut App<B>) -> bool {
     }
     app.refresh_shelf();
     true
+}
+
+/// Picker-mode row tap (C eh_on_tap_browse in BR_MODE_PICKER): ".."
+/// ascends, any directory tap COMMITS it as the downloads dir (the app
+/// saves the config and re-resolves, C eh_settings_apply).
+pub fn tap_picker<B: Framebuffer>(app: &mut App<B>, _x: i32, y: i32) {
+    let top = TOP_BAR_H + TOP_BAR_PAD;
+    if (y as u32) < top {
+        return;
+    }
+    let (scroll, path) = {
+        let b = match app.dl_picker.as_ref() {
+            Some(b) => b,
+            None => return,
+        };
+        (b.scroll, b.path.clone())
+    };
+    let idx = ((y as u32 - top - 8) / FOLDER_ROW_H) as usize + scroll;
+    let Some(entry) = app.dl_picker.as_ref().unwrap().entries.get(idx).cloned() else { return };
+    if entry.name == ".." {
+        app.dl_picker.as_mut().unwrap().up();
+        app.dirty = true;
+        app.refresh_shelf();
+        return;
+    }
+    if entry.is_dir {
+        // C folder_commit: the tapped directory becomes the downloads dir.
+        let path = format!("{}/{}", path.trim_end_matches('/'), entry.name);
+        app.commit_downloads_dir(&path);
+    }
 }
 
 #[cfg(test)]
@@ -1239,3 +1276,4 @@ mod tests {
         assert_eq!(f.to_book().source, "local");
     }
 }
+

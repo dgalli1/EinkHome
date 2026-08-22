@@ -347,6 +347,9 @@ pub struct App<B: Framebuffer> {
     /// Reading progress per local path (C g_progress): reloaded from the
     /// firmware explorer db on init and show/foreground.
     pub progress: crate::progress::ProgressMap,
+    /// Settings → Download-folder picker (C BR_MODE_PICKER): Some while
+    /// the directory chooser is open.
+    pub dl_picker: Option<crate::local::Browser>,
     pub page: usize,
     pub pages: usize,
     /// The current page's entries; the grid widgets mirror these.
@@ -404,7 +407,15 @@ pub struct App<B: Framebuffer> {
     pub suggest_q: String,
     /// Full-library cover-warm queue (C eh_cover_warm_start): remote ids
     /// still to fetch, one drained per tick while online.
-    pub warm_queue: Vec<String>,
+    /// The single cover-warm worker thread owns the id queue; the UI
+    /// reads its progress through these atomics.  (C's bcov weak timer
+    /// fetched one cover per tick on the main loop; a spawn-per-cover
+    /// model retained ~180MB of glibc arena at 100k books.)
+    pub warm_remaining: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    /// Worker alive (draining or paused offline).
+    pub warm_active: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Live network gate the worker polls between fetches.
+    pub warm_online: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// The settings row (or search input) currently owning the on-screen
     /// keyboard — the draw inverts the editing row (C eh_g_kb_field).
     pub kb_editing: Option<KbField>,
@@ -493,6 +504,7 @@ pub fn per_page(bp: eh_layout::Breakpoint) -> usize {
     }
 }
 
+
 /// True when `path` exists (or was just created) and accepts a write
 /// probe — the C `access(wanted, W_OK)` + mkdir dance.
 fn ensure_writable_dir(path: &str) -> bool {
@@ -576,6 +588,7 @@ impl<B: Framebuffer> App<B> {
             dl_batch_failed: std::collections::HashSet::new(),
             context_items: Vec::new(),
             progress: crate::progress::reload(),
+            dl_picker: None,
             page: 0,
             pages: 0,
             entries: Vec::new(),
@@ -605,7 +618,9 @@ impl<B: Framebuffer> App<B> {
             // Full-library cover-warm pass (C eh_cover_warm_start):
             // remote book ids still needing a cover fetch, popped one
             // per app tick while online.
-            warm_queue: Vec::new(),
+            warm_remaining: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            warm_active: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            warm_online: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
             chooser_rects: Vec::new(),
             downloader: crate::downloads::Downloader::new(),
             dl_single: false,
@@ -685,14 +700,48 @@ impl<B: Framebuffer> App<B> {
         if self.source != Source::Kavita {
             return;
         }
-        self.warm_queue = self
+        let ids: Vec<String> = self
             .store
             .list_books(1_000_000, 0)
             .unwrap_or_default()
             .into_iter()
             .map(|b| b.id)
             .collect();
-        self.warm_total = self.warm_queue.len();
+        self.warm_total = ids.len();
+        self.warm_remaining
+            .store(ids.len(), std::sync::atomic::Ordering::Relaxed);
+        if ids.is_empty() {
+            return;
+        }
+        self.warm_active
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        // One persistent worker drains the queue (C: one fetch per bcov
+        // tick).  A spawn-per-cover model created 100k threads for a
+        // full-library pass; glibc arena retention put RSS at ~200MB.
+        let remaining = self.warm_remaining.clone();
+        let active = self.warm_active.clone();
+        let online = self.warm_online.clone();
+        let client = self.client.clone();
+        let covers_dir = self.covers_dir.clone();
+        let _ = std::thread::Builder::new()
+            .name("cover-warm".into())
+            .spawn(move || {
+                let mut ids = ids;
+                while let Some(id) = ids.pop() {
+                    if !online.load(std::sync::atomic::Ordering::Relaxed) {
+                        std::thread::sleep(std::time::Duration::from_millis(200));
+                        continue;
+                    }
+                    remaining.store(ids.len(), std::sync::atomic::Ordering::Relaxed);
+                    if cover::load_cached(&covers_dir, &id).is_some() {
+                        continue;
+                    }
+                    let _ = cover::fetch(&client, &covers_dir, &id);
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                remaining.store(0, std::sync::atomic::Ordering::Relaxed);
+                active.store(false, std::sync::atomic::Ordering::Relaxed);
+            });
     }
 
     /// Drain the warm pass: at most one fetch handed to a background
@@ -701,22 +750,9 @@ impl<B: Framebuffer> App<B> {
     /// UI thread — a blocking fetch here stalls event processing for the
     /// whole request duration and the shell feels dead after boot.
     fn cover_warm_tick(&mut self) {
-        if self.warm_queue.is_empty() || !self.screen().framebuffer().net_active() {
-            return;
-        }
-        while let Some(id) = self.warm_queue.pop() {
-            if cover::load_cached(&self.covers_dir, &id).is_some() {
-                continue;
-            }
-            let client = self.client.clone();
-            let covers_dir = self.covers_dir.clone();
-            let _ = std::thread::Builder::new()
-                .name("cover-warm".into())
-                .spawn(move || {
-                    let _ = cover::fetch(&client, &covers_dir, &id);
-                });
-            break;
-        }
+        // The worker thread polls this gate between fetches.
+        let online = self.screen().framebuffer().net_active();
+        self.warm_online.store(online, std::sync::atomic::Ordering::Relaxed);
     }
     /// Boot: sync the library delta (only when online or the source is
     /// local-only — C eh_evt_init), then build the first shelf page.
@@ -1135,6 +1171,11 @@ impl<B: Framebuffer> App<B> {
             self.drill_back();
             return;
         }
+        // The download-folder picker closes on Back (C eh_folder_close).
+        if self.dl_picker.take().is_some() {
+            self.dirty = true;
+            return;
+        }
         // Folder source: Back ascends one level; at the browser root it
         // falls through (C eh_browse_up's "caller decides" contract).
         if self.source == Source::Folder && self.browser.open && crate::local::browse_up(self) {
@@ -1173,6 +1214,11 @@ impl<B: Framebuffer> App<B> {
         // Folder source: the browser owns the body (C eh_on_tap_browse).
         if self.source == Source::Folder && self.browser.open {
             crate::local::tap_browse(self, x, y);
+            return;
+        }
+        // Download-folder picker: rows descend / commit.
+        if self.dl_picker.is_some() {
+            crate::local::tap_picker(self, x, y);
             return;
         }
         if self.tab == Tab::Search {
@@ -1279,7 +1325,6 @@ impl<B: Framebuffer> App<B> {
             self.sync_popup_open();
             return;
         }
-        crate::logger::log("[bookshelf] do_sync ENTER");
         self.start_sync(true);
     }
 
@@ -1289,7 +1334,6 @@ impl<B: Framebuffer> App<B> {
         if self.syncing {
             return;
         }
-        crate::logger::log("[bookshelf] do_sync ENTER");
         self.start_sync(false);
     }
 
@@ -1303,6 +1347,15 @@ impl<B: Framebuffer> App<B> {
     /// transactions — and SQLite's 2 s busy_timeout (set in Store::open)
     /// absorbs the rare commit collision between the two connections.
     fn start_sync(&mut self, popup: bool) {
+        // No configured server — nothing to sync against (the C app
+        // resolved its API host before arming eh_do_sync).
+        if self.syncing || self.config.api_url.is_empty() {
+            return;
+        }
+        // Logged synchronously on the UI thread so the e2e log slicer
+        // always sees the entry even though the chain runs async
+        // (C eh_evt_init's synchronous eh_do_sync entry log).
+        crate::logger::log(&format!("[bookshelf] do_sync ENTER batch={}", crate::sync::EH_SYNC_BATCH));
         // Initial anti-suspend ban (C eh_do_sync's eh_sync_keep_awake);
         // per-round re-arms come back as SyncMsg::BanSleep.
         self.screen()
@@ -1334,7 +1387,7 @@ impl<B: Framebuffer> App<B> {
                 let _ = crate::sync::sync(
                     &client,
                     &store,
-                    50,
+                    crate::sync::EH_SYNC_BATCH,
                     &cancel,
                     &mut |ev| {
                         let _ = tx.send(crate::sync::SyncMsg::Event(ev));
@@ -1512,7 +1565,8 @@ impl<B: Framebuffer> App<B> {
     /// (C eh_cover_warm_progress).
     fn warm_progress(&self) -> (u32, u32) {
         let total = self.warm_total as u32;
-        (total.saturating_sub(self.warm_queue.len() as u32), total)
+        let remaining = self.warm_remaining.load(std::sync::atomic::Ordering::Relaxed) as u32;
+        (total.saturating_sub(remaining), total)
     }
 
     /// Apply a committed search query (C eh_keyboard_handler non-empty
@@ -1530,25 +1584,27 @@ impl<B: Framebuffer> App<B> {
         }
         crate::logger::log(&format!("[bookshelf] search commit: query=`{term}`"));
         self.tab = Tab::Library;
-        self.refresh_shelf();
+        // The shelf reads the materialised view — the query must reach
+        // view_rebuild, not just a widget refresh (C rebuilt the view on
+        // every keyboard commit).
+        self.rebuild_view();
     }
 
     /// True while the full-library warm pass still has covers to fetch
     /// (C eh_cover_warm_active); offline counts as drained — the pass is
     /// gated off offline and would otherwise pin the sheet forever.
     pub(crate) fn cover_warm_active(&mut self) -> bool {
-        if self.warm_queue.is_empty() {
-            return false;
-        }
         // Safe from overlay draws (screen take()n during present): use
-        // the live probe when available, else the cached value.
-        if self.screen.is_some() {
+        // the live probe when available, else the cached value.  Offline
+        // counts as drained (the worker pauses, C gated it the same way).
+        let online = if self.screen.is_some() {
             let net = self.screen.as_mut().unwrap().framebuffer().net_active();
             self.fb_net_active = net;
             net
         } else {
             self.fb_net_active
-        }
+        };
+        online && self.warm_remaining.load(std::sync::atomic::Ordering::Relaxed) > 0
     }
 
     /// Search-tab body taps: the input row opens the keyboard; a history
@@ -2107,11 +2163,11 @@ impl<B: Framebuffer> App<B> {
         if a && s {
             out.push(GroupPreset::AuthorSeries);
         }
-        if a {
-            out.push(GroupPreset::Author);
-        }
         if s {
             out.push(GroupPreset::Series);
+        }
+        if a {
+            out.push(GroupPreset::Author);
         }
         if y {
             out.push(GroupPreset::Year);
@@ -2340,6 +2396,14 @@ impl<B: Framebuffer> App<B> {
         // Take the framebuffer out first: the new screen is built from the
         // same canvas (the C app's full-redraw navigation).
         let fb = self.screen.take().expect("screen present").into_framebuffer();
+        if let Some(b) = self.dl_picker.as_mut() {
+            // The download-folder picker owns the whole page (C
+            // BR_MODE_PICKER draws over the settings screen).
+            let mut screen = crate::local::build_browse_page(fb, b, self.content_bottom);
+            screen.content_h = self.content_bottom;
+            self.screen = Some(screen);
+            return;
+        }
         let width = fb.screen().width;
         let mut screen = if self.tab == Tab::Search {
             self.build_search_page(fb, width)
@@ -2492,6 +2556,18 @@ impl<B: Framebuffer> App<B> {
             }
         }
         self.refresh_shelf();
+    }
+
+    /// Picker commit (C folder_commit + eh_settings_apply's dir
+    /// re-resolve): store the chosen downloads dir, persist it, log the
+    /// saved marker and repaint.  Back returns to Settings.
+    pub(crate) fn commit_downloads_dir(&mut self, path: &str) {
+        ensure_writable_dir(path);
+        self.config.downloads_dir = Some(path.to_string());
+        self.save_config();
+        crate::logger::log("[bookshelf] settings: saved");
+        self.dl_picker = None;
+        self.dirty = true;
     }
 
     /// Save the settings screen's edits to the config file (C
@@ -2936,7 +3012,6 @@ fn draw_context_menu<B: Framebuffer>(surf: &mut eh_render::Surface, app: &mut Ap
     use eh_shell::{GRAY_BLACK, GRAY_LGRAY, GRAY_WHITE};
     let w = surf.width();
     let h = surf.height();
-    crate::logger::log(&format!("[eh_app] ctx draw w={w} h={h} content_bottom={}", app.content_bottom));
     dirty.push(Rect { x: 0, y: 0, w, h });
     eh_shell::dim_hatch(surf, 0, h); // LGRAY hatch (C eh_dim_content(0))
     let n = app.context_items.len().max(1);
@@ -2975,7 +3050,7 @@ fn draw_chooser_sheet<B: Framebuffer>(
     dirty: &mut Vec<Rect>,
     kind: ChooserKind,
 ) {
-    use eh_shell::{GRAY_BLACK, GRAY_LGRAY, GRAY_WHITE};
+    use eh_shell::{GRAY_BLACK, GRAY_DGRAY, GRAY_LGRAY, GRAY_WHITE};
     let w = surf.width();
     let h = app.content_bottom;
     dirty.push(Rect { x: 0, y: 0, w, h });
@@ -2994,21 +3069,40 @@ fn draw_chooser_sheet<B: Framebuffer>(
         }
     };
     let pw = w * 3 / 4;
-    let ph = (72 + n as u32 * 96 + 24).max(1);
+    let ph = (96 + n as u32 * 96 + 24).max(1);
     let px = (w - pw) / 2;
     let py = ((h as i32 - ph as i32) / 2).max(0) as u32;
+    // C eh_draw_overlay_group: white sheet with a DOUBLE black outline.
     surf.fill_gray(Rect { x: px, y: py, w: pw, h: ph }, GRAY_WHITE);
     surf.rect_outline(Rect { x: px, y: py, w: pw, h: ph }, 2, GRAY_BLACK);
+    surf.rect_outline(Rect { x: px + 1, y: py + 1, w: pw - 2, h: ph - 2 }, 1, GRAY_BLACK);
     let font = crate::shelf::shelf_font();
     let mut g = eh_render::Glyph::new();
-    eh_render::draw_text(surf, font, 28.0, title, (px + 24) as i32, (py + 20) as i32, GRAY_BLACK, &mut g);
-    surf.hline(px + 24, py + 64, pw - 48, 2, GRAY_LGRAY);
+    // Header: bold title + DGRAY current-value line under it (C
+    // DEFAULTFONTB 28 title at py+16, value at py+46), then the divider.
+    eh_render::draw_text(surf, eh_shell::bold_font(), 28.0, title, (px + 24) as i32, (py + 16) as i32 + 22, GRAY_BLACK, &mut g);
+    let current: String = match kind {
+        ChooserKind::Group => crate::i18n::tr(if app.group == crate::store::GroupPreset::None { "group.none" } else { GROUP_KEYS[app.group as usize] }).to_string(),
+        ChooserKind::Sort => crate::i18n::tr(crate::menu::sort_key(app.sort)).to_string(),
+    };
+    eh_render::draw_text(surf, font, 24.0, &current, (px + 24) as i32, (py + 46) as i32 + 18, GRAY_DGRAY, &mut g);
+    surf.hline(px + 24, py + 76, pw - 48, 2, GRAY_LGRAY);
     app.chooser_rects.clear();
-    for (i, _) in labels.iter().enumerate() {
+    let selected: i64 = match kind {
+        ChooserKind::Group => app.group as i64,
+        ChooserKind::Sort => app.sort as i64,
+    };
+    let offered: Vec<i64> = match kind {
+        ChooserKind::Group => app.group_offer().iter().map(|g| *g as i64).collect(),
+        ChooserKind::Sort => vec![0, 1, 2, 3],
+    };
+    for (i, label) in labels.iter().enumerate() {
         let iy = py + 84 + (i as u32) * 96;
-        surf.fill_gray(Rect { x: px + 12, y: iy, w: pw - 24, h: 84 }, GRAY_WHITE);
+        let sel = offered.get(i) == Some(&selected);
+        let (bg, fg) = if sel { (GRAY_BLACK, GRAY_WHITE) } else { (GRAY_WHITE, GRAY_BLACK) };
+        surf.fill_gray(Rect { x: px + 12, y: iy, w: pw - 24, h: 84 }, bg);
         surf.rect_outline(Rect { x: px + 12, y: iy, w: pw - 24, h: 84 }, 1, GRAY_BLACK);
-        eh_render::draw_text(surf, font, 26.0, &labels[i], (px + 32) as i32, (iy + 30) as i32, GRAY_BLACK, &mut g);
+        eh_render::draw_text(surf, eh_shell::bold_font(), 26.0, label, (px + 32) as i32, (iy + 30) as i32 + 20, fg, &mut g);
         app.chooser_rects.push(Rect { x: px + 12, y: iy, w: pw - 24, h: 84 });
     }
 }
@@ -3106,6 +3200,9 @@ mod tests {
         open: RefCell<bool>,
         on_done: KbDoneCell,
         cancelled: RefCell<bool>,
+        /// Offline by default so App::new's boot auto-sync never runs in
+        /// tests (no pending worker events racing tick assertions).
+        offline: bool,
     }
 
     impl FakeKb {
@@ -3116,6 +3213,7 @@ mod tests {
                 open: RefCell::new(false),
                 on_done: RefCell::new(None),
                 cancelled: RefCell::new(false),
+                offline: true,
             }
         }
         fn type_text(&self, s: &str) {
@@ -3133,6 +3231,8 @@ mod tests {
     }
 
     impl Framebuffer for FakeKb {
+        fn net_active(&self) -> bool { !self.offline }
+
         fn screen(&self) -> eh_hal::Screen {
             eh_hal::Screen::full(1072, 1448)
         }
@@ -3178,7 +3278,13 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let fb = FakeKb::new(1072, 1448);
-        let app = App::new(fb, Config::default(), None, &dir);
+        // A dead-but-configured host: explicit do_sync engages the
+        // machinery while boot stays quiet (FakeKb is offline).
+        let cfg = Config {
+            api_url: "http://mock.invalid".into(),
+            ..Default::default()
+        };
+        let app = App::new(fb, cfg, None, &dir);
         app.store.suggest_set("b1", &["potter".into(), "harry potter".into()]).unwrap();
         app
     }

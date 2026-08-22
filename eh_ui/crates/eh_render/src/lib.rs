@@ -299,6 +299,37 @@ impl<'a> Surface<'a> {
     }
 
     /// Blend a coverage run (fontdue bitmap: 0=bkg, 255=fg) tinted `gray`.
+    /// C StretchBitmap: scale the source to EXACTLY dst.w x dst.h (no
+    /// aspect preservation — the C grid stretches covers to fill the tile).
+    pub fn blit_image_stretch(
+        &mut self,
+        src: &[u8],
+        src_w: u32,
+        src_h: u32,
+        src_fmt: PixelFormat,
+        dst: Rect,
+    ) {
+        if src_w == 0 || src_h == 0 || dst.is_empty() { return; }
+        let bpp = src_fmt.bytes_per_pixel();
+        if src.len() < (src_w as usize) * (src_h as usize) * bpp { return; }
+        let dw = dst.w.max(1);
+        let dh = dst.h.max(1);
+        for row in 0..dh {
+            let sy = (row as u64 * src_h as u64 / dh as u64) as usize;
+            for col in 0..dw {
+                let sx = (col as u64 * src_w as u64 / dw as u64) as usize;
+                let s = (sy * src_w as usize + sx) * bpp;
+                let d = (dst.y + row) as usize * self.stride
+                    + (dst.x + col) as usize * self.bpp();
+                let e = d + bpp;
+                if e <= self.data.len() {
+                    self.data[d..e].copy_from_slice(&src[s..s + bpp]);
+                }
+            }
+        }
+    }
+
+
     pub fn blit_glyph(&mut self, x: i32, y: i32, w: u32, h: u32, coverage: &[u8], gray: u8) {
         if coverage.len() < (w as usize) * (h as usize) { return; }
         let (format, bpp) = (self.format, self.bpp());
@@ -349,14 +380,18 @@ impl<'a> Surface<'a> {
 /// renderer don't pull fontdue types into their public API.
 pub struct Font {
     face: fontdue::Font,
+    /// Cache-key identity: two faces (regular + bold) must never share
+    /// glyph-cache entries, or chars render with the other face's
+    /// coverage mid-string.
+    id: u8,
 }
 
-/// Rasterised-glyph cache keyed by (char, size): the first draw of each
-/// glyph pays fontdue's rasterize; every later draw copies the cached
-/// coverage (the emulator's text-heavy overlays went ~1s -> ~20ms).
-static GLYPH_CACHE: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<(char, u32), (fontdue::Metrics, Vec<u8>)>>> =
+/// Rasterised-glyph cache keyed by (font id, char, size): the first draw
+/// of each glyph pays fontdue's rasterize; every later draw copies the
+/// cached coverage (the emulator's text-heavy overlays went ~1s -> ~20ms).
+static GLYPH_CACHE: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<(u8, char, u32), (fontdue::Metrics, Vec<u8>)>>> =
     std::sync::OnceLock::new();
-fn glyph_cache() -> &'static std::sync::Mutex<std::collections::HashMap<(char, u32), (fontdue::Metrics, Vec<u8>)>> {
+fn glyph_cache() -> &'static std::sync::Mutex<std::collections::HashMap<(u8, char, u32), (fontdue::Metrics, Vec<u8>)>> {
     GLYPH_CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
 }
 
@@ -379,15 +414,17 @@ impl Default for Glyph {
 
 impl Font {
     pub fn from_bytes(data: &'static [u8]) -> Result<Self, &'static str> {
+        static NEXT_ID: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
         let face = fontdue::Font::from_bytes(data, fontdue::FontSettings::default())?;
-        Ok(Self { face })
+        let id = NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Ok(Self { face, id })
     }
 
     /// Rasterise one glyph into `glyph` (cached by char+size — fontdue's
     /// SDF rasterize is ~10ms per glyph under qemu-arm, so uncached text
     /// re-renders were the emulator's ~1s overlay draws).
     pub fn raster(&self, ch: char, size_px: f32, glyph: &mut Glyph) -> bool {
-        let key = (ch, (size_px * 4.0).round() as u32);
+        let key = (self.id, ch, (size_px * 4.0).round() as u32);
         if let Some((m, cov)) = glyph_cache().lock().unwrap().get(&key) {
             glyph.metrics = *m;
             glyph.coverage = cov.clone();

@@ -7,7 +7,7 @@
 
 use eh_hal::{Framebuffer, Rect};
 use eh_render::draw_text;
-use eh_shell::{GRAY_BLACK, GRAY_DGRAY, GRAY_WHITE};
+use eh_shell::{GRAY_BLACK, GRAY_WHITE};
 
 use crate::app::{App, KbField, SettingsRow};
 
@@ -30,7 +30,7 @@ pub fn draw_header(surf: &mut eh_render::Surface, title: &str, _dirty: &mut [Rec
     let bx = BACK_X as i32 + BACK_W as i32 / 2;
     let by = (HEADER_H as i32 - BACK_H as i32) / 2 + BACK_H as i32 / 2;
     draw_back_icon(surf, bx, by, GRAY_BLACK);
-    let font = crate::shelf::shelf_font();
+    let font = eh_shell::bold_font();
     let mut glyph = eh_render::Glyph::new();
     let tw = font.width(title, 36.0) as i32;
     draw_text(surf, font, 36.0, title, (w as i32 - tw) / 2, (HEADER_H as i32) / 2 + 12, GRAY_BLACK, &mut glyph);
@@ -95,7 +95,7 @@ pub fn draw<B: Framebuffer>(surf: &mut eh_render::Surface, app: &mut App<B>, dir
         let ry = y as u32;
         surf.fill_gray(Rect { x: MARGIN, y: ry, w: w - 2 * MARGIN, h: ROW_H - 12 }, card_col);
         surf.rect_outline(Rect { x: MARGIN, y: ry, w: w - 2 * MARGIN, h: ROW_H - 12 }, 2, GRAY_BLACK);
-        draw_text(surf, font, 26.0, label, (MARGIN + 16) as i32, ry as i32 + 40, text_col, &mut glyph);
+        draw_text(surf, eh_shell::bold_font(), 26.0, label, (MARGIN + 16) as i32, ry as i32 + 40, text_col, &mut glyph);
         draw_text(surf, font, 30.0, value, (MARGIN + 16) as i32, ry as i32 + 82, value_col, &mut glyph);
         app.settings_rows.push((Rect { x: MARGIN, y: ry, w: w - 2 * MARGIN, h: ROW_H - 12 }, *row));
         y += ROW_H as i32;
@@ -116,7 +116,7 @@ pub fn draw<B: Framebuffer>(surf: &mut eh_render::Surface, app: &mut App<B>, dir
         surf.rect_outline(Rect { x: MARGIN, y: ry, w: w - 2 * MARGIN, h: BTN_H - 12 }, 2, GRAY_BLACK);
         let col = if filled { GRAY_WHITE } else { GRAY_BLACK };
         let tw = font.width(label, 32.0) as i32;
-        draw_text(surf, font, 32.0, label, (w as i32 - tw) / 2, ry as i32 + (BTN_H - 12) as i32 / 2 + 11, col, &mut glyph);
+        draw_text(surf, eh_shell::bold_font(), 32.0, label, (w as i32 - tw) / 2, ry as i32 + (BTN_H - 12) as i32 / 2 + 11, col, &mut glyph);
         app.settings_rows.push((Rect { x: MARGIN, y: ry, w: w - 2 * MARGIN, h: BTN_H - 12 }, row));
         y += BTN_H as i32;
     }
@@ -153,7 +153,20 @@ pub fn tap_settings<B: Framebuffer>(x: i32, y: i32, app: &mut App<B>) {
                 app.dirty = true;
             }
             SettingsRow::DownloadFolder => {
-                crate::log("[eh_app] settings: DownloadFolder not ported yet");
+                // Open the folder picker rooted at the storage root,
+                // starting at the current downloads dir when it is under
+                // the root (C eh_on_tap_settings_folder -> eh_folder_open).
+                let root = crate::local::browse_root();
+                let start = app
+                    .config
+                    .downloads_dir
+                    .clone()
+                    .filter(|d| d.starts_with(&root))
+                    .unwrap_or_else(|| root.clone());
+                let mut b = crate::local::Browser { picker: true, ..Default::default() };
+                b.start(&start);
+                app.dl_picker = Some(b);
+                app.dirty = true;
             }
             SettingsRow::SystemApp => {
                 // Toggle: promote the running binary, or unpromote when

@@ -271,7 +271,7 @@ class BookshelfGeometry:
     GROUP_HEADER_H = 48
 
     def _chooser_py(self, n_rows: int) -> int:
-        ph = 72 + n_rows * 96 + 24
+        ph = 96 + n_rows * 96 + 24
         # The app centers chooser sheets in the content area (below the top
         # bar, above the system panel): eh_group_geom uses
         # (eh_content_bottom() - ph)/2.  Centering in the full screen_h

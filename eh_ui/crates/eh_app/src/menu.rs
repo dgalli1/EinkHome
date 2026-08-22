@@ -14,29 +14,15 @@ use crate::app::{App, MenuRow};
 pub const Y0: u32 = 96;
 pub const ITEM_H: u32 = 88;
 
-/// Row list with the live summary values (C `vals[]`: the group summary
-/// and the current sort label).
-pub(crate) fn labels(app: &App<impl eh_hal::Framebuffer>) -> [(MenuRow, &'static str, Option<&'static str>); 5] {
-    let group_val = if app.group == crate::store::GroupPreset::None {
-        Some(crate::i18n::tr("group.none"))
-    } else {
-        None // the inverted row carries no value slot in C either
-    };
-    let sort_val = crate::i18n::tr(sort_key(app.sort));
+/// Static row list (C `labels[]`); the live summary values are attached
+/// at draw time (see [`draw`]).
+pub(crate) fn label_keys() -> [(MenuRow, &'static str); 5] {
     [
-        (
-            MenuRow::GroupBy,
-            crate::i18n::tr("action.group_by"),
-            group_val,
-        ),
-        (
-            MenuRow::SortBy,
-            crate::i18n::tr("action.sort_by"),
-            Some(sort_val),
-        ),
-        (MenuRow::DownloadAll, crate::i18n::tr("action.download_all"), None),
-        (MenuRow::Settings, crate::i18n::tr("action.settings"), None),
-        (MenuRow::Applications, crate::i18n::tr("action.apps"), None),
+        (MenuRow::GroupBy, crate::i18n::tr("action.group_by")),
+        (MenuRow::SortBy, crate::i18n::tr("action.sort_by")),
+        (MenuRow::DownloadAll, crate::i18n::tr("action.download_all")),
+        (MenuRow::Settings, crate::i18n::tr("action.settings")),
+        (MenuRow::Applications, crate::i18n::tr("action.apps")),
     ]
 }
 
@@ -67,9 +53,21 @@ pub fn draw<B: eh_hal::Framebuffer>(surf: &mut eh_render::Surface, app: &mut App
     surf.vline(px, 0, h, 2, GRAY_BLACK);
 
     app.menu_rows.clear();
-    let font = crate::shelf::shelf_font();
+    // C opens DEFAULTFONTB for the drawer rows.
+    let font = eh_shell::bold_font();
     let mut glyph = eh_render::Glyph::new();
-    for (_i, (row, label, val)) in labels(app).iter().enumerate() {
+    let group_val = if app.group == crate::store::GroupPreset::None {
+        Some(crate::i18n::tr("group.none"))
+    } else {
+        None
+    };
+    let sort_val = crate::i18n::tr(sort_key(app.sort));
+    for (_i, (row, label)) in label_keys().iter().enumerate() {
+        let val = match row {
+            MenuRow::GroupBy => group_val,
+            MenuRow::SortBy => Some(sort_val),
+            _ => None,
+        };
         let ry = Y0 + _i as u32 * ITEM_H;
         // Selected-group row inverts (C: sel ? BLACK : WHITE fill).
         let sel = *row == MenuRow::GroupBy && app.group != crate::store::GroupPreset::None;

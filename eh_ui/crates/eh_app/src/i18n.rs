@@ -382,12 +382,11 @@ mod tests {
         // the language must change the exact strings the More drawer
         // paints.
         set_current("en");
-        let en = crate::menu::labels();
+        let en = crate::menu::label_keys();
         set_current("de");
-        let de = crate::menu::labels();
+        let de = crate::menu::label_keys();
         assert_eq!(en[0].1, "Group by");
         assert_eq!(de[0].1, "Gruppieren nach");
-        assert_eq!(de[0].2, Some("Keine")); // group summary value
         assert_eq!(de[4].1, "Anwendungen");
         set_current("en");
     }

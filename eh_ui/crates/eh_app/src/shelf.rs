@@ -105,10 +105,12 @@ impl Widget for StackCard {
             ctx.fill(Rect { x: bx as u32, y: by as u32, w: bw, h: bh }, GRAY_BLACK);
             ctx.text(bx + 6, by + 20, 20.0, &badge, GRAY_WHITE);
         }
-        // Group label beneath the stack.
-        let ccx = rect.x as i32 + rect.w as i32 / 2;
-        let max_w = rect.w.saturating_sub(12) as i32;
-        ctx.text_center_fit(ccx, (rect.y + rect.h - 10) as i32, 20.0, &self.label, max_w, GRAY_BLACK);
+        // Group label beneath the stack (C draw_thumbnail_text title slot:
+        // DEFAULTFONTB, flush-left at the tile edge, pixel-truncated).
+        let max_w = (rect.w.saturating_sub(12)) as f32;
+        let mut fitted = String::new();
+        eh_render::fit_width(ctx.bold, 22.0, &self.label, max_w, &mut fitted);
+        ctx.text_with(ctx.bold, rect.x as i32 + 4, (rect.y + rect.h - 10) as i32 + 22, 22.0, &fitted, GRAY_BLACK);
     }
     fn dirty(&self, out: &mut Vec<Rect>) {
         if let Some(r) = self.rect {
@@ -173,7 +175,7 @@ impl Widget for ListCell {
         // left-aligned at the C text origin).
         let text_x = tx + cww + 16;
         let max_w = ((rect.x + rect.w) as i32 - pad - text_x).max(64);
-        text_left_fit(ctx, text_x, rect.y as i32 + pad + 8, 30.0, &self.title, max_w, col);
+        text_left_fit_font(ctx, ctx.bold, text_x, rect.y as i32 + pad + 8, 30.0, &self.title, max_w, col);
         if !self.author.is_empty() {
             text_left_fit(ctx, text_x, rect.y as i32 + pad + 48, 24.0, &self.author, max_w, GRAY_DGRAY);
         }
@@ -482,10 +484,15 @@ pub struct GridGeom {
     pub cell_h: u32,
 }
 
+/// The font the shelf uses (exposed for the status strip / top bar).
+/// A SINGLETON: fontdue's `Font::from_bytes` pre-parses every glyph
+/// (~30MB per instance) — re-loading per rebuild leaked ~15MB each.
 pub(crate) fn load_font() -> &'static Font {
-    let f = Font::from_bytes(include_bytes!("../../../fonts/DejaVuSans.ttf"))
-        .expect("embed font");
-    Box::leak(Box::new(f))
+    static FONT: std::sync::LazyLock<Font> = std::sync::LazyLock::new(|| {
+        Font::from_bytes(include_bytes!("../../../fonts/DejaVuSans.ttf"))
+            .expect("embed font")
+    });
+    &FONT
 }
 
 /// The font the shelf uses (exposed for the status strip / top bar).
@@ -509,6 +516,7 @@ pub fn build_search<B: Framebuffer>(
 ) -> Screen<B> {
     let font = load_font();
     let mut screen = Screen::new(fb, font);
+    screen.bg_fill = true;  // the search body may not cover the band
     screen.layout_mut().root_flex_column();
 
     // Top bar: back chevron + centered "Search" title (no source/rights).
@@ -617,6 +625,22 @@ fn text_left_fit(ctx: &mut DrawCtx, x: i32, baseline: i32, size: f32, s: &str, m
     ctx.text(x, baseline, size, &format!("{shown}…"), gray);
 }
 
+
+/// Same as [`text_left_fit`] but measuring/drawing with an explicit font
+/// (the bold face for titles, C DEFAULTFONTB).
+fn text_left_fit_font(ctx: &mut DrawCtx, font: &eh_render::Font, x: i32, baseline: i32, size: f32, s: &str, max_w: i32, gray: u8) {
+    if font.width(s, size) as i32 <= max_w {
+        ctx.text_with(font, x, baseline, size, s, gray);
+        return;
+    }
+    let ell = font.width("…", size);
+    let budget = max_w as f32 - ell;
+    let mut shown = s.to_string();
+    while font.width(&shown, size) > budget && !shown.is_empty() {
+        shown.pop();
+    }
+    ctx.text_with(font, x, baseline, size, &format!("{shown}…"), gray);
+}
 #[cfg(test)]
 mod progress_bar_tests {
     use super::*;

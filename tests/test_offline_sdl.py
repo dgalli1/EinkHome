@@ -268,6 +268,12 @@ def offline_sdl_env(tmp_path_factory):
             f"{len(corpus)})\n--- log tail ---\n{backend.current_log()[-2000:]}"
         )
 
+    # The boot sync's progress sheet auto-closes ~900ms after completion
+    # and its dismiss consumes a tap (C eh_sync_popup_close_tick) — wait
+    # for the completion marker plus the flash window before tapping.
+    _wait_log_slice(bs, "", "do_sync: rounds=", timeout=30.0)
+    time.sleep(1.5)
+
     # Download book 0 so the offline-spawn test has an on-disk book.
     before = backend.current_log()
     bs.tap_book(0)

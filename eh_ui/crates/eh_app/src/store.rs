@@ -679,6 +679,31 @@ impl Store {
         self.conn.execute("DELETE FROM view", [])?;
         self.conn.execute("BEGIN", [])?;
         let result = (|| -> rusqlite::Result<i64> {
+            // Flat ungrouped view (the 100k-scale shape): project
+            // entirely in SQL so RSS stays flat at any library size —
+            // materialising the books in Rust first (~100MB at 100k)
+            // breaks the scale budget.  C did this projection in SQL.
+            if !grouped && !drilled && query.is_empty() {
+                // Mirror the in-memory comparator per SortMode (lowercased
+                // key, then title, then id — Recent is descending recency).
+                let order = match sort {
+                    SortMode::Title => "title COLLATE NOCASE ASC, id",
+                    SortMode::Author => "author COLLATE NOCASE ASC, title COLLATE NOCASE ASC, id",
+                    SortMode::Series => "series COLLATE NOCASE ASC, series_idx ASC, id",
+                    SortMode::Recent => "added_at DESC, title COLLATE NOCASE ASC, id",
+                };
+                self.conn.execute(
+                    &format!(
+                        "INSERT INTO view(pos,kind,book_id,series_id,series_name,series_count)
+                         SELECT ROW_NUMBER() OVER (ORDER BY {order}) - 1,
+                         0, id, series_id, title, 1
+                         FROM books"
+                    ),
+                    [],
+                )?;
+                let n: i64 = self.conn.query_row("SELECT COUNT(*) FROM view", [], |r| r.get(0))?;
+                return Ok(n);
+            }
             let mut pos = 0i64;
             if drilled {
                 // Pin every drilled level's scope against ITS OWN dimension

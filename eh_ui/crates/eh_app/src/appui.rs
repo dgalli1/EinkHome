@@ -444,9 +444,10 @@ impl Widget for SearchInput {
         circle_outline(ctx, gx, gy, 13, glyph_col);
         ctx.line(gx + 9, gy + 10, gx + 22, gy + 23, 2, glyph_col);
         ctx.line(gx + 10, gy + 9, gx + 23, gy + 22, 2, glyph_col);
-        // Query text (or placeholder).
+        // Query text (or placeholder), vertically centred in the box
+        // (draw_text takes a baseline; C centres the hint in the field).
         let text = if self.text.is_empty() { crate::i18n::tr("search.ph") } else { self.text.as_str() };
-        ctx.text((bx + 68) as i32, (by + 18) as i32, 28.0, text, glyph_col);
+        ctx.text((bx + 68) as i32, (by + bh / 2) as i32, 28.0, text, glyph_col);
         // Edit cursor while the keyboard is open (C draw_search_input_text):
         // a white line right after the query.
         if self.active && !self.text.is_empty() {
@@ -484,13 +485,25 @@ impl Widget for HistoryRow {
     fn draw(&mut self, ctx: &mut DrawCtx, rect: Rect) {
         self.rect = Some(rect);
         ctx.fill(rect, GRAY_WHITE);
-        ctx.text(
-            (rect.x + 24) as i32,
-            (rect.y + 34) as i32,
-            28.0,
-            &self.term,
-            if self.hint { GRAY_DGRAY } else { GRAY_BLACK },
-        );
+        if self.hint {
+            // The empty-history hint is screen-centred in C
+            // (eh_draw_search_tab's "no recent searches" line).
+            ctx.text_center(
+                rect.x as i32 + rect.w as i32 / 2,
+                (rect.y + 34) as i32,
+                28.0,
+                &self.term,
+                GRAY_DGRAY,
+            );
+        } else {
+            ctx.text(
+                (rect.x + 24) as i32,
+                (rect.y + 34) as i32,
+                28.0,
+                &self.term,
+                GRAY_BLACK,
+            );
+        }
         if rect.h > 0 && !self.hint {
             ctx.hline(rect.x + 20, rect.y + rect.h - 1, rect.w.saturating_sub(40), 2, GRAY_LGRAY);
         }

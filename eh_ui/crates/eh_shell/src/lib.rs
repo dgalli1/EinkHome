@@ -22,6 +22,16 @@ use eh_layout::taffy::NodeId;
 use eh_layout::{Breakpoint, Layout};
 use eh_render::{draw_text, Font, Glyph, Surface};
 
+/// The bold UI face (the inkview DEFAULTFONTB stand-in: grid/list titles,
+/// menu rows, launcher labels — C loads DEFAULTFONTB for all of these).
+pub fn bold_font() -> &'static Font {
+    static BOLD: std::sync::LazyLock<Font> = std::sync::LazyLock::new(|| {
+        Font::from_bytes(include_bytes!("../../../fonts/DejaVuSans-Bold.ttf"))
+            .expect("embed bold font")
+    });
+    &BOLD
+}
+
 /// Greyscale palette values (identical to the inkview colour constants the C
 /// app uses: BLACK/DGRAY/LGRAY/WHITE).
 pub const GRAY_BLACK: u8 = 0x00;
@@ -39,8 +49,9 @@ pub trait Widget {
     /// to flush only the changed regions to the panel.
     fn dirty(&self, out: &mut Vec<Rect>);
     /// Hit-test `(x, y)` in widget-local coords → true if hit.
-    fn hit(&self, x: i32, y: i32) -> bool;
-    /// Optional tap handler; return true if consumed.
+    fn hit(&self, _x: i32, _y: i32) -> bool {
+        false
+    }
     fn on_tap(&mut self, _x: i32, _y: i32) -> bool {
         false
     }
@@ -52,6 +63,8 @@ pub trait Widget {
 pub struct DrawCtx<'a> {
     pub surf: &'a mut Surface<'a>,
     pub font: &'a Font,
+    /// Bold face for titles/menu rows/labels (C DEFAULTFONTB).
+    pub bold: &'static Font,
     pub glyph: &'a mut Glyph,
     pub dirty: &'a mut Vec<Rect>,
 }
@@ -91,6 +104,12 @@ impl<'a> DrawCtx<'a> {
     pub fn text_center(&mut self, cx: i32, baseline: i32, size: f32, s: &str, gray: u8) {
         let w = self.font.width(s, size) as i32;
         self.text(cx - w / 2, baseline, size, s, gray);
+    }
+
+    /// [`Self::text`] with an explicit face (the bold title font).
+    pub fn text_with(&mut self, font: &Font, x: i32, baseline: i32, size: f32, s: &str, gray: u8) {
+        let w = draw_text(self.surf, font, size, s, x, baseline, gray, self.glyph) as i32;
+        self.push(Rect::from_xy(x, baseline - size as i32, w, size as i32));
     }
 
 /// Centre `s` on `cx`, truncating (whole glyphs + `…`) so it never exceeds
@@ -281,7 +300,10 @@ impl Widget for Cover {
         let img_h = (rect.h as f32 * 0.78) as u32;
         let area = Rect { x: rect.x, y: rect.y, w: rect.w, h: img_h };
         if let Some(img) = &self.img {
-            ctx.blit(img, self.img_w, self.img_h, eh_hal::PixelFormat::Rgb24, area);
+            // C StretchBitmap: covers fill the tile rect exactly (no
+            // letterbox margins).
+            ctx.surf.blit_image_stretch(img, self.img_w, self.img_h, eh_hal::PixelFormat::Rgb24, area);
+            ctx.push(area);
         } else {
             // Placeholder: inset card with a border, centred on the tile.
             let border = 2u32;
@@ -293,16 +315,25 @@ impl Widget for Cover {
                 ctx.outline(Rect { x: cx, y: cy, w: cw, h: ch }, border, GRAY_LGRAY);
             }
         }
-        // Title + author, centred horizontally + fitted to the tile width so
-        // long titles never run past the cell edge.
+        // Caption (C draw_thumbnail_text): bold title flush-LEFT at the
+        // tile edge (DEFAULTFONTB), author line under it in DGRAY — both
+        // truncated to the tile width, never centred.
         let text_h = rect.h - img_h;
         let ty = rect.y + img_h;
-        let cx = rect.x as i32 + rect.w as i32 / 2;
-        let max_w = rect.w.saturating_sub(4) as i32;
-        let b1 = ty as i32 + self.title_size as i32;
-        ctx.text_center_fit(cx, b1, self.title_size, &self.title, max_w, GRAY_BLACK);
+        let tx = rect.x as i32 + 4;
+        let max_px = (rect.w.saturating_sub(8)) as f32;
+        let mut fitted = String::new();
+        eh_render::fit_width(ctx.bold, self.title_size, &self.title, max_px, &mut fitted);
+        if fitted.is_empty() {
+            fitted.push_str(&self.title[..1.min(self.title.chars().count())]);
+        }
+        let baseline1 = ty as i32 + self.title_size as i32;
+        draw_text(ctx.surf, ctx.bold, self.title_size, &fitted, tx, baseline1, GRAY_BLACK, ctx.glyph);
+        ctx.push(rect);
         if !self.author.is_empty() && text_h >= (self.title_size + self.author_size) as u32 {
-            ctx.text_center_fit(cx, b1 + self.author_size as i32, self.author_size, &self.author, max_w, GRAY_DGRAY);
+            let mut afitted = String::new();
+            eh_render::fit_width(ctx.font, self.author_size, &self.author, max_px, &mut afitted);
+            draw_text(ctx.surf, ctx.font, self.author_size, &afitted, tx, baseline1 + self.author_size as i32, GRAY_DGRAY, ctx.glyph);
         }
     }
     fn dirty(&self, out: &mut Vec<Rect>) {
@@ -341,6 +372,10 @@ pub struct Screen<B: Framebuffer> {
     pub widgets: Vec<Box<dyn Widget>>,
     /// Rows owned by the app above the (possibly firmware) status strip.
     pub content_h: u32,
+    /// Pages whose widgets may not cover the whole content band
+    /// (Search, browser) set this so present() pre-fills white (C
+    /// FillArea-per-page discipline).
+    pub bg_fill: bool,
 }
 
 impl<B: Framebuffer> Screen<B> {
@@ -354,6 +389,7 @@ impl<B: Framebuffer> Screen<B> {
             nodes: Vec::new(),
             root_nodes: Vec::new(),
             dirty: Vec::new(),
+            bg_fill: false,
             breakpoint: Breakpoint::from_width(screen.width),
             widgets: Vec::new(),
             content_h: screen.content_height(),
@@ -474,15 +510,15 @@ impl<B: Framebuffer> Screen<B> {
 
         self.dirty.clear();
 
-        // C parity: every page draw paints the WHOLE content area first
-        // (C eh_draw_* start with FillArea(white)).  Without it, a page
-        // with fewer/shorter widgets than the previous one (e.g. Search
-        // after the shelf) leaves stale pixels in the uncovered band —
-        // visible on e-ink and in the SDL buffer alike.  The old qemu
-        // fill-cost concern doesn't apply to native builds.
+        // C parity: pages whose widgets don't cover the whole content
+        // band (Search, folder browser) must paint the WHOLE area first,
+        // or stale pixels survive in the uncovered band — visible on
+        // e-ink and in the SDL buffer alike.  Such pages set `bg_fill`;
+        // the shelf (whose tiles tile the entire band) skips the fill —
+        // through qemu it costs ~90ms per frame and starves the sync.
         let content = Rect { x: 0, y: 0, w, h };
         let fmt = self.fb.format();
-        {
+        if self.bg_fill {
             let mut surf = Surface::new(self.fb.surface_mut(), w, h, stride, fmt);
             surf.fill_gray(content, GRAY_WHITE);
         }
@@ -499,6 +535,7 @@ impl<B: Framebuffer> Screen<B> {
                 let mut ctx = DrawCtx {
                     surf: &mut surf,
                     font: self.font,
+                    bold: bold_font(),
                     glyph: &mut self.glyph,
                     dirty: &mut self.dirty,
                 };

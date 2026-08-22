@@ -27,6 +27,9 @@ use rusqlite::Result;
 use crate::client::{ApiClient, Delta};
 use crate::store::Store;
 
+/// Rows per delta round (C EH_SYNC_BATCH): 100k books = 100 rounds.
+pub const EH_SYNC_BATCH: u32 = 1000;
+
 /// Outcome of one applied delta batch.
 enum Round {
     /// Applied + cursor advanced.
@@ -173,7 +176,9 @@ pub fn sync(
                 return Err(rusqlite::Error::QueryReturnedNoRows);
             }
         }
-        if rounds > 200 {
+        // C eh_model's ceiling is 400 rounds = 200k books (a 100k first
+        // sync needs the 201st round to observe the empty delta).
+        if rounds > 400 {
             crate::log("sync: too many rounds (pagination safety); stopping");
             cancelled = false;
             break;
