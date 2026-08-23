@@ -454,3 +454,66 @@ impl DrawScratch {
 impl Default for DrawScratch {
     fn default() -> Self { Self::new() }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use eh_hal::{PixelFormat, Rect};
+
+    const FONT: &[u8] = include_bytes!("../../../fonts/DejaVuSans.ttf");
+
+    /// Titles, authors and filenames arrive from untrusted book files
+    /// (the Grab::text byte-cap panic was exactly this class).  The
+    /// pipeline — measure → fit → draw — must tolerate arbitrary UTF-8:
+    /// multibyte scripts, emoji, combining marks, control bytes.
+    const ADVERSARIAL: [&str; 9] = [
+        "War and Peace",
+        "Капита́нская до́чка",               // Cyrillic + combining marks
+        "日本語のタイトル",                    // CJK
+        "🦀 ferris 📚 shelf",                 // emoji (4-byte chars)
+        "a\u{0301}\u{0302}b",                // combining diacritics
+        "\u{200b}\u{feff}zero\u{200d}width", // zero-width + ZWJ + BOM
+        "tab\there\nnewline\0nul",           // control bytes
+        "﷽",                                  // longest single char (U+FDFD)
+        "",                                   // empty input
+    ];
+
+    #[test]
+    fn text_pipeline_never_panics_on_adversarial_utf8() {
+        let font = Font::from_bytes(FONT).expect("bundled font parses");
+        let mut glyph = Glyph::new();
+        let mut buf = vec![0u8; 320 * 240 * PixelFormat::Rgb24.bytes_per_pixel()];
+        for text in ADVERSARIAL {
+            // Measure.
+            let _ = font.width(text, 24.0);
+            // Fit to a budget: the prefix must stay valid UTF-8 (it is a
+            // String by construction) and never exceed the budget once
+            // it holds at least one char.
+            let mut fitted = String::new();
+            fit_width(&font, 24.0, text, 100.0, &mut fitted);
+            if !fitted.is_empty() {
+                assert!(font.width(&fitted, 24.0) <= 100.0 + f32::EPSILON);
+            }
+            // Rasterise onto a tiny surface: clipping must discard, not
+            // panic, whatever the metrics say.
+            let mut surf = Surface::new(&mut buf, 320, 240, 320 * 3, PixelFormat::Rgb24);
+            let _ = draw_text(&mut surf, &font, 24.0, text, 5, 100, 0, &mut glyph);
+            let _ = draw_text(&mut surf, &font, 24.0, text, -5000, -5000, 0, &mut glyph);
+        }
+    }
+
+    #[test]
+    fn blit_helpers_reject_out_of_bounds_geometry() {
+        let mut buf = vec![0u8; 16 * 16 * 3];
+        let mut surf = Surface::new(&mut buf, 16, 16, 16 * 3, PixelFormat::Rgb24);
+        let far = Rect { x: 10_000, y: 10_000, w: 64, h: 64 };
+        surf.fill_gray(far, 0);
+        surf.hline(10_000, 10_000, 32, 2, 0);
+        surf.vline(10_000, 10_000, 32, 2, 0);
+        surf.line(-50, -50, 10_000, 10_000, 2, 0);
+        surf.blit_image(&[0u8; 64 * 64 * 3], 64, 64, PixelFormat::Rgb24, far);
+        surf.blit_glyph(-40, -40, 8, 8, &[255u8; 64], 0);
+        // The untouched buffer stays pristine.
+        assert!(buf.iter().all(|&b| b == 0));
+    }
+}
