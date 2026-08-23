@@ -349,7 +349,6 @@ fn has_user_header(items: &[LauncherItem]) -> bool {
 /// then the /mnt/ext1/applications scan.  Returns false when the list is
 /// empty (nothing to launch anywhere).
 pub fn build<B: Framebuffer>(app: &mut App<B>) -> bool {
-    app.launcher_items.clear();
     let prof = LcProfile::from_env(app);
 
     let (db_paths, vw_paths) = desktop_paths();
@@ -357,116 +356,14 @@ pub fn build<B: Framebuffer>(app: &mut App<B>) -> bool {
     let vw_paths: Vec<&str> = vw_paths.iter().map(|s| s.as_str()).collect();
     let db = load_json(&db_paths);
     let vw = load_json(&vw_paths);
-    let db_apps = db.as_ref().and_then(|v| v.get("applications")).cloned();
-    if let (Some(db_apps), Some(vw)) = (db_apps.as_ref(), vw.as_ref()) {
-        // 1. view.json "view.groups": a header + each app id.
-        if let Some(groups) = vw.pointer("/view/groups").and_then(|g| g.as_array()) {
-            for g in groups {
-                let Some(apps_arr) = g.get("apps").and_then(|a| a.as_array()) else {
-                    continue;
-                };
-                let title = g.get("title").map(|t| lc_title(t, &prof)).filter(|t| !t.is_empty());
-                if let Some(t) = title {
-                    // C pb_build_groups: a header row per titled group,
-                    // unconditional (no cross-group dedup).
-                    app.launcher_items.push(LauncherItem { group: true, text: t, ..Default::default() });
-                }
-                for a in apps_arr {
-                    let Some(id) = a.as_str() else {
-                        continue;
-                    };
-                    let Some(def) = db_apps.get(id) else {
-                        continue;
-                    };
-                    if let Some(vis) = def.get("visible") {
-                        if !lc_visible(vis, &prof) {
-                            continue;
-                        }
-                    }
-                    let text = def
-                        .get("title")
-                        .map(|t| lc_title(t, &prof))
-                        .filter(|t| !t.is_empty())
-                        .unwrap_or_else(|| id.to_string());
-                    let it = LauncherItem {
-                        text,
-                        path: def.get("path").map(|v| lc_resolve_str(v, &prof)).unwrap_or_default(),
-                        icon: def.get("icon").map(|v| lc_resolve_str(v, &prof)).unwrap_or_default(),
-                        params: lc_params(def),
-                        ..Default::default()
-                    };
-                    if !it.path.is_empty() && !has_path(&app.launcher_items, &it.path) {
-                        app.launcher_items.push(it);
-                    }
-                }
-            }
-        }
-        // 2. view.json "applications" U_* user apps not in a group.
-        if let Some(vw_apps) = vw.get("applications").and_then(|a| a.as_object()) {
-            let mut hdr = false;
-            for (key, val) in vw_apps {
-                if !key.starts_with("U_") {
-                    continue;
-                }
-                if let Some(vis) = val.get("visible") {
-                    if !lc_visible(vis, &prof) {
-                        continue;
-                    }
-                }
-                add_header(&mut app.launcher_items, "Users", &mut hdr);
-                // C pb_build_user_app resolves the U_* title verbatim
-                // (no @Token/_→space translation) and takes no params.
-                let text = val
-                    .get("title")
-                    .map(|t| {
-                        let mut s = String::new();
-                        lc_resolve(t, None, &prof, &mut s);
-                        s
-                    })
-                    .filter(|t| !t.is_empty())
-                    .unwrap_or_else(|| key.clone());
-                let it = LauncherItem {
-                    text,
-                    path: val.get("path").map(|v| lc_resolve_str(v, &prof)).unwrap_or_default(),
-                    icon: val.get("icon").map(|v| lc_resolve_str(v, &prof)).unwrap_or_default(),
-                    ..Default::default()
-                };
-                if !it.path.is_empty() && !has_path(&app.launcher_items, &it.path) {
-                    app.launcher_items.push(it);
-                }
-            }
-        }
-    }
+    let db_apps = db
+        .as_ref()
+        .and_then(|v| v.get("applications"))
+        .and_then(|a| a.as_object());
 
-    // 3. Scan /mnt/ext1/applications for *.app the firmware hasn't
-    //    recorded (C eh_launcher_scan_ext1_apps), under a "Users" header.
-    let scan_dir = user_apps_dir();
-    if let Ok(rd) = std::fs::read_dir(&scan_dir) {
-        for e in rd.flatten() {
-            let name = e.file_name().to_string_lossy().to_string();
-            if !name.ends_with(".app") {
-                continue;
-            }
-            let path = format!("{scan_dir}/{name}");
-            if has_path(&app.launcher_items, &path) {
-                continue;
-            }
-            // C eh_launcher_scan_ext1_apps: reuse an existing "Users"
-            // header (from the U_* loop) instead of adding a second one.
-            if !has_user_header(&app.launcher_items) {
-                app.launcher_items.push(LauncherItem { group: true, text: "Users".into(), ..Default::default() });
-            }
-            app.launcher_items.push(LauncherItem {
-                group: false,
-                text: name.trim_end_matches(".app").to_string(),
-                path,
-                icon: String::new(),
-                params: Vec::new(),
-                art: None,
-            });
-        }
-    }
-
+    // Merge the firmware desktop configs + the ext1 scan (pure; see the
+    // assemble contract tests).
+    app.launcher_items = assemble(db_apps, vw.as_ref(), &prof, &scan_ext1_app_files());
 
     // Host fallback (the C SDL build's freedesktop discovery): when the
     // firmware desktop configs and the ext1 scan yield nothing, list the
@@ -495,6 +392,146 @@ pub fn build<B: Framebuffer>(app: &mut App<B>) -> bool {
         app.launcher_body_h
     ));
     !app.launcher_items.is_empty()
+}
+
+/// The user-apps dir's `*.app` files as full paths, SORTED by file name —
+/// readdir order is arbitrary, so without the sort the launcher's grid
+/// would reshuffle across boots.
+fn scan_ext1_app_files() -> Vec<String> {
+    let dir = user_apps_dir();
+    let mut out: Vec<String> = std::fs::read_dir(&dir)
+        .into_iter()
+        .flatten()
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .filter(|n| n.ends_with(".app"))
+        .map(|n| format!("{dir}/{n}"))
+        .collect();
+    out.sort();
+    out
+}
+
+/// Assemble the launcher item list (C eh_plat_launcher_build →
+/// pb_launcher_build's merge, pure — no I/O, no App):
+///
+/// 1. view.json `view.groups`: a header per titled group + each app id
+///    resolved against apps_db, deduped by launch path;
+/// 2. view.json `applications` U_* user apps under ONE reused "Users"
+///    header;
+/// 3. the scanned ext1 `*.app` files, joining that same header and never
+///    duplicating a known path.
+///
+/// Empty everywhere → an empty list (build() then tries the host
+/// freedesktop fallback).
+fn assemble(
+    db_apps: Option<&serde_json::Map<String, Value>>,
+    vw: Option<&Value>,
+    prof: &LcProfile,
+    ext1_files: &[String],
+) -> Vec<LauncherItem> {
+    let mut items: Vec<LauncherItem> = Vec::new();
+    if let (Some(db_apps), Some(vw)) = (db_apps, vw) {
+        // 1. view.json "view.groups": a header + each app id.
+        if let Some(groups) = vw.pointer("/view/groups").and_then(|g| g.as_array()) {
+            for g in groups {
+                let Some(apps_arr) = g.get("apps").and_then(|a| a.as_array()) else {
+                    continue;
+                };
+                let title = g.get("title").map(|t| lc_title(t, prof)).filter(|t| !t.is_empty());
+                if let Some(t) = title {
+                    // C pb_build_groups: a header row per titled group,
+                    // unconditional (no cross-group dedup).
+                    items.push(LauncherItem { group: true, text: t, ..Default::default() });
+                }
+                for a in apps_arr {
+                    let Some(id) = a.as_str() else {
+                        continue;
+                    };
+                    let Some(def) = db_apps.get(id) else {
+                        continue;
+                    };
+                    if let Some(vis) = def.get("visible") {
+                        if !lc_visible(vis, prof) {
+                            continue;
+                        }
+                    }
+                    let text = def
+                        .get("title")
+                        .map(|t| lc_title(t, prof))
+                        .filter(|t| !t.is_empty())
+                        .unwrap_or_else(|| id.to_string());
+                    let it = LauncherItem {
+                        text,
+                        path: def.get("path").map(|v| lc_resolve_str(v, prof)).unwrap_or_default(),
+                        icon: def.get("icon").map(|v| lc_resolve_str(v, prof)).unwrap_or_default(),
+                        params: lc_params(def),
+                        ..Default::default()
+                    };
+                    if !it.path.is_empty() && !has_path(&items, &it.path) {
+                        items.push(it);
+                    }
+                }
+            }
+        }
+        // 2. view.json "applications" U_* user apps not in a group.
+        if let Some(vw_apps) = vw.get("applications").and_then(|a| a.as_object()) {
+            let mut hdr = false;
+            for (key, val) in vw_apps {
+                if !key.starts_with("U_") {
+                    continue;
+                }
+                if let Some(vis) = val.get("visible") {
+                    if !lc_visible(vis, prof) {
+                        continue;
+                    }
+                }
+                add_header(&mut items, "Users", &mut hdr);
+                // C pb_build_user_app resolves the U_* title verbatim
+                // (no @Token/_→space translation) and takes no params.
+                let text = val
+                    .get("title")
+                    .map(|t| {
+                        let mut s = String::new();
+                        lc_resolve(t, None, prof, &mut s);
+                        s
+                    })
+                    .filter(|t| !t.is_empty())
+                    .unwrap_or_else(|| key.clone());
+                let it = LauncherItem {
+                    text,
+                    path: val.get("path").map(|v| lc_resolve_str(v, prof)).unwrap_or_default(),
+                    icon: val.get("icon").map(|v| lc_resolve_str(v, prof)).unwrap_or_default(),
+                    ..Default::default()
+                };
+                if !it.path.is_empty() && !has_path(&items, &it.path) {
+                    items.push(it);
+                }
+            }
+        }
+    }
+
+    // 3. The scanned /mnt/ext1/applications *.app files the firmware
+    //    hasn't recorded (C eh_launcher_scan_ext1_apps), under a "Users"
+    //    header — reusing the U_* loop's header instead of adding a
+    //    second one.
+    for path in ext1_files {
+        // Belt-and-braces: the scanner already filtered, but this fn's
+        // contract is "ext1 *.app files" (C checked the suffix in-scan).
+        if !path.ends_with(".app") || has_path(&items, path) {
+            continue;
+        }
+        if !has_user_header(&items) {
+            items.push(LauncherItem { group: true, text: "Users".into(), ..Default::default() });
+        }
+        let name = path.rsplit('/').next().unwrap_or(path);
+        items.push(LauncherItem {
+            group: false,
+            text: name.trim_end_matches(".app").to_string(),
+            path: path.clone(),
+            ..Default::default()
+        });
+    }
+    items
 }
 
 /// Scan the freedesktop application dirs (C eh_plat_launcher_build on the
@@ -1033,5 +1070,75 @@ mod tests {
             lc_params(&json!({"params": [1, "keep", null]})),
             vec!["keep"]
         );
+    }
+
+    // ── assemble() contracts: the home-screen merge rules ───────────
+
+    fn db_apps() -> Value {
+        json!({
+            "reader": {"title": {"all": "Reader"}, "path": "/ebrmain/reader.app", "icon": "READER"},
+            "gallery": {"title": "@Gallery", "path": "/ebrmain/gallery.app"},
+            "hidden": {"visible": "no", "path": "/x/hidden.app"}
+        })
+    }
+
+    #[test]
+    fn groups_merge_dedupe_and_respect_visibility() {
+        let vw = json!({"view": {"groups": [
+            {"title": "Main", "apps": ["reader", "gallery", "missing", "hidden"]},
+            // All of this group's apps dedupe away, but C pb_build_groups
+            // still emits the titled header unconditionally.
+            {"title": "Again", "apps": ["reader"]}
+        ]}});
+        let items = assemble(Some(db_apps().as_object().unwrap()), Some(&vw), &prof(), &[]);
+        let texts: Vec<&str> = items.iter().map(|i| i.text.as_str()).collect();
+        assert_eq!(texts, ["Main", "Reader", "Gallery", "Again"]);
+        // reader listed in both groups appears exactly once...
+        assert_eq!(
+            items.iter().filter(|i| i.path == "/ebrmain/reader.app").count(),
+            1
+        );
+        // ...invisible apps and ids missing from apps_db never land.
+        assert!(!texts.contains(&"hidden"));
+        assert!(items.iter().all(|i| i.group || !i.path.is_empty()));
+    }
+
+    #[test]
+    fn user_apps_share_one_users_header_and_fall_back_to_the_key() {
+        let vw = json!({"applications": {
+            "U_ko": {"title": "KOReader", "path": "/mnt/ext1/koreader.app"},
+            "U_pl": {"path": "/mnt/ext1/plumber.app"}
+        }});
+        // U_* assembly runs under build()'s both-configs guard (the C
+        // shape), so the fixture carries an EMPTY apps_db, not none.
+        let empty = json!({});
+        let items = assemble(Some(empty.as_object().unwrap()), Some(&vw), &prof(), &[]);
+        let texts: Vec<&str> = items.iter().map(|i| i.text.as_str()).collect();
+        // ONE header for the whole U_* run (add_header's `already` flag);
+        // an untitled user app falls back to its view.json key.
+        assert_eq!(texts, ["Users", "KOReader", "U_pl"]);
+    }
+
+    #[test]
+    fn ext1_files_join_the_same_header_without_duplicates() {
+        let vw = json!({"applications": {"U_ko": {"path": "/mnt/ext1/applications/koreader.app"}}});
+        let ext1 = vec![
+            "/mnt/ext1/applications/koreader.app".into(), // known → skipped
+            "/mnt/ext1/applications/mytool.app".into(),   // fresh → joins
+            "/mnt/ext1/applications/notes.txt".into(),    // not scanned here
+        ];
+        // U_* + ext1 phases sit behind build()'s both-configs guard
+        // (C shape): an EMPTY apps_db rather than none.
+        let empty = json!({});
+        let items = assemble(Some(empty.as_object().unwrap()), Some(&vw), &prof(), &ext1);
+        let texts: Vec<&str> = items.iter().map(|i| i.text.as_str()).collect();
+        // Same single "Users" header; no duplicate koreader row; the
+        // ".app" suffix is stripped from the label.
+        assert_eq!(texts, ["Users", "U_ko", "mytool"]);
+        assert_eq!(items.iter().filter(|i| i.group).count(), 1);
+
+        // Nothing anywhere: an empty list (build() then tries the host
+        // freedesktop fallback).
+        assert!(assemble(None, None, &prof(), &[]).is_empty());
     }
 }
