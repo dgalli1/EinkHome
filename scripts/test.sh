@@ -2,7 +2,7 @@
 #
 # test.sh — run the EinkHome test suites.
 #
-#   scripts/test.sh                # api unit tests + the emulator e2e suite
+#   scripts/test.sh                # rust + api unit tests + the emulator e2e suite
 #   scripts/test.sh --api-only     # api unit tests only (no podman/firmware)
 #   scripts/test.sh --pbemu        # ... plus the pbemu submodule's own suite
 #   scripts/test.sh -- -k offline  # pass pytest args through to the e2e suite
@@ -38,11 +38,13 @@ PBEMU_DIR="${REPO_ROOT}/pbemu"
 PY="${PBEMU_DIR}/.venv/bin/python"
 FIRMWARE_DIR="${PBEMU_DIR}/U633_6.8.2817"
 BOOKS_DIR="${FIRMWARE_DIR}/.live/mnt/ext1/books"
+EH_UI_DIR="${REPO_ROOT}/eh_ui"
 
 RUN_API=1
 RUN_E2E=1
 RUN_PBEMU=0
 RUN_API_ONLY=0
+RUN_RUST=1
 args=()
 
 while [ "$#" -gt 0 ]; do
@@ -86,6 +88,11 @@ if [ "${RUN_E2E}" = 1 ] && [ "${BACKEND}" != "sdl" ]; then
 fi
 
 rc=0
+
+if [ "${RUN_RUST}" = 1 ]; then
+	echo "==> Rust unit tests (eh_ui)"
+	(cd "${EH_UI_DIR}" && cargo test --workspace -q) || rc=1
+fi
 
 if [ "${RUN_API}" = 1 ]; then
 	echo "==> api unit tests (api/tests)"

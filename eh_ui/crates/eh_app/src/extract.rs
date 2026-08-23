@@ -275,7 +275,17 @@ impl<'a> Grab<'a> {
             self.out.push(' ');
         }
         self.out.push_str(t);
-        self.out.truncate(limit);
+        // Byte-cap on a char boundary: String::truncate panics when the
+        // cut splits a multibyte char, and titles are untrusted device
+        // input (an EPUB title with one straddling byte 96 would crash
+        // the import scan).
+        if self.out.len() > limit {
+            let mut end = limit;
+            while !self.out.is_char_boundary(end) {
+                end -= 1;
+            }
+            self.out.truncate(end);
+        }
     }
 }
 
@@ -619,5 +629,195 @@ fn pdf_decode_bytes(bytes: &[u8]) -> String {
         String::from_utf16_lossy(&units)
     } else {
         bytes.iter().map(|&b| b as char).collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── PDF Info-dictionary strings ─────────────────────────────────────
+
+    #[test]
+    fn pdf_literal_string_decodes_escapes_nesting_and_octal() {
+        // Standard escapes, an unescaped nested paren pair, and an octal
+        // escape; the returned offset lands past the closing paren.
+        let body = br#"a\(b\)c(d)e\101f)"#;
+        let (s, end) = pdf_literal_string(body).unwrap();
+        assert_eq!(s, "a(b)c(d)eAf");
+        assert_eq!(end, body.len());
+
+        // Octal runs take up to three digits: \1010 is 'A' then '0'.
+        assert_eq!(pdf_literal_string(br"\1010)").unwrap().0, "A0");
+
+        // A backslash-newline continues the line; unknown escapes keep
+        // the escaped char.
+        assert_eq!(pdf_literal_string(b"a\\\nb\\xy)").unwrap().0, "abxy");
+    }
+
+    #[test]
+    fn pdf_literal_string_unterminated_is_none() {
+        assert!(pdf_literal_string(b"no closing paren").is_none());
+    }
+
+    #[test]
+    fn pdf_hex_string_skips_whitespace_and_pads_odd_digit() {
+        // Whitespace between hex digits is ignored; a FEFF BOM decodes
+        // the rest as UTF-16BE.
+        let body = b"FEFF 0434 0435 > rest";
+        let (s, end) = pdf_hex_string(body).unwrap();
+        assert_eq!(s, "де");
+        assert_eq!(end, b"FEFF 0434 0435 >".len());
+        // An odd trailing digit pairs its high nibble with 0:
+        // "414" -> 0x41 'A', 0x40 '@'.
+        assert_eq!(pdf_hex_string(b"414>").unwrap().0, "A@");
+    }
+
+    #[test]
+    fn pdf_dict_string_scans_past_nonstring_values_and_caps_chars() {
+        // Whitespace between key and value; a non-string value (`true`)
+        // keeps the scan going to the next occurrence of the key.
+        assert_eq!(pdf_dict_string(b"/Title\n true /Title (Real)", b"/Title", 96), "Real");
+        // The cap counts characters, not bytes: multibyte text survives
+        // whole (a byte truncate would split a char).
+        assert_eq!(pdf_dict_string(b"/Title <FEFF043404350436>", b"/Title", 2), "де");
+        // No usable value anywhere: empty string.
+        assert_eq!(pdf_dict_string(b"/Author null", b"/Author", 8), "");
+    }
+
+    #[test]
+    fn pdf_decode_bytes_switches_on_the_utf16_bom() {
+        // No BOM: bytes map through PDFDocEncoding (≈ Latin-1).
+        assert_eq!(pdf_decode_bytes(&[0x41, 0xE9]), "Aé");
+        // FEFF BOM: the remainder reads as UTF-16BE units.
+        assert_eq!(pdf_decode_bytes(&[0xFE, 0xFF, 0x00, 0x64, 0x04, 0x34]), "dд");
+    }
+
+    // ── XML field grabbing ──────────────────────────────────────────────
+
+    #[test]
+    fn grab_two_fields_matches_local_names_across_nesting() {
+        let xml = br#"<metadata><dc:title>A<x>B</x> C</dc:title><dc:creator>Z &amp; W</dc:creator></metadata>"#;
+        let (t, a) = grab_two_fields(xml, &["title"], &["creator"], MAX_TITLE_LEN);
+        // Namespace prefixes are stripped for matching, an inner close
+        // does not end the capture, and entities arrive unescaped.
+        assert_eq!(t, "A B C");
+        assert_eq!(a, "Z & W");
+    }
+
+    #[test]
+    fn grab_falls_through_an_empty_first_match() {
+        // `done` only latches on non-empty text: an empty first <title>
+        // must not swallow the real one.
+        let xml = br#"<p><title></title><title>Fallback</title></p>"#;
+        let (t, _) = grab_two_fields(xml, &["title"], &[], MAX_TITLE_LEN);
+        assert_eq!(t, "Fallback");
+    }
+
+    #[test]
+    fn grab_byte_cap_never_splits_a_multibyte_char() {
+        // Regression: a title whose byte cap landed mid-char used to hit
+        // String::truncate's char-boundary assertion — a device crash in
+        // the middle of the import scan.
+        let xml = format!("<t>{}é</t>", "a".repeat(95)).into_bytes();
+        let (t, _) = grab_two_fields(&xml, &["t"], &[], MAX_TITLE_LEN);
+        assert_eq!(t.len(), 95);
+        assert_eq!(t.chars().count(), 95);
+
+        // When the cap DOES fall on a boundary, the full budget is used.
+        let xml = format!("<t>{}é</t>", "a".repeat(94)).into_bytes();
+        let (t, _) = grab_two_fields(&xml, &["t"], &[], MAX_TITLE_LEN);
+        assert_eq!(t.len(), MAX_TITLE_LEN);
+        assert!(t.ends_with('é'));
+    }
+
+    // ── epub plumbing ───────────────────────────────────────────────────
+
+    #[test]
+    fn rootfile_path_reads_the_first_rootfile() {
+        let xml = r#"<container><rootfiles><rootfile full-path="OEBPS/content.opf"/><rootfile full-path="second.opf"/></rootfiles></container>"#;
+        assert_eq!(rootfile_path(xml).as_deref(), Some("OEBPS/content.opf"));
+        assert_eq!(rootfile_path("<container/>"), None);
+    }
+
+    #[test]
+    fn cover_hint_resolves_both_wild_conventions() {
+        // Convention 1 wins even when a plain item precedes it, and only
+        // the exact "cover-image" token matches.
+        let props = r#"<manifest><item id="c2" href="plain.png"/><item id="c1" href="props.png" properties="cover-image image-count-2"/></manifest>"#;
+        assert_eq!(cover_hint(props).as_deref(), Some("props.png"));
+        // Convention 2: meta[name=cover] content=<id> → that item's href.
+        let meta = r#"<metadata><meta name="cover" content="my-img"/></metadata><manifest><item id="my-img" href="meta.png"/></manifest>"#;
+        assert_eq!(cover_hint(meta).as_deref(), Some("meta.png"));
+        // Neither convention: no hint.
+        assert_eq!(cover_hint(r#"<manifest><item id="x" href="a.png"/></manifest>"#), None);
+    }
+
+    #[test]
+    fn attr_in_reads_quoted_values_only() {
+        assert_eq!(attr_in(r#"href="a.png""#, "href").as_deref(), Some("a.png"));
+        assert_eq!(attr_in("href='a.png'", "href").as_deref(), Some("a.png"));
+        assert_eq!(attr_in("href=a.png", "href"), None);
+        assert_eq!(attr_in("id=x", "href"), None);
+    }
+
+    #[test]
+    fn resolve_member_exact_dot_percent_and_basename() {
+        use std::io::Write;
+        use zip::write::SimpleFileOptions;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.epub");
+        let f = std::fs::File::create(&path).unwrap();
+        let mut z = zip::ZipWriter::new(f);
+        z.start_file("OEBPS/plain.png", SimpleFileOptions::default()).unwrap();
+        z.write_all(b"x").unwrap();
+        z.start_file("OEBPS/imgs/my cover.png", SimpleFileOptions::default()).unwrap();
+        z.write_all(b"x").unwrap();
+        z.finish().unwrap();
+        let mut ar = zip::ZipArchive::new(std::fs::File::open(&path).unwrap()).unwrap();
+
+        // Exact member name.
+        assert_eq!(
+            resolve_member(&mut ar, "OEBPS/plain.png").as_deref(),
+            Some("OEBPS/plain.png")
+        );
+        // OPF-dir relative href with a ./ prefix resolves by base name.
+        assert_eq!(
+            resolve_member(&mut ar, "./plain.png").as_deref(),
+            Some("OEBPS/plain.png")
+        );
+        // Percent-encoded space decodes to the stored member.
+        assert_eq!(
+            resolve_member(&mut ar, "OEBPS/imgs/my%20cover.png").as_deref(),
+            Some("OEBPS/imgs/my cover.png")
+        );
+        // A wrong directory still falls back to the base name,
+        // case-insensitively.
+        assert_eq!(
+            resolve_member(&mut ar, "elsewhere/MY COVER.PNG").as_deref(),
+            Some("OEBPS/imgs/my cover.png")
+        );
+        // Nothing matches: None.
+        assert_eq!(resolve_member(&mut ar, "nope.png"), None);
+    }
+
+    // ── misc helpers ────────────────────────────────────────────────────
+
+    #[test]
+    fn local_name_strips_the_namespace_prefix() {
+        assert_eq!(local_name(b"dc:title"), "title");
+        assert_eq!(local_name(b"title"), "title");
+        assert_eq!(local_name(b"a:b:c"), "c");
+    }
+
+    #[test]
+    fn read_capped_truncates_and_tolerates_missing_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("big.bin");
+        std::fs::write(&p, vec![0u8; 4096]).unwrap();
+        assert_eq!(read_capped(&p, 1000).len(), 1000);
+        assert_eq!(read_capped(&p, 1 << 20).len(), 4096);
+        // Missing file: empty buffer, no panic (best-effort extraction).
+        assert!(read_capped(&dir.path().join("nope"), 10).is_empty());
     }
 }

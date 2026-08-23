@@ -46,6 +46,22 @@ jobs:
       - name: Run api unit tests
         run: pbemu/.venv/bin/python -m pytest api/tests -q
 
+  rust-tests:
+    name: Rust unit tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: eh_ui
+      # The eh_ui workspace is self-contained (no build scripts, fonts are
+      # in-repo), so this needs no submodule, firmware or emulator — the
+      # whole unit suite runs in seconds.
+      - name: Run make test-rust
+        run: make test-rust
+
   e2e:
     name: E2E (bookshelf suite)
     uses: ./.github/workflows/e2e-suite.yml
