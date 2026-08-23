@@ -41,7 +41,10 @@ scripts/            # run.sh (headless emulator), run-visible-pb.sh
                     # install-koreader-device.sh (real device),
                     # install-koreader.sh (emulator KOReader),
                     # uninstall-device.sh, test.sh, dev tools, legacy/
-api/                # mock Kavita REST API server (+ tests)
+docs/               # ARCHITECTURE.md (crate layers, workers, test tiers)
+                    # + playwright-report-spec.md
+                    # Start with docs/ARCHITECTURE.md before diving in.
+ api/                # mock Kavita REST API server (+ tests)
 tests/              # e2e suites: emulator (bookshelf.py) and SDL
                     # (offline_sdl, cover_warm_sdl) + support framework
 pbemu/              # git submodule: the emulator project this app runs in
