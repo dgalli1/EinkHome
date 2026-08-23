@@ -1002,6 +1002,25 @@ mod tests {
     }
 
     #[test]
+    fn download_all_skips_disk_native_sources() {
+        // Regression (emulator e2e): a stale folder row — file deleted
+        // under a later cleanup, flag reconciled to undownloaded at boot
+        // — used to join the batch, 404 at the server, and be remembered
+        let (mut app, _dl) = mk_dl_app("natv");
+        app.store.upsert_book(&meta("srv")).unwrap();
+        let folder = crate::store::Book {
+            id: "fld_stale".into(),
+            source: "folder".into(),
+            downloaded: false, // the stale-reconciliation shape
+            ..Default::default()
+        };
+        app.store.upsert_book_row(&folder).unwrap();
+        app.download_all();
+        assert_eq!(app.downloader.live_ids(), vec!["srv".to_string()]);
+        assert_eq!(app.dl.total, 1, "disk-native rows never join the batch");
+    }
+
+    #[test]
     fn download_all_bounds_queue_and_tops_up() {
         let (mut app, _dl) = mk_dl_app("topup");
         for i in 0..12 {

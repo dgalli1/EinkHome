@@ -532,6 +532,14 @@ impl<B: Framebuffer> App<B> {
     /// queue stays bounded and tops up as jobs finish, failures are
     /// remembered so they can't loop, and nothing opens when there is
     /// nothing to fetch.
+    ///
+    /// Only server-sourced ("kavita") rows are fetchable: folder/local
+    /// rows are disk-native — their content IS the ext1 file, no server
+    /// endpoint exists for their ids.  A stale one (file deleted under a
+    /// later cleanup, flag reconciled to undownloaded at boot) used to
+    /// join the batch here, burn queue slots on a guaranteed 404, and be
+    /// remembered by `failed_ids` forever — so the batch could never
+    /// reach its queued total.
     pub(crate) fn download_all(&mut self) {
         let n = self.store.count().unwrap_or(0) as usize;
         let targets: Vec<Book> = self
@@ -539,7 +547,7 @@ impl<B: Framebuffer> App<B> {
             .list_books(n, 0)
             .unwrap_or_default()
             .into_iter()
-            .filter(|b| !b.downloaded)
+            .filter(|b| !b.downloaded && b.source == "kavita")
             .collect();
         if targets.is_empty() {
             crate::logger::log("[bookshelf] download-all nothing to download");
