@@ -98,7 +98,13 @@ mod imp {
     #[allow(dead_code)]
     pub unsafe extern "C" fn GetResource(_name: *const u8, _deflt: *const IBitmapHdr) -> *mut IBitmapHdr { std::ptr::null_mut() }
     #[allow(dead_code)]
+    pub unsafe extern "C" fn LoadPNG(_name: *const u8, _deflt: i32) -> *mut IBitmapHdr { std::ptr::null_mut() }
+    #[allow(dead_code)]
     pub unsafe extern "C" fn GetFrontlightState() -> i32 { -1 }
+    #[allow(dead_code)]
+    pub unsafe extern "C" fn SetOrientation(_n: i32) {}
+    #[allow(dead_code)]
+    pub unsafe extern "C" fn SetPanelType(_t: i32) {}
     #[allow(dead_code)]
     pub unsafe extern "C" fn GetFrontlightEnabled() -> i32 { 0 }
 }
@@ -132,18 +138,19 @@ mod imp {
         pub(super) fn device_has_touchpanel() -> bool;
         pub(super) fn device_has_audio() -> bool;
         pub(super) fn iv_ipc_cmd(typ: core::ffi::c_long, param: core::ffi::c_long) -> core::ffi::c_long;
+        pub(super) fn SetOrientation(n: i32);
+        pub(super) fn SetPanelType(type_: i32);
         pub(super) fn OpenControlPanel(ctx: *mut core::ffi::c_void);
         pub(super) fn GetResource(name: *const u8, deflt: *const IBitmapHdr) -> *mut IBitmapHdr;
+        pub(super) fn LoadPNG(name: *const u8, deflt: i32) -> *mut IBitmapHdr;
         pub(super) fn GetFrontlightState() -> i32;
         pub(super) fn GetFrontlightEnabled() -> i32;
     }
 }
-
-// Re-expose the imports uniformly.
 #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
-use imp::{BanSleep, CloseKeyboard, DrawPanel, FullUpdate, GetBatteryPower, GetCanvas, GetDeviceModel, GetFrontlightEnabled, GetFrontlightState, GetResource, GetSoftwareVersion, InitInkview, InkViewMain, NewTaskEx, OpenBook, OpenControlPanel, OpenKeyboard, PanelHeight, PartialUpdate, QueryNetwork, Repaint, ScreenHeight, ScreenWidth, SetWeakTimerEx, device_has_audio, device_has_touchpanel, device_number, iv_ipc_cmd, iv_update_panel};
+use imp::{BanSleep, CloseKeyboard, DrawPanel, FullUpdate, GetBatteryPower, GetCanvas, GetDeviceModel, GetFrontlightEnabled, GetFrontlightState, GetResource, GetSoftwareVersion, InitInkview, InkViewMain, LoadPNG, NewTaskEx, OpenBook, OpenControlPanel, OpenKeyboard, PanelHeight, PartialUpdate, QueryNetwork, Repaint, ScreenHeight, ScreenWidth, SetOrientation, SetPanelType, SetWeakTimerEx, device_has_audio, device_has_touchpanel, device_number, iv_ipc_cmd, iv_update_panel};
 #[cfg(not(any(target_arch = "arm", target_arch = "aarch64")))]
-use imp::{BanSleep, DrawPanel, FullUpdate, GetBatteryPower, GetCanvas, GetDeviceModel, GetFrontlightEnabled, GetFrontlightState, GetResource, GetSoftwareVersion, InitInkview, InkViewMain, NewTaskEx, OpenBook, OpenControlPanel, PanelHeight, PartialUpdate, QueryNetwork, Repaint, ScreenHeight, ScreenWidth, SetWeakTimerEx, device_has_audio, device_has_touchpanel, device_number, iv_ipc_cmd, iv_update_panel};
+use imp::{BanSleep, DrawPanel, FullUpdate, GetBatteryPower, GetCanvas, GetDeviceModel, GetFrontlightEnabled, GetFrontlightState, GetResource, GetSoftwareVersion, InitInkview, InkViewMain, LoadPNG, NewTaskEx, OpenBook, OpenControlPanel, PanelHeight, PartialUpdate, QueryNetwork, Repaint, ScreenHeight, ScreenWidth, SetOrientation, SetPanelType, SetWeakTimerEx, device_has_audio, device_has_touchpanel, device_number, iv_ipc_cmd, iv_update_panel};
 
 /// Boot the inkview library exactly like the stock bookshelf: register, then
 /// hand the event loop a callback.  `on_event` receives raw (evt, par1, par2)
@@ -151,6 +158,12 @@ use imp::{BanSleep, DrawPanel, FullUpdate, GetBatteryPower, GetCanvas, GetDevice
 pub fn iv_main(on_event: extern "C" fn(i32, i32, i32) -> i32) -> ! {
     unsafe {
         InitInkview(0x4110);
+        // C eh_plat_boot (the stock bookshelf's main): register the
+        // orientation/panel BEFORE InkViewMain attaches the task — the
+        // theme store GetResource reads resolves per-orientation resource
+        // sets and misses without it (launcher icons came back NULL).
+        SetOrientation(0);
+        SetPanelType(1);
         InkViewMain(on_event);
     }
     std::process::abort();
@@ -408,17 +421,28 @@ impl Framebuffer for InkviewFb {
     /// launcher resolves its icons through before LoadPNG.
     fn theme_resource(&self, name: &str) -> Option<eh_hal::ThemeBitmap> {
         let c = std::ffi::CString::new(name).ok()?;
-        unsafe {
-            let bm = GetResource(c.as_ptr() as *const u8, std::ptr::null());
-            if bm.is_null() {
-                return None;
-            }
-            let hdr: IBitmapHdr = std::ptr::read(bm as *const IBitmapHdr);
-            let len = hdr.scanline as usize * hdr.height as usize;
-            let data = core::slice::from_raw_parts((bm as *const u8).add(core::mem::size_of::<IBitmapHdr>()), len).to_vec();
-            Some(eh_hal::ThemeBitmap { width: hdr.width, height: hdr.height, depth: hdr.depth, scanline: hdr.scanline, data })
-        }
+        unsafe { parse_ibitmap(GetResource(c.as_ptr() as *const u8, std::ptr::null())) }
     }
+
+    /// C LoadPNG(name, 0): inkview's image loader — on modern firmware it
+    /// also resolves bare theme names, so it is the C launcher's fallback
+    /// when GetResource misses (C eh_launcher.c launcher_icon_get).
+    fn load_png(&self, name: &str) -> Option<eh_hal::ThemeBitmap> {
+        let c = std::ffi::CString::new(name).ok()?;
+        unsafe { parse_ibitmap(LoadPNG(c.as_ptr() as *const u8, 0)) }
+    }
+}
+
+/// Copy a firmware `ibitmap*` into an owned [`eh_hal::ThemeBitmap`] (the
+/// pixel rows follow the 8-byte header, scanline-strided).
+unsafe fn parse_ibitmap(bm: *mut IBitmapHdr) -> Option<eh_hal::ThemeBitmap> {
+    if bm.is_null() {
+        return None;
+    }
+    let hdr: IBitmapHdr = std::ptr::read(bm as *const IBitmapHdr);
+    let len = hdr.scanline as usize * hdr.height as usize;
+    let data = core::slice::from_raw_parts((bm as *const u8).add(core::mem::size_of::<IBitmapHdr>()), len).to_vec();
+    Some(eh_hal::ThemeBitmap { width: hdr.width, height: hdr.height, depth: hdr.depth, scanline: hdr.scanline, data })
 }
 
 

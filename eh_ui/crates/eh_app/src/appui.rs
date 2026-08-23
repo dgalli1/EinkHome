@@ -63,9 +63,11 @@ impl Widget for TopBar {
     fn draw(&mut self, ctx: &mut DrawCtx, rect: Rect) {
         self.rect = Some(rect);
         let col = GRAY_BLACK;
-        // White bar + bottom separator.
+        // White bar + bottom separator.  C draws the separator BELOW the
+        // bar (DrawLine(0, y0+EH_TOP_BAR_H, w, …)) — inside the bar the
+        // source button's white fill erases it (a visible gap x112..288).
         ctx.fill(rect, GRAY_WHITE);
-        ctx.hline(0, rect.y + rect.h - 2, rect.w, 2, col);
+        ctx.hline(0, rect.y + rect.h, rect.w, 1, col);
 
         let cy = (rect.y + rect.h / 2) as i32;
         let y0 = rect.y as i32;
@@ -97,10 +99,11 @@ impl Widget for TopBar {
             (left_w + band_w / 2, band_w)
         };
         if !self.state.title.is_empty() {
-            // C draws the 40px title with its TOP at y0+(TOP_BAR_H-40)/2
-            // (DrawString is top-anchored); our draw_text takes the
-            // BASELINE, so add the ascent (~40px at 44px).
-            ctx.text_center_fit(center, y0 + 28 + 40, 44.0, &self.state.title, budget, col);
+            // C draws the title (DEFAULTFONT 44) with its TOP at
+            // y0+(TOP_BAR_H-40)/2 (DrawString is top-anchored); draw_text
+            // takes the BASELINE, so add the face's real ascent.
+            let asc = ctx.font.line_h(44.0).0 as i32;
+            ctx.text_center_fit(center, y0 + 28 + asc, 44.0, &self.state.title, budget, col);
         }
 
         // Right icon stack, hidden on the search tab.
@@ -152,7 +155,10 @@ fn draw_source_button(ctx: &mut DrawCtx, _w: i32, _y0: i32, cy: i32, source: Sou
         Source::Local => draw_book_icon(ctx, ic_x, ic_y, col),
         Source::Folder => draw_folder_icon(ctx, ic_x, ic_y, col),
     }
-    ctx.text(ic_x + 60, cy - 15, 30.0, source_label(source), col);
+    // C DrawString tops the 30px label at cy-15; add the face's ascent
+    // for our baseline-anchored draw_text.
+    let asc = ctx.font.line_h(30.0).0 as i32;
+    ctx.text(ic_x + 60, cy - 15 + asc, 30.0, source_label(source), col);
 }
 
 /// Short label of the active source (C source_short_label).

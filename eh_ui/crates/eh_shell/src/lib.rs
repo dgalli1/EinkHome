@@ -289,37 +289,50 @@ impl Cover {
         self.img_w = w;
         self.img_h = h;
     }
+    /// The centred 2:3 cover card inside `rect` (port of C eh_cover_rect:
+    /// 4px border, 52px caption band below).
+    pub fn cover_card(rect: Rect) -> Rect {
+        const THUMB_BORDER: u32 = 4;
+        const TEXT_AREA: u32 = 52;
+        let inner_w = rect.w.saturating_sub(2 * THUMB_BORDER) as i32;
+        let inner_h = rect.h.saturating_sub(2 * THUMB_BORDER) as i32;
+        let mut ch0 = inner_h - TEXT_AREA as i32;
+        let mut cw0 = ch0 * 2 / 3;
+        if cw0 > inner_w {
+            cw0 = inner_w;
+            ch0 = cw0 * 3 / 2;
+        }
+        if ch0 > inner_h {
+            ch0 = inner_h;
+        }
+        if ch0 < 8 {
+            ch0 = 8;
+        }
+        let cx = rect.x as i32 + THUMB_BORDER as i32 + (inner_w - cw0) / 2;
+        let cy = rect.y as i32 + THUMB_BORDER as i32;
+        Rect { x: cx.max(0) as u32, y: cy.max(0) as u32, w: cw0.max(0) as u32, h: ch0.max(0) as u32 }
+    }
 }
 impl Widget for Cover {
     fn draw(&mut self, ctx: &mut DrawCtx, rect: Rect) {
         self.rect = Some(rect);
         ctx.fill(rect, GRAY_WHITE);
-        // Cover image area: the top ~78% is a 2:3 letterboxed image; when no
-        // image is loaded, draw a bordered placeholder card so the tile reads
-        // like a cover even before real art arrives.
-        let img_h = (rect.h as f32 * 0.78) as u32;
-        let area = Rect { x: rect.x, y: rect.y, w: rect.w, h: img_h };
+        // Cover card (C eh_cover_rect): a centred 2:3 portrait inside the
+        // tile minus the 4px thumb border, with EH_TEXT_AREA (52px)
+        // reserved below for the caption lines.  Covers stretch to fill
+        // this card exactly (C StretchBitmap); with no art yet C draws a
+        // 1px BLACK outline of the same card.
+        let card = Self::cover_card(rect);
         if let Some(img) = &self.img {
-            // C StretchBitmap: covers fill the tile rect exactly (no
-            // letterbox margins).
-            ctx.surf.blit_image_stretch(img, self.img_w, self.img_h, eh_hal::PixelFormat::Rgb24, area);
-            ctx.push(area);
+            ctx.surf.blit_image_stretch(img, self.img_w, self.img_h, eh_hal::PixelFormat::Rgb24, card);
+            ctx.push(card);
         } else {
-            // Placeholder: inset card with a border, centred on the tile.
-            let border = 2u32;
-            let cx = rect.x + border;
-            let cy = rect.y + border;
-            let cw = rect.w.saturating_sub(border * 2);
-            let ch = img_h.saturating_sub(border * 2);
-            if cw > 0 && ch > 0 {
-                ctx.outline(Rect { x: cx, y: cy, w: cw, h: ch }, border, GRAY_LGRAY);
-            }
+            ctx.outline(card, 1, GRAY_BLACK);
         }
-        // Caption (C draw_thumbnail_text): bold title flush-LEFT at the
-        // tile edge (DEFAULTFONTB), author line under it in DGRAY — both
-        // truncated to the tile width, never centred.
-        let text_h = rect.h - img_h;
-        let ty = rect.y + img_h;
+        // Caption (C draw_thumbnail_text grid slot): bold title flush-LEFT
+        // at the tile edge, 6px under the card; author 24px lower in DGRAY
+        // — both truncated to the tile width, never centred.
+        let cap_y = card.y as i32 + card.h as i32 + 6;
         let tx = rect.x as i32 + 4;
         let max_px = (rect.w.saturating_sub(8)) as f32;
         let mut fitted = String::new();
@@ -327,13 +340,14 @@ impl Widget for Cover {
         if fitted.is_empty() {
             fitted.push_str(&self.title[..1.min(self.title.chars().count())]);
         }
-        let baseline1 = ty as i32 + self.title_size as i32;
+        let baseline1 = cap_y + self.title_size as i32;
         draw_text(ctx.surf, ctx.bold, self.title_size, &fitted, tx, baseline1, GRAY_BLACK, ctx.glyph);
         ctx.push(rect);
-        if !self.author.is_empty() && text_h >= (self.title_size + self.author_size) as u32 {
+        let text_h = rect.h.saturating_sub(card.y - rect.y + card.h) as i32;
+        if !self.author.is_empty() && text_h >= (self.title_size + self.author_size) as i32 {
             let mut afitted = String::new();
             eh_render::fit_width(ctx.font, self.author_size, &self.author, max_px, &mut afitted);
-            draw_text(ctx.surf, ctx.font, self.author_size, &afitted, tx, baseline1 + self.author_size as i32, GRAY_DGRAY, ctx.glyph);
+            draw_text(ctx.surf, ctx.font, self.author_size, &afitted, tx, cap_y + 24 + self.author_size as i32, GRAY_DGRAY, ctx.glyph);
         }
     }
     fn dirty(&self, out: &mut Vec<Rect>) {

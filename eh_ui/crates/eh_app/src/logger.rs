@@ -23,6 +23,9 @@ use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
 static LOGGER: OnceLock<Mutex<Option<File>>> = OnceLock::new();
+/// The resolved log path (set by [`init`]); [`crate::viewer`] reads this
+/// for "Show logs" so it can never disagree with where lines are written.
+static LOG_PATH: OnceLock<PathBuf> = OnceLock::new();
 
 fn resolve_path(app_dir: Option<&str>) -> PathBuf {
     if let Ok(d) = std::env::var("PBEMU_LOG_DIR") {
@@ -44,6 +47,7 @@ fn resolve_path(app_dir: Option<&str>) -> PathBuf {
 pub fn init(app_dir: Option<&str>) {
     LOGGER.get_or_init(|| {
         let path = resolve_path(app_dir);
+        let _ = LOG_PATH.set(path.clone());
         let mut file = OpenOptions::new().create(true).append(true).open(&path).ok();
         if let Some(f) = file.as_mut() {
             let argv0 = std::env::args().next().unwrap_or_else(|| "(null)".into());
@@ -52,6 +56,11 @@ pub fn init(app_dir: Option<&str>) {
         }
         Mutex::new(file)
     });
+}
+
+/// The path `log` writes to (None before [`init`]).
+pub fn path() -> Option<&'static PathBuf> {
+    LOG_PATH.get()
 }
 
 /// Append a line to the e2e log (no-op if the log never opened); mirrors to

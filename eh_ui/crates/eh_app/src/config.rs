@@ -24,6 +24,11 @@ pub struct Config {
     /// Lowercased first 3 chars of the config's `language=`/`lang=` value
     /// (C cfg_set_language stores into eh_g_lang); wave-2 i18n consumes it.
     pub language: Option<String>,
+    /// Persisted grouping preset (`group=`, lowercase preset name —
+    /// "none"/"author_series"/"author"/"year"/"genre"/"series"); parsed by
+    /// [`crate::menu::group_from_config`] at boot so the shelf regroups
+    /// across restarts.  Absent in older cfg files → no grouping.
+    pub group: Option<String>,
 }
 
 impl Config {
@@ -48,6 +53,9 @@ impl Config {
         }
         if over.language.is_some() {
             self.language = over.language;
+        }
+        if over.group.is_some() {
+            self.group = over.group;
         }
     }
 
@@ -177,7 +185,7 @@ impl Config {
 
     /// Persist the config as a plain `key=value` list (C
     /// eh_write_config_file): api_url, api_token, downloads_dir, source,
-    /// reader (path, or `auto` for the firmware reader).
+    /// group, reader (path, or `auto` for the firmware reader).
     pub fn save(&self, path: &Path) -> std::io::Result<()> {
         let mut text = format!("api_url={}\n", self.api_url);
         text.push_str(&format!("api_token={}\n", self.api_token));
@@ -187,6 +195,7 @@ impl Config {
             }
         }
         text.push_str(&format!("source={}\n", self.source.as_deref().unwrap_or("kavita")));
+        text.push_str(&format!("group={}\n", self.group.as_deref().unwrap_or("none")));
         text.push_str(&format!("reader={}\n", self.reader.as_deref().unwrap_or("auto")));
         std::fs::write(path, text)
     }
@@ -214,6 +223,7 @@ pub(crate) fn parse_kv_file(path: &Path) -> std::io::Result<Config> {
             "reader" => cfg.reader = Some(value.to_string()),
             "downloads_dir" | "download_dir" => cfg.downloads_dir = Some(value.to_string()),
             "source" => cfg.source = Some(value.to_string()),
+            "group" => cfg.group = Some(value.to_string()),
             // C cfg_set_language: trimmed value, lowercased, truncated to
             // 3 chars (en/de/fr/it…).  Stored now; i18n consumes it in
             // wave 2.

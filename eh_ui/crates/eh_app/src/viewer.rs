@@ -193,14 +193,14 @@ fn draw_header(surf: &mut eh_render::Surface, title: &str) {
     draw_settings_header(surf, title, &mut dirty);
 }
 
-/// The e2e log path (mirrors logger::init's resolution).
+/// The e2e log path: exactly where logger::init opened the file (never
+/// re-derived here — a mismatch shows the user "No log file yet").
 fn log_path() -> std::path::PathBuf {
-    if let Ok(d) = std::env::var("PBEMU_LOG_DIR") {
-        if !d.is_empty() {
-            return std::path::PathBuf::from(d).join("bookshelf.log");
-        }
-    }
-    std::path::PathBuf::from("/mnt/ext1/system/bin/bookshelf.log")
+    crate::logger::path().cloned().unwrap_or_else(|| {
+        // Logger not initialised (cannot happen in the running app):
+        // keep the device default for the draw label.
+        std::path::PathBuf::from("/mnt/ext1/system/bin/bookshelf.log")
+    })
 }
 
 /// Read the log tail: at most `cap` bytes, aligned to a line boundary
@@ -271,7 +271,9 @@ pub fn draw_log_viewer<B: Framebuffer>(surf: &mut eh_render::Surface, app: &mut 
     let mut fitted = String::new();
     eh_render::fit_width(font, 20.0, &shown, (w.saturating_sub(64)) as f32, &mut fitted);
     let tw = font.width(&fitted, 20.0) as i32;
-    draw_text(surf, font, 20.0, &fitted, ((w as i32 - tw) / 2).max(0), (HEADER_H + 10) as i32, GRAY_DGRAY, &mut glyph);
+    // C DrawString takes the glyph TOP; draw_text a baseline — +20 keeps
+    // the 20px path fully below the header rule instead of straddling it.
+    draw_text(surf, font, 20.0, &fitted, ((w as i32 - tw) / 2).max(0), (HEADER_H + 30) as i32, GRAY_DGRAY, &mut glyph);
 
     let body_top = LOG_BODY_TOP;
     let rows_vis = log_rows_vis(h);
@@ -294,7 +296,7 @@ pub fn draw_log_viewer<B: Framebuffer>(surf: &mut eh_render::Surface, app: &mut 
     };
     for i in 0..rows_vis.min(rows.len().saturating_sub(first)) {
         let r = &rows[first + i];
-        draw_text(surf, font, LOG_FONT, &text[r.start..r.end], 24, (body_top + i as u32 * LOG_ROW_H) as i32, GRAY_BLACK, &mut glyph);
+        draw_text(surf, font, LOG_FONT, &text[r.start..r.end], 24, (body_top + i as u32 * LOG_ROW_H + 20) as i32, GRAY_BLACK, &mut glyph);
     }
     // Corner scroll buttons: older = up, newer = down.
     draw_scroll_buttons(surf, h, first > 0, first < max_first);
@@ -355,7 +357,7 @@ pub fn draw_license_detail<B: Framebuffer>(surf: &mut eh_render::Surface, app: &
     let mut fitted = String::new();
     eh_render::fit_width(font, 20.0, &band, (w.saturating_sub(64)) as f32, &mut fitted);
     let tw = font.width(&fitted, 20.0) as i32;
-    draw_text(surf, font, 20.0, &fitted, ((w as i32 - tw) / 2).max(0), (HEADER_H + 10) as i32, GRAY_DGRAY, &mut glyph);
+    draw_text(surf, font, 20.0, &fitted, ((w as i32 - tw) / 2).max(0), (HEADER_H + 30) as i32, GRAY_DGRAY, &mut glyph);
 
     let btn_y = h.saturating_sub(8 + SCROLL_BTN_H);
     let body_h = btn_y.saturating_sub(LOG_BODY_TOP + 8).max(LOG_ROW_H);

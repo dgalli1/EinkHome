@@ -26,14 +26,17 @@ pub const ROWS_Y0: u32 = 112;
 pub fn draw_header(surf: &mut eh_render::Surface, title: &str, _dirty: &mut [Rect]) {
     let w = surf.width();
     surf.fill_gray(Rect { x: 0, y: 0, w, h: HEADER_H }, GRAY_WHITE);
-    surf.hline(0, HEADER_H - 2, w, 2, GRAY_BLACK);
+    surf.hline(0, HEADER_H - 1, w, 1, GRAY_BLACK);
     let bx = BACK_X as i32 + BACK_W as i32 / 2;
     let by = (HEADER_H as i32 - BACK_H as i32) / 2 + BACK_H as i32 / 2;
     draw_back_icon(surf, bx, by, GRAY_BLACK);
     let font = eh_shell::bold_font();
     let mut glyph = eh_render::Glyph::new();
     let tw = font.width(title, 36.0) as i32;
-    draw_text(surf, font, 36.0, title, (w as i32 - tw) / 2, (HEADER_H as i32) / 2 + 12, GRAY_BLACK, &mut glyph);
+    // C DrawString tops the 36px bold title at (HEADER_H-36)/2; draw_text
+    // takes the BASELINE — add the face's ascent.
+    let asc = font.line_h(36.0).0 as i32;
+    draw_text(surf, font, 36.0, title, (w as i32 - tw) / 2, (HEADER_H as i32 - 36) / 2 + asc, GRAY_BLACK, &mut glyph);
 }
 
 /// Left-pointing back chevron (C eh_draw_back_icon: two 2px strokes, 26px
@@ -163,9 +166,23 @@ pub fn tap_settings<B: Framebuffer>(x: i32, y: i32, app: &mut App<B>) {
                     .clone()
                     .filter(|d| d.starts_with(&root))
                     .unwrap_or_else(|| root.clone());
-                let mut b = crate::local::Browser { picker: true, ..Default::default() };
-                b.start(&start);
+                // Root at the STORAGE ROOT but start in the current
+                // downloads dir (C eh_folder_open): starting rooted AT
+                // the downloads dir leaves no ".." to ascend from.
+                let mut b = crate::local::Browser {
+                    picker: true,
+                    root: root.clone(),
+                    path: start,
+                    ..Default::default()
+                };
+                b.load();
                 app.dl_picker = Some(b);
+                // The picker is NOT an overlay: it lives on the main page
+                // (app.dl_picker) and tap_screen routes its taps. Leaving
+                // Overlay::Settings up would keep routing body taps to
+                // tap_settings, so drop the overlay before opening.
+                app.overlay = crate::app::Overlay::None;
+                app.settings_rows.clear();
                 app.dirty = true;
             }
             SettingsRow::SystemApp => {

@@ -462,6 +462,7 @@ pub fn build<B: Framebuffer>(app: &mut App<B>) -> bool {
                 path,
                 icon: String::new(),
                 params: Vec::new(),
+                art: None,
             });
         }
     }
@@ -474,6 +475,19 @@ pub fn build<B: Framebuffer>(app: &mut App<B>) -> bool {
         scan_desktop_apps(app);
     }
 
+    // Resolve every icon NOW, while the framebuffer is attached — the
+    // firmware theme store cannot be consulted from the overlay draw
+    // (present() has taken the screen out of App by then).
+    let icons: Vec<String> = app
+        .launcher_items
+        .iter()
+        .map(|it| if it.group { String::new() } else { it.icon.clone() })
+        .collect();
+    for (i, icon) in icons.iter().enumerate() {
+        if !icon.is_empty() && app.launcher_items[i].art.is_none() {
+            app.launcher_items[i].art = resolve_icon_art(app, icon);
+        }
+    }
     layout(app);
     crate::log(&format!(
         "[eh_app] launcher built: {} items, body_h={}",
@@ -550,6 +564,7 @@ fn scan_desktop_apps<B: Framebuffer>(app: &mut App<B>) {
                 path: cmd,
                 icon,
                 params: Vec::new(),
+                art: None,
             });
         }
     }
@@ -607,8 +622,33 @@ fn scroll_state<B: Framebuffer>(app: &App<B>) -> (i32, i32) {
     (app.launcher_scroll.clamp(0, max), max)
 }
 
+/// Pointer travel before a drag starts scrolling (C
+/// EH_LAUNCHER_DRAG_SLOP): keeps a stationary press's tremor from
+/// jittering the list.
+pub const DRAG_SLOP: i32 = 24;
+
+/// Feed one pointer-move delta into the scroll offset while a drag is in
+/// flight (C eh_main.c drag_scroll_move's scroll update).  The offset is
+/// clamped against the SAME geometry the painter clamps with
+/// ([`scroll_state`] → [`body_rect`]) — never a separate view height — so
+/// a held pointer can only change state when the visible scroll actually
+/// moves.  Returns true when it did (the caller marks the frame dirty).
+pub fn drag_move<B: Framebuffer>(app: &mut App<B>, dy: i32) -> bool {
+    let (scroll, max) = scroll_state(app);
+    let new = (scroll + dy).clamp(0, max);
+    if new != scroll {
+        app.launcher_scroll = new;
+        return true;
+    }
+    false
+}
+
 /// Draw the launcher overlay.  A row's screen y is `layout_y - scroll +
-/// body_top` (C's draw loop); rows fully outside the body are skipped.
+/// body_top` (C's draw loop).  Rows must fit the visible body outright
+/// (C skips any row whose bottom would spill past the body — page scrolls
+/// align rows to the body, so the gap is never visible), and the shared
+/// header is repainted after the body so a row straddling the body top
+/// can never bleed into it (C's SetClip(0, body_top, ...) discipline).
 pub fn draw<B: Framebuffer>(surf: &mut eh_render::Surface, app: &mut App<B>, dirty: &mut Vec<Rect>) {
     let w = surf.width();
     let h = app.content_bottom;
@@ -630,16 +670,16 @@ pub fn draw<B: Framebuffer>(surf: &mut eh_render::Surface, app: &mut App<B>, dir
         return;
     }
 
-    let items: Vec<(Rect, bool, String, String)> = app
+    let items: Vec<(Rect, bool, Option<(Vec<u8>, u32, u32)>, String)> = app
         .launcher_items
         .iter()
         .zip(app.launcher_rects.iter())
-        .map(|(it, r)| (*r, it.group, it.icon.clone(), it.text.clone()))
+        .map(|(it, r)| (*r, it.group, it.art.clone(), it.text.clone()))
         .collect();
-    for (r, is_group, icon, text) in items.iter() {
+    for (r, is_group, art, text) in items.iter() {
         let r = *r;
         let sy = r.y as i32 - scroll + body_top as i32;
-        if sy + r.h as i32 <= body_top as i32 || sy >= body_bottom {
+        if sy + r.h as i32 <= body_top as i32 || sy + r.h as i32 > body_bottom {
             continue;
         }
         if *is_group {
@@ -651,13 +691,19 @@ pub fn draw<B: Framebuffer>(surf: &mut eh_render::Surface, app: &mut App<B>, dir
         } else {
             let cx = (r.x + r.w / 2) as i32;
             let icon_cy = sy + 12 + (ICON_SZ as i32) / 2;
-            draw_icon(surf, icon, cx, icon_cy, text, app, font, &mut glyph, fmt);
+            draw_icon(surf, art.as_ref(), cx, icon_cy, text, app, font, &mut glyph, fmt);
             let ly = sy + 12 + ICON_SZ as i32 + 8;
             let maxw = r.w as i32 - 8;
             draw_label(surf, font, &mut glyph, text, cx, ly, maxw);
         }
     }
 
+    // The row loop has no Surface clip (the C SetClip is unreliable on
+    // some SDK paths anyway): a row scrolled part-way past the body top
+    // paints into the header band, so repaint the shared header over it
+    // once the body is done (C resets the clip and draws the buttons
+    // after; the header band and the button band never overlap).
+    crate::settings::draw_header(surf, crate::i18n::tr("launcher.title"), dirty);
     // Corner scroll buttons while the column overflows (C
     // eh_draw_scroll_buttons: bottom-left up / bottom-right down).
     if max_scroll > 0 {
@@ -680,49 +726,27 @@ pub fn draw<B: Framebuffer>(surf: &mut eh_render::Surface, app: &mut App<B>, dir
     }
 }
 
-/// One launcher icon: decoded firmware art (image paths only — theme names
-/// need GetResource, not available here) or the C app's single-letter
-/// placeholder box.
+/// One launcher icon: the art resolved at build() time (see
+/// resolve_icon_art) or the C app's single-letter placeholder box.
 fn draw_icon<B: eh_hal::Framebuffer>(
     surf: &mut eh_render::Surface,
-    icon: &str,
+    art: Option<&(Vec<u8>, u32, u32)>,
     cx: i32,
     cy: i32,
     title: &str,
-    app: &mut crate::app::App<B>,
+    _app: &mut crate::app::App<B>,
     font: &eh_render::Font,
     glyph: &mut eh_render::Glyph,
     fmt: eh_hal::PixelFormat,
 ) {
-    let _t0 = std::time::Instant::now();
     let x0 = cx - (ICON_SZ as i32) / 2;
     let y0 = cy - (ICON_SZ as i32) / 2;
     let mut ok = false;
-    // Theme names resolve through the firmware store first (C eh_launcher:
-    // GetResource before LoadPNG); file paths fall through to the PNG
-    // decode below.
-    let themed = if !icon.is_empty() && !icon.starts_with('/') {
-        app.theme_resource(icon).and_then(|tb| {
-            tb.to_rgb().map(|rgb| (tb.width as u32, tb.height as u32, rgb))
-        })
-    } else {
-        None
-    };
-    let art = themed.or_else(|| {
-        if icon.is_empty() || !icon.starts_with('/') {
-            return None;
-        }
-        let decoded = std::fs::read(icon)
-            .ok()
-            .and_then(|bytes| crate::cover::decode_rgb(&bytes).ok());
-        if let Some(a) = &decoded {
-            app.icon_cache.insert(icon.to_string(), a.clone());
-        }
-        decoded
-    });
-    if let Some((iw, ih, rgb)) = art {
+    if let Some((rgb, iw, ih)) = art {
         // Scale down oversized icons aspect-preserving (C
         // launcher_draw_bitmap).
+        let iw = *iw;
+        let ih = *ih;
         let (bw, bh) = if iw > ICON_SZ || ih > ICON_SZ {
             if iw > ih {
                 (ICON_SZ, ih * ICON_SZ / ih.max(1))
@@ -733,7 +757,7 @@ fn draw_icon<B: eh_hal::Framebuffer>(
             (iw, ih)
         };
         surf.blit_image(
-            &rgb,
+            rgb,
             iw,
             ih,
             fmt,
@@ -752,6 +776,30 @@ fn draw_icon<B: eh_hal::Framebuffer>(
     }
 }
 
+
+/// Resolve one launcher icon to decoded RGB while the framebuffer is
+/// still attached (C eh_launcher.c launcher_icon_get): GetResource first,
+/// then LoadPNG (which on this firmware also resolves bare theme names),
+/// then a direct file read + decode for absolute paths.  MUST run from
+/// build()/tap context — during the overlay draw the screen is taken out
+/// of App and the firmware theme store cannot be consulted.
+pub(crate) fn resolve_icon_art<B: Framebuffer>(app: &mut App<B>, icon: &str) -> Option<(Vec<u8>, u32, u32)> {
+    if icon.is_empty() {
+        return None;
+    }
+    if !icon.starts_with('/') {
+        if let Some(tb) = app.theme_resource(icon).or_else(|| app.load_png(icon)) {
+            let (w, h) = (tb.width as u32, tb.height as u32);
+            if let Some(rgb) = tb.to_rgb() {
+                return Some((rgb, w, h));
+            }
+        }
+    }
+    std::fs::read(icon)
+        .ok()
+        .and_then(|bytes| crate::cover::decode_rgb(&bytes).ok())
+        .map(|(w, h, rgb)| (rgb, w, h))
+}
 /// Center the app label in the cell, wrapping to two lines at the last
 /// space or ellipsizing (C launcher_draw_app_label's fallbacks).
 fn draw_label(surf: &mut eh_render::Surface, font: &eh_render::Font, glyph: &mut eh_render::Glyph, text: &str, cx: i32, c_top: i32, maxw: i32) {

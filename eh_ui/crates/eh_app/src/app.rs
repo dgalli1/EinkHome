@@ -19,6 +19,9 @@ use crate::client::ApiClient;
 use crate::config::{Config, parse_kv_file};
 use crate::cover;
 use crate::shelf::{self, ShelfEntry};
+use crate::widgets::chooser::ChooserKind;
+use crate::widgets::context::ContextAction;
+use crate::widgets::sync_popup::{SyncPopup, SyncStage, SYNC_DONE_CLOSE_MS, SYNC_FAIL_CLOSE_MS};
 use crate::store::{Book, Store};
 
 /// A row of the More menu (the C app's menu drawer), in tap order.
@@ -55,6 +58,10 @@ pub struct LauncherItem {
     pub path: String,
     pub icon: String,
     pub params: Vec<String>,
+    /// Icon art resolved at build() time — GetResource/LoadPNG are
+    /// main-thread-only firmware calls and cannot resolve during the
+    /// overlay draw (the screen is taken out of App there).
+    pub art: Option<(Vec<u8>, u32, u32)>,
 }
 
 /// Overlay state (the C app's `overlay` family, collapsed to the screens
@@ -88,81 +95,6 @@ pub enum Overlay {
     /// One license's full-text page.
     LicenseDetail,
 }
-
-/// One long-press context action (C eh_ctx_*).
-#[derive(Clone, Copy, PartialEq)]
-pub enum ContextAction {
-    Open,
-    Download,
-    Delete,
-    DownloadAll,
-    DeleteAll,
-}
-
-/// Which chooser sheet is open (group vs sort) — both share the same
-/// centered-row sheet layout.
-#[derive(Clone, Copy)]
-pub enum ChooserKind {
-    Group,
-    Sort,
-}
-
-/// Stage of the sync-progress sheet (C EH_SYNC_STAGE_META/SCAN/COVERS/
-/// DONE/FAIL).
-#[derive(Clone, Copy, PartialEq, Debug)]
-pub enum SyncStage {
-    /// Pulling metadata batches.
-    Meta,
-    /// The local-source library scan.
-    Scan,
-    /// The post-sync cover warm pass.
-    Covers,
-    /// Flashed briefly before the sheet auto-closes.
-    Done,
-    /// The chain failed; the error shows before the auto-close.
-    Fail,
-}
-
-/// State machine for the sync-progress sheet (C eh_g_state.sync_popup +
-/// sync_stage/sync_round/sync_scan + the `bsyncp` weak timer).
-#[derive(Clone, Debug)]
-pub struct SyncPopup {
-    pub open: bool,
-    pub stage: SyncStage,
-    /// Metadata batch counter (C sync_round, shown as `batch N`).
-    pub round: u32,
-    /// Books scanned by the local import (C sync_scan).
-    pub scanned: u32,
-    /// Cover-pass counters for the striped bar (C eh_cover_warm_progress).
-    pub covers_done: u32,
-    pub covers_total: u32,
-    /// The failure text for the Fail stage line.
-    pub error: String,
-    /// When the current stage was entered (drives the auto-close timing).
-    pub stage_at: Option<std::time::Instant>,
-}
-
-impl Default for SyncPopup {
-    fn default() -> Self {
-        Self {
-            open: false,
-            stage: SyncStage::Meta,
-            round: 0,
-            scanned: 0,
-            covers_done: 0,
-            covers_total: 0,
-            error: String::new(),
-            stage_at: None,
-        }
-    }
-}
-
-/// Sync-sheet height (C popup_geom(..., 190)).
-pub(crate) const SYNC_SHEET_H: u32 = 190;
-/// Auto-close delays ported from eh_popups.c: the Done line flashes for
-/// 900 ms before the sheet closes; the Fail line shows for 1500 ms.
-const SYNC_DONE_CLOSE_MS: u64 = 900;
-const SYNC_FAIL_CLOSE_MS: u64 = 1500;
 
 /// The pager's four page actions (the C contract: -1/-3/-4/-2 →
 /// prev/first/last/next).
@@ -369,7 +301,6 @@ pub struct App<B: Framebuffer> {
     drag_y: Option<i32>,
     drag_total: i32,
     pub launcher_body_h: i32,
-    pub launcher_view_h: i32,
     pub source: Source,
     pub view_mode: ViewMode,
     pub tab: Tab,
@@ -534,7 +465,7 @@ impl<B: Framebuffer> App<B> {
         let mut downloads_dir = config
             .downloads_dir
             .clone()
-            .unwrap_or_else(|| "/mnt/ext1/Downloads".to_string());
+            .unwrap_or_else(crate::local::default_downloads_dir);
         // C eh_resolve_downloads_dir: a downloads dir we cannot create or
         // write (first run on the host, non-root guest) falls through to
         // the platform scratch root so downloads still work.
@@ -568,6 +499,9 @@ impl<B: Framebuffer> App<B> {
             }
         };
         let source = Source::from_config(&config.source);
+        // Persisted grouping preset (`group=` in bookshelf.cfg): restore
+        // the shelf's grouping across restarts.
+        let group = crate::menu::group_from_config(&config.group);
         let mut app = Self {
             screen: Some(screen),
             fb_screen_w: 0,
@@ -583,7 +517,7 @@ impl<B: Framebuffer> App<B> {
             cfg_path,
             covers_dir,
             source_rows: Vec::new(),
-            group: crate::store::GroupPreset::None,
+            group,
             sort: crate::store::SortMode::Title,
             dl_batch_failed: std::collections::HashSet::new(),
             context_items: Vec::new(),
@@ -599,7 +533,6 @@ impl<B: Framebuffer> App<B> {
             launcher_rects: Vec::new(),
             launcher_scroll: 0,
             launcher_body_h: 0,
-            launcher_view_h: 0,
             source,
             view_mode: ViewMode::Grid,
             tab: Tab::Library,
@@ -777,9 +710,10 @@ impl<B: Framebuffer> App<B> {
         // Materialise the default view (flat, recent order) — the shelf
         // reads from `view`, and the group/sort choosers rebuild it.
         let (g, s, d, q) = (self.group, self.sort, self.drill, self.query.clone());
+        let src = self.source.config_value();
         let total = {
             let scopes = self.drill_scopes();
-            self.store.view_rebuild(g as i64, s as i64, d as i64, &q, &scopes).unwrap_or(0)
+            self.store.view_rebuild(g as i64, s as i64, d as i64, &q, &scopes, &src).unwrap_or(0)
         };
         crate::logger::log(&format!(
             "[bookshelf] view_rebuild: view={} sort={} group={} drill={}",
@@ -861,10 +795,22 @@ impl<B: Framebuffer> App<B> {
 
     /// Theme-resource lookup safe to call from overlay draws: resolves
     /// through the framebuffer when it is alive, else replays the cache.
-    pub(crate) fn theme_resource(&mut self, name: &str) -> Option<eh_hal::ThemeBitmap> {
+    pub fn theme_resource(&mut self, name: &str) -> Option<eh_hal::ThemeBitmap> {
         if self.screen.is_some() {
             self.sync_fb_cache();
             let t = self.screen.as_mut().unwrap().framebuffer().theme_resource(name);
+            self.theme_cache.insert(name.to_string(), t.clone());
+            t
+        } else {
+            self.theme_cache.get(name).cloned().flatten()
+        }
+    }
+    /// Firmware-loader lookup (C LoadPNG fallback).  Deliberately does NOT
+    /// consult theme_cache: a failed theme_resource() call caches None for
+    /// the same name, which would shadow this lookup.
+    pub(crate) fn load_png(&mut self, name: &str) -> Option<eh_hal::ThemeBitmap> {
+        if self.screen.is_some() {
+            let t = self.screen.as_mut().unwrap().framebuffer().load_png(name);
             self.theme_cache.insert(name.to_string(), t.clone());
             t
         } else {
@@ -919,11 +865,11 @@ impl<B: Framebuffer> App<B> {
                     Overlay::Settings => crate::settings::draw(&mut surf, self, &mut dirty),
                     Overlay::Launcher => crate::launcher::draw(&mut surf, self, &mut dirty),
                     Overlay::Source => crate::source::draw(&mut surf, self, &mut dirty),
-                    Overlay::Download => draw_download_popup(&mut surf, self, &mut dirty),
-                    Overlay::Sync => draw_sync_popup(&mut surf, self, &mut dirty),
-                    Overlay::Context => draw_context_menu(&mut surf, self, &mut dirty),
-                    Overlay::GroupChooser => draw_chooser_sheet(&mut surf, self, &mut dirty, ChooserKind::Group),
-                    Overlay::SortChooser => draw_chooser_sheet(&mut surf, self, &mut dirty, ChooserKind::Sort),
+                    Overlay::Download => crate::widgets::download::draw_download_popup(&mut surf, self, &mut dirty),
+                    Overlay::Sync => crate::widgets::sync_popup::draw_sync_popup(&mut surf, self, &mut dirty),
+                    Overlay::Context => crate::widgets::context::draw_context_menu(&mut surf, self, &mut dirty),
+                    Overlay::GroupChooser => crate::widgets::chooser::draw_chooser_sheet(&mut surf, self, &mut dirty, ChooserKind::Group),
+                    Overlay::SortChooser => crate::widgets::chooser::draw_chooser_sheet(&mut surf, self, &mut dirty, ChooserKind::Sort),
                     Overlay::LogViewer => crate::viewer::draw_log_viewer(&mut surf, self, &mut dirty),
                     Overlay::Licenses => crate::viewer::draw_licenses(&mut surf, self, &mut dirty),
                     Overlay::LicenseDetail => crate::viewer::draw_license_detail(&mut surf, self, &mut dirty),
@@ -994,16 +940,21 @@ impl<B: Framebuffer> App<B> {
                 self.drag_total = 0;
             }
             InputEvent::PointerMove { x, y } => {
-                // Launcher vertical drag: move the scroll offset with the
-                // finger (C eh_launcher drag), clamped to the body.
+                // Launcher vertical drag (C eh_main.c drag_scroll_move):
+                // travel below DRAG_SLOP leaves the list alone (a
+                // stationary hold must not jitter it), and once dragging,
+                // launcher::drag_move clamps the offset against the same
+                // geometry the painter uses and reports a change only when
+                // the visible scroll moved — so a held pointer produces at
+                // most one dirty transition per real scroll step, never a
+                // repaint loop.
                 if self.overlay == Overlay::Launcher {
                     if let (Some(prev), Some(_)) = (self.drag_y, self.press_start) {
                         let dy = prev - *y;
                         self.drag_total += dy;
-                        let max = (self.launcher_body_h - self.launcher_view_h).max(0);
-                        let new = (self.launcher_scroll + dy).clamp(0, max);
-                        if new != self.launcher_scroll {
-                            self.launcher_scroll = new;
+                        if self.drag_total.abs() >= crate::launcher::DRAG_SLOP
+                            && crate::launcher::drag_move(self, dy)
+                        {
                             self.dirty = true;
                         }
                     }
@@ -1171,9 +1122,10 @@ impl<B: Framebuffer> App<B> {
             self.drill_back();
             return;
         }
-        // The download-folder picker closes on Back (C eh_folder_close).
+        // The download-folder picker closes on Back and returns to the
+        // Settings page it was opened from (C eh_folder_close).
         if self.dl_picker.take().is_some() {
-            self.dirty = true;
+            self.set_overlay(Overlay::Settings);
             return;
         }
         // Folder source: Back ascends one level; at the browser root it
@@ -1211,14 +1163,14 @@ impl<B: Framebuffer> App<B> {
             self.tap_pager(x, y, pager);
             return;
         }
+        // Download-folder picker first: it owns the page while open, even
+        if self.dl_picker.is_some() {
+            crate::local::tap_picker(self, x, y);
+            return;
+        }
         // Folder source: the browser owns the body (C eh_on_tap_browse).
         if self.source == Source::Folder && self.browser.open {
             crate::local::tap_browse(self, x, y);
-            return;
-        }
-        // Download-folder picker: rows descend / commit.
-        if self.dl_picker.is_some() {
-            crate::local::tap_picker(self, x, y);
             return;
         }
         if self.tab == Tab::Search {
@@ -1769,7 +1721,7 @@ impl<B: Framebuffer> App<B> {
             .config
             .downloads_dir
             .clone()
-            .unwrap_or_else(|| "/mnt/ext1/Downloads".to_string());
+            .unwrap_or_else(crate::local::default_downloads_dir);
         let cur = book_local_path(book, &downloads_dir);
         let stored = PathBuf::from(&book.local_path);
         let exists = cur.is_file() || (!book.local_path.is_empty() && stored.is_file());
@@ -1795,7 +1747,7 @@ impl<B: Framebuffer> App<B> {
         self.config
             .downloads_dir
             .clone()
-            .unwrap_or_else(|| "/mnt/ext1/Downloads".to_string())
+            .unwrap_or_else(crate::local::default_downloads_dir)
     }
 
     /// Queue one book file on the worker + open the modal download popup
@@ -2156,7 +2108,7 @@ impl<B: Framebuffer> App<B> {
     /// The offered group-chooser presets (C eh_view_dim_available), in the
     /// harness's row order: None, Author>Series, Series, Author, Year,
     /// Genre, minus dims the store has no values for.
-    fn group_offer(&self) -> Vec<crate::store::GroupPreset> {
+    pub(crate) fn group_offer(&self) -> Vec<crate::store::GroupPreset> {
         let (a, s, y, g) = self.store.dim_availability().unwrap_or((true, false, true, true));
         use crate::store::GroupPreset;
         let mut out = vec![GroupPreset::None];
@@ -2184,8 +2136,9 @@ impl<B: Framebuffer> App<B> {
         let (group, sort, drill, q) = (self.group, self.sort, self.drill, self.query.clone());
         let total = {
             let scopes = self.drill_scopes();
+            let src = self.source.config_value();
             self.store
-                .view_rebuild(group as i64, sort as i64, drill as i64, &q, &scopes)
+                .view_rebuild(group as i64, sort as i64, drill as i64, &q, &scopes, &src)
                 .unwrap_or(0)
         };
         crate::logger::log(&format!(
@@ -2217,11 +2170,7 @@ impl<B: Framebuffer> App<B> {
                     ChooserKind::Group => {
                         let offer = self.group_offer();
                         if let Some(g) = offer.get(i) {
-                            self.group = *g;
-                            self.drill = 0;
-                            self.drill_values = Default::default();
-                            self.drill_names = Default::default();
-                            self.rebuild_view();
+                            self.set_group(*g);
                         }
                     }
                     ChooserKind::Sort => {
@@ -2243,6 +2192,19 @@ impl<B: Framebuffer> App<B> {
         // Tap outside the sheet → dismiss.
         self.chooser_rects.clear();
         self.set_overlay(Overlay::None);
+    }
+
+    /// Apply a chosen grouping preset (C eh_g_group assignment in the
+    /// group chooser): reset any drill state, rebuild the view, and
+    /// persist the choice so it survives a restart (`group=` cfg key).
+    fn set_group(&mut self, g: crate::store::GroupPreset) {
+        self.group = g;
+        self.config.group = Some(crate::menu::group_config_value(g));
+        self.drill = 0;
+        self.drill_values = Default::default();
+        self.drill_names = Default::default();
+        self.rebuild_view();
+        self.save_config();
     }
 
     /// The pinned drill scopes for the store, level 0..drill (C
@@ -2489,21 +2451,65 @@ impl<B: Framebuffer> App<B> {
     /// keep working; flat tiles map to their book.
     fn store_view_page(&mut self, per: usize, offset: usize) -> Vec<ShelfEntry> {
         let rows = self.store.view_page(per, offset).unwrap_or_default();
-        rows.into_iter()
-            .map(|v| {
-                let book = self.store.get_book(&v.book_id).ok().flatten().unwrap_or_default();
-                let art = cover::load_cached(&self.covers_dir, &book.id)
-                    .and_then(|bytes| cover::decode_rgb(&bytes).ok())
-                    .map(|(w, h, rgb)| (rgb, w, h));
-                if art.is_some() {
-                    crate::logger::log(&format!("[bookshelf] cover_tick cache hit id={}", book.id));
-                }
-                let stack = v.kind == 1;
-                let scope = if stack { v.series_id.clone() } else { String::new() };
-                let progress = crate::progress::percent(&self.progress, &book.local_path);
-                ShelfEntry { book, art, stack, stack_label: v.series_name, stack_count: v.series_count, stack_scope: scope, progress }
-            })
-            .collect()
+        let mut entries = Vec::with_capacity(rows.len());
+        for v in rows {
+            let book = self.store.get_book(&v.book_id).ok().flatten().unwrap_or_default();
+            let art = cover::load_cached(&self.covers_dir, &book.id)
+                .and_then(|bytes| cover::decode_rgb(&bytes).ok())
+                .map(|(w, h, rgb)| (rgb, w, h))
+                .or_else(|| self.local_cover_art(&book));
+            if art.is_some() {
+                crate::logger::log(&format!("[bookshelf] cover_tick cache hit id={}", book.id));
+            }
+            let stack = v.kind == 1;
+            let scope = if stack { v.series_id.clone() } else { String::new() };
+            let progress = crate::progress::percent(&self.progress, &book.local_path);
+            entries.push(ShelfEntry {
+                book,
+                art,
+                stack,
+                stack_label: v.series_name,
+                stack_count: v.series_count,
+                stack_scope: scope,
+                progress,
+            });
+        }
+        entries
+    }
+
+    /// Cover art for a LOCAL book (C cover_slot_fetch's local branch):
+    /// no server cover exists, so extract the embedded image (EPUB),
+    /// render the PDF's first page, or typeset a TXT's opening words —
+    /// and cache the raw bytes next to the PNG cache so only the first
+    /// view pays for the extraction.
+    fn local_cover_art(&self, book: &Book) -> Option<(Vec<u8>, u32, u32)> {
+        // Kavita rows get their art from the server cache; local_path
+        // alone would re-extract every downloaded book needlessly.
+        if self.source == Source::Kavita || book.local_path.is_empty() {
+            return None;
+        }
+        let raw = cover::raw_path(&self.covers_dir, &book.id);
+        let bytes = match std::fs::read(&raw) {
+            Ok(bytes) => bytes,
+            Err(_) => {
+                // Extraction failure caches an EMPTY tombstone so a
+                // hopeless file is not re-opened (and a PDF not
+                // re-rendered) on every later view.
+                let Some(extracted) =
+                    crate::local::extract_book_cover(Path::new(&book.local_path), &book.ext)
+                else {
+                    let _ = cover::store_raw(&self.covers_dir, &book.id, &[]);
+                    return None;
+                };
+                cover::store_raw(&self.covers_dir, &book.id, &extracted).ok()?;
+                extracted
+            }
+        };
+        if bytes.is_empty() {
+            return None; // known-no-cover tombstone
+        }
+        crate::logger::log(&format!("[bookshelf] cover_tick local extract id={}", book.id));
+        cover::decode_rgb(&bytes).ok().map(|(w, h, rgb)| (rgb, w, h))
     }
 
     /// The Search sub-page at the current page (input row + history).
@@ -2546,7 +2552,9 @@ impl<B: Framebuffer> App<B> {
         let books = if self.query.is_empty() {
             self.store.list_books(per, page * per).unwrap_or_default()
         } else {
-            self.store.search(&self.query, per, page * per).unwrap_or_default()
+            self.store
+                .search(&self.query, per, page * per, &self.source.config_value())
+                .unwrap_or_default()
         };
         // C cover-warm pass — network-gated: an offline flip renders the
         // cached covers only (no remote fetches, C eh_plat_net_active).
@@ -2567,7 +2575,7 @@ impl<B: Framebuffer> App<B> {
         self.save_config();
         crate::logger::log("[bookshelf] settings: saved");
         self.dl_picker = None;
-        self.dirty = true;
+        self.set_overlay(Overlay::Settings);
     }
 
     /// Save the settings screen's edits to the config file (C
@@ -2708,7 +2716,7 @@ impl<B: Framebuffer> App<B> {
                 // eh_dl_cancel_rect hit → eh_cancel_downloads); any other
                 // tap dismisses only a drained popup (modal in flight).
                 let scr = self.screen().framebuffer().screen();
-                let cx = dl_cancel_rect(scr.width, self.content_bottom);
+                let cx = crate::widgets::download::dl_cancel_rect(scr.width, self.content_bottom);
                 if cx.contains(x, y) {
                     self.cancel_downloads();
                 } else if self.downloader.pending == 0 {
@@ -2827,303 +2835,6 @@ fn stamp_self_panel<B: Framebuffer>(fb: &mut B, y0: u32, panel: u32) {
     }
     fb.refresh(Rect { x: 0, y: y0, w: s.width, h: panel }, eh_hal::RefreshMode::Partial);
 }
-/// Size of the download-popup X button (C EH_DL_CANCEL_SIZE).
-pub const DL_CANCEL_SIZE: u32 = 48;
-
-/// The download-popup cancel-button rect (C eh_dl_cancel_rect mirrored
-/// onto this popup's sheet geometry): right edge of the sheet, aligned
-/// with the status line.  Draw + tap share this, so they never drift.
-pub fn dl_cancel_rect(w: u32, h: u32) -> Rect {
-    let pw = w * 3 / 4;
-    let ph = 160u32;
-    let px = (w - pw) / 2;
-    let py = h.saturating_sub(ph) / 2;
-    Rect {
-        x: px + pw - DL_CANCEL_SIZE - 24,
-        y: py + 96,
-        w: DL_CANCEL_SIZE,
-        h: DL_CANCEL_SIZE,
-    }
-}
-
-/// The modal download-progress popup (C eh_draw_dl_popup): a dim + a
-/// centered white sheet showing the remaining count (the count changes as
-/// the queue drains, so the frame changes during a batch — the e2e
-/// suite's event-loop-alive proof).  Modal while a batch is in flight.
-fn draw_download_popup<B: Framebuffer>(surf: &mut eh_render::Surface, app: &mut App<B>, dirty: &mut Vec<Rect>) {
-    use eh_shell::{GRAY_BLACK, GRAY_WHITE};
-    let w = surf.width();
-    let h = app.content_bottom;
-    dirty.push(Rect { x: 0, y: 0, w, h });
-    // Dim starting BELOW the top bar (C eh_dim_content(EH_TOP_BAR_H)): the
-    // icons — the spinning sync glyph among them — stay fully visible.
-    eh_shell::dim_hatch(surf, crate::appui::TOP_BAR_H, h);
-    let pw = w * 3 / 4;
-    let ph = 160u32;
-    let px = (w - pw) / 2;
-    let py = h.saturating_sub(ph) / 2;
-    surf.fill_gray(Rect { x: px, y: py, w: pw, h: ph }, GRAY_WHITE);
-    surf.rect_outline(Rect { x: px, y: py, w: pw, h: ph }, 2, GRAY_BLACK);
-    let font = crate::shelf::shelf_font();
-    let mut g = eh_render::Glyph::new();
-    eh_render::draw_text(
-        surf,
-        font,
-        28.0,
-        crate::i18n::tr("dl.in_progress"),
-        (px + 32) as i32,
-        (py + 72) as i32,
-        GRAY_BLACK,
-        &mut g,
-    );
-    let label = if app.dl_total > 0 && !app.dl_batch_all {
-        format!(
-            "{}, {}",
-            crate::i18n::trn("dl.complete", &[app.dl_done as i64]),
-            crate::i18n::trn("dl.failed_count", &[app.dl_failed as i64])
-        )
-    } else {
-        crate::i18n::trn("dl.remaining", &[app.downloader.pending as i64])
-    };
-    eh_render::draw_text(surf, font, 24.0, &label, (px + 32) as i32, (py + 120) as i32, GRAY_BLACK, &mut g);
-    // Cancel X button (C draw_dl_popup_sheet's boxed X).
-    let cr = dl_cancel_rect(w, h);
-    surf.fill_gray(cr, GRAY_WHITE);
-    surf.rect_outline(cr, 2, GRAY_BLACK);
-    surf.line(
-        (cr.x + 12) as i32,
-        (cr.y + 12) as i32,
-        (cr.x + cr.w - 12) as i32,
-        (cr.y + cr.h - 12) as i32,
-        3,
-        GRAY_BLACK,
-    );
-    surf.line(
-        (cr.x + cr.w - 12) as i32,
-        (cr.y + 12) as i32,
-        (cr.x + 12) as i32,
-        (cr.y + cr.h - 12) as i32,
-        3,
-        GRAY_BLACK,
-    );
-}
-
-/// The modal sync-progress sheet (C eh_draw_sync_popup /
-/// draw_sync_popup_sheet): a dim below the top bar + a centred 190px
-/// sheet — title band, the phase line, the counter subline, and during
-/// the covers stage a striped progress bar.
-fn draw_sync_popup<B: Framebuffer>(surf: &mut eh_render::Surface, app: &mut App<B>, dirty: &mut Vec<Rect>) {
-    use eh_shell::{GRAY_BLACK, GRAY_DGRAY, GRAY_LGRAY, GRAY_WHITE};
-    let w = surf.width();
-    let h = app.content_bottom;
-    dirty.push(Rect { x: 0, y: 0, w, h });
-    // Dim starting BELOW the top bar (C eh_dim_content(EH_TOP_BAR_H)): the
-    // icons — the spinning sync glyph among them — stay fully visible.
-    eh_shell::dim_hatch(surf, crate::appui::TOP_BAR_H, h);
-    let pw = w * 3 / 4;
-    let ph = SYNC_SHEET_H;
-    let px = (w - pw) / 2;
-    let py = h.saturating_sub(ph) / 2;
-    surf.fill_gray(Rect { x: px, y: py, w: pw, h: ph }, GRAY_WHITE);
-    // C draws the border twice (outer + inset); an outline of 2 covers it.
-    surf.rect_outline(Rect { x: px, y: py, w: pw, h: ph }, 2, GRAY_BLACK);
-    const PAD: u32 = 24; // C EH_CTX_PAD
-    const TITLE_H: u32 = 72; // C EH_CTX_TITLE_H
-    let font = crate::shelf::shelf_font();
-    let mut g = eh_render::Glyph::new();
-    eh_render::draw_text(
-        surf,
-        font,
-        30.0,
-        crate::i18n::tr("action.sync"),
-        (px + PAD) as i32,
-        (py + 18) as i32,
-        GRAY_BLACK,
-        &mut g,
-    );
-    surf.hline(px + PAD, py + TITLE_H - 1, pw - 2 * PAD, 2, GRAY_LGRAY);
-
-    // Whether the cover warm pass has drained — computed before the popup
-    // borrow (the probe needs &mut self).
-    let warm_drained = !app.cover_warm_active();
-    let p = &app.sync_popup;
-    let line;
-    let subline;
-    match p.stage {
-        SyncStage::Meta => {
-            line = crate::i18n::tr("sync.meta").to_string();
-            subline = crate::i18n::trn("sync.batch", &[p.round as i64]);
-        }
-        SyncStage::Scan => {
-            line = crate::i18n::tr("sync.scan").to_string();
-            subline = crate::i18n::trn("sync.books", &[p.scanned as i64]);
-        }
-        SyncStage::Covers => {
-            line = crate::i18n::tr("sync.covers").to_string();
-            if p.covers_total > 0 {
-                subline = crate::i18n::trn(
-                    "sync.cover_count",
-                    &[p.covers_done as i64, p.covers_total as i64],
-                );
-            } else {
-                subline = crate::i18n::tr("sync.covers").to_string();
-            }
-        }
-        SyncStage::Fail => {
-            line = crate::i18n::tr("status.fail").to_string();
-            subline = p.error.clone();
-        }
-        SyncStage::Done => {
-            line = crate::i18n::tr("sync.done").to_string();
-            subline = crate::i18n::trn("sync.books", &[app.store.count().unwrap_or(0)]);
-        }
-    }
-    eh_render::draw_text(surf, font, 28.0, &line, (px + PAD) as i32, (py + TITLE_H + 24) as i32, GRAY_BLACK, &mut g);
-    eh_render::draw_text(surf, font, 24.0, &subline, (px + PAD) as i32, (py + TITLE_H + 68) as i32, GRAY_DGRAY, &mut g);
-
-    // Covers stage: progress bar under the counter (C draw_sync_popup_
-    // sheet: bar top TITLE_H+96, h 12), filled by done/total with a
-    // striped overlay over the unfilled part while covers still load.
-    if p.stage == SyncStage::Covers && p.covers_total > 0 {
-        let bar = Rect { x: px + PAD, y: py + TITLE_H + 96, w: pw - 48, h: 12 };
-        surf.fill_gray(bar, GRAY_WHITE);
-        surf.rect_outline(bar, 1, GRAY_BLACK);
-        let fill = (p.covers_done * (bar.w - 2)) / p.covers_total;
-        if fill > 0 {
-            surf.fill_gray(
-                Rect { x: bar.x + 1, y: bar.y + 1, w: fill.min(bar.w - 2), h: bar.h - 2 },
-                GRAY_BLACK,
-            );
-        }
-        let drained = warm_drained;
-        let from = bar.x + 1 + fill;
-        let mut sx = from;
-        while sx + 3 < bar.x + bar.w - 1 && !drained {
-            surf.line(sx as i32, (bar.y + 1) as i32, (sx + 2) as i32, (bar.y + bar.h - 2) as i32, 1, GRAY_DGRAY);
-            sx += 6;
-        }
-    }
-}
-
-/// The long-press context menu (C eh_draw_context): a centered white sheet
-/// with the action rows.  Geometry matches the harness's context_geom
-/// (sheet centred on the FULL screen; title band 72 + n*96 + 24 rows).
-fn draw_context_menu<B: Framebuffer>(surf: &mut eh_render::Surface, app: &mut App<B>, dirty: &mut Vec<Rect>) {
-    use eh_shell::{GRAY_BLACK, GRAY_LGRAY, GRAY_WHITE};
-    let w = surf.width();
-    let h = surf.height();
-    dirty.push(Rect { x: 0, y: 0, w, h });
-    eh_shell::dim_hatch(surf, 0, h); // LGRAY hatch (C eh_dim_content(0))
-    let n = app.context_items.len().max(1);
-    let pw = w * 3 / 4;
-    let ph = (72 + n * 96 + 24) as u32;
-    let px = (w - pw) / 2;
-    let py = ((h as i32 - ph as i32) / 2).max(0) as u32;
-    surf.fill_gray(Rect { x: px, y: py, w: pw, h: ph }, GRAY_WHITE);
-    surf.rect_outline(Rect { x: px, y: py, w: pw, h: ph }, 2, GRAY_BLACK);
-    let font = crate::shelf::shelf_font();
-    let mut g = eh_render::Glyph::new();
-    surf.hline(px + 24, py + 72, pw - 48, 2, GRAY_LGRAY);
-    app.context_rects.clear();
-    for (i, act) in app.context_items.iter().enumerate() {
-        let iy = py + 72 + (i as u32) * 96;
-        let label: &str = match act {
-            ContextAction::Open => crate::i18n::tr("ctx.open"),
-            ContextAction::Download => crate::i18n::tr("ctx.download"),
-            ContextAction::Delete => crate::i18n::tr("ctx.delete"),
-            ContextAction::DownloadAll => crate::i18n::tr("ctx.download_all"),
-            ContextAction::DeleteAll => crate::i18n::tr("ctx.delete_series"),
-        };
-        surf.fill_gray(Rect { x: px + 12, y: iy, w: pw - 24, h: 84 }, GRAY_WHITE);
-        surf.rect_outline(Rect { x: px + 12, y: iy, w: pw - 24, h: 84 }, 1, GRAY_BLACK);
-        eh_render::draw_text(surf, font, 28.0, label, (px + 32) as i32, (iy + 30) as i32, GRAY_BLACK, &mut g);
-        app.context_rects.push(Rect { x: px + 12, y: iy, w: pw - 24, h: 84 });
-    }
-}
-
-/// The Group by / Sort by chooser sheet (C eh_draw_group / eh_draw_sort):
-/// a dim + a centered sheet with a title band and N rows.  Row geometry
-/// matches the harness's `_chooser_py` (centred on the CONTENT area).
-fn draw_chooser_sheet<B: Framebuffer>(
-    surf: &mut eh_render::Surface,
-    app: &mut App<B>,
-    dirty: &mut Vec<Rect>,
-    kind: ChooserKind,
-) {
-    use eh_shell::{GRAY_BLACK, GRAY_DGRAY, GRAY_LGRAY, GRAY_WHITE};
-    let w = surf.width();
-    let h = app.content_bottom;
-    dirty.push(Rect { x: 0, y: 0, w, h });
-    eh_shell::dim_hatch(surf, 0, h); // LGRAY hatch (C eh_dim_content(0))
-    let (n, labels, title): (usize, Vec<String>, &str) = match kind {
-        ChooserKind::Group => {
-            let offer = app.group_offer();
-            (
-                offer.len(),
-                offer.iter().map(|g| crate::i18n::tr(GROUP_KEYS[*g as usize]).to_string()).collect(),
-                crate::i18n::tr("action.group_by"),
-            )
-        }
-        ChooserKind::Sort => {
-            (4, SORT_KEYS.iter().map(|k| crate::i18n::tr(k).to_string()).collect(), crate::i18n::tr("action.sort_by"))
-        }
-    };
-    let pw = w * 3 / 4;
-    let ph = (96 + n as u32 * 96 + 24).max(1);
-    let px = (w - pw) / 2;
-    let py = ((h as i32 - ph as i32) / 2).max(0) as u32;
-    // C eh_draw_overlay_group: white sheet with a DOUBLE black outline.
-    surf.fill_gray(Rect { x: px, y: py, w: pw, h: ph }, GRAY_WHITE);
-    surf.rect_outline(Rect { x: px, y: py, w: pw, h: ph }, 2, GRAY_BLACK);
-    surf.rect_outline(Rect { x: px + 1, y: py + 1, w: pw - 2, h: ph - 2 }, 1, GRAY_BLACK);
-    let font = crate::shelf::shelf_font();
-    let mut g = eh_render::Glyph::new();
-    // Header: bold title + DGRAY current-value line under it (C
-    // DEFAULTFONTB 28 title at py+16, value at py+46), then the divider.
-    eh_render::draw_text(surf, eh_shell::bold_font(), 28.0, title, (px + 24) as i32, (py + 16) as i32 + 22, GRAY_BLACK, &mut g);
-    let current: String = match kind {
-        ChooserKind::Group => crate::i18n::tr(if app.group == crate::store::GroupPreset::None { "group.none" } else { GROUP_KEYS[app.group as usize] }).to_string(),
-        ChooserKind::Sort => crate::i18n::tr(crate::menu::sort_key(app.sort)).to_string(),
-    };
-    eh_render::draw_text(surf, font, 24.0, &current, (px + 24) as i32, (py + 46) as i32 + 18, GRAY_DGRAY, &mut g);
-    surf.hline(px + 24, py + 76, pw - 48, 2, GRAY_LGRAY);
-    app.chooser_rects.clear();
-    let selected: i64 = match kind {
-        ChooserKind::Group => app.group as i64,
-        ChooserKind::Sort => app.sort as i64,
-    };
-    let offered: Vec<i64> = match kind {
-        ChooserKind::Group => app.group_offer().iter().map(|g| *g as i64).collect(),
-        ChooserKind::Sort => vec![0, 1, 2, 3],
-    };
-    for (i, label) in labels.iter().enumerate() {
-        let iy = py + 84 + (i as u32) * 96;
-        let sel = offered.get(i) == Some(&selected);
-        let (bg, fg) = if sel { (GRAY_BLACK, GRAY_WHITE) } else { (GRAY_WHITE, GRAY_BLACK) };
-        surf.fill_gray(Rect { x: px + 12, y: iy, w: pw - 24, h: 84 }, bg);
-        surf.rect_outline(Rect { x: px + 12, y: iy, w: pw - 24, h: 84 }, 1, GRAY_BLACK);
-        eh_render::draw_text(surf, eh_shell::bold_font(), 26.0, label, (px + 32) as i32, (iy + 30) as i32 + 20, fg, &mut g);
-        app.chooser_rects.push(Rect { x: px + 12, y: iy, w: pw - 24, h: 84 });
-    }
-}
-
-
-/// i18n keys of the group-chooser rows, in the C order (None,
-/// [Author>Series], Series, Author, Year, Genre) — the harness reads the
-/// store to map a chosen dimension to its row index, so the order must
-/// match; the drawn text comes from crate::i18n::tr at draw time.
-/// Indexed by [`crate::store::GroupPreset`] value (None=0, AuthorSeries=1,
-/// Author=2, Year=3, Genre=4, Series=5).
-const GROUP_KEYS: [&str; 6] = [
-    "group.all",
-    "group.author_series",
-    "group.author",
-    "group.year",
-    "group.genre",
-    "group.series",
-];
-const SORT_KEYS: [&str; 4] = ["sort.title_az", "sort.author", "sort.series", "sort.recent"];
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3551,7 +3262,7 @@ mod tests {
         app.enqueue_download(&b.id, &cur);
         assert_eq!(app.overlay, Overlay::Download);
         assert_eq!(app.downloader.pending, 1);
-        let r = dl_cancel_rect(1072, app.content_bottom);
+        let r = crate::widgets::download::dl_cancel_rect(1072, app.content_bottom);
         app.tap_overlay((r.x + r.w / 2) as i32, (r.y + r.h / 2) as i32);
         assert_eq!(app.overlay, Overlay::None, "X cancels AND closes (C eh_cancel_downloads)");
         assert_eq!(app.downloader.pending, 0);
@@ -3787,6 +3498,111 @@ mod tests {
             "cancel flag set before the endpoints are rebuilt (C eh_sync_abort)");
         assert!(app.syncing, "a fresh chain starts against the rebuilt endpoints");
         assert!(app.sync_rx.is_some(), "the fresh chain's stream is attached");
+    }
+
+    /// Draw the current overlay into the FakeKb buffer and return the
+    /// grayscale pixels (1 byte per pixel, stride 1072).
+    fn draw_overlay_pixels(app: &mut App<FakeKb>) -> Vec<u8> {
+        app.present();
+        kb(app).px.clone()
+    }
+
+    fn dark_in(px: &[u8], x0: u32, y0: u32, x1: u32, y1: u32, max_val: u8) -> usize {
+        let w = 1072usize;
+        let mut n = 0;
+        for y in y0..y1 {
+            for x in x0..x1 {
+                if px[(y as usize) * w + (x as usize)] <= max_val {
+                    n += 1;
+                }
+            }
+        }
+        n
+    }
+
+    #[test]
+    fn sync_popup_draws_sheet_title_and_lines() {
+        let mut app = mk_app("syncdraw");
+        app.overlay = Overlay::Sync;
+        app.sync_popup = SyncPopup {
+            open: true,
+            stage: SyncStage::Fail,
+            error: "boom".into(),
+            ..Default::default()
+        };
+        let px = draw_overlay_pixels(&mut app);
+        // Sheet geometry per widgets::sheet::open_sheet: centred on the
+        // content area, w*3/4 wide, 190 high.
+        let pw = 1072u32 * 3 / 4;
+        let ph = crate::widgets::sync_popup::SYNC_SHEET_H as i32;
+        let sx = ((1072 - pw) / 2) as u32;
+        let sy = (((app.content_bottom as i32 - ph) / 2).max(0)) as u32;
+        // Border row: the sheet outline spans nearly the full panel width.
+        assert!(dark_in(&px, sx + 4, sy, sx + pw - 4, sy + 3, 100) > (pw - 8) as usize * 3 / 5,
+            "top border row missing");
+        // Title + phase line + subline live in the upper half of the sheet.
+        let text = dark_in(&px, sx + 20, sy + 10, sx + pw - 20, sy + ph as u32 / 2, 100);
+        assert!(text > 200, "sync sheet title/phase text missing, dark={text}");
+        // Content OUTSIDE the sheet must be dimmed hatch, not blank white:
+        // sample just above the sheet.
+        let above = dark_in(&px, sx + 40, sy - 24, sx + pw - 40, sy - 8, 0xAA);
+        assert!(above > 50, "dim band above the sheet missing, dark={above}");
+    }
+
+    fn group_chooser_draws_sheet_and_records_rows() {
+        let mut app = mk_app("chdraw");
+        app.overlay = Overlay::GroupChooser;
+        let px = draw_overlay_pixels(&mut app);
+        let n = app.group_offer().len().max(1);
+        let pw = 1072u32 * 3 / 4;
+        let ph = (96 + n as u32 * 96 + 24).max(1);
+        let sx = (1072 - pw) / 2;
+        let sy = (((app.content_bottom as i32 - ph as i32) / 2).max(0)) as u32;
+        // Bold title + current-value line under it.
+        let head = dark_in(&px, sx + 12, sy + 4, sx + pw - 12, sy + 76, 100);
+        assert!(head > 150, "chooser header text missing, dark={head}");
+        // Rows are recorded for tap hit-testing, inside the content area.
+        assert_eq!(app.chooser_rects.len(), n);
+        let r0 = app.chooser_rects[0];
+        assert!(r0.x >= sx && r0.y > sy && r0.y + r0.h <= app.content_bottom,
+            "row rect {:?} outside the sheet", r0);
+        // The selected row (None at boot) is inverted: mostly dark.
+        let sel = dark_in(&px, r0.x + 8, r0.y + 8, r0.x + r0.w - 8, r0.y + r0.h - 8, 100);
+        assert!(sel > ((r0.w - 16) * (r0.h - 16)) as usize / 2,
+            "selected row not inverted, dark={sel}");
+    }
+
+    /// Dark-pixel count in the More-menu row *i*'s right-hand value zone
+    /// (panel px = w - w*3/4, rows start at menu::Y0).
+    fn menu_row_value_dark(px: &[u8], row: u32) -> usize {
+        let pw = 1072u32 * 3 / 4;
+        let panel_x = 1072u32 - pw;
+        let ry = crate::menu::Y0 + row * crate::menu::ITEM_H;
+        dark_in(px, panel_x + pw - 260, ry + 8, panel_x + pw - 24, ry + 80, 0xAA)
+    }
+
+    #[test]
+    fn more_menu_group_row_shows_active_selection() {
+        // Regression: the Group-by row hid its value whenever a grouping
+        // was active (Sort by always showed its mode). C vals[] always
+        // carries group_summary + sort_label.
+        let mut app = mk_app("menuval");
+        app.group = crate::store::GroupPreset::AuthorSeries;
+        app.overlay = Overlay::More;
+        let px = draw_overlay_pixels(&mut app);
+        let v0 = menu_row_value_dark(&px, 0);
+        assert!(v0 > 40, "active grouping not shown on the Group-by row, dark={v0}");
+        let v1 = menu_row_value_dark(&px, 1);
+        assert!(v1 > 40, "sort mode not shown on the Sort-by row, dark={v1}");
+    }
+
+    #[test]
+    fn more_menu_group_row_shows_none_at_boot() {
+        let mut app = mk_app("menuvalnone");
+        app.overlay = Overlay::More;
+        let px = draw_overlay_pixels(&mut app);
+        let v0 = menu_row_value_dark(&px, 0);
+        assert!(v0 > 40, "'None' value missing at boot, dark={v0}");
     }
 
 }

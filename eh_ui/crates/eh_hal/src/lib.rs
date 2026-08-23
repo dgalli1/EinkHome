@@ -300,6 +300,13 @@ pub trait Framebuffer {
     fn theme_resource(&self, _name: &str) -> Option<ThemeBitmap> {
         None
     }
+
+    /// Load an image through the firmware loader (C `LoadPNG(name, 0)`) —
+    /// on modern firmware this also resolves bare theme names, so it is
+    /// the C launcher's fallback when GetResource misses.
+    fn load_png(&self, _name: &str) -> Option<ThemeBitmap> {
+        None
+    }
 }
 
 /// Device capability profile (the C `eh_plat_device_profile` probes).  Raw

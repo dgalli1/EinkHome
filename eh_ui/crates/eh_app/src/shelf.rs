@@ -72,45 +72,51 @@ impl Widget for StackCard {
     fn draw(&mut self, ctx: &mut DrawCtx, rect: Rect) {
         self.rect = Some(rect);
         ctx.fill(rect, GRAY_WHITE);
-        let pad = 8u32;
         let step = 5i32; // C eh_draw_series_stack_back's offset step
-        // Cover area inside the tile (C eh_cover_rect's inset).
-        let cx = rect.x as i32 + pad as i32;
-        let cy = rect.y as i32 + pad as i32;
-        let cw = rect.w.saturating_sub(pad * 2) as i32;
-        let ch = rect.h.saturating_sub(pad * 2) as i32;
+        // Series cards use the same centred 2:3 cover card as books
+        // (C eh_cover_rect), with the offset page sheets behind it.
+        let card = Cover::cover_card(rect);
+        let cx = card.x as i32;
+        let cy = card.y as i32;
+        let cw = card.w as i32;
+        let ch = card.h as i32;
         if cw > step * 3 && ch > step * 3 {
-            // Back page sheet (furthest up-left), then the front sheet.
+            // Back page sheet (furthest up-left), then the front sheet —
+            // C fills each white and outlines it black.
             for off in [2 * step, step] {
-                ctx.outline(
-                    Rect { x: (cx - off) as u32, y: (cy - off) as u32, w: cw as u32, h: ch as u32 },
-                    2,
-                    GRAY_BLACK,
-                );
+                let sheet = Rect {
+                    x: (cx - off).max(0) as u32,
+                    y: (cy - off).max(0) as u32,
+                    w: cw as u32,
+                    h: ch as u32,
+                };
+                ctx.fill(sheet, GRAY_WHITE);
+                ctx.outline(sheet, 1, GRAY_BLACK);
             }
-            let art = Rect { x: cx as u32, y: cy as u32, w: cw as u32, h: ch as u32 };
-            if let (Some(img), true) = (&self.img, cw > 4 && ch > 4) {
-                ctx.blit(img, self.img_w, self.img_h, PixelFormat::Rgb24, art);
-            } else {
-                ctx.fill(art, GRAY_WHITE);
+            if let Some(img) = &self.img {
+                // C StretchBitmap: the representative cover fills the front
+                // sheet exactly.
+                ctx.surf.blit_image_stretch(img, self.img_w, self.img_h, PixelFormat::Rgb24, card);
+                ctx.push(card);
             }
-            // Outline the cover rect so it reads as the top book.
-            ctx.outline(art, 2, GRAY_BLACK);
-            // Count badge over the art, top-right (white digits on black).
+            // Outline the cover rect so it reads as the top book, then the
+            // count badge top-right (white digits on black).
+            ctx.outline(card, 1, GRAY_BLACK);
             let badge = format!("{}", self.count);
-            let bw = ctx.font.width(&badge, 20.0) as u32 + 12;
-            let bh = 26u32;
-            let bx = cx + cw - bw as i32 - 2;
+            let bw = ctx.font.width(&badge, 20.0) as i32 + 12;
+            let bh = 26i32;
+            let bx = cx + cw - bw - 2;
             let by = cy + 2;
-            ctx.fill(Rect { x: bx as u32, y: by as u32, w: bw, h: bh }, GRAY_BLACK);
-            ctx.text(bx + 6, by + 20, 20.0, &badge, GRAY_WHITE);
+            ctx.fill(Rect { x: bx.max(0) as u32, y: by.max(0) as u32, w: bw as u32, h: bh as u32 }, GRAY_BLACK);
+            ctx.text(bx + 6, by + 2 + 20, 20.0, &badge, GRAY_WHITE);
         }
         // Group label beneath the stack (C draw_thumbnail_text title slot:
-        // DEFAULTFONTB, flush-left at the tile edge, pixel-truncated).
-        let max_w = (rect.w.saturating_sub(12)) as f32;
+        // DEFAULTFONTB 22, flush-left at the tile edge, pixel-truncated).
+        let cap_y = cy + ch + 6;
+        let max_w = (rect.w.saturating_sub(8)) as f32;
         let mut fitted = String::new();
         eh_render::fit_width(ctx.bold, 22.0, &self.label, max_w, &mut fitted);
-        ctx.text_with(ctx.bold, rect.x as i32 + 4, (rect.y + rect.h - 10) as i32 + 22, 22.0, &fitted, GRAY_BLACK);
+        ctx.text_with(ctx.bold, rect.x as i32 + 4, cap_y + 22, 22.0, &fitted, GRAY_BLACK);
     }
     fn dirty(&self, out: &mut Vec<Rect>) {
         if let Some(r) = self.rect {
@@ -155,8 +161,10 @@ impl Widget for ListCell {
         let pad = 8i32;
         let tx = rect.x as i32 + pad;
         let ty = rect.y as i32 + pad;
-        let cww = 85i32;
-        let chh = 128i32;
+        // C list slot thumb: height = row - 2*pad (clamped ≥40), width =
+        // 2/3 of the height — not a fixed 85x128 box.
+        let chh = (rect.h as i32 - 2 * pad).max(40);
+        let cww = chh * 2 / 3;
         let thumb = Rect { x: tx as u32, y: ty as u32, w: cww as u32, h: chh as u32 };
         ctx.fill(thumb, GRAY_WHITE);
         if let Some(img) = &self.img {
@@ -171,13 +179,15 @@ impl Widget for ListCell {
         if self.progress > 0 {
             draw_progress_bar(ctx, tx, ty, cww, chh, self.progress as i32);
         }
-        // Title / author beside the thumb (C: DEFAULTFONTB 30 / DEFAULTFONT 24,
-        // left-aligned at the C text origin).
+        // Title / author beside the thumb (C: DEFAULTFONTB 30 with its
+        // TOP at y+pad+8, DEFAULTFONT 24 top at y+pad+48).  C DrawString
+        // is top-anchored; text_left_fit* take a BASELINE — add the
+        // font size so the lines sit inside their row.
         let text_x = tx + cww + 16;
         let max_w = ((rect.x + rect.w) as i32 - pad - text_x).max(64);
-        text_left_fit_font(ctx, ctx.bold, text_x, rect.y as i32 + pad + 8, 30.0, &self.title, max_w, col);
+        text_left_fit_font(ctx, ctx.bold, text_x, rect.y as i32 + pad + 8 + 30, 30.0, &self.title, max_w, col);
         if !self.author.is_empty() {
-            text_left_fit(ctx, text_x, rect.y as i32 + pad + 48, 24.0, &self.author, max_w, GRAY_DGRAY);
+            text_left_fit(ctx, text_x, rect.y as i32 + pad + 48 + 24, 24.0, &self.author, max_w, GRAY_DGRAY);
         }
     }
     fn dirty(&self, out: &mut Vec<Rect>) {
@@ -202,11 +212,10 @@ impl Widget for CoverTile {
     fn draw(&mut self, ctx: &mut DrawCtx, rect: Rect) {
         self.cover.draw(ctx, rect);
         if self.progress > 0 {
-            // The shell's Cover paints its art across the top ~78% of the
-            // tile (its letterboxed cover area) — anchor the bar there,
-            // mirroring the C eh_cover_rect cover-card bottom edge.
-            let img_h = (rect.h as f32 * 0.78) as i32;
-            draw_progress_bar(ctx, rect.x as i32, rect.y as i32, rect.w as i32, img_h, self.progress as i32);
+            // C draw_thumbnail_fonts: the bar rides the bottom edge of the
+            // centred 2:3 cover card (eh_cover_rect), not the whole tile.
+            let card = Cover::cover_card(rect);
+            draw_progress_bar(ctx, card.x as i32, card.y as i32, card.w as i32, card.h as i32, self.progress as i32);
         }
     }
     fn dirty(&self, out: &mut Vec<Rect>) {
@@ -276,6 +285,11 @@ pub fn build_shelf<B: Framebuffer>(
     // Root is a vertical column: [topbar, grid, pager].
     screen.layout_mut().root_flex_column();
 
+    // C eh_draw_page fills the whole content band white before drawing
+    // (eh_screen.c: FillArea(0, 0, w, content_bottom, WHITE)) — the list
+    // rows / grid gaps don't cover the band, and skipping the fill lets
+    // the previous page's pixels ghost through on mode flips.
+    screen.bg_fill = true;
     // --- top bar band ---
     let tb_state = crate::appui::TopBarState {
         back,
@@ -297,21 +311,28 @@ pub fn build_shelf<B: Framebuffer>(
             ..Style::default()
         },
     );
-
-    // --- grid container (fills remaining vertical space, wraps covers) ---
-    let screen_w = screen.framebuffer().screen().width;
     // --- grid container (fills remaining vertical space, wraps covers).
-    // The 8px side margin is the C grid's left/right inset: cells sized
-    // 1/cols of (w-16) then land exactly on the C tile rects.
+    // C eh_grid_x0: 8px side margin plus half the leftover width when the
+    // cells clamp, tiles start 16px below the band (top+16) with an 8px
+    // column gap and a 6px row gap — the tile rects (cell_w-8 × cell_h-6)
+    // the e2e taps assume.
+    let screen_w = screen.framebuffer().screen().width;
+    let g = grid_geom(screen_w, content_h);
+    let avail_w = screen_w.saturating_sub(16);
+    let x0 = 8 + (avail_w.saturating_sub(g.cols * g.cell_w)) / 2;
     let grid = screen.add_container(Style {
         flex_grow: 1.0,
         flex_shrink: 1.0,
         flex_wrap: taffy::style::FlexWrap::Wrap,
         align_items: Some(taffy::style::AlignItems::FLEX_START),
+        gap: taffy::geometry::Size {
+            width: taffy::style::LengthPercentage::length(8.0),
+            height: taffy::style::LengthPercentage::length(6.0),
+        },
         padding: taffy::geometry::Rect {
-            left: taffy::style::LengthPercentage::length(8.0),
+            left: taffy::style::LengthPercentage::length(x0 as f32),
             right: taffy::style::LengthPercentage::length(8.0),
-            top: taffy::style::LengthPercentage::length(0.0),
+            top: taffy::style::LengthPercentage::length(16.0),
             bottom: taffy::style::LengthPercentage::length(0.0),
         },
         ..Style::default()
@@ -319,14 +340,13 @@ pub fn build_shelf<B: Framebuffer>(
 
     // Grid mode mirrors the C eh_grid_geom exactly: the mode-aware
     // column/row counts (3×2 on the standard panel), clamped cell sizes
-    // and an 8px side margin — the tile rects the e2e taps assume.  List
-    // mode is a single full-width column of fixed-height (LIST_ROW_H) rows.
+    // and the 8px side margin — tiles are the C tile rects (cell_w-8 ×
+    // cell_h-6).  List mode is a single full-width column of fixed-height
+    // (LIST_ROW_H) rows.
     let grid_h = (content_h as i32 - TOP_BAR_H as i32 - PAGER_H as i32).max(1) as u32;
-    let g = grid_geom(screen_w, content_h);
     match view_mode {
         crate::app::ViewMode::Grid => {
-            let cols = g.cols;
-            let row_h = if entries.is_empty() { grid_h } else { g.cell_h };
+            let row_h = if entries.is_empty() { grid_h } else { g.cell_h.saturating_sub(6) };
             for e in entries {
                 if e.stack {
                     let mut c = StackCard::new(e.stack_label.clone(), e.stack_count);
@@ -335,7 +355,7 @@ pub fn build_shelf<B: Framebuffer>(
                     }
                     let style = Style {
                         size: taffy::geometry::Size {
-                            width: Dimension::percent(1.0 / cols as f32),
+                            width: Dimension::length(g.cell_w.saturating_sub(8) as f32),
                             height: Dimension::length(row_h as f32),
                         },
                         ..Style::default()
@@ -345,14 +365,14 @@ pub fn build_shelf<B: Framebuffer>(
                 }
                 let mut c = Cover::new(e.book.title.clone());
                 c.author = e.book.author.clone();
-                c.title_size = 18.0;
-                c.author_size = 15.0;
+                c.title_size = 22.0;
+                c.author_size = 18.0;
                 if let Some((rgb, w, h)) = &e.art {
                     c.set_image(rgb.clone(), *w, *h);
                 }
                 let style = Style {
                     size: taffy::geometry::Size {
-                        width: Dimension::percent(1.0 / cols as f32),
+                        width: Dimension::length(g.cell_w.saturating_sub(8) as f32),
                         height: Dimension::length(row_h as f32),
                     },
                     ..Style::default()

@@ -35,6 +35,7 @@ pub mod store;
 pub mod sync;
 pub mod sysapp;
 pub mod util;
+pub mod widgets;
 pub mod viewer;
 
 /// Simple diagnostic logger.  On the device this writes to the same

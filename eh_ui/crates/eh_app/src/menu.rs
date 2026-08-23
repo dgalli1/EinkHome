@@ -2,9 +2,8 @@
 //! over the whole content area, a right-anchored white 3/4-width panel
 //! divided by a 1px line, and a plain row list (Group by / Sort by /
 //! Download all / Settings / Applications) starting at the first button.
-//! Rows are 88px tall; the Group row inverts (black bg, white text) while
-//! a group is active.  No row outlines, no header — C eh_draw_overlay_more
-//! verbatim.
+//! Rows are 88px tall, all drawn alike (white bg, black label, DGRAY
+//! value).  No row outlines, no header — C eh_draw_overlay_more verbatim.
 
 use eh_hal::Rect;
 
@@ -26,20 +25,37 @@ pub(crate) fn label_keys() -> [(MenuRow, &'static str); 5] {
     ]
 }
 
-/// i18n key for the active sort (C sort_label), matching SORT_KEYS order.
-pub(crate) fn sort_key(mode: crate::store::SortMode) -> &'static str {
-    match mode {
-        crate::store::SortMode::Author => "sort.author",
-        crate::store::SortMode::Series => "sort.series",
-        crate::store::SortMode::Recent => "sort.recent",
-        crate::store::SortMode::Title => "sort.title_az",
+
+/// The persisted config value of a grouping preset (lowercase preset
+/// name, mirroring the Source persistence precedent).
+pub(crate) fn group_config_value(g: crate::store::GroupPreset) -> String {
+    match g {
+        crate::store::GroupPreset::None => "none",
+        crate::store::GroupPreset::AuthorSeries => "author_series",
+        crate::store::GroupPreset::Author => "author",
+        crate::store::GroupPreset::Year => "year",
+        crate::store::GroupPreset::Genre => "genre",
+        crate::store::GroupPreset::Series => "series",
+    }
+    .to_string()
+}
+
+/// Map a stored `group=` value back to a preset; anything else → None.
+pub(crate) fn group_from_config(s: &Option<String>) -> crate::store::GroupPreset {
+    match s.as_deref() {
+        Some("author_series") => crate::store::GroupPreset::AuthorSeries,
+        Some("author") => crate::store::GroupPreset::Author,
+        Some("year") => crate::store::GroupPreset::Year,
+        Some("genre") => crate::store::GroupPreset::Genre,
+        Some("series") => crate::store::GroupPreset::Series,
+        _ => crate::store::GroupPreset::None,
     }
 }
 
 /// Draw the drawer; records each row's rect into `app.menu_rows` for tap
 /// routing (the C app's draw/hit geometry parity).
 pub fn draw<B: eh_hal::Framebuffer>(surf: &mut eh_render::Surface, app: &mut App<B>, dirty: &mut Vec<Rect>) {
-    use eh_shell::{GRAY_BLACK, GRAY_DGRAY, GRAY_WHITE};
+    use eh_shell::{GRAY_BLACK, GRAY_WHITE};
     let w = surf.width();
     let h = app.content_bottom;
     dirty.push(Rect { x: 0, y: 0, w, h });
@@ -56,38 +72,28 @@ pub fn draw<B: eh_hal::Framebuffer>(surf: &mut eh_render::Surface, app: &mut App
     // C opens DEFAULTFONTB for the drawer rows.
     let font = eh_shell::bold_font();
     let mut glyph = eh_render::Glyph::new();
-    let group_val = if app.group == crate::store::GroupPreset::None {
-        Some(crate::i18n::tr("group.none"))
-    } else {
-        None
-    };
-    let sort_val = crate::i18n::tr(sort_key(app.sort));
+    // Both rows always show their live selection (C vals[]: group_summary
+    // + sort_label — the Group-by value was wrongly hidden when a grouping
+    // was active).
+    let group_val = crate::widgets::chooser::group_display_key(app.group);
+    let sort_val = crate::widgets::chooser::sort_display_key(app.sort);
     for (_i, (row, label)) in label_keys().iter().enumerate() {
         let val = match row {
-            MenuRow::GroupBy => group_val,
-            MenuRow::SortBy => Some(sort_val),
+            MenuRow::GroupBy => Some(crate::i18n::tr(group_val)),
+            MenuRow::SortBy => Some(crate::i18n::tr(sort_val)),
             _ => None,
         };
         let ry = Y0 + _i as u32 * ITEM_H;
-        // Selected-group row inverts (C: sel ? BLACK : WHITE fill).
-        let sel = *row == MenuRow::GroupBy && app.group != crate::store::GroupPreset::None;
-        let (bg, fg, vcol) = if sel {
-            (GRAY_BLACK, GRAY_WHITE, GRAY_WHITE)
-        } else {
-            (GRAY_WHITE, GRAY_BLACK, GRAY_DGRAY)
-        };
-        surf.fill_gray(Rect { x: px + 12, y: ry, w: (pw as u32) - 24, h: ITEM_H - 12 }, bg);
-        let mid = ry as i32 + ((ITEM_H - 28) / 2) as i32 - 2;
-        // draw_text takes a baseline; C DrawString takes the glyph top.
-        eh_render::draw_text(surf, font, 28.0, label, (px + 32) as i32, mid + 21, fg, &mut glyph);
-        if let Some(v) = val {
-            let vw = font.width(v, 24.0) as i32;
-            let vx = (px + pw as u32 - 32) as i32 - vw;
-            eh_render::draw_text(surf, font, 24.0, v, vx, mid + 20, vcol, &mut glyph);
-        }
-        app.menu_rows.push((
-            Rect { x: px + 12, y: ry, w: (pw as u32) - 24, h: ITEM_H - 12 },
-            *row,
-        ));
+        let rect = crate::widgets::menu_row::draw_menu_row(
+            surf,
+            font,
+            &mut glyph,
+            px,
+            pw as u32,
+            ry,
+            label,
+            val,
+        );
+        app.menu_rows.push((rect, *row));
     }
 }
