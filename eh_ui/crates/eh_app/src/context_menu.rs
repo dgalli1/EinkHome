@@ -175,7 +175,7 @@ impl<B: Framebuffer> App<B> {
     pub(crate) fn download_series(&mut self, scope: &str, _label: &str, _count: i64) {
         let books = self
             .store
-            .list_sorted(crate::store::SortMode::Recent, "", 1, scope)
+            .list_series(scope)
             .unwrap_or_default();
         crate::logger::log(&format!("[bookshelf] download_series scope={scope} queued={}", books.len()));
         // Fresh batch state BEFORE the popup draws: a previous batch's
@@ -197,7 +197,7 @@ impl<B: Framebuffer> App<B> {
     pub(crate) fn delete_series(&mut self, scope: &str) {
         let books = self
             .store
-            .list_sorted(crate::store::SortMode::Recent, "", 1, scope)
+            .list_series(scope)
             .unwrap_or_default();
         crate::logger::log(&format!("[bookshelf] delete_series scope={scope} books={}", books.len()));
         for b in &books {

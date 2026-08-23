@@ -16,6 +16,19 @@ use crate::client::BookMeta;
 pub const EH_LIB_DB_FILENAME: &str = "bookshelf_lib.db";
 /// Max remembered search terms (C EH_SEARCH_HISTORY_MAX).
 const EH_SEARCH_HISTORY_MAX: usize = 20;
+
+/// Books the Rust-side grouped-view engine scans per rebuild.
+///
+/// Deliberate RSS guard, not an oversight: grouping materialises every
+/// matching book in Rust (a HashMap of groups), so this is what keeps a
+/// GROUPED browse of an outsized library from the ~100MB the flat shape
+/// would need on device (the scale suite's budget).  The ungrouped shape
+/// never hits the cap — it projects entirely in SQL straight from
+/// `books` (see [`Store::view_rebuild`]) — so flat paging stays exact at
+/// any library size; a grouped browse larger than the cap shows its
+/// first VIEW_SCAN_CAP books instead of OOM-ing the reader.
+pub(crate) const VIEW_SCAN_CAP: usize = 10_000;
+
 /// Column names + types the C app's store_migrate_columns() adds to stores
 /// created by older builds (CREATE TABLE IF NOT EXISTS leaves old shapes
 /// untouched).  Mirrored verbatim for byte-compatible DBs.
@@ -598,6 +611,68 @@ impl Store {
 
     // ── view rebuild ───────────────────────────────────────────────────
 
+    /// One row into the materialised `view` (kind 0 = book tile,
+    /// 1 = stack card).
+    fn insert_view_row(
+        &self,
+        pos: i64,
+        kind: i64,
+        book_id: &str,
+        series_id: &str,
+        name: &str,
+        count: i64,
+    ) -> rusqlite::Result<()> {
+        self.conn
+            .execute(
+                "INSERT INTO view(pos,kind,book_id,series_id,series_name,series_count) VALUES(?1,?2,?3,?4,?5,?6)",
+                rusqlite::params![pos, kind, book_id, series_id, name, count],
+            )
+            .map(|_| ())
+    }
+
+    /// Every scanned book as an individual tile in sort order ("All
+    /// books", or the leaf of a fully-drilled selection).
+    fn append_flat(&self, all: &[Book], pos: &mut i64) -> rusqlite::Result<()> {
+        for b in all {
+            self.insert_view_row(*pos, 0, &b.id, &b.series_id, &b.title, 1)?;
+            *pos += 1;
+        }
+        Ok(())
+    }
+
+    /// Multi-member groups become stack cards AT THE FIRST MEMBER'S SORT
+    /// POSITION (so cards interleave with flat single-member tiles
+    /// instead of landing after them, C view_rebuild_group); single
+    /// members stay lone tiles.  `key_of` picks the dimension:
+    /// [`group_key`] at level 0 or [`dim_key`] at a drilled level.
+    fn append_grouped(
+        &self,
+        all: &[Book],
+        group: GroupPreset,
+        key_of: &dyn Fn(&Book) -> String,
+        pos: &mut i64,
+    ) -> rusqlite::Result<()> {
+        let mut groups: std::collections::HashMap<String, Vec<Book>> = Default::default();
+        for b in all {
+            groups.entry(key_of(b)).or_default().push(b.clone());
+        }
+        let mut seen: std::collections::HashSet<String> = Default::default();
+        for b in all {
+            let k = key_of(b);
+            if !seen.insert(k.clone()) {
+                continue; // covered by its card or lone tile
+            }
+            let members = &groups[&k];
+            if members.len() > 1 {
+                self.insert_view_row(*pos, 1, &members[0].id, &k, &group_label(members, group), members.len() as i64)?;
+            } else {
+                self.insert_view_row(*pos, 0, &b.id, &b.series_id, &b.title, 1)?;
+            }
+            *pos += 1;
+        }
+        Ok(())
+    }
+
     /// Rebuild the materialised `view` table from the current books,
     /// grouped by `group` and ordered by `sort`, filtered by `query`
     /// within the pinned drill scopes (one per drilled level).  Returns
@@ -612,35 +687,14 @@ impl Store {
         scopes: &[&str],
         source: &str,
     ) -> rusqlite::Result<i64> {
-        fn group_key(b: &Book, g: GroupPreset) -> String {
-            match g {
-                // C dim_at: the Author>Series preset's LEVEL-0 dimension
-                // is author alone (series only at a deeper drill).
-                GroupPreset::Author | GroupPreset::AuthorSeries => {
-                    b.author.trim().to_string()
-                }
-                GroupPreset::Series => b.series_id.trim().to_string(),
-                GroupPreset::Year => year_of(b.added_at).unwrap_or_default(),
-                GroupPreset::Genre => b.genre.trim().to_string(),
-                GroupPreset::None => String::new(),
-            }
-        }
-
-        /// Dimension key at a drill LEVEL (C dim_at): only Author>Series
-        /// nests — level 0 groups by author, level 1 by series_id.
-        fn dim_key(b: &Book, g: GroupPreset, level: usize) -> String {
-            match g {
-                GroupPreset::AuthorSeries if level >= 1 => b.series_id.trim().to_string(),
-                _ => group_key(b, g),
-            }
-        }
-
         let group = GroupPreset::from_i64(group);
         let sort = SortMode::from_i64(sort);
         let grouped = group != GroupPreset::None;
         let drilled = drill > 0;
 
-        let mut all = self.list_books(10_000, 0)?;
+        // Grouped/drilled shapes scan in Rust, bounded by VIEW_SCAN_CAP
+        // (the RSS guard documented there).
+        let mut all = self.list_books(VIEW_SCAN_CAP, 0)?;
         // The view shows ONLY the active source's rows (C view_source +
         // view_where): a local/folder import stays in the DB but must not
         // appear once the user switches back to Kavita.
@@ -691,7 +745,8 @@ impl Store {
             // Flat ungrouped view (the 100k-scale shape): project
             // entirely in SQL so RSS stays flat at any library size —
             // materialising the books in Rust first (~100MB at 100k)
-            // breaks the scale budget.  C did this projection in SQL.
+            // breaks the scale budget, and only this shape escapes
+            // VIEW_SCAN_CAP.  C did this projection in SQL too.
             if !grouped && !drilled && query.is_empty() {
                 // Mirror the in-memory comparator per SortMode (lowercased
                 // key, then title, then id — Recent is descending recency).
@@ -727,85 +782,18 @@ impl Store {
                     });
                 }
                 if levels < group_levels(group) {
-                    // A deeper dimension still groups: stack cards (at the
-                    // first member's sort position) + flat singles of the
-                    // NEXT dimension among the survivors (C
-                    // view_rebuild_group at drill level > 0).
-                    let mut groups: std::collections::HashMap<String, Vec<Book>> = Default::default();
-                    for b in &all {
-                        groups.entry(dim_key(b, group, levels)).or_default().push(b.clone());
-                    }
-                    let mut seen: std::collections::HashSet<String> = Default::default();
-                    for b in &all {
-                        let k = dim_key(b, group, levels);
-                        if !seen.insert(k.clone()) {
-                            continue;
-                        }
-                        let members = &groups[&k];
-                        if members.len() > 1 {
-                            let label = group_label(members, group);
-                            self.conn.execute(
-                                "INSERT INTO view(pos,kind,book_id,series_id,series_name,series_count) VALUES(?1,?2,?3,?4,?5,?6)",
-                                rusqlite::params![pos, 1, members[0].id, k, label, members.len() as i64],
-                            )?;
-                        } else {
-                            self.conn.execute(
-                                "INSERT INTO view(pos,kind,book_id,series_id,series_name,series_count) VALUES(?1,?2,?3,?4,?5,?6)",
-                                rusqlite::params![pos, 0, b.id, b.series_id, b.title, 1],
-                            )?;
-                        }
-                        pos += 1;
-                    }
+                    // A deeper dimension still groups: stack cards + flat
+                    // singles of the NEXT dimension among the survivors
+                    // (C view_rebuild_group at drill level > 0).
+                    self.append_grouped(&all, group, &|b| dim_key(b, group, levels), &mut pos)?;
                 } else {
                     // Leaf level: flat books of the fully scoped selection.
-                    for b in &all {
-                        self.conn.execute(
-                            "INSERT INTO view(pos,kind,book_id,series_id,series_name,series_count) VALUES(?1,?2,?3,?4,?5,?6)",
-                            rusqlite::params![pos, 0, b.id, b.series_id, b.title, 1],
-                        )?;
-                        pos += 1;
-                    }
+                    self.append_flat(&all, &mut pos)?;
                 }
             } else if grouped {
-                // MEMBER'S POSITION in the active sort, so cards
-                // interleave with the flat single-member tiles instead of
-                // landing after them (C view_rebuild_group).  series_id
-                // carries the raw group value so a card tap can drill.
-                let mut groups: std::collections::HashMap<String, Vec<Book>> = Default::default();
-                for b in &all {
-                    groups.entry(group_key(b, group)).or_default().push(b.clone());
-                }
-                let mut seen: std::collections::HashSet<String> = Default::default();
-                for b in &all {
-                    let k = group_key(b, group);
-                    if !seen.insert(k.clone()) {
-                        continue; // covered by its card or lone tile
-                    }
-                    let members = &groups[&k];
-                    if members.len() > 1 {
-                        let label = group_label(members, group);
-                        self.conn.execute(
-                            "INSERT INTO view(pos,kind,book_id,series_id,series_name,series_count) VALUES(?1,?2,?3,?4,?5,?6)",
-                            rusqlite::params![pos, 1, members[0].id, k, label, members.len() as i64],
-                        )?;
-                    } else {
-                        self.conn.execute(
-                            "INSERT INTO view(pos,kind,book_id,series_id,series_name,series_count) VALUES(?1,?2,?3,?4,?5,?6)",
-                            rusqlite::params![pos, 0, b.id, b.series_id, b.title, 1],
-                        )?;
-                    }
-                    pos += 1;
-                }
+                self.append_grouped(&all, group, &|b| group_key(b, group), &mut pos)?;
             } else {
-                // No grouping ("All books", or the leaf of a drill):
-                // every book as an individual tile in sort order.
-                for b in &all {
-                    self.conn.execute(
-                        "INSERT INTO view(pos,kind,book_id,series_id,series_name,series_count) VALUES(?1,?2,?3,?4,?5,?6)",
-                        rusqlite::params![pos, 0, b.id, b.series_id, b.title, 1],
-                    )?;
-                    pos += 1;
-                }
+                self.append_flat(&all, &mut pos)?;
             }
             Ok(pos)
         })();
@@ -853,9 +841,9 @@ impl Store {
         self.view_count().unwrap_or(0) as usize
     }
 
-    /// List books matching a series_id scope (C list_sorted helper for
-    /// download_series / delete_series).
-    pub fn list_sorted(&self, _sort: SortMode, _query: &str, _limit: usize, scope: &str) -> rusqlite::Result<Vec<Book>> {
+    /// List a series' books in reading order (series_idx, then title) —
+    /// the C list_sorted helper download_series / delete_series call.
+    pub fn list_series(&self, scope: &str) -> rusqlite::Result<Vec<Book>> {
         self.conn
             .prepare(concat!(
                 "SELECT id,title,author,series,series_id,series_idx,",
@@ -896,6 +884,28 @@ fn group_label(members: &[Book], g: GroupPreset) -> String {
         GroupPreset::Year => year_of(members[0].added_at).unwrap_or_default(),
         GroupPreset::Genre => members[0].genre.clone(),
         GroupPreset::None => String::new(),
+    }
+}
+
+/// The group key of a book at drill LEVEL 0 (C dim_at(group, 0)): the
+/// Author>Series preset's LEVEL-0 dimension is author alone (series only
+/// at a deeper drill).
+fn group_key(b: &Book, g: GroupPreset) -> String {
+    match g {
+        GroupPreset::Author | GroupPreset::AuthorSeries => b.author.trim().to_string(),
+        GroupPreset::Series => b.series_id.trim().to_string(),
+        GroupPreset::Year => year_of(b.added_at).unwrap_or_default(),
+        GroupPreset::Genre => b.genre.trim().to_string(),
+        GroupPreset::None => String::new(),
+    }
+}
+
+/// Dimension key at a drill LEVEL (C dim_at): only Author>Series nests —
+/// level 0 groups by author, level 1 by series_id.
+fn dim_key(b: &Book, g: GroupPreset, level: usize) -> String {
+    match g {
+        GroupPreset::AuthorSeries if level >= 1 => b.series_id.trim().to_string(),
+        _ => group_key(b, g),
     }
 }
 
@@ -1515,6 +1525,49 @@ mod tests {
         assert_eq!(got.size, 1234);
         assert!(got.downloaded);
         assert_eq!(got.source, "local");
+    }
+
+    #[test]
+    fn view_scan_cap_guards_grouped_but_sql_flat_bypasses_it() {
+        // >VIEW_SCAN_CAP books in one source: the ungrouped shape
+        // projects in SQL and stays complete at any size, while the
+        // grouped engine's Rust-side scan is bounded by the cap (the RSS
+        // guard documented on VIEW_SCAN_CAP — truncation beats OOM on a
+        // reader).
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("cap.db")).unwrap();
+        let n = VIEW_SCAN_CAP + 2;
+        store.conn.execute("BEGIN", []).unwrap();
+        {
+            let mut ins = store
+                .conn
+                .prepare(concat!(
+                    "INSERT INTO books(id,title,author,series,series_id,series_idx,",
+                    " ext,size,downloaded,local_path,added_at,",
+                    " filename,source,search_text,genre)",
+                    " VALUES(?1,?2,?3,'','',0,'',0,0,'',0,'','kavita','','')"
+                ))
+                .unwrap();
+            for i in 0..n {
+                // Distinct authors => one lone tile per book when grouped,
+                // so the grouped row count exposes the scan width.
+                ins.execute(params![format!("k{i}"), format!("t{i}"), format!("a{i}")]).unwrap();
+            }
+        }
+        store.conn.execute("COMMIT", []).unwrap();
+
+        // Flat: the SQL projection sees EVERY book — no cap.
+        let flat = store
+            .view_rebuild(GroupPreset::None as i64, SortMode::Title as i64, 0, "", &[], "kavita")
+            .unwrap();
+        assert_eq!(flat as usize, n);
+        assert_eq!(store.view_total(), n);
+
+        // Grouped by author: exactly the documented cap survives.
+        let grouped = store
+            .view_rebuild(GroupPreset::Author as i64, SortMode::Title as i64, 0, "", &[], "kavita")
+            .unwrap();
+        assert_eq!(grouped as usize, VIEW_SCAN_CAP);
     }
 }
 
