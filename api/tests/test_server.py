@@ -47,6 +47,7 @@ def _make_app(tmp_path, token="test-token", suggestions=True):
 
 class _TestServer:
     def __init__(self, app, token="test-token"):
+        self.app = app
         RequestHandler = type(
             "RequestHandler",
             (PbemuAPIServer,),
@@ -66,6 +67,11 @@ class _TestServer:
         self.httpd.shutdown()
         self.httpd.server_close()
         self.thread.join()
+        # The app owns a SyncLedger (two SQLite connections); release it
+        # here or every server test leaks ResourceWarnings at gc time.
+        ledger = getattr(self.app, "ledger", None)
+        if ledger is not None:
+            ledger.close()
 
 
 @pytest.fixture
