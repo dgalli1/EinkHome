@@ -6,4 +6,3 @@ license.workspace = true
 
 [dependencies]
 eh_hal = { path = "../eh_hal" }
-eh_render = { path = "../eh_render" }

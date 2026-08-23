@@ -12,7 +12,5 @@ crate-type = ["staticlib", "rlib"]
 
 [dependencies]
 eh_hal = { path = "../eh_hal" }
-eh_render = { path = "../eh_render" }
-eh_shell = { path = "../eh_shell" }
 eh_backend_inkview = { path = "../eh_backend_inkview" }
 eh_app = { path = "../eh_app" }
