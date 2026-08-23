@@ -352,10 +352,6 @@ fn img_ext(base_lower: &str) -> bool {
 /// PocketBook itself: even a metadata-less PDF shows its first page as
 /// the tile art.
 fn pdf_first_page_png(path: &Path) -> Option<Vec<u8>> {
-    // TEMP bisect: mupdf disabled
-    let _ = path;
-    return None;
-    #[allow(unreachable_code)]
     let doc = mupdf::Document::open(path.to_str()?).ok()?;
     let page = doc.load_page(0).ok()?;
     let bounds = page.bounds().ok()?;
