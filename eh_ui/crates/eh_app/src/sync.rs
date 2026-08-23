@@ -43,6 +43,36 @@ enum Round {
     StoreFailed,
 }
 
+/// Why a sync chain stopped.  Transport and store-write failures carry
+/// the user-facing reason verbatim (the popup shows it); SQL errors
+/// surface unchanged.  Historically every failure returned a bogus
+/// `rusqlite::Error::QueryReturnedNoRows` sentinel, so an offline boot's
+/// popup blamed SQLite for a network outage.
+#[derive(Debug)]
+pub enum SyncError {
+    /// Delta fetch or store write failed; the string is the reason.
+    Failed(String),
+    /// A SQLite operation inside the chain failed.
+    Sql(rusqlite::Error),
+}
+
+impl std::fmt::Display for SyncError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SyncError::Failed(reason) => f.write_str(reason),
+            SyncError::Sql(e) => e.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for SyncError {}
+
+impl From<rusqlite::Error> for SyncError {
+    fn from(e: rusqlite::Error) -> Self {
+        SyncError::Sql(e)
+    }
+}
+
 /// Progress phases streamed out of a sync run (the C `g_sync_ui_hooks`
 /// phases collapsed into one enum).  The engine emits `Start`,
 /// `MetaBatch`, `Complete` and `Failed`; the local-import scan and the
@@ -157,7 +187,7 @@ pub fn sync(
     cancel: &AtomicBool,
     on_event: &mut dyn FnMut(SyncEvent),
     mut ban_sleep: Option<&mut dyn FnMut(u32)>,
-) -> Result<i64> {
+) -> Result<i64, SyncError> {
     on_event(SyncEvent::Start);
     let mut ban_until: Option<Instant> = None;
     rearm_ban(&mut ban_sleep, &mut ban_until);
@@ -176,8 +206,8 @@ pub fn sync(
             Ok(d) => d,
             Err(e) => {
                 crate::log(&format!("sync: delta failed at cursor {cursor}: {e}"));
-                on_event(SyncEvent::Failed(e));
-                return Err(rusqlite::Error::QueryReturnedNoRows);
+                on_event(SyncEvent::Failed(e.clone()));
+                return Err(SyncError::Failed(e));
             }
         };
         // The fetch overlapped an abort request: drop the fetched round
@@ -200,8 +230,7 @@ pub fn sync(
             }
             Round::StoreFailed => {
                 crate::log("sync: store write failed; rolled back, cursor kept");
-                on_event(SyncEvent::Failed("store write failed".into()));
-                return Err(rusqlite::Error::QueryReturnedNoRows);
+                return Err(SyncError::Failed("store write failed".into()));
             }
         }
         // C eh_model's ceiling is 400 rounds = 200k books (a 100k first
@@ -744,7 +773,10 @@ mod tests {
             &mut |ev| events.borrow_mut().push(ev),
             silent_ban(),
         );
-        assert!(res.is_err());
+        // The error carries the real reason verbatim — never the old
+        // QueryReturnedNoRows sentinel that blamed SQLite for transport
+        // failures.
+        assert_eq!(res.unwrap_err().to_string(), "boom");
         assert_eq!(
             *events.borrow(),
             vec![
