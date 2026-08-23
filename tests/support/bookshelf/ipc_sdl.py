@@ -69,7 +69,12 @@ class IpcBookshelf:
                 raise ConnectionError(f"app closed socket (cmd={line!r})")
             self._buf += chunk
         line_b, self._buf = self._buf.split(b"\n", 1)
-        return line_b.decode("utf-8", "replace").strip()
+        reply = line_b.decode("utf-8", "replace").strip()
+        # Protocol-level failures ("err ...") must be loud: silently
+        # returning them made failed taps/shots look like successes.
+        if reply.startswith("err"):
+            raise OSError(f"ipc: {reply} (cmd={line!r})")
+        return reply
 
     # -- event injection ------------------------------------------------
 

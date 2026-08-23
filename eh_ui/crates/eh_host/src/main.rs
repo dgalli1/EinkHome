@@ -256,8 +256,12 @@ fn handle_line(app: &mut App<SdlFb>, line: &str) -> Outcome {
         "shot" => match a {
             Some(path) => {
                 let fb = app.screen().framebuffer_mut();
-                let _ = fb.dump_ppm(path);
-                Outcome::Reply("ok\n".into())
+                // A failed dump must not masquerade as success: the
+                // harness would otherwise fail later on a missing file.
+                match fb.dump_ppm(path) {
+                    Ok(()) => Outcome::Reply("ok\n".into()),
+                    Err(e) => Outcome::Reply(format!("err shot {path}: {e}\n")),
+                }
             }
             None => Outcome::Reply("err unknown cmd\n".into()),
         },
