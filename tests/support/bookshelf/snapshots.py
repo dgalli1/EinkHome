@@ -158,16 +158,20 @@ class SnapshotRecorder:
             return None
         self._seq += 1
         try:
-            if not raw.exists():
+            if isinstance(raw, bytes):
+                data = raw
+            elif not raw.exists():
                 raise FileNotFoundError(f"probe output missing: {raw}")
-            data = raw.read_bytes()
+            else:
+                data = raw.read_bytes()
             if data.startswith(b"P5"):
                 png = pgm_to_png(data)
             else:
                 png = ppm_to_png(data)
             out = self._dir / f"{name}.png"
             out.write_bytes(png)
-            raw.unlink(missing_ok=True)
+            if not isinstance(raw, bytes):
+                raw.unlink(missing_ok=True)
             self._index.append(f"{name}.png  {label}")
             self._entries.append(
                 {

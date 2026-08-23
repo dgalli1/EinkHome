@@ -392,6 +392,9 @@ def fresh_bookshelf(bookshelf_env, request):
     # bookshelf log: the per-test log slicer cuts exactly here (the
     # restart below opens the test's own invocation).
     request.node._bs_log_open_start = bs.invocation_count()  # type: ignore[attr-defined]
+    # The app persists the grouping preset across restarts by design;
+    # reset it so every test boots on the default view.
+    bs.backend.reset_view_state()
     bs.begin_snapshots(request.node.name)
     bs.backend.restart()
     bs.snapshot("boot")

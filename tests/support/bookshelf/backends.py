@@ -212,6 +212,20 @@ class EmulatorBackend:
         return self._log.read().count(_LOG_OPEN_MARKER)
 
     # lifecycle / data dirs
+    def reset_view_state(self):
+        """Drop persisted view keys the tests assume at defaults.
+
+        The app persists the grouping preset across restarts (a feature);
+        a grouping test would otherwise leak `group=author_series` into
+        every later test in the module via the shared .live cfg."""
+        live = REPO_ROOT / self._firmware / ".live"
+        for sub in ("mnt/ext1/system/bin/bookshelf.cfg", "tmp/bookshelf.cfg"):
+            p_ = live / sub
+            if p_.is_file():
+                keep = [l for l in p_.read_text(encoding="utf-8").splitlines()
+                        if not l.startswith("group=")]
+                p_.write_text("\n".join(keep) + "\n", encoding="utf-8")
+
     def restart(self, *, wait_init=True):
         from tests.support.bookshelf import env as _env
         _env._restart_bookshelf(self._emu) if hasattr(_env, "_restart_bookshelf") else None
@@ -315,6 +329,15 @@ class SdlBackend:
         return text[idx:] if idx != -1 else text
     def invocation_count(self):
         return self._log.read().count(_LOG_OPEN_MARKER)
+
+    def reset_view_state(self):
+        """Drop persisted view keys the tests assume at defaults: strip
+        `group=` from this instance's cfg (see the emulator backend)."""
+        p_ = self._run_dir / "bookshelf.cfg"
+        if p_.is_file():
+            keep = [l for l in p_.read_text(encoding="utf-8").splitlines()
+                    if not l.startswith("group=")]
+            p_.write_text("\n".join(keep) + "\n", encoding="utf-8")
 
     # lifecycle — restart relaunches a clean process (per-test isolation)
     def restart(self, *, wait_init=True):

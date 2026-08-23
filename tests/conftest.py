@@ -22,6 +22,9 @@ import pytest
 _EINKHOME = Path(__file__).resolve().parents[1]
 _PBEMU = _EINKHOME / "pbemu"
 sys.path.insert(0, str(_PBEMU))
+# The pbemu *python package* (pbemu.paths et al) lives one level deeper,
+# under tools/ — without it every runtime_probes import fails.
+sys.path.insert(0, str(_PBEMU / "tools"))
 
 _BS_DIR = Path(__file__).resolve().parent / "support" / "bookshelf"
 _bs_spec = importlib.util.spec_from_file_location(

@@ -168,7 +168,9 @@ class BookshelfGeometry:
         row = index // COLS
         col = index % COLS
         tx = 8 + col * cell_w
-        ty = top + 4 + row * cell_h
+        # Mirrors build_shelf's grid container padding.top (16.0 — the
+        # user-requested visible gap below the header; was the C top+4).
+        ty = top + 16 + row * cell_h
         tw = cell_w - 8
         th = cell_h - 6
         return (tx + tw // 2, ty + th // 2)
