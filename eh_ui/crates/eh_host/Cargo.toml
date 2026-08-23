@@ -8,6 +8,7 @@ license.workspace = true
 eh_app = { path = "../eh_app" }
 eh_backend_sdl = { path = "../eh_backend_sdl" }
 eh_hal = { path = "../eh_hal" }
+libc = "0.2"
 
 [[bin]]
 name = "bookshelf-test"

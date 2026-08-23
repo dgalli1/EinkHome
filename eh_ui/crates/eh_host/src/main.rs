@@ -20,6 +20,16 @@ use eh_backend_sdl::ipc::Ipc;
 use eh_backend_sdl::SdlFb;
 use eh_hal::{Framebuffer, InputEvent, KeyCode};
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// Set by the SIGINT/SIGTERM handler (Ctrl-C in the launching terminal):
+/// the main loop polls it and exits cleanly so the run script's EXIT trap
+/// brings the API server down with it.
+static SIGNALED: AtomicBool = AtomicBool::new(false);
+extern "C" fn on_signal(_sig: libc::c_int) {
+    // Async-signal-safe: a SeqCst store compiles to a plain MOV.
+    SIGNALED.store(true, Ordering::SeqCst);
+}
 
 /// The three PocketBook screen classes the app adapts to (C
 /// g_resolutions); F11 cycles them at runtime, EH_RES picks one up front.
@@ -55,7 +65,16 @@ fn main() -> Result<(), String> {
 
     let mut ipc = Ipc::bind();
     let mut last_tick = std::time::Instant::now();
+    // Ctrl-C / SIGTERM close the window even when the launching
+    // environment inherited a SIGINT-ignored disposition.
+    unsafe {
+        libc::signal(libc::SIGINT, on_signal as libc::sighandler_t);
+        libc::signal(libc::SIGTERM, on_signal as libc::sighandler_t);
+    }
     loop {
+        if SIGNALED.load(Ordering::SeqCst) || app.screen().framebuffer_mut().close_requested() {
+            return Ok(());
+        }
         // ── control plane: every command runs to completion (incl. the
         // post-command present) before its reply is written.
         let lines = ipc.as_mut().map(|i| i.poll()).unwrap_or_default();
@@ -144,7 +163,10 @@ fn res_from_env() -> (u32, u32, usize) {
         .iter()
         .position(|&(rw, rh)| rw == w && h.is_none_or(|h| rh == h))
     {
-        eprintln!("[pc] EH_RES={e} -> {}x{}", RESOLUTIONS[i].0, RESOLUTIONS[i].1);
+        eprintln!(
+            "[pc] EH_RES={e} -> {}x{}",
+            RESOLUTIONS[i].0, RESOLUTIONS[i].1
+        );
         (RESOLUTIONS[i].0, RESOLUTIONS[i].1, i)
     } else {
         eprintln!("[pc] EH_RES={e}: no supported match, keeping {default:?}");
@@ -209,7 +231,9 @@ fn handle_line(app: &mut App<SdlFb>, line: &str) -> Outcome {
         // ── query group
         "key" => match a.map(parse_code) {
             Some(Some(code)) => {
-                app.on_event(&InputEvent::KeyDown { key: iv_to_key(code) });
+                app.on_event(&InputEvent::KeyDown {
+                    key: iv_to_key(code),
+                });
                 app.present();
                 Outcome::Reply("ok\n".into())
             }
@@ -289,13 +313,13 @@ fn iv_to_key(code: u32) -> KeyCode {
 /// SDL scancode → key code (C map_scancode_to_ivkey).
 fn scancode_to_key(sc: u32) -> Option<KeyCode> {
     Some(match sc {
-        101 => KeyCode::Menu,             // SDL_SCANCODE_MENU
-        74 => KeyCode::Home,              // SDL_SCANCODE_HOME
-        42 | 41 => KeyCode::Back,         // BACKSPACE / ESCAPE
-        75 => KeyCode::PrevPage,          // PAGEUP
-        76 => KeyCode::NextPage,          // PAGEDOWN
-        82 => KeyCode::PrevPage,          // UP → IV_KEY_PREV2
-        81 => KeyCode::NextPage,          // DOWN → IV_KEY_NEXT2
+        101 => KeyCode::Menu,     // SDL_SCANCODE_MENU
+        74 => KeyCode::Home,      // SDL_SCANCODE_HOME
+        42 | 41 => KeyCode::Back, // BACKSPACE / ESCAPE
+        75 => KeyCode::PrevPage,  // PAGEUP
+        76 => KeyCode::NextPage,  // PAGEDOWN
+        82 => KeyCode::PrevPage,  // UP → IV_KEY_PREV2
+        81 => KeyCode::NextPage,  // DOWN → IV_KEY_NEXT2
         _ => return None,
     })
 }
@@ -334,5 +358,9 @@ fn overlay_int(o: Overlay) -> i32 {
 
 /// Tab → the C `EH_TAB_LIBRARY`/`EH_TAB_SEARCH` ordinals.
 fn tab_int(t: Tab) -> i32 {
-    if t == Tab::Search { 1 } else { 0 }
+    if t == Tab::Search {
+        1
+    } else {
+        0
+    }
 }

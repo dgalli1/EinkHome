@@ -31,6 +31,10 @@ pub struct SdlFb {
     pub buf: Vec<u8>,
     /// Translated events queued by [`pump_events`](Self::pump_events).
     queue: Vec<InputEvent>,
+    /// Set when the compositor asks the window to close (the X button /
+    /// WM_DELETE): the host polls [`Self::close_requested`] and exits
+    /// cleanly instead of leaving an unclosable window.
+    close_requested: bool,
     pub width: u32,
     pub height: u32,
     scale: f32,
@@ -66,10 +70,16 @@ impl SdlFb {
         let window = video
             .window(title, win_w, win_h)
             .position_centered()
+            // Free window scaling: the logical size below keeps the app
+            // resolution fixed — SDL letterbox-scales the framebuffer to
+            // whatever size the user drags the window to.
+            .resizable()
             .build()
             .map_err(|e| e.to_string())?;
         let mut canvas = window.into_canvas().build().map_err(|e| e.to_string())?;
-        canvas.set_logical_size(width, height).map_err(|e| e.to_string())?;
+        canvas
+            .set_logical_size(width, height)
+            .map_err(|e| e.to_string())?;
         // The texture borrows the creator; one process-lifetime creator
         // (stored on the struct) lets set_resolution recreate textures
         // without leaking another one per resize.
@@ -92,6 +102,7 @@ impl SdlFb {
             scale,
             buf,
             queue: Vec::new(),
+            close_requested: false,
             kb_buf: Vec::new(),
             kb_open: false,
             kb_on_done: None,
@@ -113,6 +124,9 @@ impl SdlFb {
             let f = self.kb_on_done.take();
             self.kb_open = false;
             let buf = std::mem::take(&mut self.kb_buf);
+            if let Ok(video) = self.sdl.video() {
+                video.text_input().stop();
+            }
             if let Some(f) = f {
                 f(&buf);
             }
@@ -129,10 +143,46 @@ impl SdlFb {
 
     fn pump_with(&mut self, pump: &mut EventPump) {
         for ev in pump.poll_iter() {
+            if matches!(ev, Event::Quit { .. }) {
+                self.close_requested = true;
+            }
+            // Physical-keyboard pass-through while a keyboard is open (the
+            // device shows the on-screen keyboard instead): printable text
+            // appends to the buffer, Backspace pops one char (UTF-8 aware),
+            // Return commits exactly like the IPC "kb_commit", and Space /
+            // editing keys are eaten so the app never sees them as shelf
+            // shortcuts.  Escape cancels AND falls through as BACK so the
+            // app leaves the search view (the device BACK-key behaviour).
+            if self.kb_open {
+                match &ev {
+                    Event::TextInput { text, .. } => {
+                        self.kb_buf.extend_from_slice(text.as_bytes());
+                        continue;
+                    }
+                    Event::KeyDown { keycode: Some(k), .. } => {
+                        match classify_kb_key(*k) {
+                            Some(KbKey::Backspace) => pop_char(&mut self.kb_buf),
+                            Some(KbKey::Commit) => self.kb_commit(),
+                            // Swallowed: translate() maps Space→Ok, which
+                            // would toggle something behind the search field.
+                            Some(KbKey::Swallow) => {}
+                            None => {} // falls through to translate()
+                        }
+                        continue;
+                    }
+                    _ => {}
+                }
+            }
             if let Some(t) = translate(ev, self.scale) {
                 self.queue.push(t);
             }
         }
+    }
+
+    /// True once the compositor asked the window to close (the X button).
+    /// Sticky until observed; the host exits its loop on it.
+    pub fn close_requested(&self) -> bool {
+        self.close_requested
     }
 
     /// Write the current RGBA buffer to a PPM file (debug / CI dump).
@@ -154,14 +204,20 @@ impl SdlFb {
         self.width = w;
         self.height = h;
         self.buf = vec![0u8; w as usize * h as usize * 4];
+        // Keep the user's window zoom: the window grows by the same scale
+        // factor as the logical canvas (the C build resized 1:1).
         self.canvas
             .window_mut()
-            .set_size(w, h)
+            .set_size(
+                (w as f32 * self.scale).max(1.0) as u32,
+                (h as f32 * self.scale).max(1.0) as u32,
+            )
             .map_err(|e| e.to_string())?;
         self.canvas
             .set_logical_size(w, h)
             .map_err(|e| e.to_string())?;
-        self.texture = self.creator
+        self.texture = self
+            .creator
             .create_texture_streaming(PixelFormatEnum::ABGR8888, w, h)
             .map_err(|e| e.to_string())?;
         Ok(())
@@ -210,7 +266,15 @@ impl Framebuffer for SdlFb {
         }
     }
     fn present(&mut self, mode: RefreshMode) {
-        self.refresh(Rect { x: 0, y: 0, w: self.width, h: self.height }, mode);
+        self.refresh(
+            Rect {
+                x: 0,
+                y: 0,
+                w: self.width,
+                h: self.height,
+            },
+            mode,
+        );
     }
     fn open_keyboard(&mut self, _title: &str, initial: &str, on_done: fn(&[u8])) {
         // No on-screen keyboard is rendered (like the C SDL build): the
@@ -218,6 +282,11 @@ impl Framebuffer for SdlFb {
         self.kb_buf = initial.as_bytes().to_vec();
         self.kb_on_done = Some(on_done);
         self.kb_open = true;
+        // Accept real keystrokes from the window (SDL_StartTextInput):
+        // they land in pump_with above and feed the same buffer.
+        if let Ok(video) = self.sdl.video() {
+            video.text_input().start();
+        }
     }
     fn live_keyboard_text(&self) -> Option<String> {
         if self.kb_open {
@@ -231,12 +300,17 @@ impl Framebuffer for SdlFb {
             self.kb_open = false;
             self.kb_on_done = None;
             self.kb_buf.clear();
+            if let Ok(video) = self.sdl.video() {
+                video.text_input().stop();
+            }
         }
     }
     fn net_active(&self) -> bool {
         // The C SDL QueryNetwork: EH_OFFLINE reports no active connection
         // so the app boots from the on-disk store (the offline e2e suite).
-        std::env::var("EH_OFFLINE").map(|v| v.is_empty()).unwrap_or(true)
+        std::env::var("EH_OFFLINE")
+            .map(|v| v.is_empty())
+            .unwrap_or(true)
     }
 
     /// PBEMU_BATTERY=<pct> emulator override (mirrors the EH_OFFLINE
@@ -252,14 +326,23 @@ fn translate(ev: Event, _scale: f32) -> Option<InputEvent> {
         Event::MouseButtonDown { x, y, .. } => Some(InputEvent::PointerDown { x, y }),
         Event::MouseButtonUp { x, y, .. } => Some(InputEvent::PointerUp { x, y }),
         Event::MouseMotion { x, y, .. } => Some(InputEvent::PointerMove { x, y }),
-        Event::KeyDown { keycode: Some(k), .. } => {
-            key_to_code(k).map(|key| InputEvent::KeyDown { key })
-        }
+        Event::KeyDown {
+            keycode: Some(k), ..
+        } => key_to_code(k).map(|key| InputEvent::KeyDown { key }),
         // Foreground transitions (the C EVT_SHOW/EVT_FOREGROUND mapping):
         // the app answers with a full redraw + progress reload.
-        Event::Window { win_event: WindowEvent::FocusGained, .. }
-        | Event::Window { win_event: WindowEvent::Restored, .. }
-        | Event::Window { win_event: WindowEvent::Exposed, .. } => Some(InputEvent::WidgetShown),
+        Event::Window {
+            win_event: WindowEvent::FocusGained,
+            ..
+        }
+        | Event::Window {
+            win_event: WindowEvent::Restored,
+            ..
+        }
+        | Event::Window {
+            win_event: WindowEvent::Exposed,
+            ..
+        } => Some(InputEvent::WidgetShown),
         Event::Quit { .. } => Some(InputEvent::Lifecycle(42)),
         _ => None,
     }
@@ -273,6 +356,36 @@ pub fn parse_pbemu_battery(v: Option<&str>) -> Option<u8> {
         return None;
     }
     v.parse::<u8>().ok().filter(|p| *p <= 100)
+}
+
+/// What [`SdlFb::pump_with`] does with a KeyDown while a keyboard is open.
+#[derive(Debug, PartialEq, Eq)]
+enum KbKey {
+    /// Pop one character (UTF-8 aware) from the buffer.
+    Backspace,
+    /// Close the keyboard and fire the app's on_done with the buffer.
+    Commit,
+    /// Eat the key (it would translate to a shelf shortcut).
+    Swallow,
+}
+
+/// Classify a physical KeyDown for the open-keyboard pass-through.
+/// `None` falls through to translate() (letters arrive via TextInput,
+/// Escape → BACK, arrows still navigate).
+fn classify_kb_key(k: Keycode) -> Option<KbKey> {
+    match k {
+        Keycode::Backspace => Some(KbKey::Backspace),
+        Keycode::Return | Keycode::KpEnter => Some(KbKey::Commit),
+        // Space would translate() to Ok behind the search field.
+        Keycode::Space => Some(KbKey::Swallow),
+        _ => None,
+    }
+}
+
+/// Pop one full UTF-8 scalar: the last byte plus any continuation bytes
+/// before it.  ASCII pops exactly one byte.
+fn pop_char(buf: &mut Vec<u8>) {
+    while buf.pop().is_some_and(|b| b & 0xC0 == 0x80) {}
 }
 
 fn key_to_code(k: Keycode) -> Option<KeyCode> {
@@ -307,7 +420,8 @@ pub fn dump_ppm(buf: &[u8], w: u32, h: u32, path: &str) -> std::io::Result<()> {
 }
 #[cfg(test)]
 mod tests {
-    use super::parse_pbemu_battery;
+    use super::{parse_pbemu_battery, pop_char, classify_kb_key, KbKey};
+    use sdl2::keyboard::Keycode;
 
     #[test]
     fn pbemu_battery_parsing() {
@@ -322,5 +436,32 @@ mod tests {
         assert_eq!(parse_pbemu_battery(Some("abc")), None);
         assert_eq!(parse_pbemu_battery(Some("250")), None);
         assert_eq!(parse_pbemu_battery(Some("-1")), None);
+    }
+
+    #[test]
+    fn kb_key_classification() {
+        assert_eq!(classify_kb_key(Keycode::Backspace), Some(KbKey::Backspace));
+        assert_eq!(classify_kb_key(Keycode::Return), Some(KbKey::Commit));
+        assert_eq!(classify_kb_key(Keycode::KpEnter), Some(KbKey::Commit));
+        assert_eq!(classify_kb_key(Keycode::Space), Some(KbKey::Swallow));
+        // Everything else reaches the app: Escape → BACK via translate(),
+        // letters arrive as TextInput events.
+        assert_eq!(classify_kb_key(Keycode::Escape), None);
+        assert_eq!(classify_kb_key(Keycode::A), None);
+        assert_eq!(classify_kb_key(Keycode::Up), None);
+    }
+
+    #[test]
+    fn pop_char_pops_whole_utf8_scalars() {
+        let mut buf = "héllo".as_bytes().to_vec(); // é is 2 bytes
+        pop_char(&mut buf);
+        assert_eq!(buf, b"h\xc3\xa9ll");
+        pop_char(&mut buf);
+        assert_eq!(buf, b"h\xc3\xa9l");
+        while !buf.is_empty() {
+            pop_char(&mut buf);
+        }
+        pop_char(&mut buf); // empty-buffer pop is a no-op
+        assert!(buf.is_empty());
     }
 }

@@ -51,7 +51,11 @@ impl Ipc {
         let _ = std::fs::remove_file(&path);
         let listener = UnixListener::bind(&path).ok()?;
         listener.set_nonblocking(true).ok()?;
-        Some(Ipc { listener, client: None, acc: Vec::new() })
+        Some(Ipc {
+            listener,
+            client: None,
+            acc: Vec::new(),
+        })
     }
 
     /// Non-blocking accept + read.  Returns every complete command line

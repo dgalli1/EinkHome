@@ -18,8 +18,11 @@
 #   scripts/run-visible-sdl.sh --host URL # API base URL override
 #   EH_RES=1404x1872 scripts/run-visible-sdl.sh  # start at a PB resolution
 #   # (after launch, F11 cycles 758x1024 / 1072x1448 / 1404x1872)
+#   The window is freely resizable — dragging it only scales the fixed
+#   framebuffer (letterboxed); F11 changes the app's actual resolution.
 #
-# Stop the app with Ctrl-C (also stops the API server it started).
+# Stop the app with Ctrl-C or the window's X button (also stops the API
+# server it started).
 #
 # NOTE: shares the dev-server pidfile + log (/tmp/pbemu-api.{pid,log})
 # with run.sh / run-visible-pb.sh — only one may run at a time.
