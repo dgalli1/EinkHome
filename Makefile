@@ -76,10 +76,14 @@ lint-py:
 $(RUST_APP_LIB): $(RUST_SRCS)
 	cd $(EH_UI) && cargo zigbuild --release \
 		--target $(ARM_TARGET).2.23 -p eh_pb
+	# MuPDF's resource blobs come out of mupdf-sys's make as host-ELF
+	# objects; relink them for ARM before anything consumes the archive.
+	scripts/fix-arm-archive.sh $@
 
 $(RUST_APP_LIB_ARMHF): $(RUST_SRCS)
 	cd $(EH_UI) && cargo zigbuild --release \
 		--target $(ARMHF_TARGET).2.23 -p eh_pb
+	FIX_CROSS_PREFIX=arm-linux-gnueabihf scripts/fix-arm-archive.sh $@
 
 $(HOST_BIN): $(RUST_SRCS)
 	cd $(EH_UI) && cargo build --release -p eh_host

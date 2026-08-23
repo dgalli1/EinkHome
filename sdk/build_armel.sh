@@ -244,7 +244,7 @@ podman run --rm \
 	-Wall -Wextra -Werror=implicit-function-declaration -O2 \
 	${EXTRA_FLAGS:-} \
 	${CONTAINER_SRCS} \
-	${CONTAINER_LINK_INPUTS:-} \
+	-Wl,--whole-archive ${CONTAINER_LINK_INPUTS} -Wl,--no-whole-archive \
 	-o "${CONTAINER_OUT}" \
 	"-Wl,-dynamic-linker,/lib/ld-linux.so.3" \
 	"-Wl,--allow-shlib-undefined" \

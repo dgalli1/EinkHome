@@ -53,6 +53,12 @@ int fstat64(int fd, struct stat64 *buf)            { return __fxstat64(_STAT_VER
 int lstat64(const char *path, struct stat64 *buf)  { return __lxstat64(_STAT_VER, path, buf); }
 int fstatat64(int fd, const char *path, struct stat64 *buf, int flag)
 { return __fxstatat64(_STAT_VER, fd, path, buf, flag); }
+/* MuPDF's posix directory/stat code calls plain stat/lstat; same
+ * shared-lib-only redirect as the 64-bit variants above. */
+extern int __xstat(int ver, const char *path, struct stat *buf);
+extern int __lxstat(int ver, const char *path, struct stat *buf);
+int stat(const char *path, struct stat *buf)   { return __xstat(_STAT_VER, path, buf); }
+int lstat(const char *path, struct stat *buf)  { return __lxstat(_STAT_VER, path, buf); }
 
 /*
  * malloc-family forwarders.  The shared-lib-only link (libc passed by full
