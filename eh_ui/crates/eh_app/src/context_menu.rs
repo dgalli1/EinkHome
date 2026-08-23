@@ -205,3 +205,45 @@ impl<B: Framebuffer> App<B> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dismiss_clears_rows_but_keeps_series_scope() {
+        // tap_context dismisses the menu BEFORE dispatching the action,
+        // and the Download/Delete-all arms then read scope + label — so
+        // dismiss must keep them (only rows, geometry and book go).
+        let mut m = MenuState {
+            items: vec![ContextAction::DownloadAll, ContextAction::DeleteAll],
+            rects: vec![Rect { x: 0, y: 0, w: 10, h: 10 }],
+            series: 1,
+            book: Some(Book::default()),
+            scope: "author:Rex".into(),
+            label: "Rex".into(),
+            count: 3,
+        };
+        m.dismiss();
+        assert!(m.rects.is_empty() && m.items.is_empty() && m.book.is_none());
+        assert_eq!(m.scope, "author:Rex");
+        assert_eq!(m.label, "Rex");
+        assert_eq!(m.count, 3);
+    }
+
+    #[test]
+    fn take_series_returns_and_clears_scope_label() {
+        let mut m = MenuState {
+            series: 1,
+            scope: "series:42".into(),
+            label: "Dune".into(),
+            count: 7,
+            ..Default::default()
+        };
+        assert_eq!(m.take_series(), ("series:42".into(), "Dune".into(), 7));
+        // Cleared after the take so a later book menu cannot inherit a
+        // series scope.
+        assert!(m.scope.is_empty() && m.label.is_empty());
+        assert_eq!(m.count, 7);
+    }
+}

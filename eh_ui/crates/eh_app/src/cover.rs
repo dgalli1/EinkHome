@@ -318,4 +318,23 @@ mod tests {
         // sanitize path: slug must not contain '/'
         assert!(!sanitize("abc/def").contains('/'));
     }
+
+    #[test]
+    fn warm_handle_starts_online_and_progress_tracks_total_minus_remaining() {
+        use std::sync::atomic::Ordering;
+        let mut w = WarmHandle::default();
+        // The gate assumes online until the first tick probes the hal.
+        assert!(w.online.load(Ordering::Relaxed));
+        assert_eq!(w.done(), 0);
+
+        w.total = 10;
+        w.remaining.store(3, Ordering::Relaxed);
+        assert_eq!(w.done(), 7);
+
+        // A re-armed pass with a lagging counter saturates at zero
+        // instead of underflowing the progress bar.
+        w.total = 5;
+        w.remaining.store(9, Ordering::Relaxed);
+        assert_eq!(w.done(), 0);
+    }
 }

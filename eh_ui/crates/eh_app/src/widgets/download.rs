@@ -57,14 +57,15 @@ pub fn draw_download_popup<B: Framebuffer>(
         GRAY_BLACK,
         &mut g,
     );
-    let label = if app.dl.total > 0 && !app.dl.batch_all {
-        format!(
+    let label = match app.dl.sheet_status(app.downloader.pending) {
+        crate::downloads::SheetStatus::Tally { done, failed } => format!(
             "{}, {}",
-            crate::i18n::trn("dl.complete", &[app.dl.done as i64]),
-            crate::i18n::trn("dl.failed_count", &[app.dl.failed as i64])
-        )
-    } else {
-        crate::i18n::trn("dl.remaining", &[app.downloader.pending as i64])
+            crate::i18n::trn("dl.complete", &[done as i64]),
+            crate::i18n::trn("dl.failed_count", &[failed as i64])
+        ),
+        crate::downloads::SheetStatus::Remaining { count } => {
+            crate::i18n::trn("dl.remaining", &[count as i64])
+        }
     };
     eh_render::draw_text(surf, font, 24.0, &label, (sh.px + 32) as i32, (sh.py + 120) as i32, GRAY_BLACK, &mut g);
     // Cancel X button (C draw_dl_popup_sheet's boxed X).

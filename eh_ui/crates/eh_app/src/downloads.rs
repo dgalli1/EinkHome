@@ -374,7 +374,7 @@ pub fn book_local_path(book: &Book, downloads_dir: &str) -> PathBuf {
 ///   series download / cancel) — the modal popup stays until dismissed;
 /// * download-all ([`BatchUi::start_all`]) — bounded top-up queue +
 ///   remembered failures + the settle marker on drain.
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct BatchUi {
     /// Single-book press: auto-open the reader on drain.
     pub single: bool,
@@ -419,6 +419,33 @@ impl BatchUi {
             ..Default::default()
         }
     }
+
+    /// What the modal sheet's status line shows for the current state
+    /// (the branch C draw_dl_popup makes).  `pending` is the worker's
+    /// queued + in-flight job count.
+    ///
+    /// A LIVE download-all counts down what is left; once it drains
+    /// (`batch_all` latched off, tally kept for the still-open modal) the
+    /// line becomes the finished tally.  Single/series batches carry no
+    /// tally (they start wholesale with `total == 0`), so they always
+    /// count down — a previous batch can never bleed its numbers in.
+    pub fn sheet_status(&self, pending: usize) -> SheetStatus {
+        if !self.batch_all && self.total > 0 {
+            SheetStatus::Tally { done: self.done, failed: self.failed }
+        } else {
+            SheetStatus::Remaining { count: pending }
+        }
+    }
+}
+
+/// The modal download sheet's status line, decided by
+/// [`BatchUi::sheet_status`] (i18n rendering stays at the draw site).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SheetStatus {
+    /// A finished batch's tally: "X downloaded, Y failed".
+    Tally { done: usize, failed: usize },
+    /// Jobs still to go: "N remaining".
+    Remaining { count: usize },
 }
 
 impl<B: Framebuffer> App<B> {
@@ -715,5 +742,61 @@ mod tests {
         let d = dl.try_next().unwrap();
         assert!(!d.ok);
         assert!(dl.live_ids().is_empty());
+    }
+
+    // ── BatchUi contracts ───────────────────────────────────────────
+
+    fn batch_book(id: &str) -> Book {
+        Book { id: id.into(), ..Default::default() }
+    }
+
+    #[test]
+    fn batch_starts_replace_the_whole_state() {
+        // Regression for the stale-tally popup bug: every start wipes
+        // the previous batch's tally, so a fresh popup can never show
+        // an old batch's "N downloaded" numbers.
+        let mut b = BatchUi::start_all(vec![batch_book("a"), batch_book("b")]);
+        b.done = 5;
+        b.failed = 1;
+        b.failed_ids.insert("x".into());
+
+        b.start_single(("/books/a.epub".into(), "A".into()));
+        assert!(b.single);
+        assert_eq!(b.autopen.as_ref().map(|(p, t)| (p.as_str(), t.as_str())), Some(("/books/a.epub", "A")));
+        assert!(!b.batch_all);
+        assert_eq!((b.done, b.failed, b.total), (0, 0, 0));
+        assert!(b.queue.is_empty());
+        assert!(b.failed_ids.is_empty());
+
+        b.reset();
+        assert_eq!(b.done, 0);
+        assert!(b.autopen.is_none());
+    }
+
+    #[test]
+    fn start_all_stages_queue_with_fresh_failures() {
+        let b = BatchUi::start_all(vec![batch_book("a"), batch_book("b"), batch_book("c")]);
+        assert!(b.batch_all);
+        assert_eq!(b.total, 3);
+        assert_eq!(b.queue.len(), 3);
+        // A new batch forgets the previous one's failures.
+        assert!(b.failed_ids.is_empty());
+    }
+
+    #[test]
+    fn sheet_status_tally_only_after_a_finished_batch() {
+        // Live download-all: the line counts down what is left.
+        let live = BatchUi { batch_all: true, total: 12, done: 5, failed: 1, ..Default::default() };
+        assert_eq!(live.sheet_status(4), SheetStatus::Remaining { count: 4 });
+        // Drained download-all (flag latched off, tally kept on the
+        // still-open modal): the finished tally.
+        let drained = BatchUi { batch_all: false, total: 12, done: 11, failed: 1, ..Default::default() };
+        assert_eq!(drained.sheet_status(0), SheetStatus::Tally { done: 11, failed: 1 });
+        // Fresh single/series batches start wholesale with total == 0:
+        // even right after a finished batch they count down and never
+        // inherit the stale tally (the bug wholesale starts killed).
+        let mut fresh = drained.clone();
+        fresh.start_single(("/p".into(), "T".into()));
+        assert_eq!(fresh.sheet_status(1), SheetStatus::Remaining { count: 1 });
     }
 }

@@ -755,4 +755,21 @@ mod tests {
         assert_eq!(store.cursor().unwrap(), 30, "failure leaves the cursor untouched");
         assert!(!src.reported.get());
     }
+
+    #[test]
+    fn worker_handle_arm_shares_one_fresh_cancel_flag() {
+        let (_tx, rx) = std::sync::mpsc::channel::<SyncMsg>();
+        let mut h = WorkerHandle::default();
+        assert!(h.rx.is_none());
+
+        let cancel = h.arm(rx);
+        // A brand-new chain starts uncancelled...
+        assert!(!cancel.load(std::sync::atomic::Ordering::Relaxed));
+        assert!(!h.cancel.load(std::sync::atomic::Ordering::Relaxed));
+        // ...and the handle's flag IS the worker's clone: aborting via
+        // the handle reaches the thread's `cancel` and vice versa.
+        cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        assert!(h.cancel.load(std::sync::atomic::Ordering::Relaxed));
+        assert!(h.rx.is_some());
+    }
 }
