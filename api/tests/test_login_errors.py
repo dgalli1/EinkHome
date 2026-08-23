@@ -46,8 +46,11 @@ def test_format_login_error_401_with_non_uuid_key():
     )
     msg = c._format_login_error(401, "Your credentials are not correct")
     assert "401" in msg
-    assert "WRONG-NOT-A-UUID" in msg
     assert "UUID" in msg
+    # The secret must NOT be echoed verbatim; the redacted peek keeps
+    # the hint actionable without leaking the credential into logs.
+    assert "WRONG-NOT-A-UUID" not in msg
+    assert "(16 chars)" in msg
 
 
 def test_format_login_error_401_with_uuid_key_no_username():

@@ -82,6 +82,16 @@ def _iso_utc(s: str) -> str:
     return dt.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _redact_secret(v: str) -> str:
+    """A peek, not a leak: enough to recognise WHICH configured value
+    this is (length + first/last chars), never the whole secret."""
+    if not v:
+        return "<empty>"
+    if len(v) <= 4:
+        return f"***({len(v)} chars)"
+    return f"{v[:2]}…{v[-2:]} ({len(v)} chars)"
+
+
 def _filename_from_content_disposition(cd: str) -> str | None:
     """Extract filename*= / filename= from a Content-Disposition header."""
     if not cd:
@@ -396,7 +406,10 @@ class _KavitaClient:
         self._jwt = body.get("token")
         self._jwt_expiry = time.time() + (body.get("expiresIn", 1800) or 1800) - 60
         if not self._jwt:
-            raise RuntimeError(f"Kavita login returned no token: {body!r}")
+            keys = sorted(body) if isinstance(body, dict) else type(body).__name__
+            raise RuntimeError(
+                f"Kavita login returned no token (response keys: {keys})"
+            )
 
     def _format_login_error(self, status: int, body: Any) -> str:
         """Translate a Kavita login failure into an actionable message.
@@ -426,8 +439,8 @@ class _KavitaClient:
                     self.api_key,
                 ):
                     clues.append(
-                        f"api_key={self.api_key!r} is not a UUID — "
-                        "check you copied the right value"
+                        f"api_key={_redact_secret(self.api_key)} is not "
+                        "a UUID — check you copied the right value"
                     )
             if not self.username:
                 clues.append("no username configured")
