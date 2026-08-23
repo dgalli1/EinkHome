@@ -221,9 +221,9 @@ impl<B: Framebuffer> App<B> {
         }
     }
 
-    /// The More drawer: an outside tap dismisses (C behaviour), a row tap
-    /// acts.  GroupBy / SortBy / DownloadAll are logged no-ops in this
-    /// slice; Settings + Applications navigate.
+    /// The More drawer: an outside tap dismisses (C behaviour); a row tap
+    /// opens Settings or the launcher, opens the group/sort choosers, or
+    /// starts a download-all batch.
     fn tap_more_menu(&mut self, x: i32, y: i32) {
         let scr = self.screen().framebuffer().screen();
         let dw = (scr.width as i32) * 3 / 4;

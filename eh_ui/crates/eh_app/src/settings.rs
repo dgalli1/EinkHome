@@ -125,9 +125,12 @@ pub fn draw<B: Framebuffer>(surf: &mut eh_render::Surface, app: &mut App<B>, dir
     }
 }
 
-/// Settings tap routing: back chevron closes; the API host / key rows open
-/// the on-screen keyboard (the C app's only real editing path); Save
-/// persists; the rest are logged no-ops in this slice.
+/// Settings tap routing.  The back chevron closes; a tap on no row is
+/// ignored.  API host / key rows open the on-screen keyboard (the C
+/// app's editing path), Save applies + persists, ReaderApp cycles the
+/// reader preference, DownloadFolder opens the directory picker,
+/// SystemApp toggles the home-task override, and ShowLogs / Licenses
+/// swap to their viewers.
 pub fn tap_settings<B: Framebuffer>(x: i32, y: i32, app: &mut App<B>) {
     if back_rect().contains(x, y) {
         app.overlay = crate::app::Overlay::None;
