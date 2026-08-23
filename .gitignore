@@ -29,3 +29,8 @@ eh_lib/target/
 scr*.bmp
 scr*.png
 covers/
+
+# Desktop-run runtime state at the repo root (regenerated every run)
+/bookshelf.cfg
+/bookshelf.log
+/bookshelf_lib.db

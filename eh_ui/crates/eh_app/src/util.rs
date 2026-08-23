@@ -45,22 +45,6 @@ pub fn get_bytes(agent: &Agent, base: &str, path: &str, token: &str) -> Result<V
     Ok(bytes)
 }
 
-/// GET and return the raw body bytes, capped at `max` (book files are
-/// bigger than the 16MB JSON/cover ceiling).
-pub fn get_bytes_max(agent: &Agent, base: &str, path: &str, token: &str, max: u64) -> Result<Vec<u8>, String> {
-    let mut bytes = Vec::new();
-    agent
-        .get(&format!("{base}{path}"))
-        .set("Authorization", &bearer(token))
-        .call()
-        .map_err(|e| ureq_err(&e))?
-        .into_reader()
-        .take(max)
-        .read_to_end(&mut bytes)
-        .map_err(|e| e.to_string())?;
-    Ok(bytes)
-}
-
 /// POST a JSON string body, return the response text.
 pub fn post_text(
     agent: &Agent,

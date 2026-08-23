@@ -511,8 +511,10 @@ impl<B: Framebuffer> Screen<B> {
     }
 
     /// Compute layout and draw all widgets into the framebuffer surface,
-    /// then flush dirty regions with `mode`.  One call per frame.
-    pub fn present(&mut self, mode: RefreshMode) {
+    /// accumulating dirty regions.  No panel update: `present` paints and
+    /// then flushes; the app layer paints overlays between the two halves
+    /// so one frame costs exactly ONE panel update.
+    pub fn paint(&mut self) {
         let screen = self.fb.screen();
         let w = screen.width;
         let h = self.content_h;
@@ -557,15 +559,26 @@ impl<B: Framebuffer> Screen<B> {
                 widget.layout(rect);
             }
         }
+        }
 
-        // Flush the union of drawn regions as one panel update.  (Production
-        // coalesces per-region with the right waveform; the shell keeps it
-        // simple and correct.)
+    /// Take the dirty regions [`paint`](Self::paint) accumulated, leaving
+    /// it empty (the app merges them with its overlay regions before its
+    /// own flush).
+    pub fn drain_dirty(&mut self) -> Vec<Rect> {
+        core::mem::take(&mut self.dirty)
+    }
+
+    /// Compute layout, draw all widgets, then flush with `mode`.  One call
+    /// per frame.
+    pub fn present(&mut self, mode: RefreshMode) {
+        self.paint();
         if !self.dirty.is_empty() {
+            let content = Rect { x: 0, y: 0, w: self.fb.screen().width, h: self.content_h };
             self.fb.refresh(content, mode);
         }
         self.dirty.clear();
     }
+
 
     /// Flush the regions accumulated since the last present (used by the
     /// app layer after drawing overlays onto the canvas without a full

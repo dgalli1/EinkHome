@@ -24,7 +24,6 @@
 use std::marker::PhantomData;
 
 use eh_hal::{Framebuffer, InputEvent, KeyCode, PixelFormat, Rect, RefreshMode, Screen};
-use eh_render::Surface;
 
 /// Canvas layout returned by `GetCanvas()` on the firmware.
 #[repr(C)]
@@ -56,8 +55,6 @@ struct IBitmapHdr {
 #[allow(non_snake_case)]
 mod imp {
     use super::{IBitmapHdr, ICanvas};
-    pub unsafe extern "C" fn InkViewMain(cb: extern "C" fn(i32, i32, i32) -> i32) { let _ = cb; }
-    pub unsafe extern "C" fn InitInkview(_f: i32) {}
     pub unsafe extern "C" fn GetCanvas() -> *const ICanvas { std::ptr::null() }
     pub unsafe extern "C" fn FullUpdate() {}
     pub unsafe extern "C" fn PartialUpdate(_x: i32, _y: i32, _w: i32, _h: i32) {}
@@ -113,7 +110,6 @@ mod imp {
 mod imp {
     use super::*;
     unsafe extern "C" {
-        pub(super) fn InitInkview(reg_flags: i32);
         pub(super) fn GetCanvas() -> *const ICanvas;
         pub(super) fn PartialUpdate(x: i32, y: i32, w: i32, h: i32);
         pub(super) fn FullUpdate();
@@ -123,7 +119,6 @@ mod imp {
         pub(super) fn iv_update_panel(reading_mode: i32);
         pub(super) fn DrawPanel(icon: *const core::ffi::c_void, text: *const u8, title: *const u8, percent: i32) -> i32;
         pub(super) fn Repaint();
-        pub(super) fn InkViewMain(cb: extern "C" fn(i32, i32, i32) -> i32);
         pub(super) fn OpenBook(path: *const u8, parameters: *const u8, flags: i32) -> i32;
         pub(super) fn NewTaskEx(path: *const u8, args: *mut *mut u8, appname: *const u8, name: *const u8, icon: *const core::ffi::c_void, flags: u32, run_as_reader: i32) -> i32;
         pub(super) fn OpenKeyboard(title: *const u8, buffer: *mut i8, maxlen: i32, flags: i32, hproc: extern "C" fn(*mut i8));
@@ -148,26 +143,9 @@ mod imp {
     }
 }
 #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
-use imp::{BanSleep, CloseKeyboard, DrawPanel, FullUpdate, GetBatteryPower, GetCanvas, GetDeviceModel, GetFrontlightEnabled, GetFrontlightState, GetResource, GetSoftwareVersion, InitInkview, InkViewMain, LoadPNG, NewTaskEx, OpenBook, OpenControlPanel, OpenKeyboard, PanelHeight, PartialUpdate, QueryNetwork, Repaint, ScreenHeight, ScreenWidth, SetOrientation, SetPanelType, SetWeakTimerEx, device_has_audio, device_has_touchpanel, device_number, iv_ipc_cmd, iv_update_panel};
+use imp::{BanSleep, CloseKeyboard, DrawPanel, FullUpdate, GetBatteryPower, GetCanvas, GetDeviceModel, GetFrontlightEnabled, GetFrontlightState, GetResource, GetSoftwareVersion, LoadPNG, NewTaskEx, OpenBook, OpenControlPanel, OpenKeyboard, PanelHeight, PartialUpdate, QueryNetwork, Repaint, ScreenHeight, ScreenWidth, SetWeakTimerEx, device_has_audio, device_has_touchpanel, device_number, iv_ipc_cmd, iv_update_panel};
 #[cfg(not(any(target_arch = "arm", target_arch = "aarch64")))]
-use imp::{BanSleep, DrawPanel, FullUpdate, GetBatteryPower, GetCanvas, GetDeviceModel, GetFrontlightEnabled, GetFrontlightState, GetResource, GetSoftwareVersion, InitInkview, InkViewMain, LoadPNG, NewTaskEx, OpenBook, OpenControlPanel, PanelHeight, PartialUpdate, QueryNetwork, Repaint, ScreenHeight, ScreenWidth, SetOrientation, SetPanelType, SetWeakTimerEx, device_has_audio, device_has_touchpanel, device_number, iv_ipc_cmd, iv_update_panel};
-
-/// Boot the inkview library exactly like the stock bookshelf: register, then
-/// hand the event loop a callback.  `on_event` receives raw (evt, par1, par2)
-/// and returns the RES_* result code.
-pub fn iv_main(on_event: extern "C" fn(i32, i32, i32) -> i32) -> ! {
-    unsafe {
-        InitInkview(0x4110);
-        // C eh_plat_boot (the stock bookshelf's main): register the
-        // orientation/panel BEFORE InkViewMain attaches the task — the
-        // theme store GetResource reads resolves per-orientation resource
-        // sets and misses without it (launcher icons came back NULL).
-        SetOrientation(0);
-        SetPanelType(1);
-        InkViewMain(on_event);
-    }
-    std::process::abort();
-}
+use imp::{BanSleep, DrawPanel, FullUpdate, GetBatteryPower, GetCanvas, GetDeviceModel, GetFrontlightEnabled, GetFrontlightState, GetResource, GetSoftwareVersion, LoadPNG, NewTaskEx, OpenBook, OpenControlPanel, PanelHeight, PartialUpdate, QueryNetwork, Repaint, ScreenHeight, ScreenWidth, SetWeakTimerEx, device_has_audio, device_has_touchpanel, device_number, iv_ipc_cmd, iv_update_panel};
 
 /// The inkview canvas-backed framebuffer.
 pub struct InkviewFb {
@@ -567,15 +545,6 @@ extern "C" fn kb_commit_handler(buf: *mut i8) {
     });
 }
 
-/// Paint the native panel content (frontlight icon + battery), delegating to
-/// the firmware's panel painter.  Safe no-op when the painter isn't active.
-///
-/// NOTE: requires `DrawPanel` which is arm-only (the firmware exports it, the
-/// host SDL shim no-ops it).  Kept generic over the symbol so a host build
-/// with a real inkview shim links; we currently call Partial/FullUpdate for
-/// the strip and leave the painter to the firmware.
-pub fn stamp_panel(_text: Option<&str>, _title: Option<&str>, _percent: i32) {}
-
 /// Translate an inkview key/pointer event into a shell [`InputEvent`].
 /// `par1/par2` semantics follow the SDK event codes.
 pub fn evt_to_input(evt: i32, par1: i32, par2: i32) -> Option<InputEvent> {
@@ -604,10 +573,6 @@ fn iv_to_key(code: i32) -> KeyCode {
         n => KeyCode::Unknown(n as u32),
     }
 }
-
-/// A full surface over the inkview canvas for one draw pass (re-exported so
-/// the shell can rasterise; the shell already builds it from `surface_mut`).
-pub type IvSurface<'a> = Surface<'a>;
 /// Arm an inkview weak timer (C SetWeakTimerEx).  `name` must be a
 /// NUL-terminated static buffer kept alive for the timer's lifetime.
 /// Public wrapper around the crate-internal SDK import.

@@ -13,6 +13,10 @@ use std::path::{Path, PathBuf};
 
 use crate::client::ApiClient;
 
+use eh_hal::Framebuffer;
+
+use crate::app::{App, Source};
+
 /// Cache subdir name (the C app's EH_COVERS_SUBDIR).
 pub const COVERS_SUBDIR: &str = "covers";
 
@@ -162,6 +166,87 @@ fn decode_jpeg(jpeg: &[u8]) -> Result<(u32, u32, Vec<u8>), String> {
         }
     };
     Ok((w, h, rgb))
+}
+
+impl<B: Framebuffer> App<B> {
+    /// Start the background full-library cover-warm pass (C
+    /// eh_cover_warm_start, run after a remote sync on the Kavita
+    /// source): every server book's cover lands in the on-disk cache so
+    /// offline launches still show real covers — not just the pages the
+    /// user happened to view.
+    pub(crate) fn cover_warm_start(&mut self) {
+        if self.source != Source::Kavita {
+            return;
+        }
+        let ids: Vec<String> = self
+            .store
+            .list_books(1_000_000, 0)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|b| b.id)
+            .collect();
+        self.warm_total = ids.len();
+        self.warm_remaining
+            .store(ids.len(), std::sync::atomic::Ordering::Relaxed);
+        if ids.is_empty() {
+            return;
+        }
+        self.warm_active
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        // One persistent worker drains the queue (C: one fetch per bcov
+        // tick).  A spawn-per-cover model created 100k threads for a
+        // full-library pass; glibc arena retention put RSS at ~200MB.
+        let remaining = self.warm_remaining.clone();
+        let active = self.warm_active.clone();
+        let online = self.warm_online.clone();
+        let client = self.client.clone();
+        let covers_dir = self.covers_dir.clone();
+        let _ = std::thread::Builder::new()
+            .name("cover-warm".into())
+            .spawn(move || {
+                let mut ids = ids;
+                while let Some(id) = ids.pop() {
+                    if !online.load(std::sync::atomic::Ordering::Relaxed) {
+                        std::thread::sleep(std::time::Duration::from_millis(200));
+                        continue;
+                    }
+                    remaining.store(ids.len(), std::sync::atomic::Ordering::Relaxed);
+                    if load_cached(&covers_dir, &id).is_some() {
+                        continue;
+                    }
+                    let _ = fetch(&client, &covers_dir, &id);
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                remaining.store(0, std::sync::atomic::Ordering::Relaxed);
+                active.store(false, std::sync::atomic::Ordering::Relaxed);
+            });
+    }
+    /// Drain the warm pass: at most one fetch handed to a background
+    /// thread per call (the C pass arms its bcov weak timer per fetch),
+    /// skipped entirely offline.  The network call MUST NOT run on the
+    /// UI thread — a blocking fetch here stalls event processing for the
+    /// whole request duration and the shell feels dead after boot.
+    pub(crate) fn cover_warm_tick(&mut self) {
+        // The worker thread polls this gate between fetches.
+        let online = self.screen().framebuffer().net_active();
+        self.warm_online.store(online, std::sync::atomic::Ordering::Relaxed);
+    }
+    /// True while the full-library warm pass still has covers to fetch
+    /// (C eh_cover_warm_active); offline counts as drained — the pass is
+    /// gated off offline and would otherwise pin the sheet forever.
+    pub(crate) fn cover_warm_active(&mut self) -> bool {
+        // Safe from overlay draws (screen take()n during present): use
+        // the live probe when available, else the cached value.  Offline
+        // counts as drained (the worker pauses, C gated it the same way).
+        let online = if self.screen.is_some() {
+            let net = self.screen.as_mut().unwrap().framebuffer().net_active();
+            self.fb_net_active = net;
+            net
+        } else {
+            self.fb_net_active
+        };
+        online && self.warm_remaining.load(std::sync::atomic::Ordering::Relaxed) > 0
+    }
 }
 
 #[cfg(test)]

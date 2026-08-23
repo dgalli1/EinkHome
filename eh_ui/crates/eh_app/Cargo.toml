@@ -46,6 +46,7 @@ mupdf = { version = "0.8.0", default-features = false, features = ["base14-fonts
 [dev-dependencies]
 tempfile = "3"
 eh_backend_sdl = { path = "../eh_backend_sdl" }
+parking_lot = "0.12"
 
 [features]
 default = []

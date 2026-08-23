@@ -24,8 +24,13 @@ use std::time::{Duration, Instant};
 
 use rusqlite::Result;
 
+use crate::app::{App, Overlay, Source};
 use crate::client::{ApiClient, Delta};
 use crate::store::Store;
+
+use eh_hal::Framebuffer;
+
+use crate::widgets::sync_popup::{SyncStage, SYNC_DONE_CLOSE_MS, SYNC_FAIL_CLOSE_MS};
 
 /// Rows per delta round (C EH_SYNC_BATCH): 100k books = 100 rounds.
 pub const EH_SYNC_BATCH: u32 = 1000;
@@ -240,6 +245,273 @@ fn store_ids(store: &Store) -> Vec<String> {
         .list_books(10_000, 0)
         .map(|books| books.into_iter().map(|b| b.id).collect())
         .unwrap_or_default()
+}
+
+impl<B: Framebuffer> App<B> {
+    /// Manual library sync (C top-bar sync icon, which==2 → eh_do_sync +
+    /// eh_sync_popup_open).  While a sync is already in flight a tap just
+    /// re-opens the sheet over the live run (C eh_sync_popup_open keeps
+    /// the running counters).
+    pub(crate) fn do_sync(&mut self) {
+        if self.syncing {
+            self.sync_popup_open();
+            return;
+        }
+        self.start_sync(true);
+    }
+
+    /// Silent re-sync used by settings_apply / the source chooser (C calls
+    /// eh_do_sync directly there — no progress sheet).
+    pub(crate) fn resync(&mut self) {
+        if self.syncing {
+            return;
+        }
+        self.start_sync(false);
+    }
+
+    /// Spawn the sync worker thread.  Threading model (the boring safe
+    /// option): the worker owns ONLY a cloned HTTP client and its own
+    /// independently-opened [`Store`] handle on the same DB file; it
+    /// streams [`crate::sync::SyncMsg`]s over an mpsc channel that
+    /// [`App::tick`] drains on the UI thread.  Chosen over
+    /// `Arc<Mutex<Store>>` because the App renders from its store every
+    /// frame — a shared mutex would stall draws behind whole-round
+    /// transactions — and SQLite's 2 s busy_timeout (set in Store::open)
+    /// absorbs the rare commit collision between the two connections.
+    pub(crate) fn start_sync(&mut self, popup: bool) {
+        // No configured server — nothing to sync against (the C app
+        // resolved its API host before arming eh_do_sync).
+        if self.syncing || self.config.api_url.is_empty() {
+            return;
+        }
+        // Logged synchronously on the UI thread so the e2e log slicer
+        // always sees the entry even though the chain runs async
+        // (C eh_evt_init's synchronous eh_do_sync entry log).
+        crate::logger::log(&format!("[bookshelf] do_sync ENTER batch={}", crate::sync::EH_SYNC_BATCH));
+        // Initial anti-suspend ban (C eh_do_sync's eh_sync_keep_awake);
+        // per-round re-arms come back as SyncMsg::BanSleep.
+        self.screen()
+            .framebuffer()
+            .ban_sleep(crate::sync::EH_SYNC_BAN_SLEEP_SEC as u32);
+        let (tx, rx) = std::sync::mpsc::channel::<crate::sync::SyncMsg>();
+        self.sync_rx = Some(rx);
+        self.sync_cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        self.syncing = true;
+        if popup {
+            self.sync_popup_open();
+        }
+        let client = self.client.clone();
+        let db_path = self.db_path.clone();
+        let cancel = std::sync::Arc::clone(&self.sync_cancel);
+        let spawned = std::thread::Builder::new()
+            .name("sync".into())
+            .spawn(move || {
+                // The worker's own store handle; see the threading note.
+                let store = match Store::open(&db_path) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        let _ = tx.send(crate::sync::SyncMsg::Event(
+                            crate::sync::SyncEvent::Failed(format!("store open: {e}")),
+                        ));
+                        return;
+                    }
+                };
+                let _ = crate::sync::sync(
+                    &client,
+                    &store,
+                    crate::sync::EH_SYNC_BATCH,
+                    &cancel,
+                    &mut |ev| {
+                        let _ = tx.send(crate::sync::SyncMsg::Event(ev));
+                    },
+                    Some(&mut |secs| {
+                        let _ = tx.send(crate::sync::SyncMsg::BanSleep(secs));
+                    }),
+                );
+            });
+        if spawned.is_err() {
+            self.sync_rx = None;
+            self.syncing = false;
+            crate::log("[eh_app] sync worker spawn failed");
+        }
+    }
+
+    /// Abort any in-flight sync chain (C eh_sync_abort): set the cancel
+    /// flag — checked between rounds AND after each fetch, so an aborted
+    /// round never applies — and detach the stale event stream.  Called
+    /// from settings_apply BEFORE the endpoint URLs are rebuilt.
+    pub(crate) fn sync_abort(&mut self) {
+        use std::sync::atomic::Ordering;
+        self.sync_cancel.store(true, Ordering::Relaxed);
+        self.sync_rx = None;
+        self.syncing = false;
+    }
+
+    /// Open the sync-progress sheet (C eh_sync_popup_open).
+    pub(crate) fn sync_popup_open(&mut self) {
+        if self.sync_popup.open && self.overlay == Overlay::Sync {
+            return;
+        }
+        // Re-opening the sheet over a LIVE run keeps the running counters
+        // (C eh_sync_popup_open resets only when no sync is running, so
+        // the progress lines never jump backwards).
+        let live = self.syncing;
+        let mut p = std::mem::take(&mut self.sync_popup);
+        p.open = true;
+        p.stage = SyncStage::Meta;
+        p.stage_at = Some(std::time::Instant::now());
+        if !live {
+            p.round = 0;
+            p.scanned = 0;
+            p.covers_done = 0;
+            p.covers_total = 0;
+            p.error.clear();
+        }
+        self.sync_popup = p;
+        self.set_overlay(Overlay::Sync);
+    }
+
+    /// Drain the sync worker's messages + advance the sheet's auto-close
+    /// timers.  Returns true when the frame changed and a repaint is due.
+    pub(crate) fn sync_poll(&mut self) -> bool {
+        let msgs: Vec<crate::sync::SyncMsg> =
+            self.sync_rx.as_ref().map_or_else(Vec::new, |rx| rx.try_iter().collect());
+        let mut changed = !msgs.is_empty();
+        for m in msgs {
+            match m {
+                crate::sync::SyncMsg::BanSleep(secs) => {
+                    // The hal handle lives on the UI thread; perform the
+                    // worker's re-arm request here (C called BanSleep on
+                    // the main thread too).
+                    self.screen().framebuffer().ban_sleep(secs);
+                }
+                crate::sync::SyncMsg::Event(ev) => changed |= self.apply_sync_event(ev),
+            }
+        }
+        if self.sync_popup.open {
+            changed |= self.sync_popup_close_tick();
+        }
+        changed
+    }
+
+    /// Apply one worker event to the popup state machine + terminal
+    /// bookkeeping (port of finish_sync / sync_round_outcome_fail's UI
+    /// side).  Returns true when the frame changed.
+    pub(crate) fn apply_sync_event(&mut self, ev: crate::sync::SyncEvent) -> bool {
+        match ev {
+            crate::sync::SyncEvent::Start => false, // the sheet opened at the trigger
+            crate::sync::SyncEvent::MetaBatch { done, .. } => {
+                self.sync_popup.stage = SyncStage::Meta;
+                self.sync_popup.round = done;
+                self.sync_popup.stage_at = Some(std::time::Instant::now());
+                true
+            }
+            crate::sync::SyncEvent::ScanLocal => {
+                self.sync_popup.stage = SyncStage::Scan;
+                self.sync_popup.stage_at = Some(std::time::Instant::now());
+                true
+            }
+            crate::sync::SyncEvent::Covers { done, total } => {
+                self.sync_popup.stage = SyncStage::Covers;
+                self.sync_popup.covers_done = done;
+                self.sync_popup.covers_total = total;
+                true
+            }
+            crate::sync::SyncEvent::Complete { rounds } => {
+                crate::logger::log(&format!(
+                    "[bookshelf] do_sync: rounds={rounds} cursor={} (books={})",
+                    self.store.cursor().unwrap_or(0),
+                    self.store.count().unwrap_or(0)
+                ));
+                self.finish_sync(true)
+            }
+            crate::sync::SyncEvent::Failed(e) => {
+                crate::logger::log(&format!("[bookshelf] do_sync FAILED: {e}"));
+                self.sync_popup.error = e;
+                self.finish_sync(false)
+            }
+        }
+    }
+
+    /// Terminal bookkeeping for a sync chain (C finish_sync +
+    /// eh_sync_popup_finish/fail): stop the spinner, rebuild the view,
+    /// hand off to the cover warm pass, stage the popup auto-close.
+    pub(crate) fn finish_sync(&mut self, ok: bool) -> bool {
+        self.syncing = false;
+        self.sync_rx = None;
+        // A source switch whose sync applies nothing must still re-project
+        // the view under the new source (C keeps this unconditional too).
+        self.rebuild_view();
+        if self.source == Source::Kavita {
+            self.cover_warm_start();
+        }
+        if self.sync_popup.open {
+            self.sync_popup.stage = if ok { SyncStage::Covers } else { SyncStage::Fail };
+            self.sync_popup.stage_at = Some(std::time::Instant::now());
+        }
+        self.refresh_shelf();
+        true
+    }
+
+    /// Advance the sheet's auto-close (C sync_popup_close_tick): while the
+    /// cover warm pass still drains, stay on COVERS so the striped bar
+    /// moves; once drained flash DONE for SYNC_DONE_CLOSE_MS; FAIL shows
+    /// the error for SYNC_FAIL_CLOSE_MS.  Returns true when the frame
+    /// changed.
+    pub(crate) fn sync_popup_close_tick(&mut self) -> bool {
+        let Some(at) = self.sync_popup.stage_at else { return false };
+        match self.sync_popup.stage {
+            SyncStage::Fail => {
+                if at.elapsed() >= std::time::Duration::from_millis(SYNC_FAIL_CLOSE_MS) {
+                    self.set_overlay(Overlay::None); // also clears popup.open
+                    return true;
+                }
+                false
+            }
+            SyncStage::Covers => {
+                let (done, total) = self.warm_progress();
+                if total > 0 && done < total {
+                    if done != self.sync_popup.covers_done {
+                        self.sync_popup.covers_done = done;
+                        self.sync_popup.covers_total = total;
+                        return true; // the bar advanced
+                    }
+                    return false;
+                }
+                self.sync_popup.stage = SyncStage::Done;
+                self.sync_popup.stage_at = Some(std::time::Instant::now());
+                true
+            }
+            SyncStage::Done => {
+                if at.elapsed() >= std::time::Duration::from_millis(SYNC_DONE_CLOSE_MS) {
+                    self.set_overlay(Overlay::None);
+                    return true;
+                }
+                false
+            }
+            SyncStage::Meta | SyncStage::Scan => false, // modal while running
+        }
+    }
+
+    /// Cover-warm progress (done, total) for the popup's covers bar
+    /// (C eh_cover_warm_progress).
+    pub(crate) fn warm_progress(&self) -> (u32, u32) {
+        let total = self.warm_total as u32;
+        let remaining = self.warm_remaining.load(std::sync::atomic::Ordering::Relaxed) as u32;
+        (total.saturating_sub(remaining), total)
+    }
+    /// Advance the top-bar sync glyph rotation while a sync or download is
+    /// in flight (C sync_spin_tick): 15°/s.  The facade ticks every 200 ms,
+    /// so +3° per active tick matches the C cadence; returns true when the
+    /// angle moved and the top bar needs a repaint.
+    pub(crate) fn sync_spin_tick(&mut self) -> bool {
+        if !(self.syncing || self.downloader.pending > 0) {
+            self.sync_angle = 0; // nothing in flight — the glyph rests
+            return false;
+        }
+        self.sync_angle = (self.sync_angle + 3) % 360;
+        true
+    }
 }
 
 #[cfg(test)]

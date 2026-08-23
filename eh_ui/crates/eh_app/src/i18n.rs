@@ -174,11 +174,6 @@ fn lang_index(code: &str) -> u8 {
     LANG_CODES.iter().position(|c| *c == code).unwrap_or(0) as u8
 }
 
-/// The active language code ("en"/"de"/"fr"/"it").
-pub fn current_lang() -> &'static str {
-    LANG_CODES[LANG.load(Ordering::Relaxed) as usize]
-}
-
 #[cfg(test)]
 pub(crate) fn set_current(code: &str) {
     LANG.store(lang_index(code), Ordering::Relaxed);
@@ -300,6 +295,13 @@ pub fn trn(key: &str, args: &[i64]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use parking_lot::Mutex;
+
+    // The language is a process-global (the LANG atomic); these tests flip
+    // it and assert on it, so they serialize on one mutex — parallel test
+    // threads would otherwise change each other's expected strings
+    // mid-assert (observed as a rare trn_substitutes flake).
+    static LANG_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn table_rows_are_complete_across_languages() {
@@ -321,6 +323,7 @@ mod tests {
 
     #[test]
     fn unknown_key_falls_back_to_itself() {
+        let _g = LANG_LOCK.lock();
         set_current("de");
         assert_eq!(tr("no.such.key"), "no.such.key");
         set_current("en");
@@ -328,6 +331,7 @@ mod tests {
 
     #[test]
     fn translations_follow_active_language() {
+        let _g = LANG_LOCK.lock();
         set_current("de");
         assert_eq!(tr("action.settings"), "Einstellungen");
         set_current("fr");
@@ -340,6 +344,7 @@ mod tests {
 
     #[test]
     fn trn_substitutes_placeholders_in_order() {
+        let _g = LANG_LOCK.lock();
         set_current("de");
         assert_eq!(trn("sync.batch", &[7]), "Batch 7");
         assert_eq!(trn("sync.cover_count", &[3, 12]), "3 / 12");
@@ -378,6 +383,7 @@ mod tests {
 
     #[test]
     fn wired_call_site_translates_a_drawn_label() {
+        let _g = LANG_LOCK.lock();
         // menu.rs draws labels()[…] verbatim via draw_text, so switching
         // the language must change the exact strings the More drawer
         // paints.

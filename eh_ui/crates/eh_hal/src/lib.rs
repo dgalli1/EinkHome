@@ -34,15 +34,6 @@ impl Screen {
         Self { width, height, content_bottom: height }
     }
 
-    /// A screen with a reserved bottom strip (`panel_h` rows tall).
-    pub fn with_panel(width: u32, height: u32, panel_h: u32) -> Self {
-        Self {
-            width,
-            height,
-            content_bottom: if panel_h > height { height } else { height - panel_h },
-        }
-    }
-
     pub fn content_height(&self) -> u32 {
         self.content_bottom
     }
@@ -166,15 +157,6 @@ pub enum KeyCode {
     Plus,
     Minus,
     Unknown(u32),
-}
-
-/// Result of one event-loop iteration handed back to the backend.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum LoopState {
-    /// Keep running.
-    Continue,
-    /// Tear down the event loop and return from the backend.
-    Exit,
 }
 
 /// The platform backend a UI runs on.  Implemented by eh_backend_* crates;

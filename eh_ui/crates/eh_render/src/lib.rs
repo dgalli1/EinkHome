@@ -132,67 +132,6 @@ impl<'a> Surface<'a> {
         }
     }
 
-    /// Fill a rectangle with a truecolour value.
-    pub fn fill_rgb(&mut self, rect: Rect, r: u8, g: u8, b: u8) {
-        let clip = rect.intersect(&Rect { x: 0, y: 0, w: self.width, h: self.height });
-        if clip.is_empty() {
-            return;
-        }
-        let bpp = self.bpp();
-        let row_bytes = self.stride;
-        for y in clip.y..clip.y + clip.h {
-            let row = (y as usize) * row_bytes;
-            let start = row + (clip.x as usize) * bpp;
-            let end = start + (clip.w as usize) * bpp;
-            if end > self.data.len() {
-                continue;
-            }
-            match self.format {
-                PixelFormat::Grayscale8 => {
-                    let g8 = (r as u32 + g as u32 + b as u32) / 3;
-                    self.data[start..end].fill(g8 as u8);
-                }
-                PixelFormat::Rgb24 => {
-                    let fill = [r, g, b];
-                    for c in self.data[start..end].chunks_exact_mut(3) {
-                        c.copy_from_slice(&fill);
-                    }
-                }
-                PixelFormat::Rgba32 => {
-                    let fill = [r, g, b, 0xff];
-                    for c in self.data[start..end].chunks_exact_mut(4) {
-                        c.copy_from_slice(&fill);
-                    }
-                }
-            }
-        }
-    }
-
-    /// Fill an entire row range (the fast path the app's FillArea uses).
-    pub fn fill_rows_gray(&mut self, y0: u32, y1: u32, gray: u8) {
-        let y0 = y0.min(self.height);
-        let y1 = y1.min(self.height);
-        let format = self.format;
-        for y in y0..y1 {
-            let row = self.row_mut(y);
-            let n = row.len();
-            match format {
-                PixelFormat::Grayscale8 => row[..n].fill(gray),
-                PixelFormat::Rgb24 => {
-                    for px in 0..n / 3 {
-                        row[px * 3] = gray; row[px * 3 + 1] = gray; row[px * 3 + 2] = gray;
-                    }
-                }
-                PixelFormat::Rgba32 => {
-                    for px in 0..n / 4 {
-                        row[px * 4] = gray; row[px * 4 + 1] = gray;
-                        row[px * 4 + 2] = gray; row[px * 4 + 3] = 0xff;
-                    }
-                }
-            }
-        }
-    }
-
     /// Horizontal line.
     pub fn hline(&mut self, x: u32, y: u32, len: u32, thick: u32, gray: u8) {
         if y + thick <= self.height {
@@ -481,11 +420,6 @@ pub fn draw_text(
     (pen_x - x as f32) as u32
 }
 
-/// Text centring: return the x for a run so it is centred on `cx`.
-pub fn center_x(font: &Font, size_px: f32, text: &str, cx: i32) -> i32 {
-    cx - (font.width(text, size_px) / 2.0).round() as i32
-}
-
 /// Column-split text at a pixel width budget (the app's `utf8_fit_width`
 /// analog — never splits a multibyte char).  Returns the visible prefix.
 pub fn fit_width(font: &Font, size_px: f32, text: &str, max_px: f32, out: &mut String) {
@@ -516,11 +450,7 @@ impl DrawScratch {
     pub fn track(&mut self, r: Rect) {
         if !r.is_empty() { self.dirty.push(r); }
     }
-    pub fn take_dirty(&mut self) -> Vec<Rect> {
-        core::mem::take(&mut self.dirty)
-    }
 }
-
 impl Default for DrawScratch {
     fn default() -> Self { Self::new() }
 }

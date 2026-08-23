@@ -167,22 +167,6 @@ impl Config {
         Path::new(CONFIG_WRITE_ROOT).join(CONFIG_FILENAME)
     }
 
-    /// Search order for the config file (device semantics).
-    pub fn locate(candidate: Option<&Path>) -> Option<PathBuf> {
-        if let Some(p) = candidate {
-            if p.exists() {
-                return Some(p.to_path_buf());
-            }
-        }
-        [
-            PathBuf::from("/mnt/ext1/system/bin/bookshelf.cfg"),
-            PathBuf::from("/etc/pbemu/bookshelf.cfg"),
-            PathBuf::from("/tmp/bookshelf.cfg"),
-        ]
-        .into_iter()
-        .find(|p| p.exists())
-    }
-
     /// Persist the config as a plain `key=value` list (C
     /// eh_write_config_file): api_url, api_token, downloads_dir, source,
     /// group, reader (path, or `auto` for the firmware reader).

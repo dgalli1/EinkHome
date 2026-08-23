@@ -17,10 +17,15 @@
 //! (let alone fail) a re-enqueued book.
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
+
+use eh_hal::Framebuffer;
+
+use crate::app::{App, Overlay};
+use crate::store::Book;
 
 /// One queued file fetch.
 struct Job {
@@ -298,7 +303,7 @@ pub fn refresh_downloaded_flags(store: &crate::store::Store, dir: &str) -> usize
         };
         let got = books.len();
         for b in &books {
-            let path = crate::app::book_local_path(b, dir);
+            let path = book_local_path(b, dir);
             let mut dl =
                 names.contains(path.file_name().unwrap_or_default().to_string_lossy().as_ref())
                     && path.is_file();
@@ -328,6 +333,176 @@ pub fn refresh_downloaded_flags(store: &crate::store::Store, dir: &str) -> usize
         crate::log(&format!("[bookshelf] refresh_downloaded_flags changed={changed}"));
     }
     changed
+}
+
+/// The local path a book downloads to (C eh_book_local_path verbatim): the
+/// provider's filename sanitized to a bare basename (slashes → `_`,
+/// control chars dropped), else `<id>.<ext>` (or bare `<id>` with no
+/// extension).
+pub fn book_local_path(book: &Book, downloads_dir: &str) -> PathBuf {
+    let dir = Path::new(downloads_dir);
+    if !book.filename.is_empty() && book.filename != "." && book.filename != ".." {
+        let sanitized: String = book
+            .filename
+            .chars()
+            .map(|c| if c == '/' { '_' } else { c })
+            .filter(|c| *c as u32 >= 0x20 && *c != '\x7f')
+            .collect();
+        let sanitized = sanitized.trim();
+        if !sanitized.is_empty() {
+            return dir.join(sanitized);
+        }
+    }
+    if !book.ext.is_empty() {
+        dir.join(format!("{}.{}", book.id, book.ext))
+    } else {
+        dir.join(&book.id)
+    }
+}
+
+impl<B: Framebuffer> App<B> {
+    /// Abort every open download (C eh_cancel_downloads): void the
+    /// in-flight fetch (its .part is never renamed), drop the queue +
+    /// batch state, and close the popup.
+    pub fn cancel_downloads(&mut self) {
+        crate::logger::log("[bookshelf] cancel_downloads");
+        self.downloader.cancel_all();
+        self.dl_batch_queue.clear();
+        self.dl_batch_failed.clear();
+        self.dl_single = false;
+        self.dl_batch_all = false;
+        self.dl_autopen = None;
+        self.set_overlay(Overlay::None);
+    }
+
+
+    /// Queue one book file on the worker + open the modal download popup
+    /// (logging `draw_dl_popup` once per popup).
+    pub(crate) fn enqueue_download(&mut self, id: &str, path: &Path) {
+        let base = self.config.api_url.clone();
+        let token = self.config.api_token.clone();
+        self.downloader.enqueue(&base, &token, id, &path.to_string_lossy());
+        if self.overlay != Overlay::Download {
+            crate::logger::log("[bookshelf] draw_dl_popup");
+        }
+        self.set_overlay(Overlay::Download);
+    }
+    /// Drain completed downloads into the store, and when the queue empties
+    /// close the popup + auto-open the reader for a single-book press.
+    pub(crate) fn drain_downloads(&mut self) {
+        loop {
+            let Some(d) = self.downloader.try_next() else { break };
+            self.downloader.pending = self.downloader.pending.saturating_sub(1);
+            // The popup shows the remaining count: repaint it.
+            self.dirty = true;
+            if d.ok {
+                self.dl_done += 1;
+                if let Err(e) = self.store.set_downloaded(&d.id, true, &d.path) {
+                    crate::log(&format!("[eh_app] set_downloaded: {e}"));
+                }
+                crate::logger::log(&format!("[bookshelf] download_book_file OK id={} path={}", d.id, d.path));
+            } else {
+                self.dl_failed += 1;
+                crate::logger::log(&format!("[bookshelf] download_book_file FAILED id={}", d.id));
+            }
+            if self.dl_batch_all {
+                crate::logger::log(&format!(
+                    "[bookshelf] dl_progress done={} failed={} total={} active={}",
+                    self.dl_done, self.dl_failed, self.dl_total, self.downloader.pending
+                ));
+                if !d.ok {
+                    // C batch_note_failed: the top-up never re-enqueues a
+                    // book this batch already tried and failed.
+                    self.dl_batch_failed.insert(d.id.clone());
+                }
+                // Top the bounded queue up as jobs finish (C dl_advance).
+                self.top_up_batch();
+            }
+        }
+        if self.downloader.pending == 0 && self.dl_batch_queue.is_empty() && self.overlay == Overlay::Download {
+            if self.dl_single {
+                // Single-book press: close the popup + auto-open the reader.
+                self.set_overlay(Overlay::None);
+                if let Some((path, title)) = self.dl_autopen.take() {
+                    let path = PathBuf::from(path);
+                    self.open_reader(&path, &title);
+                }
+                self.dl_single = false;
+            } else {
+                // Download-all / context Download: the popup stays open
+                // (modal) until an outside tap dismisses it (C behavior).
+                if self.dl_batch_all {
+                    crate::logger::log("[bookshelf] download-all batch complete");
+                    // The finished-tally popup redraw (the harness proves
+                    // the popup survived the mid-drain tap via this token).
+                    crate::logger::log("[bookshelf] draw_dl_popup");
+                    self.dl_batch_all = false;
+                    self.dirty = true;
+                }
+            }
+        }
+    }
+
+    /// Download every not-yet-downloaded book (C More → Download all /
+    /// eh_download_all_start): only downloaded=0 rows join the batch, the
+    /// queue stays bounded and tops up as jobs finish, failures are
+    /// remembered so they can't loop, and nothing opens when there is
+    /// nothing to fetch.
+    pub(crate) fn download_all(&mut self) {
+        let n = self.store.count().unwrap_or(0) as usize;
+        let targets: Vec<Book> = self
+            .store
+            .list_books(n, 0)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|b| !b.downloaded)
+            .collect();
+        if targets.is_empty() {
+            crate::logger::log("[bookshelf] download-all nothing to download");
+            return;
+        }
+        self.dl_single = false;
+        self.dl_batch_all = true;
+        self.dl_done = 0;
+        self.dl_failed = 0;
+        self.dl_total = targets.len();
+        self.dl_autopen = None;
+        // New batch: drop the previous batch's failed-id set and stage the
+        // targets for the bounded top-up (C download_all_start).
+        self.dl_batch_failed.clear();
+        self.dl_batch_queue = targets.into_iter().collect();
+        self.top_up_batch();
+        crate::logger::log(&format!("[bookshelf] download-all queued={}", self.dl_total));
+        crate::logger::log("[bookshelf] draw_dl_popup");
+        self.set_overlay(Overlay::Download);
+    }
+
+    /// In-flight window of the download-all batch (C keeps its whole
+    /// queue bounded by EH_MAX_DOWNLOADS; the Rust worker channel is
+    /// unbounded, so the window lives here).
+    pub(crate) const DL_BATCH_WINDOW: usize = 8;
+
+    /// Bounded download-all top-up (C dl_advance_batch →
+    /// batch_enqueue_slice): keep DL_BATCH_WINDOW jobs queued/in flight,
+    /// pulling staged undownloaded books and skipping ids this batch
+    /// already failed (C batch_note_failed / batch_failed_id).
+    pub(crate) fn top_up_batch(&mut self) {
+        let dl = self.downloads_dir();
+        while self.downloader.pending < Self::DL_BATCH_WINDOW {
+            match self.dl_batch_queue.pop_front() {
+                Some(b) => {
+                    if self.dl_batch_failed.contains(&b.id) {
+                        continue;
+                    }
+                    let cur = book_local_path(&b, &dl);
+                    let base = self.config.api_url.clone();
+                    let token = self.config.api_token.clone();
+                    self.downloader.enqueue(&base, &token, &b.id, &cur.to_string_lossy());
+                }
+                None => break,
+            }
+        }
+    }
 }
 
 #[cfg(test)]
