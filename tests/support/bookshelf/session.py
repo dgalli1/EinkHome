@@ -233,6 +233,17 @@ class BookshelfSession:
         self.tap_at(*self._g.sort_option_center(option_row))
         return before
 
+    def choose_source(self, index: int) -> str:
+        """Top-bar source button -> chooser row *index* (0 = Kavita,
+        1 = Local, 2 = Folder); the app saves the choice to its config
+        and switches immediately.  Returns the pre-tap log offset."""
+        before = self.current_log()
+        self.tap_at(*self._g.source_button_center())
+        self.wait_for_stable()
+        self.tap_at(*self._g.source_option_center(index))
+        self.wait_for_stable()
+        return before
+
     def tap_group_header(self) -> None:
         """Tap the current page's group header (drills into the group)."""
         self.tap_at(*self._g.group_header_center())

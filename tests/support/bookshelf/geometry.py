@@ -298,6 +298,18 @@ class BookshelfGeometry:
         py = self._chooser_py(4)
         return (self.screen_w // 2, py + 84 + index * 96 + 48)
 
+    # ── source button + source-chooser sheet (C eh_source_geom) ────────
+    def source_button_center(self) -> tuple[int, int]:
+        """Top-bar source button: fixed x=112 w=176, full bar height."""
+        return (112 + 176 // 2, 96 // 2)
+
+    def source_option_center(self, index: int) -> tuple[int, int]:
+        """Centre of source-chooser row *index* (0 = Kavita, 1 = Local,
+        2 = Folder); rows sit at sheet py+80, 96 px apart, h=84."""
+        ph = 72 + 3 * 96 + 24
+        py = (self.content_bottom() - ph) // 2
+        return (self.screen_w // 2, py + 80 + index * 96 + 42)
+
     def group_header_center(self) -> tuple[int, int]:
         """Centre of the current page's dimension-group header band."""
         return (self.screen_w // 2, self.GROUP_GRID_TOP + self.GROUP_HEADER_H // 2)

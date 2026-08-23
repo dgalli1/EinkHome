@@ -14,6 +14,7 @@ import json
 import os
 import re
 import shutil
+import sqlite3
 import subprocess
 import sys
 import time
@@ -120,6 +121,11 @@ def _sdl_env(*, config: str | None = None):
     env["SDL_VIDEODRIVER"] = "dummy"
     env["PBEMU_LOG_DIR"] = str(run_dir)
     env["EH_SYSAPP_DIR"] = str(run_dir / "sysapp")  # isolate home-task promote/demote
+    # Isolate the local-library scan root (local::browse_root) per
+    # instance — without it a host run would walk the real $HOME.
+    ext1 = run_dir / "ext1"
+    ext1.mkdir(parents=True, exist_ok=True)
+    env["EH_BROWSE_ROOT"] = str(ext1)
     _held = {"proc": None}
 
     def _launch():
@@ -1468,6 +1474,146 @@ def _inject_bulk_books(count: int, stem: str = "BatchStress") -> list[Path]:
         p.write_bytes(b"PK\x03\x04 bulk stub for download-all stress test")
         paths.append(p)
     return paths
+
+
+
+def _djb2_8hex(s: str) -> str:
+    """Rust local::hash_hex — djb2 over the UTF-8 bytes, 8 lowercase hex."""
+    h = 5381
+    for b in s.encode():
+        h = (h * 33 + b) & 0xFFFFFFFFFFFFFFFF
+    return f"{h:08x}"
+
+
+def _fnv_bucket(safe: str) -> str:
+    """Rust cover::bucket_of — FNV-1a 32, low byte as 2 hex chars."""
+    h = 2166136261
+    for b in safe.encode():
+        h ^= b
+        h = (h * 16777619) & 0xFFFFFFFF
+    return f"{h & 0xFF:02x}"
+
+
+def _minimal_pdf(text: bool) -> bytes:
+    """A valid single-page PDF.  *text* adds a Type1 Helvetica draw of
+    the word 'Minimal'; without it the page is blank like the Rust unit
+    test's fixture.  Both rely on MuPDF's repair-free strict parse."""
+    content = b"BT /F1 48 Tf 72 720 Td (Minimal) Tj ET"
+    res = b"/Resources<</Font<</F1 5 0 R>>>>"
+    objs = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 280] "
+        + (b"/Contents 4 0 R " + res if text else b"") + b">>",
+        b"<< /Length " + str(len(content)).encode() + b" >>stream\n"
+        + content + b"\nendstream",
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+    ]
+    if not text:
+        objs = objs[:3]
+    out = bytearray(b"%PDF-1.4\n")
+    offsets = []
+    for i, body in enumerate(objs, start=1):
+        offsets.append(len(out))
+        out += f"{i} 0 obj ".encode() + body + b" endobj\n"
+    xref_at = len(out)
+    out += f"xref\n0 {len(objs) + 1}\n".encode()
+    out += b"0000000000 65535 f \n"
+    for off in offsets:
+        out += f"{off:010d} 00000 n \n".encode()
+    out += (
+        f"trailer<<</Size {len(objs) + 1}/Root 1 0 R>>\n"
+        f"startxref\n{xref_at}\n%%EOF\n"
+    ).encode()
+    return bytes(out)
+
+
+def test_local_pdf_import_renders_mupdf_cover(fresh_bookshelf):
+    """Switching to the Local source walks the storage root; a
+    metadata-less PDF must get its first page rendered through the
+    bundled MuPDF (the exact code path the ARM device binary runs),
+    fall back to the filename stem for its title, and persist both in
+    the store."""
+    bs = fresh_bookshelf
+    backend = bs.backend
+    on_emulator = os.environ.get("EH_TEST_BACKEND", "emulator") == "emulator"
+    if on_emulator:
+        ext1 = backend.config_path.parents[2]  # .live/mnt/ext1
+        scan_prefix = "/mnt/ext1"
+    else:
+        ext1 = backend.config_path.parent / "ext1"  # run_dir/ext1
+        scan_prefix = str(ext1)
+
+    seed_dir = ext1 / "eh_pdf_e2e"
+    seed_dir.mkdir(parents=True, exist_ok=True)
+    # Two shapes: a text page (exercises font rendering) and a bare
+    # page (the Rust unit-test's fixture shape).
+    cases = {"Minimal": True, "Blank": False}
+    for stem, with_text in cases.items():
+        (seed_dir / f"{stem}.pdf").write_bytes(_minimal_pdf(text=with_text))
+    bids = {
+        stem: f"fld_{_djb2_8hex(f'{scan_prefix}/eh_pdf_e2e/{stem}.pdf')}"
+        for stem in cases
+    }
+
+
+    try:
+        # Real user path: source button -> chooser -> Local.  The app
+        # saves the choice itself; switching back in `finally` restores
+        # the Kavita boot for later tests.
+        before = bs.choose_source(1)
+        _wait_log_slice(bs, before, "source switched to ", timeout=10.0)
+        # The import scan + cover extraction run asynchronously; qemu-arm
+        # MuPDF rendering of even a tiny PDF takes a while.
+        # Only VISIBLE tiles get cover ticks; with ~20 imported books the
+        # two PDFs may land on different pages, so flip pages until both
+        # covers have been produced (extract on first render, cache hit
+        # when a previous page view already extracted it).
+        def _ticked(book_id: str) -> bool:
+            tail = bs.current_log()[len(before):]
+            return (
+                f"local extract id={book_id}" in tail
+                or f"cache hit id={book_id}" in tail
+            )
+
+        for _ in range(8):
+            if all(_ticked(b) for b in bids.values()):
+                break
+            bs.tap_at(*bs.geom.pager_next_center())
+            time.sleep(3)
+        else:
+            raise AssertionError("cover ticks never reached both PDFs")
+
+        # Rendered art landed in the cover cache: PNG plus the raw bytes.
+        db_copy = Path(backend.tmp_dir) / "mupdf-e2e-store-copy.db"
+        shutil.copyfile(backend.store_path, db_copy)
+        con = sqlite3.connect(db_copy)
+        try:
+            for stem, b in bids.items():
+                # Local books persist their extracted cover as .raw (the
+                # MuPDF-rendered first page, already PNG-encoded); the
+                # .png cache is written only for server covers.
+                safe = b.replace("/", "_")
+                raw = backend.covers_dir / _fnv_bucket(safe) / f"{safe}.raw"
+                assert raw.is_file(), f"{stem}: no raw cover cached"
+                data = raw.read_bytes()
+                assert data[:8] == b"\x89PNG\r\n\x1a\n", f"{stem}: not a PNG"
+                assert len(data) > 500, f"{stem}: cover only {len(data)} bytes"
+                row = con.execute(
+                    "SELECT title, source FROM books WHERE id=?", (b,)
+                ).fetchone()
+                assert row == (stem, "local"), (stem, row)
+        finally:
+            con.close()
+            db_copy.unlink(missing_ok=True)
+    finally:
+        # Switch back through the UI so the app's own config write makes
+        # Kavita the persisted boot source again (leftover store rows are
+        # filtered from the Kavita view by design).
+        back = bs.current_log()
+        bs.choose_source(0)
+        _wait_log_slice(bs, back, "source switched to ", timeout=10.0)
+        shutil.rmtree(seed_dir, ignore_errors=True)
 
 
 def _grouped_series_index(bs: BookshelfSession, series_title: str) -> int:

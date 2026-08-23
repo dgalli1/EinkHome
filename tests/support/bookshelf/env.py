@@ -543,22 +543,43 @@ def _kill_guest_tasks() -> None:
     container_sh(_KILL_GUEST_TASKS_SCRIPT, check=False, timeout=10)
 
 
-def _wait_fresh_bookshelf(before: int, timeout: float = 30.0) -> None:
-    """Block until a launch newer than *before* has synced and drawn."""
+def _wait_fresh_bookshelf(before: int, timeout: float = 60.0) -> None:
+    """Block until a launch newer than *before* has synced and drawn.
+
+    ``do_sync`` only fires for the Kavita source; a boot into the Local
+    source instead walks the storage root before its first draw.  Such an
+    invocation passes once it drew and stayed settled briefly."""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if count_log_openings(FIRMWARE) > before:
             slice_ = latest_invocation_log(FIRMWARE)
             if "do_sync" in slice_ and "draw_grid" in slice_:
                 return
+            if "draw_grid" in slice_ and "local: imported" in slice_:
+                settled_at = time.monotonic()
+                last = len(slice_)
+                while time.monotonic() - settled_at < 3.0:
+                    time.sleep(0.3)
+                    slice_ = latest_invocation_log(FIRMWARE)
+                    if count_log_openings(FIRMWARE) > before or (
+                        len(slice_) != last and "local: imported" not in slice_
+                    ):
+                        break
+                else:
+                    return
         time.sleep(0.3)
+    from tests.support.bookshelf.backends import _EmulatorLog
+
+    dbg_log = _EmulatorLog(FIRMWARE)
+    slice_ = latest_invocation_log(FIRMWARE)
     raise RuntimeError(
         f"bookshelf did not respawn+sync within {timeout}s "
-        f"(log openings={count_log_openings(FIRMWARE)}, expected > {before})"
+        f"(log openings={count_log_openings(FIRMWARE)}, expected > {before}; "
+        f"log={dbg_log.path()}, slice tail={slice_[-400:]!r})"
     )
 
 
-def _restart_bookshelf(emulator: Emulator, timeout: float = 30.0) -> None:
+def _restart_bookshelf(emulator: Emulator, timeout: float = 60.0) -> None:
     """Kill the guest bookshelf (+ any reader) and wait for a clean respawn."""
     before = count_log_openings(FIRMWARE)
     _kill_guest_tasks()
