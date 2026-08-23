@@ -57,11 +57,11 @@ pub fn draw_download_popup<B: Framebuffer>(
         GRAY_BLACK,
         &mut g,
     );
-    let label = if app.dl_total > 0 && !app.dl_batch_all {
+    let label = if app.dl.total > 0 && !app.dl.batch_all {
         format!(
             "{}, {}",
-            crate::i18n::trn("dl.complete", &[app.dl_done as i64]),
-            crate::i18n::trn("dl.failed_count", &[app.dl_failed as i64])
+            crate::i18n::trn("dl.complete", &[app.dl.done as i64]),
+            crate::i18n::trn("dl.failed_count", &[app.dl.failed as i64])
         )
     } else {
         crate::i18n::trn("dl.remaining", &[app.downloader.pending as i64])

@@ -154,8 +154,7 @@ impl<B: Framebuffer> App<B> {
         } else {
             // Async: enqueue on the worker, show the modal popup, auto-open
             // the reader when the queue drains.
-            self.dl_single = true;
-            self.dl_autopen = Some((cur.to_string_lossy().into_owned(), book.title.clone()));
+            self.dl.start_single((cur.to_string_lossy().into_owned(), book.title.clone()));
             self.enqueue_download(&book.id, &cur);
         }
     }

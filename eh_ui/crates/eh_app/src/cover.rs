@@ -168,6 +168,44 @@ fn decode_jpeg(jpeg: &[u8]) -> Result<(u32, u32, Vec<u8>), String> {
     Ok((w, h, rgb))
 }
 
+/// Shared state of the full-library cover-warm pass (the C
+/// eh_cover_warm_* globals): the atomics live behind Arcs because the
+/// persistent worker thread mutates them off the UI thread.
+/// (C's bcov weak timer fetched one cover per main-loop tick; a
+/// spawn-per-cover model here retained ~180MB of glibc arena at 100k
+/// books, so the pass runs on one long-lived drainer.)
+pub(crate) struct WarmHandle {
+    /// Ids queued by the current pass (progress denominator).
+    pub total: usize,
+    /// Remote ids still to fetch.
+    pub remaining: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    /// Worker alive (draining or paused offline).
+    pub active: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Live network gate the worker polls between fetches.
+    pub online: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl Default for WarmHandle {
+    fn default() -> Self {
+        WarmHandle {
+            total: 0,
+            remaining: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            active: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            // Assume online until the first tick probes the hal gate.
+            online: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        }
+    }
+}
+
+impl WarmHandle {
+    /// Covers already fetched by the current pass (progress numerator).
+    pub fn done(&self) -> u32 {
+        self.total
+            .saturating_sub(self.remaining.load(std::sync::atomic::Ordering::Relaxed))
+            as u32
+    }
+}
+
 impl<B: Framebuffer> App<B> {
     /// Start the background full-library cover-warm pass (C
     /// eh_cover_warm_start, run after a remote sync on the Kavita
@@ -185,20 +223,20 @@ impl<B: Framebuffer> App<B> {
             .into_iter()
             .map(|b| b.id)
             .collect();
-        self.warm_total = ids.len();
-        self.warm_remaining
+        self.warm.total = ids.len();
+        self.warm.remaining
             .store(ids.len(), std::sync::atomic::Ordering::Relaxed);
         if ids.is_empty() {
             return;
         }
-        self.warm_active
+        self.warm.active
             .store(true, std::sync::atomic::Ordering::Relaxed);
         // One persistent worker drains the queue (C: one fetch per bcov
         // tick).  A spawn-per-cover model created 100k threads for a
         // full-library pass; glibc arena retention put RSS at ~200MB.
-        let remaining = self.warm_remaining.clone();
-        let active = self.warm_active.clone();
-        let online = self.warm_online.clone();
+        let remaining = self.warm.remaining.clone();
+        let active = self.warm.active.clone();
+        let online = self.warm.online.clone();
         let client = self.client.clone();
         let covers_dir = self.covers_dir.clone();
         let _ = std::thread::Builder::new()
@@ -229,7 +267,7 @@ impl<B: Framebuffer> App<B> {
     pub(crate) fn cover_warm_tick(&mut self) {
         // The worker thread polls this gate between fetches.
         let online = self.screen().framebuffer().net_active();
-        self.warm_online.store(online, std::sync::atomic::Ordering::Relaxed);
+        self.warm.online.store(online, std::sync::atomic::Ordering::Relaxed);
     }
     /// True while the full-library warm pass still has covers to fetch
     /// (C eh_cover_warm_active); offline counts as drained — the pass is
@@ -245,7 +283,7 @@ impl<B: Framebuffer> App<B> {
         } else {
             self.fb_net_active
         };
-        online && self.warm_remaining.load(std::sync::atomic::Ordering::Relaxed) > 0
+        online && self.warm.remaining.load(std::sync::atomic::Ordering::Relaxed) > 0
     }
 }
 

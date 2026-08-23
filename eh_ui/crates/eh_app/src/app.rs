@@ -19,9 +19,8 @@ use crate::config::{Config, parse_kv_file};
 use crate::cover;
 use crate::shelf::{self, ShelfEntry};
 use crate::widgets::chooser::ChooserKind;
-use crate::widgets::context::ContextAction;
 use crate::widgets::sync_popup::SyncPopup;
-use crate::store::{Book, Store};
+use crate::store::Store;
 
 /// A row of the More menu (the C app's menu drawer), in tap order.
 #[derive(Clone, Copy, PartialEq)]
@@ -263,17 +262,9 @@ pub struct App<B: Framebuffer> {
     /// Last keyboard buffer the suggest tick acted on (C g_last_suggest_q):
     /// the 200 ms poll only re-queries the store when the buffer moved.
     pub suggest_q: String,
-    /// Full-library cover-warm queue (C eh_cover_warm_start): remote ids
-    /// still to fetch, one drained per tick while online.
-    /// The single cover-warm worker thread owns the id queue; the UI
-    /// reads its progress through these atomics.  (C's bcov weak timer
-    /// fetched one cover per tick on the main loop; a spawn-per-cover
-    /// model retained ~180MB of glibc arena at 100k books.)
-    pub warm_remaining: std::sync::Arc<std::sync::atomic::AtomicUsize>,
-    /// Worker alive (draining or paused offline).
-    pub warm_active: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    /// Live network gate the worker polls between fetches.
-    pub warm_online: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Full-library cover-warm pass: shared worker atomics + progress
+    /// total (owner: [`crate::cover::WarmHandle`]).
+    pub(crate) warm: crate::cover::WarmHandle,
     /// The settings row (or search input) currently owning the on-screen
     /// keyboard — the draw inverts the editing row (C eh_g_kb_field).
     pub kb_editing: Option<KbField>,
@@ -281,30 +272,12 @@ pub struct App<B: Framebuffer> {
     pub chooser_rects: Vec<Rect>,
     /// Download queue + worker + completion channel.
     pub downloader: crate::downloads::Downloader,
-    /// True when the active download batch came from a single-book press
-    /// (auto-open the reader when it drains); false for download-all.
-    pub dl_single: bool,
-    /// True when the active batch is a download-all (logs the
-    /// `download-all batch complete` settle marker on drain).
-    pub dl_batch_all: bool,
-    /// Download-all batch tally (done/failed/total) for `dl_progress`.
-    pub dl_done: usize,
-    pub dl_failed: usize,
-    pub dl_total: usize,
-    /// (path, title) to auto-open in the reader once a single-book download
-    /// drains (C: single press → download → launch reader).
-    pub dl_autopen: Option<(String, String)>,
-    /// Download-all top-up queue: undownloaded books staged but not yet
-    /// enqueued (C batch_enqueue_slice's bounded-slice cursor).
-    pub dl_batch_queue: std::collections::VecDeque<Book>,
-    /// Ids the current download-all batch already tried and failed
-    /// (C g_dl_batch_failed_ids): keeps the top-up from re-enqueueing
-    /// failing books forever.
-    pub dl_batch_failed: std::collections::HashSet<String>,
-    pub context_items: Vec<ContextAction>,
-    pub context_rects: Vec<Rect>,
-    /// Series set by long-press (for the `context menu open series=N` log).
-    pub context_series: u32,
+    /// Active download batch (sheet labels + drain behavior; owner:
+    /// [`crate::downloads::BatchUi`]).
+    pub dl: crate::downloads::BatchUi,
+    /// Long-press context menu (rows, geometry, target; owner:
+    /// [`crate::context_menu::MenuState`]).
+    pub context: crate::context_menu::MenuState,
     /// The license currently shown in the detail page (licenses viewer).
     pub license_selected: Option<usize>,
     /// First visible row of the log tail (<0 = pinned to the newest end,
@@ -314,12 +287,6 @@ pub struct App<B: Framebuffer> {
     /// Decoded launcher icon art by path (decoded once; the emulator PNG
     /// decode is ~100ms each, so per-frame re-decoding froze the render).
     pub icon_cache: std::collections::HashMap<String, (u32, u32, Vec<u8>)>,
-    /// The book the context menu was opened for (None when dismissed).
-    pub context_book: Option<Book>,
-    /// The series context's scope + label (stack-card long-press).
-    pub context_scope: String,
-    pub context_label: String,
-    pub context_count: i64,
     /// Long-press tracking: the down-tap screen position + time.
     press_pos: Option<(i32, i32)>,
     press_start: Option<std::time::Instant>,
@@ -331,26 +298,18 @@ pub struct App<B: Framebuffer> {
     pub last_overlay: Overlay,
     /// Folder-source browser state (C BR_MODE_BROWSER: path/scroll/rows).
     pub browser: crate::local::Browser,
-    /// In-flight local import scan (worker → main-thread apply), with its
-    /// chain generation so a re-kick invalidates a stale result
-    /// (C g_local_scan_gen).
-    pub(crate) local_scan:
-        Option<std::sync::mpsc::Receiver<(u32, Vec<crate::local::LocalBook>)>>,
-    pub(crate) local_gen: u32,
+    /// In-flight Local import scan (generation guard + worker receiver;
+    /// owner: [`crate::local::ScanJob`]).
+    pub(crate) scan_job: crate::local::ScanJob,
     /// Path of the store DB — the async sync worker opens its own handle
     /// on the same file (Store::open's legacy import is once-guarded by
     /// the `.migrated` rename; the FTS backfill no-ops when populated).
     pub(crate) db_path: PathBuf,
-    /// Event stream from the in-flight sync worker (None when idle).
-    pub(crate) sync_rx: Option<std::sync::mpsc::Receiver<crate::sync::SyncMsg>>,
-    /// Cancel flag shared with the worker (settings_apply sets it before
-    /// rebuilding endpoints — C eh_sync_abort's generation bump).
-    pub(crate) sync_cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// In-flight sync worker (event stream + cancel flag; owner:
+    /// [`crate::sync::WorkerHandle`]).
+    pub(crate) sync_worker: crate::sync::WorkerHandle,
     /// Sync-progress sheet state (visible while overlay == Overlay::Sync).
     pub sync_popup: SyncPopup,
-    /// Total ids queued by the current cover-warm pass (denominator for
-    /// the popup's covers bar; C eh_cover_warm_progress's total).
-    pub(crate) warm_total: usize,
 }
 
 /// True when `path` exists (or was just created) and accepts a write
@@ -436,8 +395,8 @@ impl<B: Framebuffer> App<B> {
             source_rows: Vec::new(),
             group,
             sort: crate::store::SortMode::Title,
-            dl_batch_failed: std::collections::HashSet::new(),
-            context_items: Vec::new(),
+            dl: crate::downloads::BatchUi::default(),
+            context: crate::context_menu::MenuState::default(),
             progress: crate::progress::reload(),
             dl_picker: None,
             page: 0,
@@ -465,46 +424,25 @@ impl<B: Framebuffer> App<B> {
             suggestions: Vec::new(),
             kb_editing: None,
             suggest_q: String::new(),
-            // Full-library cover-warm pass (C eh_cover_warm_start):
-            // remote book ids still needing a cover fetch, popped one
-            // per app tick while online.
-            warm_remaining: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            warm_active: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            warm_online: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            warm: crate::cover::WarmHandle::default(),
             chooser_rects: Vec::new(),
             downloader: crate::downloads::Downloader::new(),
-            dl_single: false,
-            dl_batch_all: false,
-            dl_done: 0,
-            dl_failed: 0,
-            dl_total: 0,
-            dl_autopen: None,
-            dl_batch_queue: std::collections::VecDeque::new(),
             sync_angle: 0,
             log_scroll: -1,
             lic_scroll: 0,
-            context_rects: Vec::new(),
-            context_series: 0,
             license_selected: None,
             icon_cache: std::collections::HashMap::new(),
-            context_book: None,
-            context_scope: String::new(),
-            context_label: String::new(),
-            context_count: 0,
             press_pos: None,
             press_start: None,
             drag_y: None,
             drag_total: 0,
             browser: Default::default(),
-            local_scan: None,
-            local_gen: 0,
+            scan_job: crate::local::ScanJob::default(),
             dirty: true,
             last_overlay: Overlay::None,
             db_path,
-            sync_rx: None,
-            sync_cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            sync_worker: crate::sync::WorkerHandle::default(),
             sync_popup: SyncPopup::default(),
-            warm_total: 0,
         };
         app.sync_fb_cache();
         app.boot();
@@ -965,9 +903,9 @@ impl<B: Framebuffer> App<B> {
             self.settings_rows.clear();
             self.launcher_rects.clear();
             self.source_rows.clear();
-            self.context_rects.clear();
-            self.context_items.clear();
-            self.context_book = None;
+            self.context.rects.clear();
+            self.context.items.clear();
+            self.context.book = None;
             return;
         }
         // Drilled into a group: pop the drill level first.
@@ -1324,6 +1262,7 @@ mod tests {
     use super::*;
     use crate::reader::reader_pref_from_path;
     use crate::widgets::sync_popup::{SyncStage, SYNC_DONE_CLOSE_MS, SYNC_FAIL_CLOSE_MS};
+    use crate::store::Book;
     use crate::downloads::book_local_path;
     use crate::reader::STANDARD_READER;
     fn book(filename: &str, ext: &str) -> Book {
@@ -1751,13 +1690,13 @@ mod tests {
         }
         app.download_all();
         assert_eq!(app.downloader.pending, App::<FakeKb>::DL_BATCH_WINDOW, "queue stays bounded");
-        assert_eq!(app.dl_batch_queue.len(), 12 - App::<FakeKb>::DL_BATCH_WINDOW);
-        assert_eq!(app.dl_total, 12);
+        assert_eq!(app.dl.queue.len(), 12 - App::<FakeKb>::DL_BATCH_WINDOW);
+        assert_eq!(app.dl.total, 12);
         // One job settles successfully: the window tops back up.
         app.downloader.pending -= 1;
         app.top_up_batch();
         assert_eq!(app.downloader.pending, App::<FakeKb>::DL_BATCH_WINDOW, "window refilled");
-        assert_eq!(app.dl_batch_queue.len(), 3, "12 - window - 1 topped up");
+        assert_eq!(app.dl.queue.len(), 3, "12 - window - 1 topped up");
     }
 
     #[test]
@@ -1768,11 +1707,11 @@ mod tests {
         assert_eq!(app.downloader.pending, 1);
         // Simulate the drain's failure settle for x.
         app.downloader.pending -= 1;
-        app.dl_failed += 1;
-        app.dl_batch_failed.insert("x".into());
+        app.dl.failed += 1;
+        app.dl.failed_ids.insert("x".into());
         app.top_up_batch();
         assert_eq!(app.downloader.live_ids(), vec!["x".to_string()], "settled entry stays until drained");
-        assert!(app.dl_batch_queue.is_empty());
+        assert!(app.dl.queue.is_empty());
     }
 
     #[test]
@@ -1788,7 +1727,7 @@ mod tests {
         app.tap_overlay((r.x + r.w / 2) as i32, (r.y + r.h / 2) as i32);
         assert_eq!(app.overlay, Overlay::None, "X cancels AND closes (C eh_cancel_downloads)");
         assert_eq!(app.downloader.pending, 0);
-        assert!(!app.dl_batch_all && app.dl_batch_queue.is_empty());
+        assert!(!app.dl.batch_all && app.dl.queue.is_empty());
     }
 
     #[test]
@@ -1961,7 +1900,7 @@ mod tests {
         // DONE and auto-closes (C eh_sync_popup_finish → close tick).
         app.apply_sync_event(crate::sync::SyncEvent::Complete { rounds: 0 });
         assert!(!app.syncing, "spinner stops at the terminal event");
-        assert!(app.sync_rx.is_none(), "event stream detached at completion");
+        assert!(app.sync_worker.rx.is_none(), "event stream detached at completion");
         assert_eq!(app.sync_popup.stage, SyncStage::Covers);
         // No warm pass queued → the next tick flashes Done, the next one
         // (after the 900 ms delay) closes.
@@ -2012,14 +1951,14 @@ mod tests {
     fn settings_apply_aborts_the_in_flight_chain_first() {
         let mut app = mk_app("syncabort");
         // Simulate a live chain: fresh flag + attached stream.
-        app.sync_cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        app.sync_worker.cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         app.syncing = true;
-        let in_flight = std::sync::Arc::clone(&app.sync_cancel);
+        let in_flight = std::sync::Arc::clone(&app.sync_worker.cancel);
         app.settings_apply();
         assert!(in_flight.load(std::sync::atomic::Ordering::Relaxed),
             "cancel flag set before the endpoints are rebuilt (C eh_sync_abort)");
         assert!(app.syncing, "a fresh chain starts against the rebuilt endpoints");
-        assert!(app.sync_rx.is_some(), "the fresh chain's stream is attached");
+        assert!(app.sync_worker.rx.is_some(), "the fresh chain's stream is attached");
     }
 
     /// Draw the current overlay into the FakeKb buffer and return the

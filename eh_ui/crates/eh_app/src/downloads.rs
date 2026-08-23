@@ -360,6 +360,67 @@ pub fn book_local_path(book: &Book, downloads_dir: &str) -> PathBuf {
     }
 }
 
+/// UI-side state of the active download batch (the C g_dl_* globals):
+/// what the progress sheet shows and what happens when the queue drains.
+///
+/// Three batch shapes share it, and every shape STARTS WHOLESALE — the
+/// constructors replace the whole state, so a previous batch's tally can
+/// never bleed into the next popup (a plain flag-poke once left
+/// `total`/`done` stale and mislabeled a fresh download as "N complete"):
+///
+/// * single-book press ([`BatchUi::start_single`]) — the reader
+///   auto-opens when the queue drains;
+/// * plain popup batch ([`BatchUi::reset`] + enqueues: context Download /
+///   series download / cancel) — the modal popup stays until dismissed;
+/// * download-all ([`BatchUi::start_all`]) — bounded top-up queue +
+///   remembered failures + the settle marker on drain.
+#[derive(Default)]
+pub struct BatchUi {
+    /// Single-book press: auto-open the reader on drain.
+    pub single: bool,
+    /// (path, title) to auto-open once a single-book download drains
+    /// (C: single press → download → launch reader).
+    pub autopen: Option<(String, String)>,
+    /// Download-all batch: logs the `download-all batch complete` settle
+    /// marker on drain and drives the bounded top-up.
+    pub batch_all: bool,
+    /// Batch tally (done/failed/total) for the finished-popup label.
+    pub done: usize,
+    pub failed: usize,
+    pub total: usize,
+    /// Download-all top-up queue: undownloaded books staged but not yet
+    /// enqueued (C batch_enqueue_slice's bounded-slice cursor).
+    pub queue: std::collections::VecDeque<Book>,
+    /// Ids the current download-all batch already tried and failed
+    /// (C g_dl_batch_failed_ids): keeps the top-up from re-enqueueing
+    /// failing books forever.
+    pub failed_ids: std::collections::HashSet<String>,
+}
+
+impl BatchUi {
+    /// A fresh single-book press: the reader opens when the queue drains.
+    pub fn start_single(&mut self, autopen: (String, String)) {
+        *self = BatchUi { single: true, autopen: Some(autopen), ..Default::default() };
+    }
+
+    /// Drop every batch trace (cancel / plain popup batch): the next
+    /// popup draws from a clean slate.
+    pub fn reset(&mut self) {
+        *self = BatchUi::default();
+    }
+
+    /// Stage a download-all batch: fresh tally, no remembered failures,
+    /// every undownloaded target queued for the bounded top-up.
+    pub fn start_all(targets: Vec<Book>) -> BatchUi {
+        BatchUi {
+            batch_all: true,
+            total: targets.len(),
+            queue: targets.into_iter().collect(),
+            ..Default::default()
+        }
+    }
+}
+
 impl<B: Framebuffer> App<B> {
     /// Abort every open download (C eh_cancel_downloads): void the
     /// in-flight fetch (its .part is never renamed), drop the queue +
@@ -367,11 +428,7 @@ impl<B: Framebuffer> App<B> {
     pub fn cancel_downloads(&mut self) {
         crate::logger::log("[bookshelf] cancel_downloads");
         self.downloader.cancel_all();
-        self.dl_batch_queue.clear();
-        self.dl_batch_failed.clear();
-        self.dl_single = false;
-        self.dl_batch_all = false;
-        self.dl_autopen = None;
+        self.dl.reset();
         self.set_overlay(Overlay::None);
     }
 
@@ -396,47 +453,47 @@ impl<B: Framebuffer> App<B> {
             // The popup shows the remaining count: repaint it.
             self.dirty = true;
             if d.ok {
-                self.dl_done += 1;
+                self.dl.done += 1;
                 if let Err(e) = self.store.set_downloaded(&d.id, true, &d.path) {
                     crate::log(&format!("[eh_app] set_downloaded: {e}"));
                 }
                 crate::logger::log(&format!("[bookshelf] download_book_file OK id={} path={}", d.id, d.path));
             } else {
-                self.dl_failed += 1;
+                self.dl.failed += 1;
                 crate::logger::log(&format!("[bookshelf] download_book_file FAILED id={}", d.id));
             }
-            if self.dl_batch_all {
+            if self.dl.batch_all {
                 crate::logger::log(&format!(
                     "[bookshelf] dl_progress done={} failed={} total={} active={}",
-                    self.dl_done, self.dl_failed, self.dl_total, self.downloader.pending
+                    self.dl.done, self.dl.failed, self.dl.total, self.downloader.pending
                 ));
                 if !d.ok {
                     // C batch_note_failed: the top-up never re-enqueues a
                     // book this batch already tried and failed.
-                    self.dl_batch_failed.insert(d.id.clone());
+                    self.dl.failed_ids.insert(d.id.clone());
                 }
                 // Top the bounded queue up as jobs finish (C dl_advance).
                 self.top_up_batch();
             }
         }
-        if self.downloader.pending == 0 && self.dl_batch_queue.is_empty() && self.overlay == Overlay::Download {
-            if self.dl_single {
+        if self.downloader.pending == 0 && self.dl.queue.is_empty() && self.overlay == Overlay::Download {
+            if self.dl.single {
                 // Single-book press: close the popup + auto-open the reader.
                 self.set_overlay(Overlay::None);
-                if let Some((path, title)) = self.dl_autopen.take() {
+                if let Some((path, title)) = self.dl.autopen.take() {
                     let path = PathBuf::from(path);
                     self.open_reader(&path, &title);
                 }
-                self.dl_single = false;
+                self.dl.single = false;
             } else {
                 // Download-all / context Download: the popup stays open
                 // (modal) until an outside tap dismisses it (C behavior).
-                if self.dl_batch_all {
+                if self.dl.batch_all {
                     crate::logger::log("[bookshelf] download-all batch complete");
                     // The finished-tally popup redraw (the harness proves
                     // the popup survived the mid-drain tap via this token).
                     crate::logger::log("[bookshelf] draw_dl_popup");
-                    self.dl_batch_all = false;
+                    self.dl.batch_all = false;
                     self.dirty = true;
                 }
             }
@@ -461,18 +518,9 @@ impl<B: Framebuffer> App<B> {
             crate::logger::log("[bookshelf] download-all nothing to download");
             return;
         }
-        self.dl_single = false;
-        self.dl_batch_all = true;
-        self.dl_done = 0;
-        self.dl_failed = 0;
-        self.dl_total = targets.len();
-        self.dl_autopen = None;
-        // New batch: drop the previous batch's failed-id set and stage the
-        // targets for the bounded top-up (C download_all_start).
-        self.dl_batch_failed.clear();
-        self.dl_batch_queue = targets.into_iter().collect();
+        self.dl = BatchUi::start_all(targets);
         self.top_up_batch();
-        crate::logger::log(&format!("[bookshelf] download-all queued={}", self.dl_total));
+        crate::logger::log(&format!("[bookshelf] download-all queued={}", self.dl.total));
         crate::logger::log("[bookshelf] draw_dl_popup");
         self.set_overlay(Overlay::Download);
     }
@@ -489,9 +537,9 @@ impl<B: Framebuffer> App<B> {
     pub(crate) fn top_up_batch(&mut self) {
         let dl = self.downloads_dir();
         while self.downloader.pending < Self::DL_BATCH_WINDOW {
-            match self.dl_batch_queue.pop_front() {
+            match self.dl.queue.pop_front() {
                 Some(b) => {
-                    if self.dl_batch_failed.contains(&b.id) {
+                    if self.dl.failed_ids.contains(&b.id) {
                         continue;
                     }
                     let cur = book_local_path(&b, &dl);

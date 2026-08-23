@@ -233,17 +233,29 @@ pub struct LocalBook {
     pub meta: ExtractedMeta,
 }
 
+/// The in-flight Local import scan job (the C g_local_scan* globals):
+/// the worker → main-thread receiver plus the chain generation — a new
+/// kick or a source switch bumps the generation, and a landed result
+/// whose generation no longer matches is discarded as stale.
+#[derive(Default)]
+pub(crate) struct ScanJob {
+    /// Scan results arrive here once the worker finishes.
+    pub rx: Option<std::sync::mpsc::Receiver<(u32, Vec<LocalBook>)>>,
+    /// Bumped on every kick/cancel; pollers compare before applying.
+    pub gen: u32,
+}
+
 /// Kick the Local-source import (C eh_local_import_scanner): bump the
 /// generation, spawn the scan thread, remember its receiver.  Safe to call
 /// from the boot path and on every Local selection — a new kick invalidates
 /// any in-flight result.
 pub fn kick_import<B: Framebuffer>(app: &mut App<B>) {
-    app.local_gen += 1;
-    let gen = app.local_gen;
+    app.scan_job.gen += 1;
+    let gen = app.scan_job.gen;
     let root = browse_root();
     crate::logger::log("[bookshelf] local: import scan started");
     let (tx, rx) = std::sync::mpsc::channel();
-    app.local_scan = Some(rx);
+    app.scan_job.rx = Some(rx);
     app.syncing = true;
     let _ = std::thread::Builder::new().name("local-scan".into()).spawn(move || {
         let files = scan(&root);
@@ -260,18 +272,18 @@ pub fn kick_import<B: Framebuffer>(app: &mut App<B>) {
 /// result is discarded as stale by [`poll_import`] (the C scanner's gen
 /// guard; a source switch must not apply a scan under the new source).
 pub fn cancel_scan<B: Framebuffer>(app: &mut App<B>) {
-    app.local_gen += 1;
-    app.local_scan = None;
+    app.scan_job.gen += 1;
+    app.scan_job.rx = None;
 }
 
 /// Drain a finished local scan into the store (C local_apply_slice's tail):
 /// replace the whole 'local' source with the fresh results, cache unknown
 /// metadata, then rebuild the view.  Stale generations drop their result.
 pub fn poll_import<B: Framebuffer>(app: &mut App<B>) {
-    let Some(rx) = &app.local_scan else { return };
+    let Some(rx) = &app.scan_job.rx else { return };
     let Ok((gen, books)) = rx.try_recv() else { return };
-    app.local_scan = None;
-    if gen != app.local_gen {
+    app.scan_job.rx = None;
+    if gen != app.scan_job.gen {
         return; // stale chain (source switch / settings change): drop
     }
     app.syncing = false;

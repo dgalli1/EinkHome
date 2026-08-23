@@ -75,6 +75,29 @@ pub enum SyncMsg {
     BanSleep(u32),
 }
 
+/// Handle to the in-flight sync worker thread: its event stream plus the
+/// shared cancel flag (settings_apply sets it BEFORE rebuilding endpoints
+/// — C eh_sync_abort's generation bump — so an aborted round never
+/// applies).
+#[derive(Default)]
+pub(crate) struct WorkerHandle {
+    /// Worker → UI messages (None when idle / aborted).
+    pub rx: Option<std::sync::mpsc::Receiver<SyncMsg>>,
+    /// Polled between delta rounds and after each fetch.
+    pub cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl WorkerHandle {
+    /// Arm a fresh chain: new channel + clear cancel flag, returning the
+    /// cancel clone the worker thread closes over.
+    pub fn arm(&mut self, rx: std::sync::mpsc::Receiver<SyncMsg>) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        self.rx = Some(rx);
+        self.cancel = std::sync::Arc::clone(&cancel);
+        cancel
+    }
+}
+
 /// Anti-suspend ban duration (C `EH_SYNC_BAN_SLEEP_SEC`): 30 min per ban.
 pub const EH_SYNC_BAN_SLEEP_SEC: u64 = 1800;
 /// Re-arm window (C `eh_sync_keep_awake`): refresh the ban only when less
@@ -294,15 +317,13 @@ impl<B: Framebuffer> App<B> {
             .framebuffer()
             .ban_sleep(crate::sync::EH_SYNC_BAN_SLEEP_SEC as u32);
         let (tx, rx) = std::sync::mpsc::channel::<crate::sync::SyncMsg>();
-        self.sync_rx = Some(rx);
-        self.sync_cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let cancel = self.sync_worker.arm(rx);
         self.syncing = true;
         if popup {
             self.sync_popup_open();
         }
         let client = self.client.clone();
         let db_path = self.db_path.clone();
-        let cancel = std::sync::Arc::clone(&self.sync_cancel);
         let spawned = std::thread::Builder::new()
             .name("sync".into())
             .spawn(move || {
@@ -330,7 +351,7 @@ impl<B: Framebuffer> App<B> {
                 );
             });
         if spawned.is_err() {
-            self.sync_rx = None;
+            self.sync_worker.rx = None;
             self.syncing = false;
             crate::log("[eh_app] sync worker spawn failed");
         }
@@ -342,8 +363,8 @@ impl<B: Framebuffer> App<B> {
     /// from settings_apply BEFORE the endpoint URLs are rebuilt.
     pub(crate) fn sync_abort(&mut self) {
         use std::sync::atomic::Ordering;
-        self.sync_cancel.store(true, Ordering::Relaxed);
-        self.sync_rx = None;
+        self.sync_worker.cancel.store(true, Ordering::Relaxed);
+        self.sync_worker.rx = None;
         self.syncing = false;
     }
 
@@ -375,7 +396,7 @@ impl<B: Framebuffer> App<B> {
     /// timers.  Returns true when the frame changed and a repaint is due.
     pub(crate) fn sync_poll(&mut self) -> bool {
         let msgs: Vec<crate::sync::SyncMsg> =
-            self.sync_rx.as_ref().map_or_else(Vec::new, |rx| rx.try_iter().collect());
+            self.sync_worker.rx.as_ref().map_or_else(Vec::new, |rx| rx.try_iter().collect());
         let mut changed = !msgs.is_empty();
         for m in msgs {
             match m {
@@ -438,7 +459,7 @@ impl<B: Framebuffer> App<B> {
     /// hand off to the cover warm pass, stage the popup auto-close.
     pub(crate) fn finish_sync(&mut self, ok: bool) -> bool {
         self.syncing = false;
-        self.sync_rx = None;
+        self.sync_worker.rx = None;
         // A source switch whose sync applies nothing must still re-project
         // the view under the new source (C keeps this unconditional too).
         self.rebuild_view();
@@ -496,9 +517,7 @@ impl<B: Framebuffer> App<B> {
     /// Cover-warm progress (done, total) for the popup's covers bar
     /// (C eh_cover_warm_progress).
     pub(crate) fn warm_progress(&self) -> (u32, u32) {
-        let total = self.warm_total as u32;
-        let remaining = self.warm_remaining.load(std::sync::atomic::Ordering::Relaxed) as u32;
-        (total.saturating_sub(remaining), total)
+        (self.warm.done(), self.warm.total as u32)
     }
     /// Advance the top-bar sync glyph rotation while a sync or download is
     /// in flight (C sync_spin_tick): 15°/s.  The facade ticks every 200 ms,
