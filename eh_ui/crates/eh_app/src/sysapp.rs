@@ -12,7 +12,7 @@
 
 use crate::app::App;
 use eh_hal::Framebuffer;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 /// Home-task override dir: `$EH_SYSAPP_DIR` (the SDL e2e suite's test
@@ -35,11 +35,23 @@ fn self_bin() -> Option<PathBuf> {
     std::env::args().next().map(PathBuf::from)
 }
 
-/// Stream-copy `src` → `dst`; removes a partial `dst` on failure.
+/// Stream-copy `src` → `dst` in bounded chunks (the promoted binary is
+/// ~35 MB — buffering it whole risks an OOM on low-RAM readers).  A
+/// failure can leave a partial `dst`; the caller removes it (promote
+/// does).
 fn copy_file(src: &Path, dst: &Path) -> std::io::Result<()> {
-    let bytes = std::fs::read(src)?;
+    let mut inp = std::fs::File::open(src)?;
     let mut out = std::fs::File::create(dst)?;
-    out.write_all(&bytes)?;
+    // 1 MiB chunks: large enough to keep syscalls few, far below the
+    // allocation that would threaten the device.
+    let mut buf = [0u8; 1 << 20];
+    loop {
+        let n = inp.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        out.write_all(&buf[..n])?;
+    }
     Ok(())
 }
 
@@ -94,4 +106,27 @@ pub fn unpromote() {
     crate::logger::log(
         "[bookshelf] sysapp: home-task override removed; stock home returns on reboot",
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn copy_file_roundtrips_across_chunk_boundaries() {
+        // Larger than the internal 1 MiB chunk with a partial final
+        // chunk, so the streaming loop provably iterates.
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src.bin");
+        let dst = dir.path().join("dst.bin");
+        let payload: Vec<u8> = (0..(2 << 20) + 123).map(|i| (i % 251) as u8).collect();
+        std::fs::write(&src, &payload).unwrap();
+
+        copy_file(&src, &dst).unwrap();
+        assert_eq!(std::fs::read(&dst).unwrap(), payload);
+
+        // A missing source errors without corrupting the destination.
+        let missing = dir.path().join("missing.bin");
+        assert!(copy_file(&missing, &dst).is_err());
+    }
 }
