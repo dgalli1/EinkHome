@@ -157,9 +157,17 @@ EH_TEST_BACKEND=sdl pbemu/.venv/bin/python -m pytest \
   tests/test_bookshelf.py tests/test_offline_sdl.py tests/test_cover_warm_sdl.py
 ```
 
-The emulator e2e suite needs podman, the staged firmware
-(`pbemu/pbemu install`) and staged books in
-`pbemu/U633_6.8.2817/.live/mnt/ext1/books/`.
+The emulator e2e suite needs podman, the staged firmware and staged
+books in `pbemu/U633_6.8.2817/.live/mnt/ext1/books/` (stage with
+`./scripts/stage-mock-books.sh pbemu/U633_6.8.2817`).  `test.sh`
+resolves the firmware strictly inside `pbemu/`: when your staging
+lives at the repository root instead (as a raw `U633_6.8.2817/`
+directory next to `build/`), link it through —
+`ln -s ../U633_6.8.2817 pbemu/U633_6.8.2817` — or export
+`PB_TEST_FIRMWARE` / point the suite at the root copy yourself.
+Scale-tier runs against the local emulator also want
+`PBEMU_SYS_TMPFS=1` (hosted-runner /sys workaround, harmless
+locally).
 
 ## Why the binary is still called bookshelf.app
 
