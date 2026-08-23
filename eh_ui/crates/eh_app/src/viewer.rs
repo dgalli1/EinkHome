@@ -379,6 +379,30 @@ pub fn draw_license_detail<B: Framebuffer>(surf: &mut eh_render::Surface, app: &
     draw_scroll_buttons(surf, h, first > 0, first < max_first);
 }
 
+/// The log viewer's scroll after one corner-button page (C
+/// eh_log_view_scroll).  `scroll < 0` means PINNED to the tail: "newer"
+/// keeps the pin (new lines must stay visible), "older" materialises a
+/// concrete first row paging up from the tail's last full page.  Once
+/// unpinned the offset just shifts and clamps at the top; the draw
+/// clamps the bottom against the wrapped-row count.
+fn log_scroll_after(scroll: i32, dir: i32, page: i32, tail_first: usize) -> i32 {
+    if scroll < 0 {
+        if dir < 0 {
+            (tail_first as i32 - page).max(0)
+        } else {
+            scroll
+        }
+    } else {
+        (scroll + dir * page).max(0)
+    }
+}
+
+/// The licenses list/detail scroll after one corner-button page: a plain
+/// shift clamped at the top (the draw clamps the bottom).
+fn lic_scroll_after(scroll: i32, dir: i32, page: i32) -> i32 {
+    (scroll + dir * page).max(0)
+}
+
 /// Overlay tap routing for the log/licenses viewers (C eh_on_tap_log_view
 /// / eh_on_tap_licenses_view): Back steps detail → list → shelf, the
 /// corner buttons page-scroll the current view, and a list-row tap opens
@@ -411,18 +435,9 @@ pub fn tap<B: Framebuffer>(x: i32, y: i32, app: &mut App<B>) {
         match app.overlay {
             Overlay::LogViewer => {
                 let page = (((btn_y - LOG_BODY_TOP as i32).max(0) as u32) / LOG_ROW_H).max(1) as i32;
-                if app.log_scroll < 0 {
-                    // Pinned to the tail.  "Newer" is already at the
-                    // newest lines, so it stays pinned; "older" pages up
-                    // from the tail's last full page.
-                    if dir < 0 {
-                        let tf = log_tail_first(sw as u32, app.content_bottom) as i32;
-                        app.log_scroll = (tf - page).max(0);
-                    }
-                } else {
-                    // Rows are ordered oldest → newest; up goes older.
-                    app.log_scroll = (app.log_scroll + dir * page).max(0);
-                }
+                let tf = log_tail_first(sw as u32, app.content_bottom);
+                app.log_scroll =
+                    log_scroll_after(app.log_scroll, dir, page, tf);
             }
             Overlay::Licenses | Overlay::LicenseDetail => {
                 let detail = app.overlay == Overlay::LicenseDetail;
@@ -431,8 +446,8 @@ pub fn tap<B: Framebuffer>(x: i32, y: i32, app: &mut App<B>) {
                 } else {
                     (LIC_LIST_TOP as i32, LIC_LIST_H as i32)
                 };
-                let page = (((btn_y - top - 8) / rh).max(1)).max(1);
-                app.lic_scroll = (app.lic_scroll + dir * page).max(0);
+                let page = ((btn_y - top - 8) / rh).max(1);
+                app.lic_scroll = lic_scroll_after(app.lic_scroll, dir, page);
             }
             _ => {}
         }
@@ -508,5 +523,26 @@ mod tests {
         for r in rows.iter().filter(|r| !r.blank) {
             assert!(!LICENSES[1].text[r.start..r.end].is_empty());
         }
+    }
+
+    #[test]
+    fn log_scroll_pinned_tail_rules() {
+        // Pinned (-1): "newer" keeps the pin whatever the page size —
+        // new lines must stay visible while the viewer is open.
+        assert_eq!(log_scroll_after(-1, 1, 5, 40), -1);
+        // ...and "older" materialises a concrete row, paging up from the
+        // tail's last full page and clamping at the top.
+        assert_eq!(log_scroll_after(-1, -1, 5, 40), 35);
+        assert_eq!(log_scroll_after(-1, -1, 500, 40), 0);
+        // Unpinned: a plain shift, clamped at the top in both
+        // directions (the draw clamps the bottom).
+        assert_eq!(log_scroll_after(10, -1, 4, 40), 6);
+        assert_eq!(log_scroll_after(2, 1, 9, 40), 11);
+    }
+
+    #[test]
+    fn lic_scroll_shifts_and_clamps_at_the_top() {
+        assert_eq!(lic_scroll_after(3, -1, 5), 0);
+        assert_eq!(lic_scroll_after(7, 1, 5), 12);
     }
 }
