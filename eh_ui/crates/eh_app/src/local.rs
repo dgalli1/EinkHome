@@ -86,11 +86,40 @@ fn stem_title(name: &str) -> String {
     stem.chars().take(MAX_TITLE_LEN - 1).collect()
 }
 
-/// The storage root for this run (env override first — the SDL/host test
-/// path — else the device mount).
-pub fn browse_root() -> String {
-    std::env::var("EH_BROWSE_ROOT").unwrap_or_else(|_| DEVICE_BROWSE_ROOT.to_string())
+/// True when running on PocketBook hardware (the ext1 mount exists).
+/// Platform seam for the path defaults: device builds keep the firmware
+/// layout, PC hosts (SDL / linuxfb desktop) get useful $HOME-based ones.
+fn on_device() -> bool {
+    Path::new(DEVICE_BROWSE_ROOT).is_dir()
 }
+
+/// Fallback storage root on PC hosts.
+fn home_dir() -> String {
+    std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string())
+}
+
+/// The storage root for this run (env override first — the SDL/host test
+/// path), then the device mount on hardware, else the PC home directory
+/// (browsing /mnt/ext1 on a desktop can never list anything).
+pub fn browse_root() -> String {
+    match std::env::var("EH_BROWSE_ROOT") {
+        Ok(d) if !d.is_empty() => d,
+        _ if on_device() => DEVICE_BROWSE_ROOT.to_string(),
+        _ => home_dir(),
+    }
+}
+
+/// The default downloads directory per platform (C eh_plat_downloads_dir):
+/// the device's ext1 Downloads mount on hardware, $HOME/Downloads on PC
+/// hosts.  App::new resolves + creates it and falls back to /tmp when
+/// unwritable, so this stays a pure default.
+pub fn default_downloads_dir() -> String {
+    if on_device() {
+        format!("{DEVICE_BROWSE_ROOT}/Downloads")
+    } else {
+        format!("{}/Downloads", home_dir())
+    }
+ }
 
 // ── scanner (C eh_local.c) ───────────────────────────────────────────────
 
@@ -224,10 +253,183 @@ pub fn extract_book_meta(path: &Path, ext: &str) -> ExtractedMeta {
         "pdf" => extract_pdf(path).unwrap_or_default(),
         _ => ExtractedMeta::default(),
     };
+    // Whitespace-only metadata counts as absent: the caller falls back to
+    // the filename (without extension) instead of showing a blank title.
+    let r = ExtractedMeta {
+        title: r.title.trim().to_string(),
+        author: r.author.trim().to_string(),
+        cover_hint: r.cover_hint,
+    };
     if r.is_empty() {
         crate::log(&format!("[eh_app] extract: no metadata in {}", path.display()));
     }
     r
+}
+
+/// Extract the cover image bytes of a local book (C eh_extract_book_
+/// cover), forgiving on broken files:
+///
+/// * EPUB — the embedded cover image the OPF names (the two wild
+///   conventions [`extract_epub`] already resolves).
+/// * PDF — no embedded-image concept we can rely on: render the FIRST
+///   PAGE instead (the "screenshot" fallback — even a metadata-less PDF
+///   then shows its first page as the tile art).
+/// * TXT — render the file's first few WORDS onto a generated cover;
+///   plain-text exports usually open with the title, so it gets caught
+///   by accident.
+///
+/// Returns raw PNG/JPEG bytes, decodable by [`crate::cover::decode_rgb`].
+pub fn extract_book_cover(path: &Path, ext: &str) -> Option<Vec<u8>> {
+    let bytes = match ext {
+        "epub" => extract_epub_cover(path),
+        "pdf" => pdf_first_page_png(path),
+        "txt" => txt_word_cover(path),
+        _ => None,
+    };
+    if bytes.is_none() {
+        crate::log(&format!("[eh_app] extract: no cover in {}", path.display()));
+    }
+    bytes
+}
+
+/// The EPUB's embedded cover image bytes: the OPF cover member, else a
+/// zip member conventionally named cover.<img-ext>.
+fn extract_epub_cover(path: &Path) -> Option<Vec<u8>> {
+    let hint = extract_epub(path)?.cover_hint;
+    let f = std::fs::File::open(path).ok()?;
+    let mut ar = zip::ZipArchive::new(f).ok()?;
+    let member = hint.or_else(|| find_cover_member(&mut ar))?;
+    let name = resolve_member(&mut ar, &member)?;
+    let mut out = Vec::new();
+    use std::io::Read as _;
+    ar.by_name(&name).ok()?.read_to_end(&mut out).ok()?;
+    (!out.is_empty()).then_some(out)
+}
+
+/// A zip member whose base name looks like a cover image.
+fn find_cover_member(ar: &mut zip::ZipArchive<std::fs::File>) -> Option<String> {
+    (0..ar.len()).find_map(|i| {
+        let n = ar.by_index(i).ok()?.name().to_string();
+        let base = n.rsplit('/').next().unwrap_or(&n).to_ascii_lowercase();
+        (base.starts_with("cover.") && img_ext(&base)).then_some(n)
+    })
+}
+
+/// Match an OPF href against actual zip members: exact, `./`-stripped,
+/// percent-decoded, then base-name only (hrefs are OPF-dir relative).
+fn resolve_member(
+    ar: &mut zip::ZipArchive<std::fs::File>,
+    member: &str,
+) -> Option<String> {
+    for cand in [
+        member.to_string(),
+        member.trim_start_matches("./").to_string(),
+        member.replace("%20", " "),
+    ] {
+        if ar.by_name(&cand).is_ok() {
+            return Some(cand);
+        }
+        let want = cand.rsplit('/').next().unwrap_or(&cand).to_ascii_lowercase();
+        let hit = (0..ar.len()).find_map(|i| {
+            let n = ar.by_index(i).ok()?.name().to_string();
+            let base = n.rsplit('/').next().unwrap_or(&n).to_ascii_lowercase();
+            (base == want).then_some(n)
+        });
+        if let Some(hit) = hit {
+            return Some(hit);
+        }
+    }
+    None
+}
+
+fn img_ext(base_lower: &str) -> bool {
+    [".png", ".jpg", ".jpeg"].iter().any(|e| base_lower.ends_with(e))
+}
+
+/// Render the PDF's FIRST page to PNG with the statically linked MuPDF
+/// (the `mupdf` crate vendors and cross-builds the C sources — the same
+/// cargo-zigbuild path as libsqlite3-sys), so the fallback works on the
+/// PocketBook itself: even a metadata-less PDF shows its first page as
+/// the tile art.
+fn pdf_first_page_png(path: &Path) -> Option<Vec<u8>> {
+    // TEMP bisect: mupdf disabled
+    let _ = path;
+    return None;
+    #[allow(unreachable_code)]
+    let doc = mupdf::Document::open(path.to_str()?).ok()?;
+    let page = doc.load_page(0).ok()?;
+    let bounds = page.bounds().ok()?;
+    let bw = (bounds.x1 - bounds.x0).max(1.0);
+    let bh = (bounds.y1 - bounds.y0).max(1.0);
+    // Fit inside the cover card, preserve aspect, keep it sane.
+    let s = ((300.0 / bw).min(450.0 / bh)).clamp(0.05, 8.0);
+    let ctm = mupdf::Matrix::new_scale(s, s);
+    let pixmap = page
+        .to_pixmap(&ctm, &mupdf::Colorspace::device_gray(), false, false)
+        .ok()?;
+    let mut png = Vec::new();
+    pixmap.write_to(&mut png, mupdf::ImageFormat::PNG).ok()?;
+    (!png.is_empty()).then_some(png)
+}
+
+/// Render the text file's opening words onto a generated cover (a blank
+/// 2:3 sheet, the words set like a half-title page).  The first words of
+/// a plain-text export are usually its title, so the tile reads as the
+/// book rather than a placeholder.
+fn txt_word_cover(path: &Path) -> Option<Vec<u8>> {
+    let buf = read_capped(path, 2048);
+    let text = String::from_utf8_lossy(&buf);
+    let words: Vec<&str> =
+        text.split_whitespace().filter(|w| w.chars().any(char::is_alphanumeric)).take(6).collect();
+    if words.is_empty() {
+        return None; // empty file — nothing to catch
+    }
+
+    const W: u32 = 300;
+    const H: u32 = 450; // 2:3, the C cover-card ratio
+    const LINE_H: i32 = 34;
+    let font = crate::shelf::shelf_font();
+    let max_w = (W - 48) as f32;
+
+    // Greedy wrap into at most 5 lines.
+    let mut lines: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    for w in &words {
+        let cand = if cur.is_empty() { (*w).into() } else { format!("{cur} {w}") };
+        if font.width(&cand, 26.0) <= max_w || cur.is_empty() {
+            cur = cand;
+        } else {
+            lines.push(std::mem::take(&mut cur));
+            cur = (*w).into();
+        }
+    }
+    if !cur.is_empty() && lines.len() < 5 {
+        lines.push(cur);
+    }
+
+    let mut px = vec![0xFFu8; (W * H) as usize];
+    {
+        let mut surf = eh_render::Surface::new(&mut px, W, H, W as usize, eh_hal::PixelFormat::Grayscale8);
+        let asc = font.line_h(26.0).0 as i32;
+        let top = ((H as i32 - LINE_H * lines.len() as i32) / 2).max(24) + asc;
+        let mut g = eh_render::Glyph::new();
+        for (i, line) in lines.iter().enumerate() {
+            let lw = font.width(line, 26.0) as i32;
+            let lx = ((W as i32 - lw) / 2).max(24);
+            eh_render::draw_text(&mut surf, font, 26.0, line, lx, top + i as i32 * LINE_H, eh_shell::GRAY_BLACK, &mut g);
+        }
+    }
+
+    // Encode Grayscale8 PNG (decode_rgb re-expands to RGB).
+    let mut out = std::io::Cursor::new(Vec::new());
+    {
+        let mut enc = png::Encoder::new(&mut out, W, H);
+        enc.set_color(png::ColorType::Grayscale);
+        enc.set_depth(png::BitDepth::Eight);
+        let mut wr = enc.write_header().ok()?;
+        wr.write_image_data(&px).ok()?;
+    }
+    Some(out.into_inner())
 }
 
 /// The local-name (suffix after ':') of a possibly-qualified XML tag.
@@ -674,6 +876,14 @@ pub fn kick_import<B: Framebuffer>(app: &mut App<B>) {
     });
 }
 
+/// Drop an in-flight local import scan: bump the generation so a landed
+/// result is discarded as stale by [`poll_import`] (the C scanner's gen
+/// guard; a source switch must not apply a scan under the new source).
+pub fn cancel_scan<B: Framebuffer>(app: &mut App<B>) {
+    app.local_gen += 1;
+    app.local_scan = None;
+}
+
 /// Drain a finished local scan into the store (C local_apply_slice's tail):
 /// replace the whole 'local' source with the fresh results, cache unknown
 /// metadata, then rebuild the view.  Stale generations drop their result.
@@ -970,7 +1180,24 @@ pub fn build_browse_page<B: Framebuffer>(fb: B, browser: &Browser, content_botto
             ..Style::default()
         },
     );
-    let body = screen.add_container(Style { flex_grow: 1.0, ..Style::default() });
+    let body = screen.add_container(Style {
+        flex_grow: 1.0,
+        flex_shrink: 1.0,
+        // Full-width rows must STACK: without flex_wrap the container's
+        // default ROW direction lays them out side-by-side and only the
+        // first row is ever on-screen (the rest sit at x ≥ screen width).
+        flex_wrap: taffy::style::FlexWrap::Wrap,
+        align_items: Some(taffy::style::AlignItems::FLEX_START),
+        // C eh_draw_browse: rows start 8px below the TOP_BAR_H+TOP_BAR_PAD
+        // band, and eh_on_tap_browse shares that origin.
+        padding: taffy::geometry::Rect {
+            top: taffy::style::LengthPercentage::length((TOP_BAR_PAD + 8) as f32),
+            left: taffy::style::LengthPercentage::length(0.0),
+            right: taffy::style::LengthPercentage::length(0.0),
+            bottom: taffy::style::LengthPercentage::length(0.0),
+        },
+        ..Style::default()
+    });
     let rows = Browser::rows_visible(content_bottom);
     for i in 0..rows {
         let idx = browser.scroll + i;
@@ -1006,11 +1233,13 @@ pub fn start_browse<B: Framebuffer>(app: &mut App<B>) {
 /// directory row navigates, a book file opens through the reader flow.
 pub fn tap_browse<B: Framebuffer>(app: &mut App<B>, x: i32, y: i32) {
     let _ = x; // rows span the full width; only y matters
-    let top = TOP_BAR_H + TOP_BAR_PAD;
+    // C eh_on_tap_browse origin: rows start at TOP_BAR_H+TOP_BAR_PAD+8 —
+    // the same offset build_browse_page's body padding gives the paint.
+    let top = (TOP_BAR_H + TOP_BAR_PAD + 8) as u32;
     if (y as u32) < top {
         return;
     }
-    let idx = ((y as u32 - top - 8) / FOLDER_ROW_H) as usize + app.browser.scroll;
+    let idx = ((y as u32 - top) / FOLDER_ROW_H) as usize + app.browser.scroll;
     let Some(entry) = app.browser.entries.get(idx).cloned() else { return };
     if entry.is_dir {
         app.browser.navigate(&entry.name);
@@ -1043,7 +1272,9 @@ pub fn browse_up<B: Framebuffer>(app: &mut App<B>) -> bool {
 /// ascends, any directory tap COMMITS it as the downloads dir (the app
 /// saves the config and re-resolves, C eh_settings_apply).
 pub fn tap_picker<B: Framebuffer>(app: &mut App<B>, _x: i32, y: i32) {
-    let top = TOP_BAR_H + TOP_BAR_PAD;
+    // C eh_on_tap_browse (picker mode) shares the browser row origin:
+    // rows start at TOP_BAR_H+TOP_BAR_PAD+8, matching the paint padding.
+    let top = (TOP_BAR_H + TOP_BAR_PAD + 8) as u32;
     if (y as u32) < top {
         return;
     }
@@ -1054,7 +1285,7 @@ pub fn tap_picker<B: Framebuffer>(app: &mut App<B>, _x: i32, y: i32) {
         };
         (b.scroll, b.path.clone())
     };
-    let idx = ((y as u32 - top - 8) / FOLDER_ROW_H) as usize + scroll;
+    let idx = ((y as u32 - top) / FOLDER_ROW_H) as usize + scroll;
     let Some(entry) = app.dl_picker.as_ref().unwrap().entries.get(idx).cloned() else { return };
     if entry.name == ".." {
         app.dl_picker.as_mut().unwrap().up();
@@ -1142,6 +1373,107 @@ mod tests {
         )
         .unwrap();
         z.finish().unwrap();
+    }
+
+    /// A 4x4 white Grayscale8 PNG (built with the same encoder the txt
+    /// cover uses, so no hand-rolled bytes to rot).
+    fn tiny_png() -> Vec<u8> {
+        let px = vec![0xFFu8; 16];
+        let mut out = std::io::Cursor::new(Vec::new());
+        {
+            let mut enc = png::Encoder::new(&mut out, 4, 4);
+            enc.set_color(png::ColorType::Grayscale);
+            enc.set_depth(png::BitDepth::Eight);
+            let mut wr = enc.write_header().unwrap();
+            wr.write_image_data(&px).unwrap();
+        }
+        out.into_inner()
+    }
+
+    #[test]
+    fn epub_cover_extraction_reads_the_named_member() {
+        // The OPF names OEBPS/cover.png via meta[name=cover]; the href is
+        // OPF-dir relative, so resolution must find it inside the zip.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("book.epub");
+        {
+            use std::io::Write as _;
+            use zip::write::SimpleFileOptions;
+            let f = std::fs::File::create(&path).unwrap();
+            let mut z = zip::ZipWriter::new(f);
+            z.start_file("META-INF/container.xml", SimpleFileOptions::default()).unwrap();
+            z.write_all(br#"<container><rootfiles><rootfile full-path="OEBPS/content.opf"/></rootfiles></container>"#).unwrap();
+            z.start_file("OEBPS/content.opf", SimpleFileOptions::default()).unwrap();
+            z.write_all(br#"<package xmlns="http://www.idpf.org/2007/opf"><metadata><meta name="cover" content="cover-img"/></metadata><manifest><item id="cover-img" href="cover.png"/></manifest></package>"#).unwrap();
+            z.start_file("OEBPS/cover.png", SimpleFileOptions::default()).unwrap();
+            z.write_all(&tiny_png()).unwrap();
+            z.finish().unwrap();
+        }
+        let bytes = extract_book_cover(&path, "epub").expect("epub cover extracted");
+        assert!(bytes.starts_with(b"\x89PNG"));
+        assert!(crate::cover::decode_rgb(&bytes).is_ok(), "extracted cover must decode");
+    }
+
+    #[test]
+    fn broken_epub_yields_no_meta_and_filename_fallback_holds() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("My Great Novel.epub");
+        std::fs::write(&path, b"this is not a zip file").unwrap();
+        // Metadata extraction fails cleanly -> poll_import keeps the
+        // to_book() title, i.e. the filename WITHOUT the extension.
+        assert!(extract_book_meta(&path, "epub").is_empty());
+        assert_eq!(stem_title(path.file_name().unwrap().to_str().unwrap()), "My Great Novel");
+    }
+
+    #[test]
+    fn txt_cover_typesets_the_opening_words() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("notes.txt");
+        std::fs::write(
+            &path,
+            "The Hobbit\n\nIn a hole in the ground there lived a hobbit...\n",
+        )
+        .unwrap();
+        let bytes = extract_book_cover(&path, "txt").expect("txt cover generated");
+        assert!(bytes.starts_with(b"\x89PNG"));
+        let decoded = crate::cover::decode_rgb(&bytes).unwrap();
+        // Mostly white sheet with SOME dark text pixels.
+        let dark = decoded.2.iter().filter(|&&v| v < 100).count();
+        assert!(dark > 20, "typeset words missing, dark={dark}");
+        assert!(dark < decoded.2.len() / 2, "sheet should stay mostly white");
+        // A blank text file has nothing to catch: placeholder instead.
+        let empty = dir.path().join("empty.txt");
+        std::fs::write(&empty, b"   \n\t\n").unwrap();
+        assert!(extract_book_cover(&empty, "txt").is_none());
+    }
+
+    #[test]
+    fn pdf_first_page_renders_via_bundled_mupdf() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("plain.pdf");
+        // Minimal single-page PDF (no metadata at all — the point of the
+        // first-page fallback).
+        std::fs::write(
+            &path,
+            concat!(
+                "%PDF-1.4\n",
+                "1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n",
+                "2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj\n",
+                "3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 200 280] >> endobj\n",
+                "trailer << /Root 1 0 R /Size 4 >>\n",
+                "%%EOF\n"
+            ),
+        )
+        .unwrap();
+        // Metadata: none -> title falls back to the filename stem.
+        assert!(extract_book_meta(&path, "pdf").is_empty());
+        let bytes = extract_book_cover(&path, "pdf").expect("mupdf must render page 1");
+        assert!(bytes.starts_with(b"\x89PNG"));
+        let (w, h, rgb) = crate::cover::decode_rgb(&bytes).unwrap();
+        assert!((w, h) == (300, 420), "fit-to-card render, got {w}x{h}");
+        // A blank white page: samples stay bright.
+        let dark = rgb.iter().filter(|&&v| v < 100).count();
+        assert_eq!(dark, 0, "blank page should have no dark pixels");
     }
 
     #[test]

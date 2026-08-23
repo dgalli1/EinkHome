@@ -48,6 +48,27 @@ pub fn resolve_covers_dir(app_dir: &Path) -> PathBuf {
     dir
 }
 
+/// Path of the RAW extracted cover for a local book — the exact bytes
+/// pulled from the file (PNG or JPEG), sharded like [`cache_path`] but
+/// with a `.raw` suffix (C eh_cover_raw_path).  Persisting them makes a
+/// later view skip re-opening the book file.
+pub fn raw_path(covers_dir: &Path, id: &str) -> PathBuf {
+    let safe = sanitize(id);
+    let bucket = bucket_of(&safe);
+    covers_dir.join(bucket).join(format!("{safe}.raw"))
+}
+
+/// Atomically install raw extracted-cover bytes for `id`.
+pub fn store_raw(covers_dir: &Path, id: &str, bytes: &[u8]) -> std::io::Result<()> {
+    let path = raw_path(covers_dir, id);
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let tmp = path.with_extension("raw.tmp");
+    std::fs::write(&tmp, bytes)?;
+    std::fs::rename(tmp, path)
+}
+
 /// Return the cached cover PNG bytes for `id`, if present.
 pub fn load_cached(covers_dir: &Path, id: &str) -> Option<Vec<u8>> {
     let p = cache_path(covers_dir, id);
@@ -112,9 +133,13 @@ fn decode_png(png: &[u8]) -> Result<(u32, u32, Vec<u8>), String> {
         .map_err(|e| format!("png frame: {e}"))?;
     let (ct, _bd) = reader.output_color_type();
     // EXPAND+STRIP_16 give 8-bit samples; 3 samples = RGB, 4 = RGBA.
+    // Forgiving on grayscale covers (1 sample: our generated TXT covers
+    // and real-world scans): replicate the sample to RGB.
     let rgb: Vec<u8> = match ct.samples() {
         4 => out.chunks_exact(4).flat_map(|px| [px[0], px[1], px[2]]).collect(),
         3 => out,
+        2 => out.chunks_exact(2).flat_map(|px| [px[0], px[0], px[0]]).collect(),
+        1 => out.iter().flat_map(|&v| [v, v, v]).collect(),
         n => return Err(format!("unsupported decoded samples={n}")),
     };
     Ok((info.width, info.height, rgb))

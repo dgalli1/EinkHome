@@ -385,9 +385,11 @@ impl Store {
     /// case-insensitive substring, `%`/`_`/`\` escaped).  When FTS5 is
     /// available and the query is safe, uses FTS MATCH for better ranking.
     /// Empty query = the whole shelf.  Same column/order shape as `list_books`.
-    pub fn search(&self, query: &str, limit: usize, offset: usize) -> rusqlite::Result<Vec<Book>> {
+    pub fn search(&self, query: &str, limit: usize, offset: usize, source: &str) -> rusqlite::Result<Vec<Book>> {
         if query.trim().is_empty() {
-            return self.list_books(limit, offset);
+            // '%%' matches everything: reuse the LIKE scan for the
+            // source-filtered empty-query page.
+            return self.search_like_sql("%%", source, limit, offset);
         }
 
         // FTS path — try when the index is available and the MATCH probe
@@ -403,7 +405,7 @@ impl Store {
                     .unwrap_or(-1)
                     > 0;
                 if probe {
-                    return self.search_fts_sql(&fts_q, limit, offset);
+                    return self.search_fts_sql(&fts_q, limit, offset, source);
                 }
             }
         }
@@ -411,26 +413,27 @@ impl Store {
         // LIKE fallback.
         let pat = escape_like(query);
         let like_query = format!("%{pat}%");
-        self.search_like_sql(&like_query, limit, offset)
+        self.search_like_sql(&like_query, source, limit, offset)
     }
 
-    fn search_fts_sql(&self, fts_q: &str, limit: usize, offset: usize) -> rusqlite::Result<Vec<Book>> {
+    fn search_fts_sql(&self, fts_q: &str, limit: usize, offset: usize, source: &str) -> rusqlite::Result<Vec<Book>> {
         let mut stmt = self.conn.prepare(concat!(
             "SELECT id,title,author,series,series_id,series_idx,",
             " ext,size,downloaded,local_path,added_at,",
             " filename,source,search_text,genre",
             " FROM books",
             " WHERE rowid IN (SELECT rowid FROM search_fts WHERE search_fts MATCH ?1)",
+            " AND source = ?4",
             " ORDER BY added_at DESC, title COLLATE NOCASE, id",
             " LIMIT ?2 OFFSET ?3"
         ))?;
         let rows = stmt
-            .query_map(params![fts_q, limit as i64, offset as i64], row_to_book)?
+            .query_map(params![fts_q, limit as i64, offset as i64, source], row_to_book)?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(rows)
     }
 
-    fn search_like_sql(&self, like_query: &str, limit: usize, offset: usize) -> rusqlite::Result<Vec<Book>> {
+    fn search_like_sql(&self, like_query: &str, source: &str, limit: usize, offset: usize) -> rusqlite::Result<Vec<Book>> {
         let mut stmt = self.conn.prepare(concat!(
             "SELECT id,title,author,series,series_id,series_idx,",
             " ext,size,downloaded,local_path,added_at,",
@@ -438,11 +441,12 @@ impl Store {
             " FROM books",
             " WHERE (title LIKE ?1 ESCAPE '\\' OR author LIKE ?1 ESCAPE '\\'",
             " OR series LIKE ?1 ESCAPE '\\' OR search_text LIKE ?1 ESCAPE '\\')",
+            " AND source = ?4",
             " ORDER BY added_at DESC, title COLLATE NOCASE, id",
             " LIMIT ?2 OFFSET ?3"
         ))?;
         let rows = stmt
-            .query_map(params![like_query, limit as i64, offset as i64], row_to_book)?
+            .query_map(params![like_query, limit as i64, offset as i64, source], row_to_book)?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(rows)
     }
@@ -606,6 +610,7 @@ impl Store {
         drill: i64,
         query: &str,
         scopes: &[&str],
+        source: &str,
     ) -> rusqlite::Result<i64> {
         fn group_key(b: &Book, g: GroupPreset) -> String {
             match g {
@@ -636,6 +641,10 @@ impl Store {
         let drilled = drill > 0;
 
         let mut all = self.list_books(10_000, 0)?;
+        // The view shows ONLY the active source's rows (C view_source +
+        // view_where): a local/folder import stays in the DB but must not
+        // appear once the user switches back to Kavita.
+        all.retain(|b| b.source == source);
         // Filter by query when present.
         if !query.is_empty() {
             let q = query.to_lowercase();
@@ -697,9 +706,9 @@ impl Store {
                         "INSERT INTO view(pos,kind,book_id,series_id,series_name,series_count)
                          SELECT ROW_NUMBER() OVER (ORDER BY {order}) - 1,
                          0, id, series_id, title, 1
-                         FROM books"
+                         FROM books WHERE source = ?1"
                     ),
-                    [],
+                    [source],
                 )?;
                 let n: i64 = self.conn.query_row("SELECT COUNT(*) FROM view", [], |r| r.get(0))?;
                 return Ok(n);
@@ -1228,7 +1237,7 @@ mod tests {
                 })
                 .unwrap();
         }
-        let n = store.view_rebuild(0, 0, 0, "", &[]).unwrap();
+        let n = store.view_rebuild(0, 0, 0, "", &[], "kavita").unwrap();
         assert_eq!(n, 4);
         let kinds: Vec<i64> = store
             .view_page(10, 0)
@@ -1258,7 +1267,7 @@ mod tests {
                 .unwrap();
         }
         // group=2 = Author; cards at their first member's sort position.
-        let n = store.view_rebuild(2, 0, 0, "", &[]).unwrap();
+        let n = store.view_rebuild(2, 0, 0, "", &[], "kavita").unwrap();
         assert_eq!(n, 2);
         let kinds: Vec<i64> = store
             .view_page(10, 0)
@@ -1287,9 +1296,45 @@ mod tests {
         store
             .upsert_book(&BookMeta { id: "k2".into(), title: "Beta".into(), ..Default::default() })
             .unwrap();
-        let r = store.search("alpha", 10, 0).unwrap();
+        let r = store.search("alpha", 10, 0, "kavita").unwrap();
         assert_eq!(r.len(), 1);
         assert_eq!(r[0].id, "k1");
+    }
+
+    #[test]
+    fn view_and_search_filter_by_active_source() {
+        // Regression: after a Local import, switching back to Kavita kept
+        // showing the local rows (C views filter on view_source()).
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("t.db")).unwrap();
+        let mut k = BookMeta { id: "kav1".into(), title: "Kavita only".into(), ..Default::default() };
+        k.authors = vec!["K Author".into()];
+        store.upsert_book(&k).unwrap();
+        let mut l = Book {
+            id: "loc1".into(),
+            title: "Local only".into(),
+            author: "L Author".into(),
+            source: "local".into(),
+            ..Default::default()
+        };
+        l.search_text = "local only".into();
+        store.upsert_book_row(&l).unwrap();
+
+        let n = store.view_rebuild(0, 0, 0, "", &[], "kavita").unwrap();
+        assert_eq!(n, 1, "local row leaked into the kavita view");
+        assert!(store
+            .view_page(10, 0)
+            .unwrap()
+            .iter()
+            .all(|r| r.book_id != "loc1"));
+
+        // Search spans the same filter (C search_fts_decide/view_where).
+        let hits = store.search("only", 10, 0, "kavita").unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].id, "kav1");
+        let hits = store.search("only", 10, 0, "local").unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].id, "loc1");
     }
 
     #[test]
@@ -1306,7 +1351,7 @@ mod tests {
                 })
                 .unwrap();
         }
-        let n = store.view_rebuild(2, 3, 0, "", &[]).unwrap(); // group=Author
+        let n = store.view_rebuild(2, 3, 0, "", &[], "kavita").unwrap(); // group=Author
         assert_eq!(n, 1, "single author collapses to 1 stack");
     }
 
@@ -1334,18 +1379,18 @@ mod tests {
                 .unwrap();
         }
         // Level 0: author stacks (Ann card + Bob flat).
-        let n = store.view_rebuild(1, 0, 0, "", &[]).unwrap(); // group=AuthorSeries
+        let n = store.view_rebuild(1, 0, 0, "", &[], "kavita").unwrap(); // group=AuthorSeries
         assert_eq!(n, 2);
         // Drill into Ann (level 1): series stacks WITHIN the author —
         // Bob's book must not leak through the level-0 scope.
-        let n = store.view_rebuild(1, 0, 1, "", &["Ann"]).unwrap();
+        let n = store.view_rebuild(1, 0, 1, "", &["Ann"], "kavita").unwrap();
         assert_eq!(n, 2, "two series cards under Ann");
         let rows = store.view_page(10, 0).unwrap();
         // Alpha is a 2-book stack; Beta has a single member so it stays a
         // flat tile at its own sort position.
         assert!(rows.iter().any(|r| r.kind == 1 && r.series_id == "s-alpha" && r.series_count == 2));
         assert!(rows.iter().any(|r| r.kind == 0 && r.series_id == "s-beta"));
-        let n = store.view_rebuild(1, 0, 2, "", &["Ann", "s-alpha"]).unwrap();
+        let n = store.view_rebuild(1, 0, 2, "", &["Ann", "s-alpha"], "kavita").unwrap();
         assert_eq!(n, 2);
         let rows = store.view_page(10, 0).unwrap();
         assert!(rows.iter().all(|r| r.kind == 0));
@@ -1381,7 +1426,7 @@ mod tests {
             search_text: Some("songgong".into()),
             ..Default::default()
         }).unwrap();
-        let r = store.search("songgong", 10, 0).unwrap();
+        let r = store.search("songgong", 10, 0, "kavita").unwrap();
         assert_eq!(r.len(), 1, "search_text should match folded diacritic query");
         assert_eq!(r[0].id, "d1");
     }
