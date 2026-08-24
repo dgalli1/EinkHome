@@ -41,7 +41,9 @@ fn init_once() {
     // boot (diagnostics only — conditionals resolve from device_profile).
     let (model, fw) = eh_backend_inkview::device_identity();
     let version = env!("CARGO_PKG_VERSION");
-    eh_app::logger::log(&format!("[bookshelf] EinkHome v{version} model={model} fw={fw}"));
+    eh_app::logger::log(&format!(
+        "[bookshelf] EinkHome v{version} model={model} fw={fw}"
+    ));
     eh_app::logger::evt_init(
         s.height.saturating_sub(s.content_height()),
         s.width,
