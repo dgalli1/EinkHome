@@ -1798,15 +1798,20 @@ def _wait_log_slice(bs: BookshelfSession, before: str, needle: str, *, timeout: 
         time.sleep(0.1)
     # Timeout: distinguish "app stuck" from "app alive but the event
     # never produced the expected line" — the two need opposite fixes.
-    try:
-        state = bs.cmd("state")
-        alive = f"(app alive, {state.strip()})"
-    except (ConnectionError, OSError):
-        alive = "(app unreachable — crashed or socket lost)"
+    # The liveness probe must NEVER mask the timeout itself: backends
+    # differ (SDL exposes cmd(), the emulator does not), so any probe
+    # failure downgrades to a note instead of raising.
+    detail = ""
+    probe_state = getattr(bs, "cmd", None)
+    if callable(probe_state):
+        try:
+            detail = f" app alive, {probe_state('state').strip()}"
+        except Exception:  # noqa: BLE001 — diagnostics must not raise
+            detail += " (liveness probe unavailable)"
     tail = bs.current_log()[-400:]
     raise AssertionError(
         f"log slice after offset {len(before)} never contained "
-        f"{needle!r} within {timeout}s {alive}; tail:\n{tail}"
+        f"{needle!r} within {timeout}s{detail}; tail:\n{tail}"
     )
 
 
