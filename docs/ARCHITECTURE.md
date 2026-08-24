@@ -129,3 +129,35 @@ codebases can be diffed behaviour-for-behaviour.  When a C quirk is
 preserved deliberately (e.g. `lc_params`' string-form loss, series sort
 without title tie-break), the comment says so — keep doing that instead
 of "fixing" it silently.
+
+
+## Development workflow
+
+Every change must pass the full gate sequence before it lands:
+
+```sh
+make fmt          # rustfmt --check (formatting)
+make clippy       # clippy -D warnings --all-targets --all-features
+make doc-check    # cargo doc with -D warnings (no broken links)
+make test-rust    # cargo test --workspace (unit contracts)
+make lint-py      # ruff + mypy + api tests
+```
+
+`make lint` runs fmt + clippy + doc-check + lint-py in one shot.
+CI mirrors this exact set in the `Lint` workflow, so anything that
+passes locally passes remotely.
+
+### Conventions
+
+* **One concern per module.**  When a file grows past ~800 lines or
+  starts mixing concerns, split it into a directory module (`app/`)
+  or extract pure functions into their own file (`extract.rs`).
+* **Untrusted input is hardened at the source.**  Byte-slicing on
+  arbitrary strings must respect char boundaries; filenames from
+  upstream headers are reduced to base names; config writes are
+  atomic (tmp + rename).  Each of these has a regression test.
+* **Errors carry their real reason.**  No sentinel abuse — use a
+  dedicated error enum (`SyncError`, `SheetStatus`) whose variants
+  mean what they say.
+* **Batch state starts wholesale.**  Constructor replaces the whole
+  struct; never patch individual flags (the stale-tally popup bug).
