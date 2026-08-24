@@ -137,6 +137,7 @@ help:
 	@echo "  make clippy     rust linter (pedantic subset, -D warnings)"
 	@echo "  make doc-check  rustdoc with warnings denied"
 	@echo "  make lint       clippy + fmt + doc-check + python lints"
+	@echo "  make verify     fmt + clippy + doc-check + test-rust + lint-py"
 	@echo "  make lint-py    python only: ruff, mypy, api tests"
 	@echo "  make clean      remove built artifacts"
 
