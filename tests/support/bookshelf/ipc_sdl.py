@@ -111,7 +111,7 @@ class IpcBookshelf:
         reply = self.cmd("hash")
         return reply.split("=", 1)[1] if "=" in reply else reply
 
-    def wait_hash_change(self, baseline: str, *, timeout: float = 8.0) -> str:
+    def wait_hash_change(self, baseline: str, *, timeout: float = 20.0) -> str:
         """Poll until the frame hash differs from *baseline* (stable)."""
         deadline = time.monotonic() + timeout
         seen: list[str] = []

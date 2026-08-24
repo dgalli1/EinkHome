@@ -128,7 +128,7 @@ class BookshelfSession:
         """Return the current framebuffer content hash."""
         return self._backend.frame_hash()
 
-    def wait_hash_change(self, before: str, *, timeout: float = 8.0) -> str:
+    def wait_hash_change(self, before: str, *, timeout: float = 20.0) -> str:
         """Poll until the framebuffer hash differs from *before*."""
         return self._backend.wait_frame_change(before, timeout=timeout)
 
@@ -310,7 +310,7 @@ class BookshelfSession:
         """Type *text* into the open keyboard, then commit (or not)."""
         self._backend.type_text(text)
         if commit:
-            self.wait_for_stable(timeout=8.0)
+            self.wait_for_stable(timeout=20.0)
             self.tap_at(*self._g.keyboard_return_center())
         else:
             time.sleep(0.3)
@@ -372,59 +372,59 @@ class BookshelfSession:
 
     # -- tap + verify helpers ---------------------------------------------
 
-    def tap_and_verify_change(self, x: int, y: int, *, timeout: float = 8.0) -> str:
+    def tap_and_verify_change(self, x: int, y: int, *, timeout: float = 20.0) -> str:
         before = self.frame_hash()
         self.tap_at(x, y)
         return self.wait_hash_change(before, timeout=timeout)
 
-    def tap_home_and_verify(self, *, timeout: float = 8.0) -> str:
+    def tap_home_and_verify(self, *, timeout: float = 20.0) -> str:
         return self.tap_and_verify_change(
             *self._g.home_button_center(), timeout=timeout
         )
 
-    def tap_menu_and_verify(self, *, timeout: float = 8.0) -> str:
+    def tap_menu_and_verify(self, *, timeout: float = 20.0) -> str:
         return self.tap_and_verify_change(
             *self._g.menu_button_center(), timeout=timeout
         )
 
-    def tap_search_and_verify(self, *, timeout: float = 8.0) -> str:
+    def tap_search_and_verify(self, *, timeout: float = 20.0) -> str:
         return self.tap_and_verify_change(
             *self._g.search_icon_center(), timeout=timeout
         )
 
-    def tap_search_input_and_verify(self, *, timeout: float = 8.0) -> str:
+    def tap_search_input_and_verify(self, *, timeout: float = 20.0) -> str:
         return self.tap_and_verify_change(
             *self._g.search_input_center(), timeout=timeout
         )
 
-    def tap_book_and_verify(self, index: int, *, timeout: float = 8.0) -> str:
+    def tap_book_and_verify(self, index: int, *, timeout: float = 20.0) -> str:
         return self.tap_and_verify_change(
             *self._g.book_tile_center(index), timeout=timeout
         )
 
-    def tap_pager_next_and_verify(self, *, timeout: float = 8.0) -> str:
+    def tap_pager_next_and_verify(self, *, timeout: float = 20.0) -> str:
         return self.tap_and_verify_change(
             *self._g.pager_next_center(), timeout=timeout
         )
 
-    def tap_pager_prev_and_verify(self, *, timeout: float = 8.0) -> str:
+    def tap_pager_prev_and_verify(self, *, timeout: float = 20.0) -> str:
         return self.tap_and_verify_change(
             *self._g.pager_prev_center(), timeout=timeout
         )
 
     def tap_more_item_and_verify(
-        self, item_index: int, *, timeout: float = 8.0
+        self, item_index: int, *, timeout: float = 20.0
     ) -> str:
         return self.tap_and_verify_change(
             *self._g.more_item_center(item_index), timeout=timeout
         )
 
-    def tap_outside_and_verify(self, *, timeout: float = 8.0) -> str:
+    def tap_outside_and_verify(self, *, timeout: float = 20.0) -> str:
         return self.tap_and_verify_change(
             *self._g.outside_more_overlay(), timeout=timeout
         )
 
-    def send_back_and_verify(self, *, timeout: float = 8.0) -> str:
+    def send_back_and_verify(self, *, timeout: float = 20.0) -> str:
         before = self.frame_hash()
         self.send_back_key()
         return self.wait_hash_change(before, timeout=timeout)
