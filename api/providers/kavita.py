@@ -102,6 +102,12 @@ def _filename_from_content_disposition(cd: str) -> str | None:
     """
     if not cd:
         return None
+
+    def usable(base: str | None) -> str | None:
+        # "." / ".." are directory references, not names: joining them
+        # would escape the books dir just like a traversal segment.
+        return base if base and base not in (".", "..") else None
+
     for part in cd.split(";"):
         part = part.strip()
         if part.startswith("filename*="):
@@ -111,12 +117,16 @@ def _filename_from_content_disposition(cd: str) -> str | None:
                 if raw:
                     from urllib.parse import unquote
 
-                    return os.path.basename(unquote(raw).replace("\\", "/")) or None
+                    name = unquote(raw).replace("\\", "/")
+                    return usable(os.path.basename(name))
             except ValueError:
                 pass
         if part.startswith("filename="):
-            name = part.split("=", 1)[1].strip('"')
-            return os.path.basename(name.replace("\\", "/")) or None
+            from urllib.parse import unquote
+
+            name = unquote(part.split("=", 1)[1]).strip().strip('"')
+            name = name.replace("\\", "/")
+            return usable(os.path.basename(name))
     return None
 
 
