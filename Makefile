@@ -46,7 +46,7 @@ OUT_TEST := $(CURDIR)/build/bookshelf.test
 # rebuilds the staticlib (cargo's own dep tracking makes this cheap).
 RUST_SRCS := $(EH_UI)/Cargo.toml $(wildcard $(EH_UI)/crates/*/Cargo.toml) $(wildcard $(EH_UI)/crates/*/src/*.rs) $(wildcard $(EH_UI)/crates/*/src/*/*.rs)
 
-.PHONY: all armhf pc test-host test test-rust fmt lint clippy lint-py clean
+.PHONY: all armhf pc test-host test test-rust fmt doc-check help lint clippy lint-py clean
 
 all: $(OUT)
 
@@ -62,13 +62,16 @@ test:
 test-rust:
 	cd $(EH_UI) && cargo test --workspace
 
-lint: clippy fmt lint-py
+lint: clippy fmt doc-check lint-py
 
 clippy:
 	cd $(EH_UI) && cargo clippy --workspace --all-targets -- -D warnings
 
 fmt:
 	cd $(EH_UI) && cargo fmt --check
+
+doc-check:
+	cd $(EH_UI) && RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
 
 
 lint-py:
@@ -118,3 +121,21 @@ $(OUT_TEST): $(HOST_BIN)
 clean:
 	rm -f $(OUT) $(OUT_ARMHF) $(OUT_PC) $(OUT_TEST)
 	cd $(EH_UI) && cargo clean
+
+HELP_VARS = $(filter HELP_TARGETS,$(.VARIABLES))
+help:
+	@echo "EinkHome build targets:"
+	@echo "  make            build/bookshelf.app     (emulator + armel devices)"
+	@echo "  make armhf      build/bookshelf.armhf.app (InkPad One)"
+	@echo "  make pc         build/bookshelf.pc      (SDL host binary, visible window)"
+	@echo "  make test-host  build/bookshelf.test    (headless IPC host, e2e)"
+	@echo "  make test       rust + api unit tests + emulator e2e suite"
+	@echo "  make test-rust  rust workspace unit tests only"
+	@echo "  make fmt        check rust formatting (rustfmt)"
+	@echo "  make clippy     rust linter (pedantic subset, -D warnings)"
+	@echo "  make doc-check  rustdoc with warnings denied"
+	@echo "  make lint       clippy + fmt + doc-check + python lints"
+	@echo "  make lint-py    python only: ruff, mypy, api tests"
+	@echo "  make clean      remove built artifacts"
+
+.PHONY: help
