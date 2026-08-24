@@ -168,6 +168,11 @@ The full local inventory, all runnable today:
 | Emulator e2e | `scripts/test-all-firmwares.sh --device <fw>` | podman + firmware |
 | Scale (100k) | `PBEMU_SYS_TMPFS=1 … pytest tests/test_bookshelf_scale.py` | podman + firmware |
 
+Plus a diagnostic capture: `tests/test_visual_capture.py` shoots every
+UI page to `build/screenshots/visual/` for manual layout review (same
+env as the e2e suite).
+
+
 The emulator e2e suite needs podman, the staged firmware and staged
 books in `pbemu/U633_6.8.2817/.live/mnt/ext1/books/` (stage with
 `./scripts/stage-mock-books.sh pbemu/U633_6.8.2817`).  `test.sh`
