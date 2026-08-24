@@ -93,10 +93,8 @@ podman run --rm \
 	localhost/pbdev:latest \
 	/usr/bin/arm-linux-gnueabihf-gcc \
 	"-I/work/sdk/pocketbook-sdk-b288/include" \
-	"-I/work/app/core" "-I/work/app/data" "-I/work/app/ui" \
-	"-I/work/app/action" "-I/work/app/vendor" "-I/work/app/platform" \
 	"-I/usr/include" \
-	"-L/work/pbemu/U1030_6.11.1437/rootfs/lib" \
+	"-L${SYSROOT}/lib" \
 	"--sysroot=/work/pbemu/U1030_6.11.1437/rootfs" \
 	-nostartfiles \
 	"/usr/arm-linux-gnueabihf/lib/crt1.o" \
@@ -105,7 +103,7 @@ podman run --rm \
 	-Wall -Wextra -Werror=implicit-function-declaration -O2 \
 	${EXTRA_FLAGS:-} \
 	${CONTAINER_SRCS} \
-	${CONTAINER_LINK_INPUTS:-} \
+	-Wl,--whole-archive ${CONTAINER_LINK_INPUTS:-} -Wl,--no-whole-archive \
 	-o "${CONTAINER_OUT}" \
 	"-Wl,-dynamic-linker,/lib/ld-linux-armhf.so.3" \
 	"-Wl,--allow-shlib-undefined" \
