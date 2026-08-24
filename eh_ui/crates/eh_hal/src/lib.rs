@@ -391,3 +391,197 @@ impl ThemeBitmap {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloc::vec;
+
+    // ── Rect: the geometry every hit-test and dirty-region clip routes
+    // through.  An off-by-one here misroutes taps or drops edge rows
+    // stack-wide, so the boundary semantics are pinned explicitly.
+
+    #[test]
+    fn rect_from_xy_clamps_negatives_to_zero() {
+        assert_eq!(
+            Rect::from_xy(-10, -5, 30, 20),
+            Rect {
+                x: 0,
+                y: 0,
+                w: 30,
+                h: 20
+            }
+        );
+        // Negative extents collapse to empty (u32 cast of the max).
+        assert_eq!(
+            Rect::from_xy(5, 5, -1, -2),
+            Rect {
+                x: 5,
+                y: 5,
+                w: 0,
+                h: 0
+            }
+        );
+    }
+
+    #[test]
+    fn rect_is_empty_on_zero_extent() {
+        assert!(Rect::from_xy(0, 0, 0, 10).is_empty());
+        assert!(Rect::from_xy(0, 0, 10, 0).is_empty());
+        assert!(!Rect::from_xy(0, 0, 1, 1).is_empty());
+    }
+
+    #[test]
+    fn rect_intersect_clamps_both_edges() {
+        let a = Rect::from_xy(10, 10, 50, 40);
+        let b = Rect::from_xy(30, 0, 100, 25);
+        assert_eq!(a.intersect(&b), Rect::from_xy(30, 10, 30, 15));
+        // Intersection is symmetric.
+        assert_eq!(b.intersect(&a), a.intersect(&b));
+    }
+
+    #[test]
+    fn rect_intersect_disjoint_is_empty_not_wrapped() {
+        let a = Rect::from_xy(0, 0, 10, 10);
+        let b = Rect::from_xy(20, 20, 5, 5);
+        let x = a.intersect(&b);
+        assert_eq!(
+            x,
+            Rect {
+                x: 20,
+                y: 20,
+                w: 0,
+                h: 0
+            }
+        );
+        assert!(x.is_empty());
+    }
+
+    #[test]
+    fn rect_intersect_touching_edges_meet_at_a_line() {
+        let a = Rect::from_xy(0, 0, 10, 10);
+        let b = Rect::from_xy(10, 0, 10, 10);
+        assert_eq!(
+            a.intersect(&b),
+            Rect {
+                x: 10,
+                y: 0,
+                w: 0,
+                h: 10
+            }
+        );
+    }
+
+    #[test]
+    fn rect_contains_is_inclusive_low_exclusive_high() {
+        let r = Rect {
+            x: 10,
+            y: 20,
+            w: 30,
+            h: 40,
+        };
+        assert!(r.contains(10, 20), "low corner inside");
+        assert!(r.contains(39, 59), "last pixel inside");
+        assert!(!r.contains(40, 20), "x+w exclusive");
+        assert!(!r.contains(10, 60), "y+h exclusive");
+        assert!(!r.contains(9, 20), "left of");
+        assert!(!r.contains(10, 19), "above");
+    }
+
+    // ── Screen / PixelFormat / RefreshMode basics.
+
+    #[test]
+    fn screen_full_owns_whole_panel() {
+        let s = Screen::full(1264, 1680);
+        assert_eq!((s.width, s.height), (1264, 1680));
+        assert_eq!(s.content_bottom, 1680, "no firmware panel reserved");
+        assert_eq!(s.content_height(), 1680);
+    }
+
+    #[test]
+    fn pixel_format_byte_widths() {
+        assert_eq!(PixelFormat::Grayscale8.bytes_per_pixel(), 1);
+        assert_eq!(PixelFormat::Rgb24.bytes_per_pixel(), 3);
+        assert_eq!(PixelFormat::Rgba32.bytes_per_pixel(), 4);
+    }
+
+    #[test]
+    fn refresh_mode_partial_covers_fast_and_partial() {
+        assert!(RefreshMode::Fast.is_partial());
+        assert!(RefreshMode::Partial.is_partial());
+        assert!(!RefreshMode::Full.is_partial());
+        assert!(!RefreshMode::FullHq.is_partial());
+    }
+
+    // ── ThemeBitmap::to_rgb: expands UNTRUSTED firmware bitmaps; the
+    // bounds-checked fallbacks (short row → white at depth 8, None at
+    // depth 32) are part of the contract.
+
+    #[test]
+    fn theme_bitmap_depth8_grays_with_scanline_padding() {
+        // width 2, scanline 4 → one padding byte per row is skipped.
+        let bm = ThemeBitmap {
+            width: 2,
+            height: 2,
+            depth: 8,
+            scanline: 4,
+            data: vec![0x00, 0x80, 0xEE, 0xEE, 0xFF, 0x7F, 0xEE, 0xEE],
+        };
+        assert_eq!(
+            bm.to_rgb(),
+            Some(vec![
+                0, 0, 0, 0x80, 0x80, 0x80, 0xFF, 0xFF, 0xFF, 0x7F, 0x7F, 0x7F
+            ])
+        );
+    }
+
+    #[test]
+    fn theme_bitmap_depth8_short_row_falls_back_to_white() {
+        let bm = ThemeBitmap {
+            width: 2,
+            height: 1,
+            depth: 8,
+            scanline: 2,
+            data: vec![0x10], // second pixel beyond the buffer
+        };
+        assert_eq!(bm.to_rgb(), Some(vec![0x10, 0x10, 0x10, 255, 255, 255]));
+    }
+
+    #[test]
+    fn theme_bitmap_depth32_argb_rows_to_rgb() {
+        // Little-endian 0xAARRGGBB: bytes are b, g, r, a.
+        let px = |b: u8, g: u8, r: u8, a: u8| [b, g, r, a];
+        let bm = ThemeBitmap {
+            width: 2,
+            height: 1,
+            depth: 32,
+            scanline: 8,
+            data: [px(0x11, 0x22, 0x33, 0xFF), px(0x44, 0x55, 0x66, 0x80)].concat(),
+        };
+        assert_eq!(bm.to_rgb(), Some(vec![0x33, 0x22, 0x11, 0x66, 0x55, 0x44]));
+    }
+
+    #[test]
+    fn theme_bitmap_depth32_truncated_row_is_none() {
+        let bm = ThemeBitmap {
+            width: 2,
+            height: 1,
+            depth: 32,
+            scanline: 8,
+            data: vec![0, 0, 0, 0, 0, 0], // second pixel's blue missing
+        };
+        assert_eq!(bm.to_rgb(), None);
+    }
+
+    #[test]
+    fn theme_bitmap_unknown_depth_is_none() {
+        let bm = ThemeBitmap {
+            width: 1,
+            height: 1,
+            depth: 16,
+            scanline: 2,
+            data: vec![0, 0],
+        };
+        assert_eq!(bm.to_rgb(), None);
+    }
+}

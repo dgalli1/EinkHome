@@ -10,6 +10,7 @@ or:
 import json
 import os
 import sys
+import time
 
 import pytest
 
@@ -152,6 +153,47 @@ def test_mock_provider_unknown_book(tmp_path):
     cover = provider.get_cover("nonexistent-id")
     assert cover is not None
     assert len(cover) > 0
+
+
+# --- `since` filtering ---------------------------------------------------
+
+
+def _iso_epoch(t):
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(t))
+
+
+def test_mock_list_books_since_boundary(tmp_path):
+    """A book whose updated_at equals `since` exactly is excluded; the
+    comparison is a plain string compare of UTC ISO stamps."""
+    mtime = 1768478400  # 2026-01-15T12:00:00Z
+    (tmp_path / "Alpha.epub").write_bytes(b"a")
+    os.utime(tmp_path / "Alpha.epub", (mtime, mtime))
+    provider = _make_provider(tmp_path)
+    assert len(list(provider.list_books())) == 1
+    # Boundary: equal timestamp is "not newer", so excluded.
+    assert list(provider.list_books(since=_iso_epoch(mtime))) == []
+    # One second earlier: the book is strictly newer, so kept.
+    kept = list(provider.list_books(since=_iso_epoch(mtime - 1)))
+    assert [b.title for b in kept] == ["Alpha"]
+    assert kept[0].updated_at == _iso_epoch(mtime)
+
+
+def test_mock_list_books_since_paginates(tmp_path):
+    """With `since` set the unfiltered index fast path is bypassed and
+    offset/limit paging still applies to the surviving books."""
+    old_t = 1768478400
+    new_t = old_t + 60
+    for name, t in (("Old.epub", old_t), ("New1.epub", new_t), ("New2.epub", new_t)):
+        (tmp_path / name).write_bytes(b"x")
+        os.utime(tmp_path / name, (t, t))
+    provider = _make_provider(tmp_path)
+    page1 = provider.list_books(limit=1, offset=0, since=_iso_epoch(old_t))
+    page2 = provider.list_books(limit=1, offset=1, since=_iso_epoch(old_t))
+    titles = [b.title for b in page1 + page2]
+    assert sorted(titles) == ["New1", "New2"]
+    # The stale book never leaks through any page.
+    everything = provider.list_books(limit=10, offset=0, since=_iso_epoch(old_t))
+    assert all(b.title != "Old" for b in everything)
 
 
 if __name__ == "__main__":

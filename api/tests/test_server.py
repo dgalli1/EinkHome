@@ -10,6 +10,7 @@ import os
 import socketserver
 import sys
 import threading
+import time
 from urllib import request
 
 import pytest
@@ -94,6 +95,17 @@ def _http_get(url, headers=None):
 def _http_get_bytes(url, headers=None):
     try:
         req = request.Request(url, headers=headers or {})
+        with request.urlopen(req) as r:
+            return r.status, r.read()
+    except request.HTTPError as e:
+        return e.code, e.read()
+
+
+def _http_post_bytes(url, headers=None):
+    """POST with an empty body (the libinkview QuickDownload shape),
+    returning the raw response bytes."""
+    try:
+        req = request.Request(url, data=b"", method="POST", headers=headers or {})
         with request.urlopen(req) as r:
             return r.status, r.read()
     except request.HTTPError as e:
@@ -479,6 +491,239 @@ def test_head_healthz(server):
     assert body == b""
     _, get_body = _http_get(server.url("/healthz"))
     assert int(hdrs.get("Content-Length", "0")) == len(get_body)
+
+
+# --- query-param auth (?access_token=) ---------------------------------
+
+
+def test_query_param_auth_accepted(server):
+    """A correct ?access_token= authenticates without any Authorization
+    header — the cover loader on the device cannot re-attach headers."""
+    status, body = _http_get(server.url("/api/v1/libraries?access_token=test-token"))
+    assert status == 200
+    assert _json_or_default(body, {})["count"] == 1
+
+
+def test_query_param_wrong_token_401(server):
+    status, body = _http_get(server.url("/api/v1/libraries?access_token=wrong"))
+    assert status == 401
+    assert _json_or_default(body, {})["error"] == "unauthorized"
+
+
+def test_query_param_empty_token_401(server):
+    """A blank access_token must not authenticate (dev mode is opt-in
+    via config, not via an empty credential)."""
+    status, body = _http_get(server.url("/api/v1/libraries?access_token="))
+    assert status == 401
+    assert _json_or_default(body, {})["error"] == "unauthorized"
+
+
+def test_query_token_never_logged(server, capsys):
+    """log_request drops the query string so the token stays off stderr."""
+    _http_get(server.url("/api/v1/libraries?access_token=test-token"))
+    err = capsys.readouterr().err
+    assert "test-token" not in err
+    assert '"GET /api/v1/libraries"' in err
+
+
+# --- HEAD semantics -----------------------------------------------------
+
+
+def test_head_matches_get_status_and_length(server):
+    hdr = {"Authorization": "Bearer test-token"}
+    get_status, get_body, _ = _http_get_headers(
+        server.url("/api/v1/libraries"), headers=hdr
+    )
+    head_status, head_body, head_hdrs = _http_head(
+        server.url("/api/v1/libraries"), headers=hdr
+    )
+    assert head_status == get_status
+    assert head_body == b""
+    assert int(head_hdrs["Content-Length"]) == len(get_body)
+
+
+def test_head_file_is_405(server):
+    """HEAD cannot stream a file without executing the handler twice,
+    so it is refused rather than faked (pinned actual behavior)."""
+    hdr = {"Authorization": "Bearer test-token"}
+    _, body = _http_get(server.url("/api/v1/books"), headers=hdr)
+    book_id = _json_or_default(body, {"items": [{}]})["items"][0]["id"]
+    status, body, head_hdrs = _http_head(
+        server.url(f"/api/v1/books/{book_id}/file"), headers=hdr
+    )
+    assert status == 405
+    # Body is suppressed like any HEAD response, but the headers still
+    # advertise the JSON error payload's length (pinned actual shape).
+    assert head_hdrs.get("Content-Type", "").startswith("application/json")
+    assert int(head_hdrs.get("Content-Length", "0")) > 0
+
+
+# --- POST parity for cover / file ---------------------------------------
+
+
+def _first_book_id(server):
+    hdr = {"Authorization": "Bearer test-token"}
+    _, body = _http_get(server.url("/api/v1/books"), headers=hdr)
+    return _json_or_default(body, {"items": [{}]})["items"][0]["id"]
+
+
+def test_post_cover_returns_image_bytes(server):
+    """POST /books/{id}/cover serves the image like GET — libinkview's
+    QuickDownload issues POSTs on this firmware."""
+    book_id = _first_book_id(server)
+    status, body = _http_post_bytes(
+        server.url(f"/api/v1/books/{book_id}/cover"),
+        headers={"Authorization": "Bearer test-token"},
+    )
+    assert status == 200
+    # Placeholder covers are PNG; processed ones are JPEG.
+    assert body.startswith(b"\x89PNG") or body.startswith(b"\xff\xd8\xff")
+
+
+def test_post_file_streams_epub_bytes(server):
+    book_id = _first_book_id(server)
+    status, body = _http_post_bytes(
+        server.url(f"/api/v1/books/{book_id}/file"),
+        headers={"Authorization": "Bearer test-token"},
+    )
+    assert status == 200
+    assert body == b"abc"
+
+
+def test_post_cover_file_require_auth(server):
+    book_id = _first_book_id(server)
+    assert _http_post_bytes(server.url(f"/api/v1/books/{book_id}/cover"))[0] == 401
+    assert _http_post_bytes(server.url(f"/api/v1/books/{book_id}/file"))[0] == 401
+
+
+# --- open-with resolution -----------------------------------------------
+
+
+def test_open_with_missing_id_400(server):
+    status, body = _http_post(
+        server.url("/api/v1/open-with"),
+        {},
+        headers={"Authorization": "Bearer test-token"},
+    )
+    assert status == 400
+    assert _json_or_default(body, {})["error"] == "missing id"
+
+
+def test_open_with_uppercase_ext_case_insensitive(server):
+    # The fixture's app owns no open_with table; install one directly.
+    server.app.open_with = {
+        "epub": ["eink-reader", "alt-reader"],
+        "default": ["def-app"],
+    }
+    book_id = _first_book_id(server)
+    status, body = _http_post(
+        server.url("/api/v1/open-with"),
+        {"id": book_id, "ext": "EPUB"},
+        headers={"Authorization": "Bearer test-token"},
+    )
+    assert status == 200
+    data = _json_or_default(body, {})
+    assert data["app"] == "eink-reader"
+    assert data["alternates"] == ["alt-reader"]
+    assert data["ext"] == "epub"
+
+
+def test_open_with_unknown_ext_falls_back_to_default(server):
+    server.app.open_with = {
+        "epub": ["eink-reader"],
+        "default": ["def-app", "def-alt"],
+    }
+    book_id = _first_book_id(server)
+    status, body = _http_post(
+        server.url("/api/v1/open-with"),
+        {"id": book_id, "ext": "mobi"},
+        headers={"Authorization": "Bearer test-token"},
+    )
+    assert status == 200
+    data = _json_or_default(body, {})
+    assert data["app"] == "def-app"
+    assert data["alternates"] == ["def-alt"]
+
+
+def test_open_with_ext_resolved_from_book_metadata(server):
+    """Without an explicit ext the resolver falls back to the provider's
+    file_format for the book (the mock reports "epub")."""
+    server.app.open_with = {"epub": ["eink-reader"], "default": ["def-app"]}
+    book_id = _first_book_id(server)
+    status, body = _http_post(
+        server.url("/api/v1/open-with"),
+        {"id": book_id},
+        headers={"Authorization": "Bearer test-token"},
+    )
+    assert status == 200
+    data = _json_or_default(body, {})
+    assert data["app"] == "eink-reader"
+    assert data["url"].endswith(f"/books/{book_id}/file")
+
+
+# --- degraded sync ledger -----------------------------------------------
+
+
+def test_sync_delta_ledger_unavailable_503(tmp_path):
+    """When the ledger failed to open the delta endpoint degrades to a
+    well-formed 503 instead of crashing the request thread."""
+    app = _make_app(tmp_path)
+    ledger = app.ledger
+    app.ledger = None
+    s = _TestServer(app)
+    try:
+        status, body = _http_post(
+            s.url("/api/v1/sync/delta"),
+            {"cursor": 0},
+            headers={"Authorization": "Bearer test-token"},
+        )
+        assert status == 503
+        data = _json_or_default(body, {})
+        assert data["error"] == "sync ledger unavailable"
+        assert data["more"] is False
+    finally:
+        s.stop()
+        if ledger is not None:
+            ledger.close()
+
+
+# --- outer crash net ----------------------------------------------------
+
+
+def test_provider_crash_yields_500_json(server):
+    """An exception escaping provider.list_books mid-request still gets
+    the client a valid 500 JSON response, not a dropped connection."""
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("provider exploded")
+
+    server.app.provider.list_books = boom
+    status, body = _http_get(
+        server.url("/api/v1/books"), headers={"Authorization": "Bearer test-token"}
+    )
+    assert status == 500
+    assert _json_or_default(body, {})["error"] == "internal server error"
+
+
+# --- ?since= filter end-to-end ------------------------------------------
+
+
+def _iso_epoch(t):
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(t))
+
+
+def test_books_since_filter_excludes_boundary(server):
+    """?since=<iso> excludes books whose updated_at <= since (string
+    compare of UTC ISO stamps; the mock derives updated_at from mtime)."""
+    mtime = 1768478400  # 2026-01-15T12:00:00Z
+    os.utime(os.path.join(server.app.provider.books_dir, "Test.epub"), (mtime, mtime))
+    hdr = {"Authorization": "Bearer test-token"}
+    exact = _iso_epoch(mtime)
+    _, body = _http_get(server.url(f"/api/v1/books?since={exact}"), headers=hdr)
+    assert _json_or_default(body, {})["count"] == 0
+    before = _iso_epoch(mtime - 1)
+    _, body = _http_get(server.url(f"/api/v1/books?since={before}"), headers=hdr)
+    assert _json_or_default(body, {})["count"] == 1
 
 
 if __name__ == "__main__":

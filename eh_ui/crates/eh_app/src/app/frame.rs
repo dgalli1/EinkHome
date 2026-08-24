@@ -340,3 +340,73 @@ fn stamp_self_panel<B: Framebuffer>(fb: &mut B, y0: u32, panel: u32) {
         eh_hal::RefreshMode::Partial,
     );
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // The overlay flush region is the bounding box of the dirty rects:
+    // too small clips paint (stale pixels), too big wastes an e-ink
+    // waveform.  `None` must mean "nothing to flush".
+    #[test]
+    fn union_rects_empty_is_none() {
+        assert_eq!(union_rects(&[]), None);
+    }
+
+    #[test]
+    fn union_rects_single_rect_is_identity() {
+        let r = Rect {
+            x: 5,
+            y: 7,
+            w: 11,
+            h: 13,
+        };
+        assert_eq!(union_rects(&[r]), Some(r));
+    }
+
+    #[test]
+    fn union_rects_is_the_bounding_box() {
+        let u = union_rects(&[
+            Rect {
+                x: 10,
+                y: 20,
+                w: 30,
+                h: 40,
+            },
+            Rect {
+                x: 0,
+                y: 50,
+                w: 100,
+                h: 5,
+            },
+        ]);
+        assert_eq!(
+            u,
+            Some(Rect {
+                x: 0,
+                y: 20,
+                w: 100,
+                h: 40
+            })
+        );
+    }
+
+    #[test]
+    fn union_rects_nested_and_disjoint_members() {
+        // A contained rect must not grow the box; order is irrelevant.
+        let outer = Rect {
+            x: 0,
+            y: 0,
+            w: 50,
+            h: 50,
+        };
+        let inner = Rect {
+            x: 10,
+            y: 10,
+            w: 5,
+            h: 5,
+        };
+        assert_eq!(union_rects(&[inner, outer]), Some(outer));
+        assert_eq!(union_rects(&[outer, inner]), union_rects(&[inner, outer]));
+    }
+}

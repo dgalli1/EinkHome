@@ -192,3 +192,37 @@ pub fn tap<B: eh_hal::Framebuffer>(app: &mut App<B>, x: i32, y: i32) {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // [`sheet`] and `widgets::sheet::open_sheet` must derive the SAME
+    // rect by formula (draw/tap parity): pw = w*3/4, ph = 72 + 3*96 + 24,
+    // centred.  A drift here reintroduces the old bug where tapping the
+    // title band switched the source.
+    #[test]
+    fn sheet_is_three_quarters_wide_and_vertically_centred() {
+        let (px, py, pw, ph) = sheet(1000, 1400);
+        assert_eq!(pw, 750);
+        assert_eq!(ph, 384);
+        assert_eq!(px, 125);
+        assert_eq!(py, (1400 - 384) / 2);
+    }
+
+    #[test]
+    fn sheet_truncating_quarter_matches_the_c_integer_math() {
+        // w*3/4 truncates like C's integer division (w=751 → 563).
+        let (_, _, pw, _) = sheet(751, 1024);
+        assert_eq!(pw, 563);
+    }
+
+    #[test]
+    fn sheet_fits_inside_its_content_area() {
+        for (w, h) in [(600u32, 800u32), (758, 1024), (1264, 1680), (1872, 1404)] {
+            let (px, py, pw, ph) = sheet(w, h);
+            assert!(pw <= w && ph <= h, "{w}x{h}: sheet larger than content");
+            assert!(px + pw <= w && py + ph <= h, "{w}x{h}: sheet overflows");
+        }
+    }
+}

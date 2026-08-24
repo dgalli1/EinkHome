@@ -1034,4 +1034,40 @@ mod tests {
         let rows = wrap_rows_forward(f, 20.0, "a\nb\nc\nd", 10_000.0, 2);
         assert_eq!(rows.len(), 2);
     }
+
+    // The tri-state corner hit test: -1 = up/older (left), +1 =
+    // down/newer (right), 0 = miss.  Every scrollable overlay pages by
+    // this result — a sign flip or dead zone scrolls the wrong way.
+    #[test]
+    fn scroll_hit_left_right_and_miss() {
+        let y0 = 500u32;
+        assert_eq!(hit_scroll_button_at(10, y0 as i32 + 40, y0, 1000), -1);
+        assert_eq!(hit_scroll_button_at(999, y0 as i32 + 40, y0, 1000), 1);
+        // Between the two corner boxes: miss.
+        assert_eq!(hit_scroll_button_at(500, y0 as i32 + 40, y0, 1000), 0);
+    }
+
+    #[test]
+    fn scroll_hit_respects_the_band_edges() {
+        let y0 = 500u32;
+        assert_eq!(hit_scroll_button_at(10, y0 as i32 - 1, y0, 1000), 0);
+        assert_eq!(hit_scroll_button_at(10, y0 as i32, y0, 1000), -1);
+        assert_eq!(
+            hit_scroll_button_at(10, (y0 + SCROLL_BTN_H) as i32, y0, 1000),
+            0,
+            "y+h exclusive"
+        );
+        assert_eq!(hit_scroll_button_at(-1, y0 as i32 + 40, y0, 1000), 0);
+    }
+
+    #[test]
+    fn scroll_hit_right_edge_is_inclusive_of_last_pixel() {
+        let w = 1000u32;
+        let y0 = 500u32;
+        assert_eq!(
+            hit_scroll_button_at((w - SCROLL_BTN_W) as i32, y0 as i32 + 1, y0, w),
+            1
+        );
+        assert_eq!(hit_scroll_button_at(w as i32, y0 as i32 + 1, y0, w), 0);
+    }
 }

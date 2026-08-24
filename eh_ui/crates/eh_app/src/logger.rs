@@ -90,3 +90,71 @@ pub fn evt_init(panel_h: u32, sw: u32, sh: u32) {
         "[bookshelf] EVT_INIT panel_h={panel_h} sw={sw} sh={sh}"
     ));
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use parking_lot::Mutex;
+
+    // PBEMU_LOG_DIR is a process-global; these tests flip it and so
+    // serialize on one mutex (same pattern as i18n's LANG_LOCK).
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Run `f` with PBEMU_LOG_DIR set to `value` (None = removed),
+    /// restoring the previous environment afterwards.
+    fn with_log_dir<R>(value: Option<&str>, f: impl FnOnce() -> R) -> R {
+        let _g = ENV_LOCK.lock();
+        let saved = std::env::var("PBEMU_LOG_DIR").ok();
+        match value {
+            Some(v) => std::env::set_var("PBEMU_LOG_DIR", v),
+            None => std::env::remove_var("PBEMU_LOG_DIR"),
+        }
+        let out = f();
+        match saved {
+            Some(v) => std::env::set_var("PBEMU_LOG_DIR", v),
+            None => std::env::remove_var("PBEMU_LOG_DIR"),
+        }
+        out
+    }
+
+    // The SDL e2e harness reads THIS file from a per-instance slice;
+    // wrong precedence hides the log where the harness can't see it.
+    #[test]
+    fn env_dir_wins_over_app_dir() {
+        with_log_dir(Some("/run/harness"), || {
+            assert_eq!(
+                resolve_path(Some("/device/appdir")),
+                PathBuf::from("/run/harness/bookshelf.log")
+            );
+        });
+    }
+
+    #[test]
+    fn empty_env_falls_through_to_app_dir() {
+        with_log_dir(Some(""), || {
+            assert_eq!(
+                resolve_path(Some("/device/appdir")),
+                PathBuf::from("/device/appdir/bookshelf.log")
+            );
+        });
+    }
+
+    #[test]
+    fn app_dir_used_when_env_unset() {
+        with_log_dir(None, || {
+            assert_eq!(
+                resolve_path(Some("/device/appdir")),
+                PathBuf::from("/device/appdir/bookshelf.log")
+            );
+        });
+    }
+
+    #[test]
+    fn tmp_fallback_without_any_dir() {
+        with_log_dir(None, || {
+            assert_eq!(resolve_path(None), PathBuf::from("/tmp/bookshelf.log"));
+            // An empty app dir is as good as none.
+            assert_eq!(resolve_path(Some("")), PathBuf::from("/tmp/bookshelf.log"));
+        });
+    }
+}

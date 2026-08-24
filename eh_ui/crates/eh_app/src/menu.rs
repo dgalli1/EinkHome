@@ -101,3 +101,61 @@ pub fn draw<B: eh_hal::Framebuffer>(
         app.menu_rows.push((rect, *row));
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store::GroupPreset;
+
+    // The `group=` cfg value is what persists a user's shelf grouping
+    // across restarts: one typo'd or reordered arm here silently resets
+    // everyone's grouping to None on load.  Every variant must serialize
+    // to its exact C-config string and parse back identically.
+    #[test]
+    fn group_config_values_round_trip() {
+        for g in [
+            GroupPreset::None,
+            GroupPreset::AuthorSeries,
+            GroupPreset::Author,
+            GroupPreset::Year,
+            GroupPreset::Genre,
+            GroupPreset::Series,
+        ] {
+            let stored = group_config_value(g);
+            assert_eq!(
+                group_from_config(&Some(stored.clone())),
+                g,
+                "round-trip {stored:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn group_config_strings_match_the_c_keys() {
+        assert_eq!(group_config_value(GroupPreset::None), "none");
+        assert_eq!(
+            group_config_value(GroupPreset::AuthorSeries),
+            "author_series"
+        );
+        assert_eq!(group_config_value(GroupPreset::Author), "author");
+        assert_eq!(group_config_value(GroupPreset::Year), "year");
+        assert_eq!(group_config_value(GroupPreset::Genre), "genre");
+        assert_eq!(group_config_value(GroupPreset::Series), "series");
+    }
+
+    #[test]
+    fn unknown_group_config_falls_back_to_none() {
+        // Missing key, legacy junk, or an uninstalled preset spelling.
+        assert_eq!(group_from_config(&None), GroupPreset::None);
+        assert_eq!(group_from_config(&Some(String::new())), GroupPreset::None);
+        assert_eq!(
+            group_from_config(&Some("authors".into())),
+            GroupPreset::None
+        );
+        assert_eq!(
+            group_from_config(&Some("AUTHOR".into())),
+            GroupPreset::None,
+            "match is exact-lowercase like the C app"
+        );
+    }
+}

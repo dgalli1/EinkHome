@@ -164,3 +164,42 @@ pub fn draw_chooser_sheet<B: Framebuffer>(
         });
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store::{GroupPreset, SortMode};
+
+    // Both tables are indexed by enum discriminant (`g as usize`), so a
+    // reordered const row or enum variant mislabels every chooser row or
+    // panics with an index-out-of-bounds.  The C order is load-bearing:
+    // the e2e harness maps a chosen dimension to its ROW INDEX.
+    #[test]
+    fn group_keys_follow_the_discriminant_order() {
+        for (g, key) in [
+            (GroupPreset::None, "group.all"),
+            (GroupPreset::AuthorSeries, "group.author_series"),
+            (GroupPreset::Author, "group.author"),
+            (GroupPreset::Year, "group.year"),
+            (GroupPreset::Genre, "group.genre"),
+            (GroupPreset::Series, "group.series"),
+        ] {
+            assert_eq!(group_display_key(g), key);
+            // The table itself must stay aligned with the cast too.
+            assert_eq!(GROUP_KEYS[g as usize], key);
+        }
+    }
+
+    #[test]
+    fn sort_keys_follow_the_discriminant_order() {
+        for (m, key) in [
+            (SortMode::Title, "sort.title_az"),
+            (SortMode::Author, "sort.author"),
+            (SortMode::Series, "sort.series"),
+            (SortMode::Recent, "sort.recent"),
+        ] {
+            assert_eq!(sort_display_key(m), key);
+            assert_eq!(SORT_KEYS[m as usize], key);
+        }
+    }
+}
