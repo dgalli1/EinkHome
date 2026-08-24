@@ -147,15 +147,26 @@ them.
 ## Tests
 
 ```sh
-./scripts/test.sh            # api unit tests + full emulator e2e suite
+./scripts/test.sh            # rust unit tests + api unit tests + emulator e2e
 ./scripts/test.sh --pbemu    # ... plus the pbemu submodule's own suite
 ./scripts/test.sh -- -k offline   # pass pytest args through to the e2e suite
-# or: make test
+# or: make test / make test-rust (rust unit tests only)
 
 # SDL (native PC) suites — fast, no emulator:
 EH_TEST_BACKEND=sdl pbemu/.venv/bin/python -m pytest \
-  tests/test_bookshelf.py tests/test_offline_sdl.py tests/test_cover_warm_sdl.py
+  tests/test_bookshelf.py tests/test_offline_sdl.py \
+  tests/test_cover_warm_sdl.py tests/test_rust_app_sdl.py
 ```
+
+The full local inventory, all runnable today:
+
+| Tier | Suite | Needs |
+|---|---|---|
+| Rust unit | `make test-rust` (`cargo test --workspace`) | nothing |
+| API unit + lint | `make lint-py` (ruff, mypy, pytest) | python3 |
+| SDL e2e | `EH_TEST_BACKEND=sdl pytest tests/…` | SDL2 |
+| Emulator e2e | `scripts/test-all-firmwares.sh --device <fw>` | podman + firmware |
+| Scale (100k) | `PBEMU_SYS_TMPFS=1 … pytest tests/test_bookshelf_scale.py` | podman + firmware |
 
 The emulator e2e suite needs podman, the staged firmware and staged
 books in `pbemu/U633_6.8.2817/.live/mnt/ext1/books/` (stage with
