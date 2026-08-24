@@ -1,0 +1,90 @@
+// The source chooser (C eh_draw_overlay_source / eh_on_tap_source): the
+// LGRAY hatch dim over the content area and the vertically-centred
+// 3/4-width white sheet (double border) with an inline title, a divider,
+// and three text-only rows (Kavita / Local / Folder).  The selected row
+// is filled black with white text.  Sheet: ph = 72 + 3*96 + 24, centred
+// in the content area; rows at py+80, 96px apart, 84px tall.
+
+import { HatchDim, SheetGeom, SheetPanel } from "sheet.slint";
+
+export component SourceSheet inherits Rectangle {
+    in-out property <int> content-h: 0;
+    in-out property <int> w: 0;
+    in-out property <int> selected: 0;
+    in-out property <string> title: "";
+    in-out property <[string]> labels: [];
+    in-out property <image> hatch;
+
+    callback row-tap(int);
+    callback outside;
+
+    // outside the sheet closes the chooser (rendered first = behind)
+    TouchArea {
+        x: 0;
+        y: 0;
+        width: 100%;
+        height: 100%;
+        clicked => { root.outside(); }
+    }
+
+    HatchDim {
+        dim-y0: 0px;
+        dim-y1: root.content-h * 1px;
+        hatch: root.hatch;
+    }
+
+    property <int> pw: SheetGeom.pw(w);
+    property <int> px: SheetGeom.px(w);
+    property <int> ph: 72 + 3 * 96 + 24;
+    property <int> py: SheetGeom.py(content-h, ph);
+
+    SheetPanel {
+        sheet-px: px;
+        sheet-py: py;
+        sheet-pw: pw;
+        sheet-ph: ph;
+        double-border: true;
+    }
+
+    // inline title (32px, glyph top at py+18) + divider
+    Text {
+        x: (px + 24) * 1px;
+        y: (py + 15) * 1px;
+        height: 29px;
+        vertical-alignment: center;
+        font-size: 32px;
+        color: black;
+        text: root.title;
+    }
+    Rectangle {
+        x: (px + 24) * 1px;
+        y: (py + 64) * 1px;
+        width: (pw - 48) * 1px;
+        height: 2px;
+        background: #aaaaaa;
+    }
+
+    for lbl[idx] in root.labels: Rectangle {
+        x: (px + 12) * 1px;
+        y: (py + 80 + idx * 96) * 1px;
+        width: (pw - 24) * 1px;
+        height: 84px;
+        background: root.selected == idx ? black : white;
+        border-width: 1px;
+        border-color: black;
+        Text {
+            x: 20px;
+            y: 28px;
+            height: 28px;
+            vertical-alignment: center;
+            font-size: 28px;
+            color: root.selected == idx ? white : black;
+            text: lbl;
+        }
+        TouchArea {
+            width: 100%;
+            height: 100%;
+            clicked => { root.row-tap(idx); }
+        }
+    }
+}

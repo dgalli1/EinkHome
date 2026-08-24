@@ -23,7 +23,7 @@ impl<B: Framebuffer> App<B> {
             // BR_MODE_PICKER draws over the settings screen).
             self.pages = 1;
             self.entries.clear();
-            let mut b = self.dl_picker.take().expect("picker");
+            let b = self.dl_picker.take().expect("picker");
             self.sync_browser_model(&b);
             self.dl_picker = Some(b);
             return;
@@ -80,9 +80,11 @@ impl<B: Framebuffer> App<B> {
             .map(|e| {
                 let (art, has_art) = match &e.art {
                     Some((rgb, w, h)) => (
-                        slint::Image::from_rgb8(slint::SharedPixelBuffer::<
-                            slint::Rgb8Pixel,
-                        >::clone_from_slice(rgb, *w, *h)),
+                        slint::Image::from_rgb8(
+                            slint::SharedPixelBuffer::<slint::Rgb8Pixel>::clone_from_slice(
+                                rgb, *w, *h,
+                            ),
+                        ),
                         true,
                     ),
                     None => (slint::Image::default(), false),
@@ -169,7 +171,11 @@ impl<B: Framebuffer> App<B> {
         } else {
             rows
         };
-        let model = slint::VecModel::from(list.into_iter().map(slint::SharedString::from).collect::<Vec<_>>());
+        let model = slint::VecModel::from(
+            list.into_iter()
+                .map(slint::SharedString::from)
+                .collect::<Vec<_>>(),
+        );
         let c = self.ui.comp();
         c.set_history(slint::ModelRc::new(model));
         c.set_history_hint(hint);

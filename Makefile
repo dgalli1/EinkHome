@@ -85,15 +85,21 @@ lint-py:
 	@python3 -m pytest api/tests -q --cov=api/api --cov=api/providers \
 		--cov=api/storage --cov-report=term; rc=$$?; rm -f .coverage; exit $$rc
 
+# The Slint text stack probes fontconfig via pkg-config; the firmware
+# ships it (ebrmain/lib) and sdk/build_armel.sh links it explicitly.
+ARM_PKGCONFIG = PKG_CONFIG_ALLOW_CROSS=1 \
+	PKG_CONFIG_SYSROOT_DIR="$(CURDIR)/pbemu/U633_6.8.2817" \
+	PKG_CONFIG_PATH="$(CURDIR)/resources/pkgconfig"
+
 $(RUST_APP_LIB): $(RUST_SRCS)
-	cd $(EH_UI) && cargo zigbuild --release \
+	cd $(EH_UI) && $(ARM_PKGCONFIG) cargo zigbuild --release \
 		--target $(ARM_TARGET).2.23 -p eh_pb
 	# MuPDF's resource blobs come out of mupdf-sys's make as host-ELF
 	# objects; relink them for ARM before anything consumes the archive.
 	scripts/fix-arm-archive.sh $@
 
 $(RUST_APP_LIB_ARMHF): $(RUST_SRCS)
-	cd $(EH_UI) && cargo zigbuild --release \
+	cd $(EH_UI) && $(ARM_PKGCONFIG) cargo zigbuild --release \
 		--target $(ARMHF_TARGET).2.23 -p eh_pb
 	FIX_CROSS_PREFIX=arm-linux-gnueabihf scripts/fix-arm-archive.sh $@
 

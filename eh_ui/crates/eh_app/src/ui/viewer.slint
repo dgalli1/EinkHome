@@ -1,0 +1,252 @@
+// The full-screen viewers (C eh_logview.c / eh_licenses.c): the log tail
+// (word-wrapped Rust-side with the same fontdue metrics as before — the
+// model carries exactly the visible rows), the licenses list, and the
+// license detail.  Corner scroll buttons page the body; Back steps
+// detail → list → shelf.
+
+import { TopBar } from "topbar.slint";
+
+// Corner scroll button (C eh_draw_scroll_buttons_at): 150x96 box, 2px
+// border (grey when disabled), a chevron pointing up (left) or down.
+export component ScrollButton inherits Rectangle {
+    width: 150px;
+    height: 96px;
+    in-out property <bool> up: true;
+    in-out property <bool> enabled-dir: true;
+    callback scroll(int);
+
+    background: white;
+    border-width: 2px;
+    border-color: enabled-dir ? black : #aaaaaa;
+    Path {
+        width: 150px;
+        height: 96px;
+        commands: root.up ? "M 51 62 L 75 34 L 99 62" : "M 51 34 L 75 62 L 99 34";
+        stroke: root.enabled-dir ? black : #aaaaaa;
+        stroke-width: 2px;
+    }
+    TouchArea {
+            width: 100%;
+            height: 100%;
+        clicked => { root.scroll(root.up ? -1 : 1); }
+    }
+}
+
+component LogRows inherits Rectangle {
+    in-out property <[string]> rows: [];
+    in-out property <length> body-top: 0px;
+    for t[idx] in root.rows: Text {
+        y: root.body-top + idx * 26px - 3px;
+        x: 24px;
+        height: 22px;
+        vertical-alignment: center;
+        font-size: 20px;
+        color: black;
+        overflow: clip;
+        width: parent.width - 48px;
+        text: t;
+    }
+}
+
+export component LogViewerPage inherits Rectangle {
+    in-out property <string> title: "";
+    in-out property <string> path-line: "";
+    in-out property <[string]> rows: [];
+    in-out property <bool> empty: false;
+    in-out property <string> empty-text: "";
+    in-out property <bool> up-ok: false;
+    in-out property <bool> down-ok: false;
+    in-out property <image> back-icon;
+
+    callback back;
+    callback scroll(int);
+
+    background: white;
+
+    TopBar {
+        y: 0;
+        back: true;
+        search-tab: true;
+        title-bold: true;
+        top-title: root.title;
+        back-icon: root.back-icon;
+        home => { root.back(); }
+    }
+
+    // the log path in its own band below the header rule
+    Text {
+        y: 96px + 9px;
+        height: 22px;
+        width: parent.width;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        font-size: 20px;
+        color: #555555;
+        overflow: elide;
+        text: root.path-line;
+    }
+
+    if (root.empty): Text {
+        x: 32px;
+        y: 138px + 27px;
+        height: 30px;
+        vertical-alignment: center;
+        font-size: 26px;
+        color: #555555;
+        text: root.empty-text;
+    }
+    if (!root.empty): LogRows {
+        y: 0;
+        rows: root.rows;
+        body-top: 138px;
+    }
+
+    ScrollButton {
+        x: 0;
+        y: parent.height - 96px;
+        up: true;
+        enabled-dir: root.up-ok;
+        scroll(d) => { root.scroll(d); }
+    }
+    ScrollButton {
+        x: parent.width - 150px;
+        y: parent.height - 96px;
+        up: false;
+        enabled-dir: root.down-ok;
+        scroll(d) => { root.scroll(d); }
+    }
+}
+
+export component LicensesListPage inherits Rectangle {
+    in-out property <string> title: "";
+    in-out property <[string]> names: [];   // visible rows: "name" (kind in sub)
+    in-out property <[string]> kinds: [];
+    in-out property <bool> up-ok: false;
+    in-out property <bool> down-ok: false;
+    in-out property <image> back-icon;
+
+    callback back;
+    callback scroll(int);
+    callback row-tap(int);
+
+    background: white;
+
+    TopBar {
+        y: 0;
+        back: true;
+        search-tab: true;
+        title-bold: true;
+        top-title: root.title;
+        back-icon: root.back-icon;
+        home => { root.back(); }
+    }
+
+    for nm[idx] in root.names: Rectangle {
+        x: 16px;
+        y: (112 + idx * 110) * 1px;
+        width: parent.width - 32px;
+        height: 98px;
+        background: white;
+        border-width: 2px;
+        border-color: black;
+        Text {
+            x: 16px;
+            y: 13px;
+            height: 35px;
+            vertical-alignment: center;
+            font-size: 30px;
+            color: black;
+            overflow: elide;
+            width: parent.width - 32px;
+            text: nm;
+        }
+        Text {
+            x: 16px;
+            y: 49px;
+            height: 28px;
+            vertical-alignment: center;
+            font-size: 24px;
+            color: #555555;
+            overflow: elide;
+            width: parent.width - 32px;
+            text: root.kinds[idx];
+        }
+        TouchArea {
+            width: 100%;
+            height: 100%;
+            clicked => { root.row-tap(idx); }
+        }
+    }
+
+    ScrollButton {
+        x: 0;
+        y: parent.height - 96px;
+        up: true;
+        enabled-dir: root.up-ok;
+        scroll(d) => { root.scroll(d); }
+    }
+    ScrollButton {
+        x: parent.width - 150px;
+        y: parent.height - 96px;
+        up: false;
+        enabled-dir: root.down-ok;
+        scroll(d) => { root.scroll(d); }
+    }
+}
+
+export component LicenseDetailPage inherits Rectangle {
+    in-out property <string> title: "";
+    in-out property <string> attribution: "";
+    in-out property <[string]> rows: [];
+    in-out property <bool> up-ok: false;
+    in-out property <bool> down-ok: false;
+    in-out property <image> back-icon;
+
+    callback back;
+    callback scroll(int);
+
+    background: white;
+
+    TopBar {
+        y: 0;
+        back: true;
+        search-tab: true;
+        title-bold: true;
+        top-title: root.title;
+        back-icon: root.back-icon;
+        home => { root.back(); }
+    }
+
+    Text {
+        y: 96px + 9px;
+        height: 22px;
+        width: parent.width;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        font-size: 20px;
+        color: #555555;
+        overflow: elide;
+        text: root.attribution;
+    }
+
+    LogRows {
+        y: 0;
+        rows: root.rows;
+        body-top: 138px;
+    }
+
+    ScrollButton {
+        x: 0;
+        y: parent.height - 96px;
+        up: true;
+        enabled-dir: root.up-ok;
+        scroll(d) => { root.scroll(d); }
+    }
+    ScrollButton {
+        x: parent.width - 150px;
+        y: parent.height - 96px;
+        up: false;
+        enabled-dir: root.down-ok;
+        scroll(d) => { root.scroll(d); }
+    }
+}

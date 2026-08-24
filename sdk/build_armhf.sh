@@ -116,6 +116,9 @@ podman run --rm \
 	"/work/pbemu/U1030_6.11.1437/rootfs/lib/libpthread.so.0" \
 	"/work/pbemu/U1030_6.11.1437/rootfs/lib/ld-linux-armhf.so.3" \
 	"/work/pbemu/U1030_6.11.1437/rootfs/lib/libdl.so.2" \
+	"/work/pbemu/U1030_6.11.1437/ebrmain/lib/libfontconfig.so.1" \
+	"/work/pbemu/U1030_6.11.1437/ebrmain/lib/libexpat.so.1" \
+	"/work/pbemu/U1030_6.11.1437/ebrmain/lib/libfreetype.so.6" \
 	-lgcc -lgcc_s \
 	"/usr/lib/gcc-cross/arm-linux-gnueabihf/12/crtendS.o" \
 	"/usr/arm-linux-gnueabihf/lib/crtn.o"

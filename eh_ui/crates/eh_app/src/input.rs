@@ -7,11 +7,10 @@
 //! C counterparts: eh_hit_top_bar / eh_hit_pager / eh_hit_thumbnail and
 //! the per-mode overlay dispatchers in eh_main.c / eh_input.c.
 
-use eh_hal::{Framebuffer, Rect};
+use eh_hal::Framebuffer;
 
+use crate::app::{App, KbField, Overlay, Tab, ViewMode};
 use crate::ui::Action;
-use crate::widgets::chooser::ChooserKind;
-use crate::app::{App, MenuRow, Overlay, Tab, ViewMode};
 
 impl<B: Framebuffer> App<B> {
     /// Apply the intents the Slint tree queued during input dispatch.
@@ -71,6 +70,11 @@ impl<B: Framebuffer> App<B> {
                     }
                 }
                 Action::SearchRow(idx) => self.tap_search_row(idx),
+                Action::SearchOutside => {
+                    if self.search_kb {
+                        self.dismiss_search_kb();
+                    }
+                }
                 Action::BrowseRow(idx) => {
                     if self.dl_picker.is_some() {
                         crate::local::tap_picker_row(self, idx);
@@ -78,6 +82,45 @@ impl<B: Framebuffer> App<B> {
                         crate::local::tap_browse_row(self, idx);
                     }
                 }
+                Action::MenuRow(i) => crate::menu::more_row(self, i),
+                Action::MenuOutside => {
+                    self.set_overlay(Overlay::None);
+                }
+                Action::SourceRow(i) => crate::source::apply_source(self, i),
+                Action::SourceOutside => {
+                    self.overlay = Overlay::None;
+                    self.refresh_shelf();
+                }
+                Action::ChooserRow(i) => self.chooser_row(i),
+                Action::ChooserOutside => {
+                    self.chooser_rects.clear();
+                    self.set_overlay(Overlay::None);
+                }
+                Action::ContextRow(i) => self.context_row(i),
+                Action::ContextOutside => {
+                    self.context.dismiss();
+                    self.set_overlay(Overlay::None);
+                    self.refresh_shelf();
+                }
+                Action::DownloadCancel => self.cancel_downloads(),
+                Action::DownloadDismiss => {
+                    if self.downloader.pending == 0 {
+                        self.set_overlay(Overlay::None);
+                    }
+                }
+                Action::SyncDismiss => {
+                    if !self.syncing {
+                        self.set_overlay(Overlay::None);
+                    }
+                }
+                Action::SettingsBack => self.settings_back(),
+                Action::SettingsRow(i) => self.settings_row(i),
+                Action::ViewerBack => self.viewer_back(),
+                Action::ViewerScroll(d) => self.viewer_scroll(d),
+                Action::LicenseRow(i) => self.license_row(i),
+                Action::LauncherBack => self.launcher_back(),
+                Action::LauncherScroll(d) => self.launcher_scroll_page(d),
+                Action::LauncherCell(i) => self.launcher_cell(i),
             }
         }
     }
@@ -115,80 +158,183 @@ impl<B: Framebuffer> App<B> {
     }
 }
 
-// ── overlay tap routing (interim: rect caches until each overlay ports) ──
+// ── full-screen page overlays (settings / viewers / launcher) ──────────
 
 impl<B: Framebuffer> App<B> {
-    /// Overlay tap routing (each overlay rebuilds its rects at draw time,
-    /// so taps share the paint geometry).
-    pub fn tap_overlay(&mut self, x: i32, y: i32) {
-        match self.overlay {
-            Overlay::More => self.tap_more_menu(x, y),
-            Overlay::Settings => crate::settings::tap_settings(x, y, self),
-            Overlay::Launcher => crate::launcher::tap_launcher(x, y, self),
-            Overlay::Source => crate::source::tap(self, x, y),
-            Overlay::Context => self.tap_context(x, y),
-            Overlay::GroupChooser => self.tap_chooser(x, y, ChooserKind::Group),
-            Overlay::SortChooser => self.tap_chooser(x, y, ChooserKind::Sort),
-            Overlay::LogViewer | Overlay::Licenses | Overlay::LicenseDetail => {
-                crate::viewer::tap(x, y, self)
+    /// The settings page's back chevron.
+    pub(crate) fn settings_back(&mut self) {
+        self.overlay = Overlay::None;
+    }
+
+    /// A settings row/button tap (C eh_on_tap_settings's dispatch).
+    pub(crate) fn settings_row(&mut self, i: usize) {
+        use crate::app::SettingsRow;
+        let row = match i {
+            0 => SettingsRow::ApiHost,
+            1 => SettingsRow::ApiKey,
+            2 => SettingsRow::ReaderApp,
+            3 => SettingsRow::DownloadFolder,
+            4 => SettingsRow::SystemApp,
+            5 => SettingsRow::Save,
+            6 => SettingsRow::ShowLogs,
+            _ => SettingsRow::Licenses,
+        };
+        match row {
+            SettingsRow::ApiHost => self.edit_field(KbField::ApiHost),
+            SettingsRow::ApiKey => self.edit_field(KbField::ApiKey),
+            SettingsRow::Save => self.settings_apply(),
+            SettingsRow::ReaderApp => self.cycle_reader(),
+            SettingsRow::ShowLogs => {
+                self.overlay = Overlay::LogViewer;
+                self.dirty = true;
             }
-            Overlay::Download => {
-                // The X button aborts every open download (C eh_main's
-                // eh_dl_cancel_rect hit → eh_cancel_downloads); any other
-                // tap dismisses only a drained popup (modal in flight).
-                let scr = self.fb().screen();
-                let cx = crate::widgets::download::dl_cancel_rect(scr.width, self.content_bottom);
-                if cx.contains(x, y) {
-                    self.cancel_downloads();
-                } else if self.downloader.pending == 0 {
-                    self.set_overlay(Overlay::None);
+            SettingsRow::Licenses => {
+                self.overlay = Overlay::Licenses;
+                self.dirty = true;
+            }
+            SettingsRow::DownloadFolder => {
+                // Open the folder picker rooted at the storage root,
+                // starting at the current downloads dir when it is under
+                // the root (C eh_on_tap_settings_folder -> eh_folder_open).
+                let root = crate::local::browse_root();
+                let start = self
+                    .config
+                    .downloads_dir
+                    .clone()
+                    .filter(|d| d.starts_with(&root))
+                    .unwrap_or_else(|| root.clone());
+                let mut b = crate::local::browser::Browser {
+                    picker: true,
+                    root: root.clone(),
+                    path: start,
+                    ..Default::default()
+                };
+                b.load();
+                self.dl_picker = Some(b);
+                // The picker is NOT an overlay: it lives on the main page.
+                self.overlay = Overlay::None;
+                self.dirty = true;
+            }
+            SettingsRow::SystemApp => {
+                if crate::sysapp::detect() {
+                    crate::sysapp::unpromote();
+                    crate::logger::log(
+                        "[bookshelf] sysapp: removed from system — stock home returns after reboot",
+                    );
+                } else if crate::sysapp::promote(self) {
+                    crate::logger::log(
+                        "[bookshelf] sysapp: installed as system app — reboot to boot EinkHome as the home screen",
+                    );
                 }
+                self.dirty = true;
             }
-            Overlay::Sync => {
-                // Modal while the sync runs (C pins the sheet); once the
-                // chain finished or failed, any tap dismisses it.
-                if !self.syncing {
-                    self.set_overlay(Overlay::None);
-                }
-            }
-            Overlay::None => {}
         }
     }
 
-    /// The More drawer: an outside tap dismisses (C behaviour); a row tap
-    /// opens Settings or the launcher, opens the group/sort choosers, or
-    /// starts a download-all batch.
-    fn tap_more_menu(&mut self, x: i32, y: i32) {
-        let scr = self.fb().screen();
-        let dw = (scr.width as i32) * 3 / 4;
-        let card = Rect {
-            x: (scr.width as i32 - dw) as u32,
-            y: 0,
-            w: dw as u32,
-            h: self.content_bottom,
-        };
-        if !card.contains(x, y) {
-            self.set_overlay(Overlay::None);
-            self.menu_rows.clear();
+    /// The viewers' back chevron: detail -> list -> shelf (C
+    /// eh_on_tap_licenses_view's back branch).
+    pub(crate) fn viewer_back(&mut self) {
+        match self.overlay {
+            Overlay::LicenseDetail => {
+                self.overlay = Overlay::Licenses;
+                self.license_selected = None;
+                self.lic_scroll = 0;
+            }
+            _ => {
+                self.overlay = Overlay::None;
+                self.lic_scroll = 0;
+                self.log_scroll = -1; // re-pin on the next open
+            }
+        }
+        self.dirty = true;
+    }
+
+    /// A corner scroll button in a viewer (C eh_on_tap_log_view's paging).
+    pub(crate) fn viewer_scroll(&mut self, dir: i32) {
+        let sw = self.screen_width() as i32;
+        let sh = self.content_bottom as i32;
+        match self.overlay {
+            Overlay::LogViewer => {
+                let btn_y = sh - crate::appui::SCROLL_BTN_H as i32 - 8;
+                let page = (((btn_y - crate::viewer::LOG_BODY_TOP as i32).max(0) as u32)
+                    / crate::viewer::LOG_ROW_H)
+                    .max(1) as i32;
+                let tf = crate::viewer::log_tail_first(sw as u32, self.content_bottom);
+                self.log_scroll = crate::viewer::log_scroll_after(self.log_scroll, dir, page, tf);
+            }
+            Overlay::Licenses | Overlay::LicenseDetail => {
+                let detail = self.overlay == Overlay::LicenseDetail;
+                let (top, rh) = if detail {
+                    (
+                        crate::viewer::LOG_BODY_TOP as i32,
+                        crate::viewer::LOG_ROW_H as i32,
+                    )
+                } else {
+                    (
+                        crate::viewer::LIC_LIST_TOP as i32,
+                        crate::viewer::LIC_LIST_H as i32,
+                    )
+                };
+                let btn_y = sh - crate::appui::SCROLL_BTN_H as i32 - 8;
+                let page = ((btn_y - top - 8) / rh).max(1);
+                self.lic_scroll = (self.lic_scroll + dir * page).max(0);
+            }
+            _ => {}
+        }
+        self.dirty = true;
+    }
+
+    /// A licenses-list row tap: open that license's full text.
+    pub(crate) fn license_row(&mut self, rel: usize) {
+        if self.overlay != Overlay::Licenses {
             return;
         }
-        for (r, row) in self.menu_rows.iter().cloned() {
-            if r.contains(x, y) {
-                match row {
-                    MenuRow::Settings => self.set_overlay(Overlay::Settings),
-                    MenuRow::Applications => {
-                        if crate::launcher::build(self) {
-                            self.set_overlay(Overlay::Launcher);
-                            self.launcher_scroll = 0;
-                        }
-                    }
-                    MenuRow::GroupBy => self.open_group_chooser(),
-                    MenuRow::SortBy => self.open_sort_chooser(),
-                    MenuRow::DownloadAll => self.download_all(),
-                }
-                self.menu_rows.clear();
-                return;
-            }
+        let idx = self.lic_scroll as usize + rel;
+        if idx < crate::viewer::LICENSES.len() {
+            self.license_selected = Some(idx);
+            self.overlay = Overlay::LicenseDetail;
+            self.lic_scroll = 0;
+            self.dirty = true;
+        }
+    }
+
+    /// The launcher's back chevron.
+    pub(crate) fn launcher_back(&mut self) {
+        self.overlay = Overlay::None;
+    }
+
+    /// A launcher corner scroll button (C eh_on_tap_overlay_launcher's
+    /// paging branch): page by the visible body height, clamped.
+    pub(crate) fn launcher_scroll_page(&mut self, dir: i32) {
+        let (scroll, max) = crate::launcher::scroll_of(self);
+        if max > 0 {
+            let (_, body_h) = crate::launcher::body_rects(self);
+            self.launcher_scroll = (scroll + dir * body_h as i32).clamp(0, max);
+            self.dirty = true;
+        }
+    }
+
+    /// A launcher app cell tap: launch through the backend (NewTaskEx;
+    /// the launched task draws over the shelf, so no redraw first).
+    pub(crate) fn launcher_cell(&mut self, i: usize) {
+        if self.pending_drag {
+            self.pending_drag = false;
+            return; // a drag-release is not a tap (C drag_scroll_move)
+        }
+        let Some(it) = self.launcher_items.get(i).cloned() else {
+            return;
+        };
+        if it.group {
+            return;
+        }
+        self.overlay = Overlay::None;
+        crate::log(&format!(
+            "[eh_app] launching app path={} params={}",
+            it.path,
+            it.params.len()
+        ));
+        if !self.fb().launch_app(&it.path, &it.text, &it.params) {
+            crate::log("[eh_app] launch failed (no task system on this platform)");
         }
     }
 }

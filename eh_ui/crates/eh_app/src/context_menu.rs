@@ -99,51 +99,43 @@ impl<B: Framebuffer> App<B> {
         self.set_overlay(Overlay::Context);
     }
 
-    /// A context-menu row tap (C eh_context_item_handler).
-    pub(crate) fn tap_context(&mut self, x: i32, y: i32) {
-        for (i, r) in self.context.rects.iter().enumerate() {
-            if r.contains(x, y) {
-                if let Some(action) = self.context.items.get(i).copied() {
-                    let book = self.context.book.take();
-                    self.context.dismiss();
-                    self.set_overlay(Overlay::None);
-                    match action {
-                        ContextAction::Open => {
-                            if let Some(b) = book {
-                                self.press_book(&b);
-                            }
-                        }
-                        ContextAction::Download => {
-                            if let Some(b) = book {
-                                let cur = book_local_path(&b, &self.downloads_dir());
-                                self.dl.reset();
-                                self.enqueue_download(&b.id, &cur);
-                            }
-                        }
-                        ContextAction::Delete => {
-                            if let Some(b) = book {
-                                self.delete_book(&b);
-                            }
-                        }
-                        ContextAction::DownloadAll => {
-                            let (scope, label, count) = self.context.take_series();
-                            self.download_series(&scope, &label, count);
-                        }
-                        ContextAction::DeleteAll => {
-                            let (scope, _, _) = self.context.take_series();
-                            self.delete_series(&scope);
-                        }
-                    }
-                    self.refresh_shelf();
+    /// A context-menu row tap (Slint reports the action index; C
+    /// eh_context's dispatch: the sheet closes first, then the action
+    /// runs — Open/Download navigate on from the shelf).
+    pub(crate) fn context_row(&mut self, i: usize) {
+        let Some(action) = self.context.items.get(i).copied() else {
+            return;
+        };
+        let book = self.context.book.take();
+        self.context.dismiss();
+        self.set_overlay(Overlay::None);
+        match action {
+            ContextAction::Open => {
+                if let Some(b) = book {
+                    self.press_book(&b);
                 }
-                return;
+            }
+            ContextAction::Download => {
+                if let Some(b) = book {
+                    let cur = book_local_path(&b, &self.downloads_dir());
+                    self.dl.reset();
+                    self.enqueue_download(&b.id, &cur);
+                }
+            }
+            ContextAction::Delete => {
+                if let Some(b) = book {
+                    self.delete_book(&b);
+                }
+            }
+            ContextAction::DownloadAll => {
+                let (scope, label, count) = self.context.take_series();
+                self.download_series(&scope, &label, count);
+            }
+            ContextAction::DeleteAll => {
+                let (scope, _, _) = self.context.take_series();
+                self.delete_series(&scope);
             }
         }
-        // Tap outside the sheet → dismiss.
-        self.context.rects.clear();
-        self.context.items.clear();
-        self.context.book = None;
-        self.set_overlay(Overlay::None);
         self.refresh_shelf();
     }
 

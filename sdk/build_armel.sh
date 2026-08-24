@@ -201,6 +201,11 @@ CONTAINER_FW_SQLITE="/work/U633_6.8.2817/ebrmain/lib/libsqlite3.so.0.8.6"
 CONTAINER_FW_PTHREAD="/work/U633_6.8.2817/rootfs/lib/libpthread.so.0"
 CONTAINER_FW_LDDL="/work/U633_6.8.2817/rootfs/lib/ld-linux.so.3"
 CONTAINER_FW_LIBDL="/work/U633_6.8.2817/rootfs/lib/libdl.so.2"
+# Slint's text stack (fontique) uses fontconfig; the firmware ships it in
+# ebrmain/lib together with its own dependencies (expat, freetype).
+CONTAINER_FW_FONTCONFIG="/work/U633_6.8.2817/ebrmain/lib/libfontconfig.so.1"
+CONTAINER_FW_EXPAT="/work/U633_6.8.2817/ebrmain/lib/libexpat.so.1"
+CONTAINER_FW_FREETYPE="/work/U633_6.8.2817/ebrmain/lib/libfreetype.so.6"
 CONTAINER_SYSROOT="/work/U633_6.8.2817/rootfs"
 # Crt objects live with the cross compiler, not in the firmware rootfs.
 CRT_CROSS_DIR="/usr/lib/gcc-cross/arm-linux-gnueabi/12"
@@ -257,6 +262,9 @@ podman run --rm \
 	"${CONTAINER_FW_PTHREAD}" \
 	"${CONTAINER_FW_LDDL}" \
 	"${CONTAINER_FW_LIBDL}" \
+	"${CONTAINER_FW_FONTCONFIG}" \
+	"${CONTAINER_FW_EXPAT}" \
+	"${CONTAINER_FW_FREETYPE}" \
 	-lgcc -lgcc_s \
 	"${CRTE}" \
 	"${CRTN}"

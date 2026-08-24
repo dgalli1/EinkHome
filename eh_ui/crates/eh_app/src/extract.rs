@@ -216,7 +216,7 @@ fn txt_word_cover(path: &Path) -> Option<Vec<u8>> {
                 line,
                 lx,
                 top + i as i32 * LINE_H,
-                eh_shell::GRAY_BLACK,
+                crate::appui::GRAY_BLACK,
                 &mut g,
             );
         }

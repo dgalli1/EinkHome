@@ -32,7 +32,6 @@ impl<B: Framebuffer> App<B> {
         }
     }
 
-
     /// Tile count the shelf pages over: the materialised view when one is
     /// present, else the library count (the C eh_view_total).
     pub(crate) fn view_total_books(&self) -> usize {

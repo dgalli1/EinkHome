@@ -9,9 +9,8 @@ fully platform-independent and drives a thin framebuffer contract.
 | Crate | Role |
 |---|---|
 | `eh_hal` | The platform contract: `Framebuffer` (canvas + region refresh with e-ink waveform mode), `Screen` (with native-panel reservation), `InputEvent`, `RefreshMode`, `Rect`. `#![no_std]`. |
-| `eh_render` | Software rasteriser (grayscale8 / RGB24 / RGBA32): fills, lines, glyph strings via `fontdue`, nearest-neighbour image blit. KOReader-`blitbuffer` analog. |
-| `eh_layout` | Responsive layout over `taffy` (CSS flex/grid). `Breakpoint::{Narrow, Std, Wide}` is resolved once per frame from screen width — the app's `eh_view_cols()` thresholds as data, not inline `if`s. |
-| `eh_shell` | Retained widget layer: a `Widget` draws AND hit-tests itself from the same taffy-computed rect, so draw/hit cannot drift (the core fix for the C app's `eh_grid.c`/`eh_input.c` duplication). `Screen` owns tree + dirty regions + one `present()` entry point. |
+| `eh_render` | Offline rasteriser: `Surface` fills/lines/glyphs (fontdue) used at boot to bake the top-bar line-art icons and to typeset TXT cover art. No longer on the per-frame path. |
+| `eh_app/src/ui` | The presentation layer: `main.slint` + per-screen markup (top bar, shelf, search, browser, settings, viewers, launcher, sheets), the software-renderer bridge (`mod.rs` — `MinimalSoftwareWindow` on a custom `Platform`, renders straight into the backend framebuffer, dirty region out for partial e-ink refreshes), the intent queue (`Action`), and the boot-time icon baker (`icons.rs`). |
 | `eh_backend_linuxfb` | Direct `/dev/fb0` backend: mmap + FB ioctls + e-ink update. The KOReader route for real PB/Kobo/Kindle/reMarkable hardware. |
 | `eh_backend_inkview` | PocketBook backend over libinkview: draws into `GetCanvas()` (physical fb on device; observable task-SHM in pbemu) and preserves the native status panel (refreshes clamp above `content_bottom`). |
 | `eh_backend_sdl` | Host dev/visual-verification backend (RGBA canvas → streaming texture). |

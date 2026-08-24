@@ -1,0 +1,111 @@
+// The Settings screen (C eh_draw_overlay_settings): full-screen white,
+// the shared overlay header (back chevron + centred title), five row
+// cards (API host / API key / Reader app / Download folder / System app),
+// then the filled Save + outlined Show logs / Licenses buttons.  The row
+// owning the on-screen keyboard draws inverted (black card, white text).
+
+import { TopBar } from "topbar.slint";
+
+export component SettingsPage inherits Rectangle {
+    in-out property <string> title: "";
+    in-out property <[string]> card-labels: [];   // translated, Rust-side
+    in-out property <int> card-rows: 0;
+    in-out property <string> api-host: "";
+    in-out property <string> api-key: "";
+    in-out property <string> reader-value: "";
+    in-out property <string> dl-dir: "";
+    in-out property <string> sysapp-value: "";
+    in-out property <int> editing: -1;   // 0 = api host, 1 = api key
+    in-out property <string> save-label: "";
+    in-out property <string> logs-label: "";
+    in-out property <string> licenses-label: "";
+    in-out property <image> back-icon;
+
+    callback back;
+    callback row-tap(int);   // 0..4 cards, 5 = Save, 6 = logs, 7 = licenses
+
+    background: white;
+
+    TopBar {
+        y: 0;
+        back: true;
+        search-tab: true;
+        title-bold: true;
+        top-title: root.title;
+        back-icon: root.back-icon;
+        home => { root.back(); }
+    }
+
+    property <[string]> card-values: [
+        root.api-host, root.api-key, root.reader-value,
+        root.dl-dir, root.sysapp-value,
+    ];
+
+    for lbl[idx] in root.card-labels: Rectangle {
+        x: 32px;
+        y: (112 + idx * 120) * 1px;
+        width: parent.width - 64px;
+        height: 108px;
+        background: root.editing == idx ? black : white;
+        border-width: 2px;
+        border-color: black;
+        Text {
+            x: 16px;
+            y: 11px;
+            height: 28px;
+            vertical-alignment: center;
+            font-size: 26px;
+            font-weight: 700;
+            color: root.editing == idx ? white : black;
+            text: lbl;
+        }
+        Text {
+            x: 16px;
+            y: 50px;
+            height: 29px;
+            vertical-alignment: center;
+            font-size: 30px;
+            color: root.editing == idx ? white : black;
+            overflow: elide;
+            width: parent.width - 32px;
+            text: root.card-values[idx];
+        }
+        TouchArea {
+            width: 100%;
+            height: 100%;
+            clicked => { root.row-tap(idx); }
+        }
+    }
+
+    // buttons: filled Save, outlined Show logs + Licenses
+    property <int> buttons-y: 112 + 5 * 120 + 24;
+    for b in [
+        {i: 5, label: root.save-label, filled: true},
+        {i: 6, label: root.logs-label, filled: false},
+        {i: 7, label: root.licenses-label, filled: false},
+    ]: Rectangle {
+        x: 32px;
+        y: (root.buttons-y + (b.i - 5) * 96) * 1px;
+        width: parent.width - 64px;
+        height: 84px;
+        background: b.filled ? black : white;
+        border-width: 2px;
+        border-color: black;
+        Text {
+            y: 20px;
+            height: 29px;
+            vertical-alignment: center;
+            horizontal-alignment: center;
+            width: parent.width;
+            font-size: 32px;
+            font-weight: 700;
+            color: b.filled ? white : black;
+            text: b.label;
+        }
+        TouchArea {
+            width: 100%;
+            height: 100%;
+            clicked => { root.row-tap(b.i); }
+        }
+    }
+}

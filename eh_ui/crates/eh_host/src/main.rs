@@ -68,8 +68,8 @@ fn main() -> Result<(), String> {
     // Ctrl-C / SIGTERM close the window even when the launching
     // environment inherited a SIGINT-ignored disposition.
     unsafe {
-        libc::signal(libc::SIGINT, on_signal as libc::sighandler_t);
-        libc::signal(libc::SIGTERM, on_signal as libc::sighandler_t);
+        libc::signal(libc::SIGINT, on_signal as *const () as libc::sighandler_t);
+        libc::signal(libc::SIGTERM, on_signal as *const () as libc::sighandler_t);
     }
     loop {
         if SIGNALED.load(Ordering::SeqCst) || app.fb().close_requested() {

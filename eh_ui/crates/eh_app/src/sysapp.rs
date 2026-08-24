@@ -78,7 +78,7 @@ pub fn promote<B: Framebuffer>(app: &mut App<B>) -> bool {
         return false;
     }
     // Already the home task?  Copying would truncate the running exe.
-    let is_home = src == PathBuf::from(&dst);
+    let is_home = src == dst;
     if !is_home {
         if let Err(e) = copy_file(&src, Path::new(&dst)) {
             let _ = std::fs::remove_file(&dst);

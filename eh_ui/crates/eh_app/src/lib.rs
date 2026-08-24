@@ -41,10 +41,11 @@ pub mod source;
 pub mod store;
 pub mod sync;
 pub mod sysapp;
-pub mod util;
 pub mod ui;
+pub mod util;
 pub mod viewer;
 pub mod widgets;
+pub mod wrap;
 
 /// Simple diagnostic logger.  On the device this writes to the same
 /// guest-writable path the demo used; on host it prints to stderr.  Hook

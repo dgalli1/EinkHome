@@ -5,8 +5,6 @@
 //! Rows are 88px tall, all drawn alike (white bg, black label, DGRAY
 //! value).  No row outlines, no header — C eh_draw_overlay_more verbatim.
 
-use eh_hal::Rect;
-
 use crate::app::{App, MenuRow};
 
 /// Row rhythm (C EH_MORE_*).
@@ -51,54 +49,24 @@ pub(crate) fn group_from_config(s: &Option<String>) -> crate::store::GroupPreset
     }
 }
 
-/// Draw the drawer; records each row's rect into `app.menu_rows` for tap
-/// routing (the C app's draw/hit geometry parity).
-pub fn draw<B: eh_hal::Framebuffer>(
-    surf: &mut eh_render::Surface,
-    app: &mut App<B>,
-    dirty: &mut Vec<Rect>,
-) {
-    use eh_shell::{GRAY_BLACK, GRAY_WHITE};
-    let w = surf.width();
-    let h = app.content_bottom;
-    dirty.push(Rect { x: 0, y: 0, w, h });
-
-    // Solid black over the whole content area, then the white panel
-    // (C FillArea(BLACK) + FillArea(WHITE) + DrawLine divider).
-    surf.fill_gray(Rect { x: 0, y: 0, w, h }, GRAY_BLACK);
-    let pw = (w as i32 * 3) / 4;
-    let px = w - pw as u32;
-    surf.fill_gray(
-        Rect {
-            x: px,
-            y: 0,
-            w: pw as u32,
-            h,
-        },
-        GRAY_WHITE,
-    );
-    surf.vline(px, 0, h, 2, GRAY_BLACK);
-
-    app.menu_rows.clear();
-    // C opens DEFAULTFONTB for the drawer rows.
-    let font = eh_shell::bold_font();
-    let mut glyph = eh_render::Glyph::new();
-    // Both rows always show their live selection (C vals[]: group_summary
-    // + sort_label — the Group-by value was wrongly hidden when a grouping
-    // was active).
-    let group_val = crate::widgets::chooser::group_display_key(app.group);
-    let sort_val = crate::widgets::chooser::sort_display_key(app.sort);
-    for (_i, (row, label)) in label_keys().iter().enumerate() {
-        let val = match row {
-            MenuRow::GroupBy => Some(crate::i18n::tr(group_val)),
-            MenuRow::SortBy => Some(crate::i18n::tr(sort_val)),
-            _ => None,
-        };
-        let ry = Y0 + _i as u32 * ITEM_H;
-        let rect = crate::widgets::menu_row::draw_menu_row(
-            surf, font, &mut glyph, px, pw as u32, ry, label, val,
-        );
-        app.menu_rows.push((rect, *row));
+/// A More-menu row tap (the Slint drawer reports the row index; C
+/// eh_on_tap_more's row branch).
+pub(crate) fn more_row<B: eh_hal::Framebuffer>(app: &mut App<B>, i: usize) {
+    let keys = label_keys();
+    let Some((row, _)) = keys.get(i) else {
+        return;
+    };
+    match row {
+        MenuRow::Settings => app.set_overlay(crate::app::Overlay::Settings),
+        MenuRow::Applications => {
+            if crate::launcher::build(app) {
+                app.set_overlay(crate::app::Overlay::Launcher);
+                app.launcher_scroll = 0;
+            }
+        }
+        MenuRow::GroupBy => app.open_group_chooser(),
+        MenuRow::SortBy => app.open_sort_chooser(),
+        MenuRow::DownloadAll => app.download_all(),
     }
 }
 

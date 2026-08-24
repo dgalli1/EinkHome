@@ -1,0 +1,174 @@
+// The launcher overlay (C eh_launcher.c draw side): the shared header, a
+// clipped scrolling body laid out as one continuous column (headers span
+// the width, app cells flow 3 per row — the layout math stays Rust-side
+// in launcher::ui::layout), corner scroll buttons while it overflows, and
+// drag scrolling driven by the app's raw pointer-move stream.
+
+import { TopBar } from "topbar.slint";
+import { ScrollButton } from "viewer.slint";
+
+export struct LauncherEntry {
+    is-group: bool,
+    text: string,      // group title, or the cell label's first line
+    letter: string,    // placeholder icon's single glyph (cells only)
+    label2: string,    // optional second label line ("" = single line)
+    icon: image,
+    has-icon: bool,
+    x: int,
+    y: int,            // layout coordinate (scroll applied here)
+    w: int,
+    h: int,
+}
+
+export component LauncherPage inherits Rectangle {
+    in-out property <string> title: "";
+    in-out property <string> empty-text: "";
+    in-out property <bool> empty: false;
+    in-out property <[LauncherEntry]> items: [];
+    in-out property <int> scroll: 0;
+    in-out property <int> body-h: 0;
+    in-out property <bool> up-ok: false;
+    in-out property <bool> down-ok: false;
+    in-out property <image> back-icon;
+
+    callback back;
+    callback scroll-page(int);
+    callback cell(int);
+
+    background: white;
+
+    TopBar {
+        y: 0;
+        back: true;
+        search-tab: true;
+        title-bold: true;
+        top-title: root.title;
+        back-icon: root.back-icon;
+        home => { root.back(); }
+    }
+
+    Rectangle {
+        y: 96px;
+        width: 100%;
+        height: root.body-h * 1px;
+        clip: true;
+
+        if (root.empty): Text {
+            y: Math.floor(root.body-h / 2) * 1px;
+            height: 37px;
+            width: parent.width;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+            font-size: 32px;
+            color: black;
+            text: root.empty-text;
+        }
+
+        for it[idx] in root.items: Rectangle {
+            y: (it.y - root.scroll) * 1px;
+            x: it.x * 1px;
+            width: it.w * 1px;
+            height: it.h * 1px;
+            visible: (it.y - root.scroll + 96 + it.h) > 96;
+
+            if (it.is-group): Rectangle {
+                background: white;
+                Rectangle {
+                    y: parent.height - 2px;
+                    width: 100%;
+                    height: 2px;
+                    background: black;
+                }
+                Text {
+                    x: 12px;
+                    y: parent.height / 2 - 20px;
+                    height: 28px;
+                    vertical-alignment: center;
+                    font-size: 28px;
+                    color: black;
+                    overflow: elide;
+                    width: parent.width - 24px;
+                    text: it.text;
+                }
+            }
+            if (!it.is-group): Rectangle {
+                background: transparent;
+                // icon: 120px box centred, 12px from the cell top
+                Image {
+                    x: (parent.width - 120px) / 2;
+                    y: 12px;
+                    width: 120px;
+                    height: 120px;
+                    source: it.icon;
+                    visible: it.has-icon;
+                    image-fit: contain;
+                    image-rendering: pixelated;
+                }
+                if (!it.has-icon): Rectangle {
+                    x: (parent.width - 120px) / 2;
+                    y: 12px;
+                    width: 120px;
+                    height: 120px;
+                    background: white;
+                    border-width: 2px;
+                    border-color: black;
+                    Text {
+                        y: 15px;
+                        height: 65px;
+                        width: parent.width;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                        font-size: 56px;
+                        color: black;
+                        text: it.letter;
+                    }
+                }
+                // label: first line at baseline sy+160, optional second at +26
+                Text {
+                    y: 130px;
+                    height: 28px;
+                    width: parent.width - 8px;
+                    x: 4px;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                    font-size: 24px;
+                    color: black;
+                    overflow: elide;
+                    text: it.text;
+                }
+                if (it.label2 != ""): Text {
+                    y: 156px;
+                    height: 28px;
+                    width: parent.width - 8px;
+                    x: 4px;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                    font-size: 24px;
+                    color: black;
+                    overflow: elide;
+                    text: it.label2;
+                }
+                TouchArea {
+            width: 100%;
+            height: 100%;
+                    clicked => { root.cell(idx); }
+                }
+            }
+        }
+    }
+
+    ScrollButton {
+        x: 0;
+        y: parent.height - 96px;
+        up: true;
+        enabled-dir: root.up-ok;
+        scroll(d) => { root.scroll-page(d); }
+    }
+    ScrollButton {
+        x: parent.width - 150px;
+        y: parent.height - 96px;
+        up: false;
+        enabled-dir: root.down-ok;
+        scroll(d) => { root.scroll-page(d); }
+    }
+}

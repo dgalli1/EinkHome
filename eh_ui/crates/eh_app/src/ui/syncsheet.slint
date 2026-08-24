@@ -1,0 +1,109 @@
+// The modal sync-progress sheet (C eh_draw_sync_popup_sheet): hatch dim
+// below the top bar + centred 190px sheet — title band, the phase line,
+// the counter subline, and during the covers stage a progress bar with a
+// striped (DGRAY diagonal) overlay over the unfilled part while the warm
+// pass still runs.
+
+import { HatchDim, SheetGeom, SheetPanel } from "sheet.slint";
+
+export component SyncSheet inherits Rectangle {
+    in-out property <int> content-h: 0;
+    in-out property <int> w: 0;
+    in-out property <string> title: "";
+    in-out property <string> line: "";
+    in-out property <string> subline: "";
+    in-out property <bool> show-bar: false;
+    in-out property <float> bar-fill: 0.0;   // 0..1, covers_done/total
+    in-out property <string> stripe-path: "";
+    in-out property <image> hatch;
+
+    callback dismiss;
+
+    TouchArea {
+        x: 0;
+        y: 0;
+        width: 100%;
+        height: 100%;
+        clicked => { root.dismiss(); }
+    }
+
+    HatchDim {
+        dim-y0: 96px;
+        dim-y1: root.content-h * 1px;
+        hatch: root.hatch;
+    }
+
+    property <int> pw: SheetGeom.pw(w);
+    property <int> px: SheetGeom.px(w);
+    property <int> ph: 190;
+    property <int> py: SheetGeom.py(content-h, ph);
+    property <int> pad: 24;
+
+    SheetPanel {
+        sheet-px: px;
+        sheet-py: py;
+        sheet-pw: pw;
+        sheet-ph: ph;
+    }
+
+    // title band (30px, glyph top at py+18) + divider at py+71
+    Text {
+        x: (px + pad) * 1px;
+        y: (py + 14) * 1px;
+        height: 29px;
+        vertical-alignment: center;
+        font-size: 30px;
+        color: black;
+        text: root.title;
+    }
+    Rectangle {
+        x: (px + pad) * 1px;
+        y: (py + 71) * 1px;
+        width: (pw - 2 * pad) * 1px;
+        height: 2px;
+        background: #aaaaaa;
+    }
+
+    Text {
+        x: (px + pad) * 1px;
+        y: (py + 92) * 1px;
+        height: 28px;
+        vertical-alignment: center;
+        font-size: 28px;
+        color: black;
+        text: root.line;
+    }
+    Text {
+        x: (px + pad) * 1px;
+        y: (py + 134) * 1px;
+        height: 28px;
+        vertical-alignment: center;
+        font-size: 24px;
+        color: #555555;
+        text: root.subline;
+    }
+
+    if (root.show-bar): Rectangle {
+        x: (px + pad) * 1px;
+        y: (py + 168) * 1px;
+        width: (pw - 2 * pad) * 1px;
+        height: 12px;
+        background: white;
+        border-width: 1px;
+        border-color: black;
+        Rectangle {
+            x: 1px;
+            y: 1px;
+            width: Math.max(0, Math.floor((parent.width - 2px) / 1px * root.bar-fill)) * 1px;
+            height: parent.height - 2px;
+            background: black;
+        }
+        Path {
+            width: parent.width;
+            height: parent.height;
+            commands: root.stripe-path;
+            stroke: #555555;
+            stroke-width: 1px;
+        }
+    }
+}

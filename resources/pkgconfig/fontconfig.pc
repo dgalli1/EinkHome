@@ -1,0 +1,12 @@
+# Minimal fontconfig probe for the Slint text stack's build script: the
+# firmware ships libfontconfig in ebrmain/lib (see sdk/build_armel.sh,
+# which links it explicitly).  The staticlib only needs the probe to pass;
+# the emitted flags are unused because the final link is hand-driven.
+prefix=/usr
+libdir=${prefix}/lib
+
+Name: fontconfig
+Description: fontconfig (firmware, probed only)
+Version: 2.11.0
+Libs: -lfontconfig
+Cflags:

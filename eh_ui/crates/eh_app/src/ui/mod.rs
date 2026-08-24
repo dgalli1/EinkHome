@@ -63,8 +63,48 @@ pub enum Action {
     SearchInput,
     /// A search history / suggestion row.
     SearchRow(usize),
+    /// A tap below the search rows (dismisses an open keyboard).
+    SearchOutside,
     /// A folder-browser row (index is absolute: scroll + row).
     BrowseRow(usize),
+    /// A More-menu row (index into the static row list).
+    MenuRow(usize),
+    /// Tap on the More drawer's dim (outside the panel).
+    MenuOutside,
+    /// A source-chooser row (0=Kavita 1=Local 2=Folder).
+    SourceRow(usize),
+    /// Tap outside the source sheet.
+    SourceOutside,
+    /// A group/sort chooser row (index into the offered rows).
+    ChooserRow(usize),
+    /// Tap outside the chooser sheet.
+    ChooserOutside,
+    /// A context-menu action row.
+    ContextRow(usize),
+    /// Tap outside the context sheet.
+    ContextOutside,
+    /// The download popup's X button.
+    DownloadCancel,
+    /// A tap on the download popup (dismisses only when drained).
+    DownloadDismiss,
+    /// A tap on the sync sheet (dismisses only when finished).
+    SyncDismiss,
+    /// The settings page's back chevron.
+    SettingsBack,
+    /// A settings row/button (0..4 cards, 5 Save, 6 logs, 7 licenses).
+    SettingsRow(usize),
+    /// The viewers' back chevron (detail -> list -> shelf).
+    ViewerBack,
+    /// A corner scroll button in a viewer (-1 up, +1 down).
+    ViewerScroll(i32),
+    /// A licenses-list row.
+    LicenseRow(usize),
+    /// The launcher's back chevron.
+    LauncherBack,
+    /// A launcher corner scroll button.
+    LauncherScroll(i32),
+    /// A launcher app cell.
+    LauncherCell(usize),
 }
 
 thread_local! {
@@ -112,8 +152,7 @@ impl TargetPixel for Rgb8s {
     fn blend(&mut self, color: PremultipliedRgbaColor) {
         let a = color.alpha as u32;
         for (i, c) in [color.red, color.green, color.blue].into_iter().enumerate() {
-            self.0[i] = ((self.0[i] as u32 * (255 - a)) / 255) as u8
-                + ((c as u32 * a) / 255) as u8;
+            self.0[i] = ((self.0[i] as u32 * (255 - a)) / 255) as u8 + ((c as u32 * a) / 255) as u8;
         }
     }
     fn from_rgb(red: u8, green: u8, blue: u8) -> Self {
@@ -131,8 +170,7 @@ impl TargetPixel for Rgba8s {
     fn blend(&mut self, color: PremultipliedRgbaColor) {
         let a = color.alpha as u32;
         for (i, c) in [color.red, color.green, color.blue].into_iter().enumerate() {
-            self.0[i] = ((self.0[i] as u32 * (255 - a)) / 255) as u8
-                + ((c as u32 * a) / 255) as u8;
+            self.0[i] = ((self.0[i] as u32 * (255 - a)) / 255) as u8 + ((c as u32 * a) / 255) as u8;
         }
         self.0[3] = 0xff;
     }
@@ -222,8 +260,8 @@ fn region_to_rect(
     Rect {
         x: x0,
         y: y0,
-        w: (s.width as u32).min(w - x0),
-        h: (s.height as u32).min(h - y0),
+        w: s.width.min(w - x0),
+        h: s.height.min(h - y0),
     }
 }
 
@@ -263,8 +301,7 @@ impl Ui {
     /// every callback to the intent queue.
     pub fn new(width: u32, height: u32) -> Self {
         if !PLATFORM_SET.get() {
-            slint::platform::set_platform(Box::new(EhPlatform))
-                .expect("set slint platform");
+            slint::platform::set_platform(Box::new(EhPlatform)).expect("set slint platform");
             PLATFORM_SET.set(true);
         }
         let comp = EhAppWindow::new().expect("create EhAppWindow");
@@ -282,7 +319,8 @@ impl Ui {
                 .expect("register DejaVuSans-Bold");
             FONTS_SET.set(true);
         }
-        comp.window().set_size(slint::PhysicalSize::new(width, height));
+        comp.window()
+            .set_size(slint::PhysicalSize::new(width, height));
 
         comp.on_home(|| push_action(Action::Home));
         comp.on_source_btn(|| push_action(Action::Source));
@@ -299,7 +337,27 @@ impl Ui {
         comp.on_system_bar(|| push_action(Action::SystemBar));
         comp.on_search_input(|| push_action(Action::SearchInput));
         comp.on_history_row(|i| push_action(Action::SearchRow(i as usize)));
+        comp.on_search_outside(|| push_action(Action::SearchOutside));
         comp.on_browse_row(|i| push_action(Action::BrowseRow(i as usize)));
+        comp.on_more_row(|i| push_action(Action::MenuRow(i as usize)));
+        comp.on_more_outside(|| push_action(Action::MenuOutside));
+        comp.on_source_row(|i| push_action(Action::SourceRow(i as usize)));
+        comp.on_source_outside(|| push_action(Action::SourceOutside));
+        comp.on_chooser_row(|i| push_action(Action::ChooserRow(i as usize)));
+        comp.on_chooser_outside(|| push_action(Action::ChooserOutside));
+        comp.on_context_row(|i| push_action(Action::ContextRow(i as usize)));
+        comp.on_context_outside(|| push_action(Action::ContextOutside));
+        comp.on_dl_cancel(|| push_action(Action::DownloadCancel));
+        comp.on_dl_dismiss(|| push_action(Action::DownloadDismiss));
+        comp.on_sync_dismiss(|| push_action(Action::SyncDismiss));
+        comp.on_settings_back(|| push_action(Action::SettingsBack));
+        comp.on_settings_row(|i| push_action(Action::SettingsRow(i as usize)));
+        comp.on_viewer_back(|| push_action(Action::ViewerBack));
+        comp.on_viewer_scroll(|d| push_action(Action::ViewerScroll(d)));
+        comp.on_lic_row(|i| push_action(Action::LicenseRow(i as usize)));
+        comp.on_launcher_back(|| push_action(Action::LauncherBack));
+        comp.on_launcher_page(|d| push_action(Action::LauncherScroll(d)));
+        comp.on_launcher_cell(|i| push_action(Action::LauncherCell(i as usize)));
 
         let icons = icons::bake_all();
         comp.set_house_icon(icons.house.clone());
@@ -313,7 +371,11 @@ impl Ui {
         comp.set_input_icon_inv(icons.input_inv.clone());
         comp.set_bulb_icon(icons.bulb.clone());
 
-        Ui { window, comp, icons }
+        Ui {
+            window,
+            comp,
+            icons,
+        }
     }
 
     /// The generated component (property + callback access).
@@ -323,7 +385,9 @@ impl Ui {
 
     /// Live resolution switch (SDL F11): resize + relayout.
     pub fn set_size(&self, width: u32, height: u32) {
-        self.comp.window().set_size(slint::PhysicalSize::new(width, height));
+        self.comp
+            .window()
+            .set_size(slint::PhysicalSize::new(width, height));
     }
     /// Dispatch one raw pointer event into the Slint tree (TouchAreas
     /// fire their callbacks synchronously, pushing intents).
@@ -342,18 +406,23 @@ impl Ui {
         let scr = fb.screen();
         let mut out: Option<Rect> = None;
         self.window.draw_if_needed(|renderer| {
-           if full {
-               renderer.set_repaint_buffer_type(RepaintBufferType::NewBuffer);
-           }
+            if full {
+                renderer.set_repaint_buffer_type(RepaintBufferType::NewBuffer);
+            }
             let bytes = fb.surface_mut();
             let region = render_fb(renderer, bytes, stride, fmt);
-           if full {
-               renderer.set_repaint_buffer_type(RepaintBufferType::ReusedBuffer);
-           }
+            if full {
+                renderer.set_repaint_buffer_type(RepaintBufferType::ReusedBuffer);
+            }
             out = Some(region_to_rect(&region, scr.width, scr.height));
         });
         out
     }
+    /// The hatch dim tile (shared by every sheet backdrop).
+    pub fn hatch(&self) -> slint::Image {
+        self.icons.hatch.clone()
+    }
+
     /// Source icon by active source (set at source switches).
     pub fn source_image(&self, source: crate::app::Source) -> slint::Image {
         match source {
@@ -366,4 +435,3 @@ impl Ui {
 
 // Re-export for the app's WindowEvent construction.
 pub use slint::platform::PointerEventButton;
-

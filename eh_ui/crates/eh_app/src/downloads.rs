@@ -501,10 +501,7 @@ impl<B: Framebuffer> App<B> {
     /// Drain completed downloads into the store, and when the queue empties
     /// close the popup + auto-open the reader for a single-book press.
     pub(crate) fn drain_downloads(&mut self) {
-        loop {
-            let Some(d) = self.downloader.try_next() else {
-                break;
-            };
+        while let Some(d) = self.downloader.try_next() {
             self.downloader.pending = self.downloader.pending.saturating_sub(1);
             // The popup shows the remaining count: repaint it.
             self.dirty = true;

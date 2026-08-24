@@ -20,4 +20,5 @@ pub const GROUP_H: u32 = 64;
 pub const MARGIN: u32 = 16;
 
 pub use discover::build;
-pub use ui::{drag_move, draw, tap_launcher, DRAG_SLOP};
+pub(crate) use ui::{body_rects, layout, scroll_of, split_label};
+pub use ui::{drag_move, DRAG_SLOP};

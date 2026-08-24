@@ -13,6 +13,17 @@ import { ShelfBody } from "shelf.slint";
 import { BrowseBody } from "browser.slint";
 import { Pager } from "pager.slint";
 import { SelfPanel } from "selfpanel.slint";
+import { MoreMenu } from "more.slint";
+import { SourceSheet } from "source.slint";
+import { ChooserSheet } from "chooser.slint";
+import { ContextMenu } from "context.slint";
+import { DownloadPopup } from "download.slint";
+import { SyncSheet } from "syncsheet.slint";
+import { SettingsPage } from "settings.slint";
+import { LogViewerPage, LicensesListPage, LicenseDetailPage } from "viewer.slint";
+import { LauncherPage, LauncherEntry } from "launcher.slint";
+
+export { LauncherEntry }
 
 export { EhOverlay, EhTab, ShelfTile, BrowseRow }
 
@@ -44,6 +55,56 @@ export component EhAppWindow inherits Window {
     in-out property <bool> search-kb: false;
     in-out property <[string]> history: [];
     in-out property <bool> history-hint: false;
+    // overlays
+    in-out property <image> hatch;
+    in-out property <[string]> more-labels: [];
+    in-out property <string> more-group-value: "";
+    in-out property <string> more-sort-value: "";
+    in-out property <string> source-title: "";
+    in-out property <[string]> source-labels: [];
+    in-out property <int> source-selected: 0;
+    in-out property <string> chooser-title: "";
+    in-out property <string> chooser-current: "";
+    in-out property <int> chooser-rows: 0;
+    in-out property <int> chooser-selected: -1;
+    in-out property <[string]> chooser-labels: [];
+    in-out property <[string]> context-labels: [];
+    in-out property <int> context-rows: 0;
+    in-out property <string> dl-title: "";
+    in-out property <string> dl-status: "";
+    in-out property <string> sync-title: "";
+    in-out property <string> sync-line: "";
+    in-out property <string> sync-subline: "";
+    in-out property <bool> sync-show-bar: false;
+    in-out property <float> sync-bar-fill: 0.0;
+    in-out property <string> sync-stripes: "";
+    in-out property <string> settings-title: "";
+    in-out property <[string]> settings-labels: [];
+    in-out property <string> settings-api-host: "";
+    in-out property <string> settings-api-key: "";
+    in-out property <string> settings-reader: "";
+    in-out property <string> settings-dl-dir: "";
+    in-out property <string> settings-sysapp: "";
+    in-out property <int> settings-editing: -1;
+    in-out property <string> settings-save: "";
+    in-out property <string> settings-logs: "";
+    in-out property <string> settings-licenses: "";
+    in-out property <string> viewer-path: "";
+    in-out property <[string]> viewer-rows: [];
+    in-out property <bool> viewer-empty: false;
+    in-out property <string> viewer-empty-text: "";
+    in-out property <string> viewer-title: "";
+    in-out property <bool> viewer-up: false;
+    in-out property <bool> viewer-down: false;
+    in-out property <[string]> lic-names: [];
+    in-out property <[string]> lic-kinds: [];
+    in-out property <string> lic-attribution: "";
+    in-out property <string> launcher-empty: "";
+    in-out property <[LauncherEntry]> launcher-items: [];
+    in-out property <int> launcher-scroll: 0;
+    in-out property <int> launcher-body-h: 0;
+    in-out property <bool> launcher-up: false;
+    in-out property <bool> launcher-down: false;
     // self panel
     in-out property <string> clock: "";
     in-out property <int> battery-level: 0;
@@ -72,7 +133,27 @@ export component EhAppWindow inherits Window {
     callback system-bar;
     callback search-input;
     callback history-row(int);
+    callback search-outside;
     callback browse-row(int);     // absolute row index (scroll + visible)
+    callback more-row(int);
+    callback more-outside;
+    callback source-row(int);
+    callback source-outside;
+    callback chooser-row(int);
+    callback chooser-outside;
+    callback context-row(int);
+    callback context-outside;
+    callback dl-cancel;
+    callback dl-dismiss;
+    callback sync-dismiss;
+    callback settings-back;
+    callback settings-row(int);
+    callback viewer-back;
+    callback viewer-scroll(int);
+    callback lic-row(int);
+    callback launcher-back;
+    callback launcher-page(int);
+    callback launcher-cell(int);
 
     // ── grid geometry (C eh_grid.c, mirrored exactly) ──────────────────
     property <length> avail-w: self.width - 16px;
@@ -124,14 +205,14 @@ export component EhAppWindow inherits Window {
     // ── body: folder browser OR library shelf / search ─────────────────
     if (root.browse-mode): BrowseBody {
         y: 96px;
-        width: 100%;
+        width: root.width;
         height: g-bot - 96px;
         rows: root.browse-rows;
         row-tap(i) => { root.browse-row(i + root.browse-scroll); }
     }
     if (!root.browse-mode): ShelfBody {
         y: 96px;
-        width: 100%;
+        width: root.width;
         height: g-bot - 96px;
         entries: root.entries;
         grid-mode: root.grid-mode;
@@ -150,6 +231,7 @@ export component EhAppWindow inherits Window {
         tile(i, down) => { root.tile(i, down); }
         search-input => { root.search-input(); }
         history-row(i) => { root.history-row(i); }
+        outside => { root.search-outside(); }
     }
 
     Pager {
@@ -172,5 +254,140 @@ export component EhAppWindow inherits Window {
         visible: root.has-self-panel;
     }
 
-    // ── overlays land here (next waves) ─────────────────────────────────
+    // ── overlays (one deep, C overlay enum semantics) ───────────────────
+    if (root.overlay == EhOverlay.more): MoreMenu {
+        content-h: Math.floor(root.content-bottom / 1px);
+        w: Math.floor(root.width / 1px);
+        group-value: root.more-group-value;
+        sort-value: root.more-sort-value;
+        labels: root.more-labels;
+        row-tap(i) => { root.more-row(i); }
+        outside => { root.more-outside(); }
+    }
+    if (root.overlay == EhOverlay.source): SourceSheet {
+        content-h: Math.floor(root.content-bottom / 1px);
+        w: Math.floor(root.width / 1px);
+        selected: root.source-selected;
+        title: root.source-title;
+        labels: root.source-labels;
+        hatch: root.hatch;
+        row-tap(i) => { root.source-row(i); }
+        outside => { root.source-outside(); }
+    }
+    if (root.overlay == EhOverlay.group-chooser
+        || root.overlay == EhOverlay.sort-chooser): ChooserSheet {
+        content-h: Math.floor(root.content-bottom / 1px);
+        w: Math.floor(root.width / 1px);
+        rows: root.chooser-rows;
+        selected: root.chooser-selected;
+        title: root.chooser-title;
+        current: root.chooser-current;
+        labels: root.chooser-labels;
+        hatch: root.hatch;
+        row-tap(i) => { root.chooser-row(i); }
+        outside => { root.chooser-outside(); }
+    }
+    if (root.overlay == EhOverlay.context): ContextMenu {
+        screen-h: Math.floor(root.height / 1px);
+        w: Math.floor(root.width / 1px);
+        rows: root.context-rows;
+        labels: root.context-labels;
+        hatch: root.hatch;
+        row-tap(i) => { root.context-row(i); }
+        outside => { root.context-outside(); }
+    }
+    if (root.overlay == EhOverlay.download): DownloadPopup {
+        content-h: Math.floor(root.content-bottom / 1px);
+        w: Math.floor(root.width / 1px);
+        title: root.dl-title;
+        status: root.dl-status;
+        hatch: root.hatch;
+        cancel => { root.dl-cancel(); }
+        dismiss => { root.dl-dismiss(); }
+    }
+    if (root.overlay == EhOverlay.settings): SettingsPage {
+        width: root.width;
+        height: root.height;
+        title: root.settings-title;
+        card-labels: root.settings-labels;
+        api-host: root.settings-api-host;
+        api-key: root.settings-api-key;
+        reader-value: root.settings-reader;
+        dl-dir: root.settings-dl-dir;
+        sysapp-value: root.settings-sysapp;
+        editing: root.settings-editing;
+        save-label: root.settings-save;
+        logs-label: root.settings-logs;
+        licenses-label: root.settings-licenses;
+        back-icon: root.back-icon;
+        back => { root.settings-back(); }
+        row-tap(i) => { root.settings-row(i); }
+    }
+    if (root.overlay == EhOverlay.log-viewer): LogViewerPage {
+        width: root.width;
+        height: root.height;
+        title: root.viewer-title;
+        path-line: root.viewer-path;
+        rows: root.viewer-rows;
+        empty: root.viewer-empty;
+        empty-text: root.viewer-empty-text;
+        up-ok: root.viewer-up;
+        down-ok: root.viewer-down;
+        back-icon: root.back-icon;
+        back => { root.viewer-back(); }
+        scroll(d) => { root.viewer-scroll(d); }
+    }
+    if (root.overlay == EhOverlay.licenses): LicensesListPage {
+        width: root.width;
+        height: root.height;
+        title: root.viewer-title;
+        names: root.lic-names;
+        kinds: root.lic-kinds;
+        up-ok: root.viewer-up;
+        down-ok: root.viewer-down;
+        back-icon: root.back-icon;
+        back => { root.viewer-back(); }
+        scroll(d) => { root.viewer-scroll(d); }
+        row-tap(i) => { root.lic-row(i); }
+    }
+    if (root.overlay == EhOverlay.license-detail): LicenseDetailPage {
+        width: root.width;
+        height: root.height;
+        title: root.viewer-title;
+        attribution: root.lic-attribution;
+        rows: root.viewer-rows;
+        up-ok: root.viewer-up;
+        down-ok: root.viewer-down;
+        back-icon: root.back-icon;
+        back => { root.viewer-back(); }
+        scroll(d) => { root.viewer-scroll(d); }
+    }
+    if (root.overlay == EhOverlay.launcher): LauncherPage {
+        width: root.width;
+        height: root.height;
+        title: root.viewer-title;
+        empty: root.launcher-items.length == 0;
+        empty-text: root.launcher-empty;
+        items: root.launcher-items;
+        scroll: root.launcher-scroll;
+        body-h: root.launcher-body-h;
+        up-ok: root.launcher-up;
+        down-ok: root.launcher-down;
+        back-icon: root.back-icon;
+        back => { root.launcher-back(); }
+        scroll-page(d) => { root.launcher-page(d); }
+        cell(i) => { root.launcher-cell(i); }
+    }
+    if (root.overlay == EhOverlay.sync): SyncSheet {
+        content-h: Math.floor(root.content-bottom / 1px);
+        w: Math.floor(root.width / 1px);
+        title: root.sync-title;
+        line: root.sync-line;
+        subline: root.sync-subline;
+        show-bar: root.sync-show-bar;
+        bar-fill: root.sync-bar-fill;
+        stripe-path: root.sync-stripes;
+        hatch: root.hatch;
+        dismiss => { root.sync-dismiss(); }
+    }
 }

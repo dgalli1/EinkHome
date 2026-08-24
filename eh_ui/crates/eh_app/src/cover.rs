@@ -141,12 +141,16 @@ fn decode_png(png: &[u8]) -> Result<(u32, u32, Vec<u8>), String> {
     // and real-world scans): replicate the sample to RGB.
     let rgb: Vec<u8> = match ct.samples() {
         4 => out
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .flat_map(|px| [px[0], px[1], px[2]])
             .collect(),
         3 => out,
         2 => out
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .flat_map(|px| [px[0], px[0], px[0]])
             .collect(),
         1 => out.iter().flat_map(|&v| [v, v, v]).collect(),
@@ -165,7 +169,9 @@ fn decode_jpeg(jpeg: &[u8]) -> Result<(u32, u32, Vec<u8>), String> {
     let rgb = match pixels.len() {
         n if n == (w as usize) * (h as usize) * 3 => pixels,
         n if n == (w as usize) * (h as usize) * 4 => pixels
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .flat_map(|px| [px[0], px[1], px[2]])
             .collect(),
         _ => {
@@ -287,8 +293,8 @@ impl<B: Framebuffer> App<B> {
         // Safe from overlay draws (screen take()n during present): use
         // the live probe when available, else the cached value.  Offline
         // counts as drained (the worker pauses, C gated it the same way).
-        let online = if self.fb.is_some() {
-            let net = self.fb.as_mut().unwrap().net_active();
+        let online = if let Some(fb) = self.fb.as_mut() {
+            let net = fb.net_active();
             self.fb_net_active = net;
             net
         } else {

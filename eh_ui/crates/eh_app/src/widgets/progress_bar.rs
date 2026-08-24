@@ -4,9 +4,6 @@
 //! share it.  The two geometry helpers are pure so they carry contract
 //! tests without a surface.
 
-use eh_hal::Rect;
-use eh_shell::{DrawCtx, GRAY_BLACK, GRAY_WHITE};
-
 /// Bar height by cover width (C draw_progress_bar): 10px on covers ≥150px
 /// wide, 6px on small thumbs.
 pub fn progress_bar_h(width: i32) -> i32 {
@@ -21,37 +18,6 @@ pub fn progress_bar_h(width: i32) -> i32 {
 /// leaves a ≥1px white margin on each side).
 pub fn progress_fill_w(width: i32, pct: i32) -> i32 {
     width * pct.clamp(0, 100) / 100
-}
-
-/// Reading-progress bar inside the bottom edge of a cover (port of C
-/// eh_grid.c draw_progress_bar): a thin white track with black outline and
-/// a black fill proportional to the percent read (0..100).
-pub fn draw_progress_bar(ctx: &mut DrawCtx, x: i32, y: i32, w: i32, h: i32, pct: i32) {
-    if w <= 0 || h <= 0 || x < 0 || y < 0 {
-        return;
-    }
-    let bar_h = progress_bar_h(w).min(h);
-    let by = y + h - bar_h;
-    let track = Rect {
-        x: x as u32,
-        y: by as u32,
-        w: w as u32,
-        h: bar_h as u32,
-    };
-    ctx.fill(track, GRAY_WHITE);
-    ctx.outline(track, 1, GRAY_BLACK);
-    let fill = progress_fill_w(w, pct);
-    if fill >= 2 && bar_h >= 3 {
-        ctx.fill(
-            Rect {
-                x: x as u32 + 1,
-                y: by as u32 + 1,
-                w: (fill - 2) as u32,
-                h: (bar_h - 2) as u32,
-            },
-            GRAY_BLACK,
-        );
-    }
 }
 
 #[cfg(test)]

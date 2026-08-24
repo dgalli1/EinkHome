@@ -939,9 +939,7 @@ version = "0.1.0"
 dependencies = [
  "eh_backend_sdl",
  "eh_hal",
- "eh_layout",
  "eh_render",
- "eh_shell",
  "jpeg-decoder",
  "mupdf",
  "parking_lot",
@@ -981,19 +979,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "eh_demo"
-version = "0.1.0"
-dependencies = [
- "eh_app",
- "eh_backend_linuxfb",
- "eh_backend_sdl",
- "eh_hal",
- "eh_layout",
- "eh_render",
- "eh_shell",
-]
-
-[[package]]
 name = "eh_hal"
 version = "0.1.0"
 
@@ -1005,14 +990,6 @@ dependencies = [
  "eh_backend_sdl",
  "eh_hal",
  "libc",
-]
-
-[[package]]
-name = "eh_layout"
-version = "0.1.0"
-dependencies = [
- "eh_hal",
- "taffy 0.13.0",
 ]
 
 [[package]]
@@ -1030,15 +1007,6 @@ version = "0.1.0"
 dependencies = [
  "eh_hal",
  "fontdue",
-]
-
-[[package]]
-name = "eh_shell"
-version = "0.1.0"
-dependencies = [
- "eh_hal",
- "eh_layout",
- "eh_render",
 ]
 
 [[package]]
@@ -1859,7 +1827,7 @@ dependencies = [
  "strum",
  "swash",
  "sys-locale",
- "taffy 0.10.1",
+ "taffy",
  "unicode-linebreak",
  "unicode-script",
  "unicode-segmentation",
@@ -4462,18 +4430,6 @@ dependencies = [
  "grid",
  "serde",
  "slotmap",
-]
-
-[[package]]
-name = "taffy"
-version = "0.13.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c034e05f6ee85a12daa63863c2245797715075c70649947aa0da54f3f2ab1d0f"
-dependencies = [
- "arrayvec",
- "serde",
- "slotmap",
- "smallvec",
 ]
 
 [[package]]

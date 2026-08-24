@@ -161,13 +161,13 @@ impl<'a> Surface<'a> {
                 PixelFormat::Grayscale8 => self.data[start..end].fill(gray),
                 PixelFormat::Rgb24 => {
                     let fill = [gray, gray, gray];
-                    for c in self.data[start..end].chunks_exact_mut(3) {
+                    for c in self.data[start..end].as_chunks_mut::<3>().0 {
                         c.copy_from_slice(&fill);
                     }
                 }
                 PixelFormat::Rgba32 => {
                     let fill = [gray, gray, gray, 0xff];
-                    for c in self.data[start..end].chunks_exact_mut(4) {
+                    for c in self.data[start..end].as_chunks_mut::<4>().0 {
                         c.copy_from_slice(&fill);
                     }
                 }
@@ -569,6 +569,127 @@ pub fn fit_width(font: &Font, size_px: f32, text: &str, max_px: f32, out: &mut S
         w += adv;
         out.push(ch);
     }
+}
+
+/// Drawing context handed to widgets for one pass.
+pub struct DrawCtx<'a> {
+    pub surf: &'a mut Surface<'a>,
+    pub font: &'a Font,
+    /// Bold face for titles/menu rows/labels (C DEFAULTFONTB).
+    pub bold: &'static Font,
+    pub glyph: &'a mut Glyph,
+    pub dirty: &'a mut Vec<Rect>,
+}
+
+impl<'a> DrawCtx<'a> {
+    pub fn fill(&mut self, rect: Rect, gray: u8) {
+        self.surf.fill_gray(rect, gray);
+        self.push(rect);
+    }
+    pub fn outline(&mut self, r: Rect, thick: u32, gray: u8) {
+        self.surf.rect_outline(r, thick, gray);
+        self.push(r);
+    }
+    pub fn hline(&mut self, x: u32, y: u32, len: u32, thick: u32, gray: u8) {
+        self.surf.hline(x, y, len, thick, gray);
+        self.push(Rect {
+            x,
+            y,
+            w: len,
+            h: thick,
+        });
+    }
+    pub fn vline(&mut self, x: u32, y: u32, len: u32, thick: u32, gray: u8) {
+        self.surf.vline(x, y, len, thick, gray);
+        self.push(Rect {
+            x,
+            y,
+            w: thick,
+            h: len,
+        });
+    }
+    /// 2D Bresenham line (the C app's `DrawLine`), tracking the bounding
+    /// box for dirty regions (over-approximated by the line thickness).
+    pub fn line(&mut self, x0: i32, y0: i32, x1: i32, y1: i32, thick: u32, gray: u8) {
+        self.surf.line(x0, y0, x1, y1, thick, gray);
+        let t = thick as i32;
+        let x = x0.min(x1).max(0);
+        let y = y0.min(y1).max(0);
+        let w = (x0 - x1).abs() + t;
+        let h = (y0 - y1).abs() + t;
+        self.push(Rect {
+            x: x as u32,
+            y: y as u32,
+            w: w as u32,
+            h: h as u32,
+        });
+    }
+    pub fn text(&mut self, x: i32, baseline: i32, size: f32, s: &str, gray: u8) {
+        let w = draw_text(self.surf, self.font, size, s, x, baseline, gray, self.glyph) as i32;
+        self.push(Rect::from_xy(x, baseline - size as i32, w, size as i32));
+    }
+    pub fn text_center(&mut self, cx: i32, baseline: i32, size: f32, s: &str, gray: u8) {
+        let w = self.font.width(s, size) as i32;
+        self.text(cx - w / 2, baseline, size, s, gray);
+    }
+
+    /// [`Self::text`] with an explicit face (the bold title font).
+    pub fn text_with(&mut self, font: &Font, x: i32, baseline: i32, size: f32, s: &str, gray: u8) {
+        let w = draw_text(self.surf, font, size, s, x, baseline, gray, self.glyph) as i32;
+        self.push(Rect::from_xy(x, baseline - size as i32, w, size as i32));
+    }
+
+    /// Centre `s` on `cx`, truncating (whole glyphs + `…`) so it never exceeds
+    /// `max_w` px AND stays within `[cx - max_w/2, cx + max_w/2]` — the C app's
+    /// `utf8_fit_width` analog for cover captions that must stay in their cell.
+    pub fn text_center_fit(
+        &mut self,
+        cx: i32,
+        baseline: i32,
+        size: f32,
+        s: &str,
+        max_w: i32,
+        gray: u8,
+    ) {
+        let full = self.font.width(s, size);
+        if full as i32 <= max_w {
+            // Fits whole; centre normally but never bleed off the left edge.
+            let x = (cx - (full as i32) / 2).max(0);
+            self.text(x, baseline, size, s, gray);
+            return;
+        }
+        // Ellipsis; cut chars until we fit inside [cx-half, cx+half].
+        let ell = self.font.width("…", size);
+        let half = max_w / 2;
+        let budget = (half * 2) as f32 - ell;
+        let chars: Vec<char> = s.chars().collect();
+        let mut cut_len = chars.len();
+        while self.font.width(&s[..byte_len(s, cut_len)], size) > budget && cut_len > 0 {
+            cut_len -= 1;
+        }
+        let shown = format!("{}…", &s[..byte_len(s, cut_len)]);
+        let w2 = self.font.width(&shown, size) as i32;
+        let x = cx - w2 / 2;
+        self.text(x, baseline, size, &shown, gray);
+    }
+    pub fn blit(&mut self, img: &[u8], w: u32, h: u32, fmt: crate::PixelFormat, at: Rect) {
+        let used = self.surf.blit_image(img, w, h, fmt, at);
+        self.push(used);
+    }
+    pub fn push(&mut self, r: Rect) {
+        if !r.is_empty() {
+            self.dirty.push(r);
+        }
+    }
+}
+
+/// Byte length of the first `n` chars of `s` (for slicing on a boundary).
+fn byte_len(s: &str, n: usize) -> usize {
+    s.chars()
+        .take(n)
+        .map(|c| c.len_utf8())
+        .sum::<usize>()
+        .min(s.len())
 }
 
 /// A reusable scratch area for the caller that needs a glyph buffer.

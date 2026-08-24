@@ -1,0 +1,98 @@
+// The "…" More menu drawer (C eh_draw_overlay_more): a solid BLACK dim
+// over the whole content area, a right-anchored white 3/4-width panel
+// divided by a 2px line at its left edge, and five 88px rows (Group by /
+// Sort by / Download all / Settings / Applications) starting at y=96.
+// Rows are white with a bold label and an optional right-aligned DGRAY
+// live value — C eh_draw_overlay_more verbatim.
+
+import { SheetGeom } from "sheet.slint";
+
+export component MoreMenu inherits Rectangle {
+    in-out property <int> content-h: 0;
+    in-out property <int> w: 0;
+    in-out property <string> group-value: "";
+    in-out property <string> sort-value: "";
+    in-out property <[string]> labels: [];
+
+    callback row-tap(int);
+    callback outside;
+
+    // Solid black over the whole content area
+    Rectangle {
+        x: 0;
+        y: 0;
+        width: 100%;
+        height: root.content-h * 1px;
+        background: black;
+    }
+    property <int> pw: SheetGeom.pw(w);
+    property <int> px: w - pw;
+
+    // white panel + 2px divider at its left edge
+    Rectangle {
+        x: px * 1px;
+        y: 0;
+        width: pw * 1px;
+        height: root.content-h * 1px;
+        background: white;
+    }
+    Rectangle {
+        x: px * 1px;
+        y: 0;
+        width: 2px;
+        height: root.content-h * 1px;
+        background: black;
+    }
+
+    for lbl[idx] in root.labels: Rectangle {
+        y: 96px + idx * 88px;
+        x: (px + 12) * 1px;
+        width: (pw - 24) * 1px;
+        height: 76px;
+        background: white;
+        Text {
+            x: 20px;    // px+32 in panel coords
+            y: 20px;
+            height: 28px;
+            vertical-alignment: center;
+            font-size: 28px;
+            font-weight: 700;
+            color: black;
+            overflow: elide;
+            width: parent.width - 40px - 160px;
+            text: lbl;
+        }
+        if (idx == 0): Text {
+            x: parent.width - 20px - self.preferred-width;
+            y: 21px;
+            height: 28px;
+            vertical-alignment: center;
+            font-size: 24px;
+            color: #555555;
+            text: root.group-value;
+        }
+        if (idx == 1): Text {
+            x: parent.width - 20px - self.preferred-width;
+            y: 21px;
+            height: 28px;
+            vertical-alignment: center;
+            font-size: 24px;
+            color: #555555;
+            text: root.sort-value;
+        }
+        TouchArea {
+            width: 100%;
+            height: 100%;
+            clicked => { root.row-tap(idx); }
+        }
+    }
+
+    // outside tap dismisses (the black dim area left of the panel)
+    TouchArea {
+        x: 0;
+        y: 0;
+        width: px * 1px;
+        height: root.content-h * 1px;
+        clicked => { root.outside(); }
+    }
+}

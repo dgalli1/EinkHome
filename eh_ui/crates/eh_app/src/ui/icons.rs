@@ -6,7 +6,8 @@
 
 use eh_hal::PixelFormat;
 use eh_render::{Glyph, Surface};
-use eh_shell::DrawCtx;
+
+use eh_render::DrawCtx;
 use slint::Image;
 
 use crate::app::{Source, ViewMode};
@@ -22,7 +23,7 @@ fn bake(size: (u32, u32), white_bg: bool, draw: impl FnOnce(&mut DrawCtx)) -> Im
     let (w, h) = (size.0 as usize, size.1 as usize);
     let mut buf = vec![0xff_u8; w * h * 4];
     if !white_bg {
-        for px in buf.chunks_exact_mut(4) {
+        for px in buf.as_chunks_mut::<4>().0 {
             px[0] = 0;
             px[1] = 0;
             px[2] = 0;
@@ -31,7 +32,7 @@ fn bake(size: (u32, u32), white_bg: bool, draw: impl FnOnce(&mut DrawCtx)) -> Im
     let mut glyph = Glyph::new();
     {
         let font = crate::shelf::load_font();
-        let bold = eh_shell::bold_font();
+        let bold = crate::shelf::load_bold_font();
         let mut surf = Surface::new(&mut buf, w as u32, h as u32, w * 4, PixelFormat::Rgba32);
         let mut dirty = Vec::new();
         let mut ctx = DrawCtx {
@@ -43,15 +44,17 @@ fn bake(size: (u32, u32), white_bg: bool, draw: impl FnOnce(&mut DrawCtx)) -> Im
         };
         draw(&mut ctx);
     }
-    Image::from_rgba8(slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(
-        &buf,
-        w as u32,
-        h as u32,
-    ))
+    Image::from_rgba8(
+        slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(&buf, w as u32, h as u32),
+    )
 }
 
 /// All baked icons for one boot.
 pub struct Icons {
+    /// 1x2 hatch tile (LGRAY line + transparent row): stretched with
+    /// nearest-neighbour sampling it reproduces the C eh_dim_content
+    /// every-other-line dim exactly.
+    pub hatch: Image,
     pub house: Image,
     pub back: Image,
     pub source_kavita: Image,
@@ -109,7 +112,19 @@ pub fn bake_all() -> Icons {
         }
     });
     let _ = Source::Kavita;
+    let hatch = {
+        // row 0 = LGRAY, row 1 = fully transparent
+        let mut buf = vec![0u8; 8];
+        buf[0] = 0xaa;
+        buf[1] = 0xaa;
+        buf[2] = 0xaa;
+        buf[3] = 0xff;
+        Image::from_rgba8(
+            slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(&buf, 1, 2),
+        )
+    };
     Icons {
+        hatch,
         house,
         back,
         source_kavita,

@@ -142,3 +142,13 @@ pub(crate) fn load_font() -> &'static Font {
 pub fn shelf_font() -> &'static Font {
     load_font()
 }
+
+/// The bold UI face (the inkview DEFAULTFONTB stand-in: icon baking and
+/// the TXT-cover typesetter draw with it).
+pub(crate) fn load_bold_font() -> &'static Font {
+    static FONT: std::sync::LazyLock<Font> = std::sync::LazyLock::new(|| {
+        Font::from_bytes(include_bytes!("../../../fonts/DejaVuSans-Bold.ttf"))
+            .expect("embed bold font")
+    });
+    &FONT
+}

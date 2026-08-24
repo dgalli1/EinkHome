@@ -3,11 +3,11 @@
 //! the C app's eh_hit_top_bar / eh_hit_pager / eh_hit_thumbnail +
 //! eh_book_press_action model.
 //!
-//! The app is the ONLY owner of the [`Screen`]: navigation (page flip,
-//! back) rebuilds the screen from the same framebuffer, mirroring the C
-//! app's full-redraw navigation. Overlays (More menu, Settings, Launcher)
-//! are drawn by the app on top of the screen's canvas and flush their own
-//! region with a partial update.
+//! The app owns the framebuffer and the Slint bridge: navigation (page
+//! flip, back) re-syncs the page model into the Slint tree, mirroring the
+//! C app's full-redraw navigation. Overlays are Slint subtrees toggled by
+//! the `overlay` property; present() renders the whole tree and flushes
+//! only the renderer's dirty region (one partial update per input).
 
 use std::path::{Path, PathBuf};
 
@@ -16,9 +16,8 @@ use eh_hal::{Framebuffer, InputEvent, KeyCode, Rect};
 use crate::client::ApiClient;
 use crate::config::{parse_kv_file, Config};
 use crate::cover;
-use crate::shelf::{self, ShelfEntry};
+use crate::shelf::ShelfEntry;
 use crate::store::Store;
-use crate::widgets::chooser::ChooserKind;
 use crate::widgets::sync_popup::SyncPopup;
 
 mod data;
@@ -126,6 +125,14 @@ impl Source {
             Source::Folder => "folder".to_string(),
         }
     }
+    /// The i18n key of the source's display label (C source_short_label).
+    pub fn ui_label_key(self) -> &'static str {
+        match self {
+            Source::Local => "source.local",
+            Source::Folder => "source.folder",
+            Source::Kavita => "source.kavita",
+        }
+    }
 }
 
 /// Shelf rendering mode (C `BsViewMode`, EH_VIEW_GRID/LIST).
@@ -189,6 +196,10 @@ pub struct App<B: Framebuffer> {
     /// press — the tile-release action consumes it (opens the context
     /// menu instead of activating the tile).
     pub(crate) pending_long: bool,
+    /// Set when the release that just landed ended a drag (>48px of
+    /// travel) — the launcher's cell-release action consumes it (a drag
+    /// must not launch).
+    pub(crate) pending_drag: bool,
     /// Framebuffer facts cached so overlay draws (which run while
     /// `fb` is taken inside present) never need `fb()` — a re-entrant
     /// `fb()` there panics.  Refreshed whenever the fb is alive (see
@@ -385,12 +396,14 @@ impl<B: Framebuffer> App<B> {
             if fb.needs_self_panel() {
                 (s.width, s.height, s.height.saturating_sub(106), 106)
             } else {
-                (s.width, s.height, s.content_height(), 0)
+                (s.width, s.content_height(), s.content_height(), 0)
             }
         };
         // The Slint bridge: platform (once per thread), window, fonts,
-        // baked icons, callback wiring.  Sized to the full panel; the
-        // content band is a layout property.
+        // baked icons, callback wiring.  The window is the CANVAS the
+        // renderer paints into — on firmware-panel devices the canvas
+        // excludes the strip the firmware draws itself, so the window
+        // height is the content height there (sh == content_bottom).
         let ui = crate::ui::Ui::new(sw, sh);
         let source = Source::from_config(&config.source);
         // Persisted grouping preset (`group=` in bookshelf.cfg): restore
@@ -400,6 +413,7 @@ impl<B: Framebuffer> App<B> {
             fb: Some(fb),
             ui,
             pending_long: false,
+            pending_drag: false,
             fb_screen_w: sw,
             fb_net_active: true,
             fb_profile: eh_hal::DeviceProfile::default(),
@@ -658,7 +672,7 @@ mod tests {
     /// buffer, `live_keyboard_text` exposes it while open, and
     /// `cancel_keyboard` drops it WITHOUT firing the commit callback —
     /// the contract the inkview backend implements over the firmware.
-    struct FakeKb {
+    pub(crate) struct FakeKb {
         px: Vec<u8>,
         buf: RefCell<Vec<u8>>,
         open: RefCell<bool>,
@@ -777,33 +791,33 @@ mod tests {
         // flush exactly once per frame.
         let mut app = mk_app("ovflush");
         app.present(); // initial shelf frame
-        app.screen().framebuffer().refreshes.borrow_mut().clear();
+        app.fb().refreshes.borrow_mut().clear();
 
         // Opening the launcher: one partial update carrying the merged
         // base + overlay regions.
         app.set_overlay(Overlay::Launcher);
         app.present();
         {
-            let log = app.screen().framebuffer().refreshes.borrow();
+            let log = app.fb().refreshes.borrow();
             assert_eq!(log.len(), 1, "open produced {log:?} updates for one frame");
             assert_eq!(log[0].1, eh_hal::RefreshMode::Partial);
         }
 
-        // A dirty frame while it stays open (a drag-scroll step): still
-        // exactly one update, never a bare-base flash in front of it.
-        app.screen().framebuffer().refreshes.borrow_mut().clear();
+        // A dirty frame while it stays open (a drag-scroll step): at most
+        // one update — never a bare-base flash in front of the overlay
+        // (the renderer may skip the flush entirely when nothing changed).
+        app.fb().refreshes.borrow_mut().clear();
         app.dirty = true;
         app.present();
-        let log = app.screen().framebuffer().refreshes.borrow();
-        assert_eq!(
-            log.len(),
-            1,
+        let log = app.fb().refreshes.borrow();
+        assert!(
+            log.len() <= 1,
             "drag step produced {log:?} updates for one frame"
         );
     }
 
     fn kb(app: &mut App<FakeKb>) -> &FakeKb {
-        app.screen().framebuffer()
+        app.fb()
     }
 
     fn tap(app: &mut App<FakeKb>, x: i32, y: i32) {
@@ -882,10 +896,9 @@ mod tests {
         assert_eq!(app.suggestions, vec!["potter"]);
         app.present(); // compute the rebuilt page's layout before tapping
 
-        // Tap the first row widget (index 3: [0] top bar, [1] input,
-        // [2] body container).
-        let r = app.screen().widget_rect(3);
-        tap(&mut app, (r.x + r.w / 2) as i32, (r.y + r.h / 2) as i32);
+        // Tap the first suggestion row (the input row is the 88px band
+        // below the 96px bar; rows run 96px apart from there).
+        tap(&mut app, 536, 96 + 88 + 48);
 
         // C CloseKeyboard + app-side commit: keyboard cancelled (no commit
         // callback fired), the tapped term filters the shelf.
@@ -910,9 +923,7 @@ mod tests {
         app.edit_search();
         app.present(); // layout with the (empty-suggestion) history list
 
-        let r = app.screen().widget_rect(3);
-        assert_eq!(r.h, 96, "history row must keep its fixed 96px height");
-        tap(&mut app, 536, 500);
+        tap(&mut app, 536, 500); // below the single 96px history row
 
         assert_eq!(app.query, "", "outside tap must not commit");
         assert_eq!(app.tab, Tab::Search);
@@ -930,8 +941,7 @@ mod tests {
 
         // Tap the input row itself: with the keyboard open this is the
         // C outside-band branch — dismiss, stay on Search, keep query.
-        let r = app.screen().widget_rect(1);
-        tap(&mut app, (r.x + r.w / 2) as i32, (r.y + r.h / 2) as i32);
+        tap(&mut app, 536, 96 + 44);
 
         assert!(*kb(&mut app).cancelled.borrow());
         assert!(!app.search_kb);
@@ -969,8 +979,7 @@ mod tests {
         assert!(app.suggestions.is_empty());
         app.present();
 
-        let r = app.screen().widget_rect(3); // first history row
-        tap(&mut app, (r.x + r.w / 2) as i32, (r.y + r.h / 2) as i32);
+        tap(&mut app, 536, 96 + 88 + 48); // first history row
 
         assert!(*kb(&mut app).cancelled.borrow());
         assert_eq!(app.query, "dune");
@@ -1108,8 +1117,9 @@ mod tests {
         app.enqueue_download(&b.id, &cur);
         assert_eq!(app.overlay, Overlay::Download);
         assert_eq!(app.downloader.pending, 1);
+        app.present(); // sync the sheet into the Slint tree before tapping
         let r = crate::widgets::download::dl_cancel_rect(1072, app.content_bottom);
-        app.tap_overlay((r.x + r.w / 2) as i32, (r.y + r.h / 2) as i32);
+        tap(&mut app, (r.x + r.w / 2) as i32, (r.y + r.h / 2) as i32);
         assert_eq!(
             app.overlay,
             Overlay::None,
@@ -1318,9 +1328,11 @@ mod tests {
         let mut app = mk_app("syncdismiss");
         app.sync_popup_open();
         app.syncing = true; // simulate the live run
+        app.present(); // sync the sheet into the Slint tree before tapping
         tap(&mut app, 536, 700);
         assert_eq!(app.overlay, Overlay::Sync, "modal while the sync runs");
         app.apply_sync_event(crate::sync::SyncEvent::Failed("boom".into()));
+        app.present(); // the sheet must be current for the dismiss tap
         assert!(!app.syncing);
         assert_eq!(app.sync_popup.stage, SyncStage::Fail);
         assert_eq!(app.sync_popup.error, crate::i18n::tr("sync.failed"));
@@ -1403,7 +1415,7 @@ mod tests {
         // Sheet geometry per widgets::sheet::open_sheet: centred on the
         // content area, w*3/4 wide, 190 high.
         let pw = 1072u32 * 3 / 4;
-        let ph = crate::widgets::sync_popup::SYNC_SHEET_H as i32;
+        let ph = 190i32; // the Slint sync sheet's fixed ph (C popup_geom 190)
         let sx = (1072 - pw) / 2;
         let sy = (((app.content_bottom as i32 - ph) / 2).max(0)) as u32;
         // Border row: the sheet outline spans nearly the full panel width.

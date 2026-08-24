@@ -1,0 +1,55 @@
+// Shared modal-sheet pieces (C eh_dim_content + popup_geom): the
+// every-other-line LGRAY hatch dim (a 1x2 tile stretched with nearest-
+// neighbour sampling reproduces it exactly) and the centred 3/4-width
+// white panel with the C double border.
+
+import { BrowseRow } from "types.slint";
+
+// The hatch backdrop: LGRAY 1px line every other row over [y0, y1).
+export component HatchDim inherits Image {
+    in-out property <length> dim-y0: 0px;
+    in-out property <length> dim-y1: 0px;
+    x: 0;
+    y: dim-y0;
+    width: 100%;
+    height: dim-y1 - dim-y0;
+    source: root.hatch;
+    image-rendering: pixelated;
+    in-out property <image> hatch;
+}
+
+// The centred white panel: pw = w*3/4 (integer parity with the C),
+// py = (center-base - ph)/2 clamped at 0, 2px border + optional 1px inset.
+export component SheetPanel inherits Rectangle {
+    in-out property <int> sheet-px: 0;
+    in-out property <int> sheet-py: 0;
+    in-out property <int> sheet-pw: 0;
+    in-out property <int> sheet-ph: 0;
+    in-out property <bool> double-border: false;
+
+    x: sheet-px * 1px;
+    y: sheet-py * 1px;
+    width: sheet-pw * 1px;
+    height: sheet-ph * 1px;
+    background: white;
+    border-width: 2px;
+    border-color: black;
+    if (double-border): Rectangle {
+        x: 1px;
+        y: 1px;
+        width: parent.width - 2px;
+        height: parent.height - 2px;
+        border-width: 1px;
+        border-color: black;
+    }
+}
+
+// Sheet geometry shared with the Rust tap handlers (C popup_geom):
+// pw = w*3/4, px = (w-pw)/2, py = (center-base - ph)/2 clamped at 0.
+export global SheetGeom {
+    public pure function px(w: int) -> int { return Math.floor((w - Math.floor(w * 3 / 4)) / 2); }
+    public pure function pw(w: int) -> int { return Math.floor(w * 3 / 4); }
+    public pure function py(center-base: int, ph: int) -> int {
+        return Math.max(0, Math.floor((center-base - ph) / 2));
+    }
+}

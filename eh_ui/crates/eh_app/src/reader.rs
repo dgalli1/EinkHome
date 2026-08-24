@@ -190,7 +190,7 @@ impl<B: Framebuffer> App<B> {
                     path.display()
                 ));
                 self.fb()
-                    .launch_app(rp, title, &[path_str.clone()])
+                    .launch_app(rp, title, std::slice::from_ref(&path_str))
             }
             _ => {
                 crate::logger::log(&format!(

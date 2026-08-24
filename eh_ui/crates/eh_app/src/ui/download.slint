@@ -1,0 +1,85 @@
+// The modal download-progress popup (C eh_draw_dl_popup): hatch dim
+// starting BELOW the top bar (the icons stay visible), a centred 160px
+// white sheet with the status line + tally, and a boxed X cancel button.
+
+import { HatchDim, SheetGeom, SheetPanel } from "sheet.slint";
+
+export component DownloadPopup inherits Rectangle {
+    in-out property <int> content-h: 0;
+    in-out property <int> w: 0;
+    in-out property <string> title: "";
+    in-out property <string> status: "";
+    in-out property <image> hatch;
+
+    callback cancel;
+    callback dismiss;
+
+    TouchArea {
+        x: 0;
+        y: 0;
+        width: 100%;
+        height: 100%;
+        clicked => { root.dismiss(); }
+    }
+
+    HatchDim {
+        dim-y0: 96px;
+        dim-y1: root.content-h * 1px;
+        hatch: root.hatch;
+    }
+
+    property <int> pw: SheetGeom.pw(w);
+    property <int> px: SheetGeom.px(w);
+    property <int> ph: 160;
+    property <int> py: SheetGeom.py(content-h, ph);
+
+    SheetPanel {
+        sheet-px: px;
+        sheet-py: py;
+        sheet-pw: pw;
+        sheet-ph: ph;
+    }
+
+    Text {
+        x: (px + 32) * 1px;
+        y: (py + 42) * 1px;
+        height: 28px;
+        vertical-alignment: center;
+        font-size: 28px;
+        color: black;
+        text: root.title;
+    }
+    Text {
+        x: (px + 32) * 1px;
+        y: (py + 92) * 1px;
+        height: 28px;
+        vertical-alignment: center;
+        font-size: 24px;
+        color: black;
+        text: root.status;
+    }
+
+    // cancel X (48x48 box at the sheet's right edge, aligned with the
+    // status line; 3px diagonals)
+    Rectangle {
+        x: (px + pw - 48 - 24) * 1px;
+        y: (py + 96) * 1px;
+        width: 48px;
+        height: 48px;
+        background: white;
+        border-width: 2px;
+        border-color: black;
+        Path {
+            width: 48px;
+            height: 48px;
+            commands: "M 12 12 L 36 36 M 36 12 L 12 36";
+            stroke: black;
+            stroke-width: 3px;
+        }
+        TouchArea {
+            width: 100%;
+            height: 100%;
+            clicked => { root.cancel(); }
+        }
+    }
+}

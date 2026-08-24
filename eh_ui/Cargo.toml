@@ -3,14 +3,11 @@ resolver = "2"
 members = [
     "crates/eh_hal",
     "crates/eh_render",
-    "crates/eh_layout",
-    "crates/eh_shell",
     "crates/eh_backend_sdl",
     "crates/eh_backend_linuxfb",
     "crates/eh_backend_inkview",
     "crates/eh_pb",
     "crates/eh_app",
-    "crates/eh_demo",
     "crates/eh_host",
 ]
 

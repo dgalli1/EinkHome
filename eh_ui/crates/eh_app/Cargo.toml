@@ -10,8 +10,6 @@ crate-type = ["rlib"]
 [dependencies]
 eh_hal = { path = "../eh_hal" }
 eh_render = { path = "../eh_render" }
-eh_layout = { path = "../eh_layout" }
-eh_shell = { path = "../eh_shell" }
 
 # UI toolkit: the whole presentation layer (screens, widgets, hit-testing)
 # is Slint markup rendered by the software renderer straight into the
@@ -60,6 +58,7 @@ parking_lot = "0.12"
 
 [build-dependencies]
 slint-build = "1.17"
+
 
 [features]
 default = []

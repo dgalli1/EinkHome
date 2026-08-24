@@ -22,6 +22,7 @@ export component TopBar inherits Rectangle {
     in-out property <bool> syncing: false;
     in-out property <int> sync-angle: 0;
     in-out property <bool> search-tab: false;
+    in-out property <bool> title-bold: false;   // overlay headers draw bold
     in-out property <bool> grid-mode: true;
     in-out property <image> house-icon;
     in-out property <image> back-icon;
@@ -79,9 +80,8 @@ export component TopBar inherits Rectangle {
     // centered title (C: 44px, glyph top at y0+28, budget between the
     // flanking stacks)
     Text {
-        property <length> left-w: root.search-tab
-            ? 112px : (112px + 176px);
-        property <length> right-w: 8px + 4 * 96px;
+        property <length> left-w: root.search-tab ? 0px : (112px + 176px);
+        property <length> right-w: root.search-tab ? 0px : (8px + 4 * 96px);
         property <length> band-w: Math.max(root.width - left-w - right-w, 64px);
         x: left-w;
         width: band-w;
@@ -90,6 +90,7 @@ export component TopBar inherits Rectangle {
         vertical-alignment: center;
         horizontal-alignment: center;
         font-size: 44px;
+        font-weight: root.title-bold ? 700 : 400;
         color: black;
         overflow: elide;
         text: root.top-title;
@@ -117,8 +118,7 @@ export component TopBar inherits Rectangle {
         Image {
             source: root.sync-icon;
             transform-rotation: root.syncing ? root.sync-angle * 1deg : 0deg;
-            rotation-origin-x: self.width / 2;
-            rotation-origin-y: self.height / 2;
+            transform-origin: { x: self.width / 2, y: self.height / 2 };
         }
     }
 

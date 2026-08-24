@@ -6,11 +6,9 @@
 
 use std::path::Path;
 
-use eh_hal::{Framebuffer, Rect};
-use eh_layout::taffy::{self, Dimension, Style};
-use eh_shell::{DrawCtx, Screen, Widget, GRAY_LGRAY, GRAY_WHITE};
+use eh_hal::Framebuffer;
 
-use crate::app::{App, Source, ViewMode};
+use crate::app::App;
 use crate::store::Book;
 
 use super::{
@@ -120,7 +118,10 @@ impl Browser {
     /// Visible row count: the body runs from below the top bar to the
     /// content bottom (C browser_rows_visible, browser branch).
     pub fn rows_visible(content_bottom: u32) -> usize {
-        let avail = (content_bottom as i32 - (crate::appui::TOP_BAR_H + crate::appui::TOP_BAR_PAD) as i32 - 8).max(1);
+        let avail = (content_bottom as i32
+            - (crate::appui::TOP_BAR_H + crate::appui::TOP_BAR_PAD) as i32
+            - 8)
+        .max(1);
         (avail as u32 / FOLDER_ROW_H).max(1) as usize
     }
 
@@ -194,7 +195,6 @@ pub fn folder_book(path: &str, name: &str) -> Book {
     }
 }
 
-
 /// Open the folder browser at the storage root (C source-tap →
 /// eh_browse_start): the browser becomes the shelf body.
 pub fn start_browse<B: Framebuffer>(app: &mut App<B>) {
@@ -265,6 +265,11 @@ pub fn tap_picker_row<B: Framebuffer>(app: &mut App<B>, idx: usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
+
+    fn touch(dir: &Path, name: &str) {
+        std::fs::write(dir.join(name), b"x").unwrap();
+    }
     #[test]
     fn browser_navigation_transitions() {
         let dir = tempfile::tempdir().unwrap();

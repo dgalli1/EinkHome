@@ -7,9 +7,20 @@
 
 use eh_hal::Rect;
 
-use eh_shell::{DrawCtx, GRAY_BLACK};
+use eh_render::DrawCtx;
 
 use crate::app::{Source, ViewMode};
+
+/// Greyscale palette values (identical to the inkview colour constants
+/// the C app uses: BLACK/DGRAY/LGRAY/WHITE).
+pub const GRAY_BLACK: u8 = 0x00;
+pub const GRAY_DGRAY: u8 = 0x55;
+pub const GRAY_LGRAY: u8 = 0xaa;
+pub const GRAY_WHITE: u8 = 0xff;
+
+/// Corner scroll-button geometry (C EH_SCROLL_BTN_*).
+pub const SCROLL_BTN_W: u32 = 150;
+pub const SCROLL_BTN_H: u32 = 96;
 
 /// Layout constants (mirror eh_core.h).
 pub const TOP_BAR_H: u32 = 96;

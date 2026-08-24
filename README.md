@@ -20,9 +20,8 @@ Makefile            # build entry points: bookshelf.app / .armhf.app /
 eh_ui/              # the Rust workspace:
   crates/eh_hal     #   platform contract: framebuffer, input, keyboard,
                     #   network seams (the KOReader device-abstraction analog)
-  crates/eh_render  #   surface rasterisation + fontdue text
-  crates/eh_layout  #   taffy-based flex layout
-  crates/eh_shell   #   Screen/widget runtime over any eh_hal backend
+  crates/eh_render  #   offline rasteriser (icon baking, TXT-cover art)
+  crates/eh_app/src/ui  #   Slint markup + bridge (screens, input, painting)
   crates/eh_app     #   the app: shelf, search, downloads, sync, settings,
                     #   launcher, sysapp promote, store (SQLite), config
   crates/eh_backend_inkview  # PocketBook firmware backend (device/emulator)

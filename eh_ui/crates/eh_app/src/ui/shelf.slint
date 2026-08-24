@@ -45,6 +45,8 @@ component GridTile inherits Rectangle {
     property <bool> sheets: stack && card-cw > 15 && card-ch > 15;
 
     TouchArea {
+            width: 100%;
+            height: 100%;
         pointer-event(e) => {
             if (e.kind == PointerEventKind.down) { root.press(idx); }
             if (e.kind == PointerEventKind.up) { root.release(idx); }
@@ -162,6 +164,8 @@ component ListRow inherits Rectangle {
     property <length> thumb-w: 89px;    // thumb-h * 2 / 3
 
     TouchArea {
+            width: 100%;
+            height: 100%;
         pointer-event(e) => {
             if (e.kind == PointerEventKind.down) { root.press(idx); }
             if (e.kind == PointerEventKind.up) { root.release(idx); }
@@ -232,6 +236,7 @@ component ListRow inherits Rectangle {
 
 // ── search page body: input row + history / suggestion rows ────────────
 component SearchBody inherits Rectangle {
+    init => { debug("SearchBody h:", self.height); }
     in-out property <string> query: "";
     in-out property <string> placeholder: "";
     in-out property <bool> search-kb: false;
@@ -241,8 +246,19 @@ component SearchBody inherits Rectangle {
     in-out property <image> input-icon-inv;
     callback search-input;
     callback row-tap(int);
+    callback outside;
 
-    // input row: 88px band, bordered box inset 16/10
+    // outside-tap catcher (behind everything): with the keyboard open any
+    // tap that misses the input row and the rows dismisses it (C
+    // fallthrough branch of the search-body tap handler)
+    TouchArea {
+            width: 100%;
+            height: 100%;
+        clicked => { root.outside(); }
+    }
+
+    // input row: 88px band, bordered box inset 16/10 (visuals only — the
+    // tap target is the SearchBody-level TouchArea below)
     Rectangle {
         y: 0;
         width: 100%;
@@ -280,13 +296,15 @@ component SearchBody inherits Rectangle {
                 background: white;
             }
         }
-        TouchArea {
-            x: 16px;
-            y: 10px;
-            width: parent.width - 32px;
-            height: 68px;
-            clicked => { root.search-input(); }
-        }
+    }
+
+    // the input row's tap target (SearchBody-level: the box inset 16/10)
+    TouchArea {
+        x: 16px;
+        y: 10px;
+        width: parent.width - 32px;
+        height: 68px;
+        clicked => { root.search-input(); }
     }
 
     // history / suggestion rows (fixed 96px, light separator)
@@ -315,12 +333,13 @@ component SearchBody inherits Rectangle {
             background: #aaaaaa;
         }
         TouchArea {
-            clicked => { root.row-tap(idx); }
+            width: 100%;
+            height: 100%;
             enabled: !root.hint;
+            clicked => { root.row-tap(idx); }
         }
     }
 }
-
 // ── the body container: library grid/list OR the search page ───────────
 export component ShelfBody inherits Rectangle {
     in-out property <[ShelfTile]> entries: [];
@@ -341,11 +360,12 @@ export component ShelfBody inherits Rectangle {
     callback tile(int, bool);
     callback search-input;
     callback history-row(int);
+    callback outside;
 
     if (root.search-tab): SearchBody {
-        y: 16px;    // the grid container's 16px top padding applies too
+        y: 0;
         width: 100%;
-        height: parent.height - 16px;
+        height: parent.height;
         query: root.query;
         placeholder: root.search-placeholder;
         search-kb: root.search-kb;
@@ -355,6 +375,7 @@ export component ShelfBody inherits Rectangle {
         input-icon-inv: root.input-icon-inv;
         search-input => { root.search-input(); }
         row-tap(i) => { root.history-row(i); }
+        outside => { root.outside(); }
     }
     if (!root.search-tab && root.grid-mode): Rectangle {
         x: root.grid-x0;

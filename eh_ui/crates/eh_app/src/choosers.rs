@@ -7,7 +7,6 @@
 use eh_hal::Framebuffer;
 
 use crate::app::{App, Overlay};
-use crate::widgets::chooser::ChooserKind;
 
 impl<B: Framebuffer> App<B> {
     /// Open the Group by chooser sheet.
@@ -22,35 +21,27 @@ impl<B: Framebuffer> App<B> {
         self.set_overlay(Overlay::SortChooser);
     }
 
-    /// A chooser-sheet row (or outside) tap: apply the choice, rebuild the
-    /// view, close.  Outside the sheet dismisses (C sheet behaviour).
-    pub(crate) fn tap_chooser(&mut self, x: i32, y: i32, kind: ChooserKind) {
-        for (i, r) in self.chooser_rects.iter().enumerate() {
-            if r.contains(x, y) {
-                match kind {
-                    ChooserKind::Group => {
-                        let offer = self.group_offer();
-                        if let Some(g) = offer.get(i) {
-                            self.set_group(*g);
-                        }
-                    }
-                    ChooserKind::Sort => {
-                        let mode = match i {
-                            1 => crate::store::SortMode::Author,
-                            2 => crate::store::SortMode::Series,
-                            3 => crate::store::SortMode::Recent,
-                            _ => crate::store::SortMode::Title,
-                        };
-                        self.sort = mode;
-                        self.rebuild_view();
-                    }
+    /// A chooser-sheet row tap (Slint reports the index; C eh_on_tap's
+    /// row branch): apply the choice, rebuild the view, close.
+    pub(crate) fn chooser_row(&mut self, i: usize) {
+        match self.overlay {
+            Overlay::GroupChooser => {
+                let offer = self.group_offer();
+                if let Some(g) = offer.get(i) {
+                    self.set_group(*g);
                 }
-                self.chooser_rects.clear();
-                self.set_overlay(Overlay::None);
-                return;
+            }
+            _ => {
+                let mode = match i {
+                    1 => crate::store::SortMode::Author,
+                    2 => crate::store::SortMode::Series,
+                    3 => crate::store::SortMode::Recent,
+                    _ => crate::store::SortMode::Title,
+                };
+                self.sort = mode;
+                self.rebuild_view();
             }
         }
-        // Tap outside the sheet → dismiss.
         self.chooser_rects.clear();
         self.set_overlay(Overlay::None);
     }

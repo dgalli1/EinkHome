@@ -1,0 +1,100 @@
+// The Group by / Sort by chooser sheet (C eh_draw_group / eh_draw_sort):
+// hatch dim + centred sheet (double border), a bold title + DGRAY
+// current-value header, divider, and N 96px rows (84px boxes, selected
+// inverted).  ph = 96 + n*96 + 24, centred on the CONTENT area.
+
+import { HatchDim, SheetGeom, SheetPanel } from "sheet.slint";
+
+export component ChooserSheet inherits Rectangle {
+    in-out property <int> content-h: 0;
+    in-out property <int> w: 0;
+    in-out property <int> rows: 0;
+    in-out property <int> selected: -1;
+    in-out property <string> title: "";
+    in-out property <string> current: "";
+    in-out property <[string]> labels: [];
+    in-out property <image> hatch;
+
+    callback row-tap(int);
+    callback outside;
+
+    TouchArea {
+        x: 0;
+        y: 0;
+        width: 100%;
+        height: 100%;
+        clicked => { root.outside(); }
+    }
+
+    HatchDim {
+        dim-y0: 0px;
+        dim-y1: root.content-h * 1px;
+        hatch: root.hatch;
+    }
+
+    property <int> pw: SheetGeom.pw(w);
+    property <int> px: SheetGeom.px(w);
+    property <int> ph: Math.max(96 + rows * 96 + 24, 1);
+    property <int> py: SheetGeom.py(content-h, ph);
+
+    SheetPanel {
+        sheet-px: px;
+        sheet-py: py;
+        sheet-pw: pw;
+        sheet-ph: ph;
+        double-border: true;
+    }
+
+    // header: bold title + DGRAY current value, divider under
+    Text {
+        x: (px + 24) * 1px;
+        y: (py + 8) * 1px;
+        height: 28px;
+        vertical-alignment: center;
+        font-size: 28px;
+        font-weight: 700;
+        color: black;
+        text: root.title;
+    }
+    Text {
+        x: (px + 24) * 1px;
+        y: (py + 36) * 1px;
+        height: 28px;
+        vertical-alignment: center;
+        font-size: 24px;
+        color: #555555;
+        text: root.current;
+    }
+    Rectangle {
+        x: (px + 24) * 1px;
+        y: (py + 76) * 1px;
+        width: (pw - 48) * 1px;
+        height: 2px;
+        background: #aaaaaa;
+    }
+
+    for lbl[idx] in root.labels: Rectangle {
+        x: (px + 12) * 1px;
+        y: (py + 84 + idx * 96) * 1px;
+        width: (pw - 24) * 1px;
+        height: 84px;
+        background: root.selected == idx ? black : white;
+        border-width: 1px;
+        border-color: black;
+        Text {
+            x: 20px;
+            y: 21px;
+            height: 28px;
+            vertical-alignment: center;
+            font-size: 26px;
+            font-weight: 700;
+            color: root.selected == idx ? white : black;
+            text: lbl;
+        }
+        TouchArea {
+            width: 100%;
+            height: 100%;
+            clicked => { root.row-tap(idx); }
+        }
+    }
+}
