@@ -764,7 +764,9 @@ class SyncLedger:
         """Smallest ``last_rev`` any device has reported, or None when
         no device has ever posted a cursor."""
         with self._rd_lock:
-            row = self.rdcon.execute("SELECT MIN(last_rev) FROM device_cursors").fetchone()
+            row = self.rdcon.execute(
+                "SELECT MIN(last_rev) FROM device_cursors"
+            ).fetchone()
         return int(row[0]) if row and row[0] is not None else None
 
     def compact_tombstones(self, min_rev: int | None = None) -> int:

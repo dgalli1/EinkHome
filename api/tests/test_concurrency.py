@@ -13,6 +13,7 @@ and these tests — rely on three guarantees:
 from __future__ import annotations
 
 import json
+import threading
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
@@ -90,3 +91,49 @@ def test_state_report_echoes_device_id(server):
     )
     assert status == 202
     assert json.loads(body)["deviceId"] == "dev-x"
+
+
+def test_walk_page_commits_interleaved_with_delta_reads(tmp_path):
+    """The last untested concurrent pair: background walk page-commits
+    (writer connection, under _lock) vs delta reads (WAL-snapshot
+    reader connection, under _rd_lock).  Readers must always observe a
+    consistent prefix of committed pages — never a torn or partially
+    applied batch."""
+    from storage.ledger import SyncLedger
+    from test_ledger import FakeProvider, _meta
+
+    led = SyncLedger(str(tmp_path / "walk.db"))
+    errors: list[str] = []
+    stop = threading.Event()
+
+    def reader() -> None:
+        cursor = 0
+        while not stop.is_set():
+            entries, more = led.delta(cursor, 50)
+            # Every returned entry must sit strictly beyond the asked
+            # cursor (the delta contract), regardless of walk progress.
+            for e in entries:
+                if e.rev <= cursor:
+                    errors.append(f"rev {e.rev} <= cursor {cursor}")
+                    return
+            if more and entries:
+                cursor = entries[-1].rev
+            else:
+                cursor = 0
+
+    readers = [threading.Thread(target=reader) for _ in range(3)]
+    [r.start() for r in readers]
+
+    try:
+        for g in range(8):
+            metas = [_meta(f"book{i}", title=f"Title {g} {i}") for i in range(60)]
+            led.refresh(FakeProvider(metas), max_age_s=0)
+            # Interleave reads between walk passes too.
+            entries, _ = led.delta(0, 10)
+            assert len(entries) <= 10
+    finally:
+        stop.set()
+        [r.join() for r in readers]
+        led.close()
+
+    assert not errors, errors[:5]

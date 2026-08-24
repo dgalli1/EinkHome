@@ -17,7 +17,7 @@ from providers.kavita import _filename_from_content_disposition as parse  # noqa
 
 
 def test_plain_filename():
-    assert parse("attachment; filename=\"book.epub\"") == "book.epub"
+    assert parse('attachment; filename="book.epub"') == "book.epub"
 
 
 def test_filename_star_utf8_form():
@@ -28,18 +28,18 @@ def test_filename_star_utf8_form():
 
 
 def test_traversal_segments_are_stripped():
-    assert parse("filename=\"../../../etc/cron.d/pwn\"") == "pwn"
+    assert parse('filename="../../../etc/cron.d/pwn"') == "pwn"
     assert parse("filename=..%2f..%2fetc%2fpasswd") == "passwd"
     assert parse("filename*=UTF-8''..%2F..%2Fevil.fb2") == "evil.fb2"
 
 
 def test_absolute_and_backslash_paths_are_reduced():
-    assert parse("filename=\"/etc/shadow\"") == "shadow"
-    assert parse("filename=\"C:\\\\Users\\\\x\\\\a.pdf\"") == "a.pdf"
+    assert parse('filename="/etc/shadow"') == "shadow"
+    assert parse('filename="C:\\\\Users\\\\x\\\\a.pdf"') == "a.pdf"
 
 
 def test_empty_or_degenerate_values_return_none():
     assert parse("") is None
-    assert parse("filename=\"\"") is None
+    assert parse('filename=""') is None
     assert parse("filename=../..") is None  # reduces to nothing
     assert parse("inline") is None
