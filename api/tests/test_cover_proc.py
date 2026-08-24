@@ -31,7 +31,12 @@ def test_corrupt_bytes_return_none():
     assert cover_proc.process(b"\x89PNG\r\n\x1a\n" + b"\x00" * 64) is None
 
 
+@pytest.mark.filterwarnings("ignore::UserWarning")
 def test_oversized_image_rejected():
+    """5500x5500 = 30.25MP exceeds the 30MP cap; process must return
+    None before any full decode (no decompression bomb).  The Pillow
+    DecompressionBombWarning is expected here — it confirms the cap
+    fires — so it is suppressed to keep test output clean."""
     """5500x5500 = 30.25MP exceeds the 30MP cap; process must return
     None before any full decode (no decompression bomb)."""
     from PIL import Image
