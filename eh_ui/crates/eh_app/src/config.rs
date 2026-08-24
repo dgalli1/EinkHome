@@ -304,7 +304,7 @@ mod tests {
         assert_eq!(cfg.api_token, "tok1");
         assert_eq!(cfg.reader.as_deref(), Some("/a/reader.app"));
         // language=/lang= is stored lowercased + truncated (C
-        // cfg_set_language); i18n consumes it in wave 2.
+        // cfg_set_language); i18n::init consumes it.
         assert_eq!(cfg.language.as_deref(), Some("de"));
 
         assert_eq!(parse_kv_file(&base).unwrap().language, None);
