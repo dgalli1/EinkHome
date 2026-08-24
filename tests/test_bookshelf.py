@@ -797,12 +797,12 @@ def test_settings_system_app_toggle_promotes_and_demotes(fresh_bookshelf):
     assert not _exists(app)
 
     bs.open_settings()
-    bs.wait_for_stable(timeout=8.0)
+    bs.wait_for_stable(timeout=20.0)
 
     # Toggle ON → home-task override + cfg appear.
     before = bs.frame_hash()
     bs.tap_settings_sysapp()
-    bs.wait_hash_change(before, timeout=8.0)
+    bs.wait_hash_change(before, timeout=20.0)
     deadline = time.monotonic() + 10.0
     while time.monotonic() < deadline and not (_exists(app) and _exists(cfg)):
         time.sleep(0.2)
@@ -817,7 +817,7 @@ def test_settings_system_app_toggle_promotes_and_demotes(fresh_bookshelf):
     # Toggle OFF → override + cfg are removed again.
     before2 = bs.frame_hash()
     bs.tap_settings_sysapp()
-    bs.wait_hash_change(before2, timeout=8.0)
+    bs.wait_hash_change(before2, timeout=20.0)
     deadline = time.monotonic() + 10.0
     while time.monotonic() < deadline and (_exists(app) or _exists(cfg)):
         time.sleep(0.2)
@@ -1921,9 +1921,10 @@ def test_download_keeps_ui_responsive(fresh_bookshelf):
         # draw (FullUpdate cycle), so the window must clear the worst
         # flush latency under runner load: 2 s raced it and failed
         # ~3/4 CI runs (change arrived at ~2.2 s), 8 s covers the 3 s
-        # fetch + flush on a slow guest.  A frozen event loop still
-        # times out: nothing ever repaints.
-        bs.wait_hash_change(before, timeout=8.0)
+        # fetch + flush on a slow guest, and the oldest emulated
+        # firmware (U627) needs more still — 20 s clears every observed
+        # run.  A frozen event loop still times out: nothing repaints.
+        bs.wait_hash_change(before, timeout=20.0)
 
         # The download completes and the single-book press auto-opens
         # the reader.
