@@ -163,9 +163,12 @@ impl Config {
         Path::new(CONFIG_WRITE_ROOT).join(CONFIG_FILENAME)
     }
 
-    /// Persist the config as a plain `key=value` list (C
+    /// Persist the config atomically as a plain `key=value` list (C
     /// eh_write_config_file): api_url, api_token, downloads_dir, source,
-    /// group, reader (path, or `auto` for the firmware reader).
+    /// group, reader, language.  Write to a `.tmp` sibling then rename
+    /// over the target — a power cut mid-save leaves the old file intact
+    /// instead of a truncated cfg that would silently reset every
+    /// setting on next boot.
     pub fn save(&self, path: &Path) -> std::io::Result<()> {
         let mut text = format!("api_url={}\n", self.api_url);
         text.push_str(&format!("api_token={}\n", self.api_token));
@@ -186,7 +189,12 @@ impl Config {
             "reader={}\n",
             self.reader.as_deref().unwrap_or("auto")
         ));
-        std::fs::write(path, text)
+        if let Some(lang) = &self.language {
+            text.push_str(&format!("language={lang}\n"));
+        }
+        let tmp = path.with_extension("cfg.tmp");
+        std::fs::write(&tmp, &text)?;
+        std::fs::rename(&tmp, path)
     }
 }
 
