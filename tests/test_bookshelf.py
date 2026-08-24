@@ -975,21 +975,31 @@ def _frame_dump(runtime, name: str) -> bytes:
 
 
 def _settled_dump(runtime, name: str, *, timeout: float = 5.0) -> bytes:
-    """Dump the framebuffer, retrying until two consecutive dumps are
-    byte-identical (the frame settled), then return the settled bytes.
+    """Dump the framebuffer, retrying until two consecutive NON-EMPTY
+    dumps are byte-identical (the frame settled), then return them.
 
     Pixel assertions race a slow renderer: a single dump can catch a
     half-drawn frame.  Retry until the frame stops changing so the
-    region checks read a settled image instead of a mid-redraw one."""
+    region checks read a settled image.  An EMPTY dump (the probe got
+    no response from a busy or gone app) is never a frame: it cannot
+    settle, and hitting the deadline raises with the last state
+    instead of feeding b'' to pixel assertions."""
     deadline = time.monotonic() + timeout
     prev: bytes | None = None
     while time.monotonic() < deadline:
         cur = _frame_dump(runtime, name)
-        if prev is not None and cur == prev:
+        # An empty dump is the probe's no-response leftover (busy or
+        # gone app): skip it — it can neither settle nor be a frame.
+        if not cur:
+            time.sleep(0.3)
+            continue
+        if cur == prev:
             return cur
         prev = cur
         time.sleep(0.3)
-    raise AssertionError(f"framebuffer never settled within {timeout}s for {name!r}")
+    raise AssertionError(
+        f"frame dump for {name!r} never settled within {timeout}s"
+    )
 
 
 def _ppm_region_white(ppm: bytes, x0: int, y0: int, x1: int, y1: int) -> bool:
