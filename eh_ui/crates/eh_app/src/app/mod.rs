@@ -1314,7 +1314,7 @@ mod tests {
         app.apply_sync_event(crate::sync::SyncEvent::Failed("boom".into()));
         assert!(!app.syncing);
         assert_eq!(app.sync_popup.stage, SyncStage::Fail);
-        assert_eq!(app.sync_popup.error, "boom");
+        assert_eq!(app.sync_popup.error, crate::i18n::tr("sync.failed"));
         // Tap-to-dismiss after finish (C eh_popups tap path).
         tap(&mut app, 536, 700);
         assert_eq!(app.overlay, Overlay::None);

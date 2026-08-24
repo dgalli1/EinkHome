@@ -492,7 +492,7 @@ impl<B: Framebuffer> App<B> {
             }
             crate::sync::SyncEvent::Failed(e) => {
                 crate::logger::log(&format!("[bookshelf] do_sync FAILED: {e}"));
-                self.sync_popup.error = e;
+                self.sync_popup.error = crate::i18n::tr("sync.failed").to_string();
                 self.finish_sync(false)
             }
         }

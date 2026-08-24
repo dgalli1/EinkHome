@@ -71,6 +71,13 @@ static TABLE: &[(&str, &str, &str, &str, &str)] = &[
         "Sync completato",
     ),
     (
+        "sync.failed",
+        "Sync failed",
+        "Synchronisierung fehlgeschlagen",
+        "Échec de la synchronisation",
+        "Sincronizzazione non riuscita",
+    ),
+    (
         "sync.books",
         "%d books",
         "%d Bücher",
@@ -612,7 +619,7 @@ mod tests {
     #[test]
     fn table_rows_are_complete_across_languages() {
         // 83 keys ported verbatim from eh_g_i18n[] + dl.remaining.
-        assert_eq!(TABLE.len(), 84, "unexpected i18n table size");
+        assert_eq!(TABLE.len(), 85, "unexpected i18n table size");
         for row in TABLE {
             for col in [row.1, row.2, row.3, row.4] {
                 assert!(!col.is_empty(), "empty translation for key {}", row.0);
