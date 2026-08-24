@@ -299,3 +299,10 @@ file from.
 
 That's it.  The API server, the in-emulator C app, and all
 existing providers are unaffected.
+
+## Configuration
+
+Copy `config/server.json.example` to `config/server.json`
+and fill in your Kavita credentials (or switch to the `mock`
+provider for offline development).  The file is gitignored —
+never commit real credentials.

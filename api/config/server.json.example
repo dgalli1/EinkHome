@@ -1,0 +1,36 @@
+{
+    "host": "127.0.0.1",
+    "port": 8765,
+    "api_token": "CHANGE-ME-to-a-random-string",
+    "provider": "kavita",
+    "suggestions": true,
+    "providers": {
+        "kavita": {
+            "kind": "kavita",
+            "base_url": "https://your-kavita-instance.example.com",
+            "api_key": "your-kavita-api-key-uuid",
+            "username": "your-username",
+            "password": "your-password",
+            "verify_tls": true,
+            "timeout": 60,
+            "library_ids": []
+        },
+        "mock": {
+            "kind": "mock",
+            "books_dir": "/path/to/firmware/.live/mnt/ext1/books",
+            "library_name": "pbemu demo library"
+        }
+    },
+    "open_with": {
+        "epub": ["eink-reader", "bookshelf"],
+        "pdf": ["eink-reader", "pdfviewer"],
+        "fb2": ["eink-reader"],
+        "txt": ["eink-reader"],
+        "djvu": ["djvureader"],
+        "default": ["eink-reader"]
+    },
+    "cover_cache": {
+        "dir": "/tmp/pbemu-covers",
+        "max_age_seconds": 604800
+    }
+}
