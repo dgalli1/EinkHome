@@ -19,8 +19,10 @@ Typing "harry po" matches the phrase term by plain prefix.  There is
 no stopword removal: a tapped suggestion is committed verbatim as a
 substring query against the raw title/author/series text, so terms
 must contain every word that query needs.  Terms longer than the
-device's query buffer (80 chars) are dropped server-side; the list is
-capped at 96 terms per book.
+device's query buffer (80 chars) are dropped server-side, and the
+list ships at most ``_TERM_CAP`` terms per book — deliberately far
+below the device's accepted SUGGEST_MAX_TERMS (96), so long titles
+don't dominate delta payload or per-round insert cost.
 """
 
 from __future__ import annotations
