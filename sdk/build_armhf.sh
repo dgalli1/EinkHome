@@ -120,6 +120,16 @@ podman run --rm \
 	"/usr/lib/gcc-cross/arm-linux-gnueabihf/12/crtendS.o" \
 	"/usr/arm-linux-gnueabihf/lib/crtn.o"
 
+# Ship a stripped binary to the device (symbols + debug tables are ~2/3
+# of the file with MuPDF and Rust std aboard). Keep the unstripped
+# original beside it (.unstripped) for host-side symbolication.
+cp "${REPO_ROOT}/${OUTPUT}" "${REPO_ROOT}/${OUTPUT}.unstripped"
+podman run --rm \
+	-v "${REPO_ROOT}:/work:z" \
+	-w /work \
+	localhost/pbdev:latest \
+	/bin/sh -c 'arm-linux-gnueabihf-strip --strip-unneeded "$1"' sh "${CONTAINER_OUT}"
+
 echo
 echo "Built: ${REPO_ROOT}/${OUTPUT}"
 echo "Size:  $(stat -c%s "${REPO_ROOT}/${OUTPUT}") bytes"

@@ -261,7 +261,18 @@ podman run --rm \
 	"${CRTE}" \
 	"${CRTN}"
 
+# Ship a stripped binary to the device: symbols + debug tables are ~2/3
+# of the file with MuPDF and Rust std aboard. Keep the unstripped original
+# beside it (.unstripped) so crashes can still be symbolicated on the host.
+cp "${REPO_ROOT}/${OUT_REL}" "${REPO_ROOT}/${OUT_REL}.unstripped"
+podman run --rm \
+	-v "${REPO_ROOT}:/work:z" \
+	-w /work \
+	localhost/pbdev:latest \
+	/bin/sh -c 'arm-linux-gnueabi-strip --strip-unneeded "$1"' sh "${CONTAINER_OUT}"
+
 echo
+
 case "${OUT_REL}" in
 /work/*)
 	# Reverse the repo-root mount, then any extra mounts
