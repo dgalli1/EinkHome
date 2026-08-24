@@ -201,7 +201,6 @@ name = "eh_backend_inkview"
 version = "0.1.0"
 dependencies = [
  "eh_hal",
- "eh_render",
 ]
 
 [[package]]
@@ -262,8 +261,6 @@ dependencies = [
  "eh_app",
  "eh_backend_inkview",
  "eh_hal",
- "eh_render",
- "eh_shell",
 ]
 
 [[package]]
