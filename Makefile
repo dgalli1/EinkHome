@@ -62,6 +62,8 @@ test:
 test-rust:
 	cd $(EH_UI) && cargo test --workspace
 
+verify: fmt clippy doc-check test-rust lint-py
+
 lint: clippy fmt doc-check lint-py
 
 clippy:
