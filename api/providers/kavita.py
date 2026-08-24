@@ -93,7 +93,13 @@ def _redact_secret(v: str) -> str:
 
 
 def _filename_from_content_disposition(cd: str) -> str | None:
-    """Extract filename*= / filename= from a Content-Disposition header."""
+    """Extract filename*= / filename= from a Content-Disposition header.
+
+    The header is attacker-controlled when the upstream Kavita is
+    malicious or compromised, so the result is reduced to a bare base
+    name here — no caller can ever be handed a `../` traversal or an
+    absolute path, whatever it does with the value.
+    """
     if not cd:
         return None
     for part in cd.split(";"):
@@ -105,11 +111,12 @@ def _filename_from_content_disposition(cd: str) -> str | None:
                 if raw:
                     from urllib.parse import unquote
 
-                    return unquote(raw)
+                    return os.path.basename(unquote(raw).replace("\\", "/")) or None
             except ValueError:
                 pass
         if part.startswith("filename="):
-            return part.split("=", 1)[1].strip('"')
+            name = part.split("=", 1)[1].strip('"')
+            return os.path.basename(name.replace("\\", "/")) or None
     return None
 
 
