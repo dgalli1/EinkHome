@@ -42,7 +42,7 @@ from collections.abc import Sequence
 _TERM_MAX = 79  # 80 - NUL
 _TERM_CAP = 24
 
-_NON_ALNUM = re.compile(r"[^0-9a-z]+")
+_NON_ALNUM = re.compile(r"[^\w]+", re.UNICODE)
 
 
 def _fold(text: str) -> str:
