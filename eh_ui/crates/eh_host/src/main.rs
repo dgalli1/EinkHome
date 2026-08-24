@@ -98,8 +98,12 @@ fn main() -> Result<(), String> {
             return Ok(());
         }
 
-        // ── SDL events
+        // ── SDL events: drain the ENTIRE queue before presenting.  A
+        // burst of N events then costs one flush instead of N full
+        // redraws, which is what keeps drags and fast tap sequences
+        // responsive while frames are expensive.
         app.screen().framebuffer_mut().pump_events();
+        let mut handled = false;
         while let Some(ev) = app.screen().framebuffer_mut().poll_event() {
             // F11 (the backend surfaces it as Unknown(0x7A)): cycle the
             // logical canvas to the next screen class (C sdl_set_resolution
@@ -123,6 +127,12 @@ fn main() -> Result<(), String> {
                 continue;
             }
             app.on_event(&ev);
+            handled = true;
+        }
+
+        // One flush for the whole drained batch: intermediate states are
+        // never visible anyway at these frame costs.
+        if handled {
             app.present();
         }
 
