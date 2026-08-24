@@ -4,6 +4,7 @@
 //! verification / CI); without it, opens a window and runs the loop.
 
 use eh_backend_sdl::SdlFb;
+use eh_demo::{build_screen, draw_self_panel};
 use eh_hal::{Framebuffer, InputEvent, KeyCode};
 
 fn main() -> Result<(), String> {
@@ -47,7 +48,7 @@ fn main() -> Result<(), String> {
         let ppm = {
             // produce the PPM bytes ourselves to avoid a lifetime detour
             let mut out = Vec::with_capacity(fb.stride() * height as usize / 4 * 3 + 32);
-            out.extend_from_slice(format!("P6\n{} {}\n255\n", width, height).as_bytes());
+            out.extend_from_slice(format!("P6\n{width} {height}\n255\n").as_bytes());
             let b = fb.pixels();
             for i in 0..(width as usize * height as usize) {
                 out.push(b[i * 4]);
@@ -76,7 +77,7 @@ fn main() -> Result<(), String> {
                 } => {
                     res_idx = (res_idx + 1) % RESOLUTIONS.len();
                     let (w, h) = RESOLUTIONS[res_idx];
-                    let fb = screen.into_framebuffer();
+                    let mut fb = screen.into_framebuffer();
                     fb.set_resolution(w, h)?;
                     width = w;
                     height = h;
