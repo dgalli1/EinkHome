@@ -5,7 +5,7 @@
 //! `InitInkview` — the task machinery + shim initialise inkview on load,
 //! exactly like the proven `sdk/hello/hello.c`).  Every event is forwarded to
 //! [`eh_pb_on_event`]; the first `EVT_INIT`/`EVT_SHOW` triggers
-//! [`init_once`], which builds the real [`eh_app::app::App`] on the inkview
+//! `init_once`, which builds the real [`eh_app::app::App`] on the inkview
 //! canvas: library sync, shelf, More drawer, Settings, Launcher.
 //!
 //! The inkview backend is used (not linuxfb) because:

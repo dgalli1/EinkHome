@@ -315,7 +315,7 @@ impl Framebuffer for SdlFb {
             .unwrap_or(true)
     }
 
-    /// PBEMU_BATTERY=<pct> emulator override (mirrors the EH_OFFLINE
+    /// PBEMU_BATTERY=\<pct\> emulator override (mirrors the EH_OFFLINE
     /// pattern): pins the battery glyph for UI tests.
     fn battery_level(&self) -> Option<u8> {
         parse_pbemu_battery(std::env::var("PBEMU_BATTERY").ok().as_deref())
@@ -350,7 +350,7 @@ fn translate(ev: Event, _scale: f32) -> Option<InputEvent> {
     }
 }
 
-/// Parse a PBEMU_BATTERY value ("<pct>" 0..=100; surrounding whitespace is
+/// Parse a PBEMU_BATTERY value ("\<pct\>" 0..=100; surrounding whitespace is
 /// trimmed).  Unset / empty / invalid / out-of-range → `None` (unknown).
 pub fn parse_pbemu_battery(v: Option<&str>) -> Option<u8> {
     let v = v?.trim();

@@ -714,7 +714,7 @@ pub const DRAG_SLOP: i32 = 24;
 /// Feed one pointer-move delta into the scroll offset while a drag is in
 /// flight (C eh_main.c drag_scroll_move's scroll update).  The offset is
 /// clamped against the SAME geometry the painter clamps with
-/// ([`scroll_state`] → [`body_rect`]) — never a separate view height — so
+/// (`scroll_state` → `body_rect`) — never a separate view height — so
 /// a held pointer can only change state when the visible scroll actually
 /// moves.  Returns true when it did (the caller marks the frame dirty).
 pub fn drag_move<B: Framebuffer>(app: &mut App<B>, dy: i32) -> bool {

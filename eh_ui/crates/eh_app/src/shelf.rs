@@ -6,7 +6,7 @@
 //!
 //! Cover art is fetched BEFORE building the widgets (the caller passes
 //!   books + their decoded covers), so the shell stays free of
-//!   image-lifetime concerns — every [`ShelfEntry`](crate::shelf::ShelfEntry)
+//!   image-lifetime concerns — every [`ShelfEntry`]
 //!   carries its already decoded `art`, which build_shelf attaches to
 //!   the tiles.
 

@@ -56,7 +56,7 @@ pub fn extract_book_meta(path: &Path, ext: &str) -> ExtractedMeta {
 /// cover), forgiving on broken files:
 ///
 /// * EPUB — the embedded cover image the OPF names (the two wild
-///   conventions [`extract_epub`] already resolves).
+///   conventions `extract_epub` already resolves).
 /// * PDF — no embedded-image concept we can rely on: render the FIRST
 ///   PAGE instead (the "screenshot" fallback — even a metadata-less PDF
 ///   then shows its first page as the tile art).

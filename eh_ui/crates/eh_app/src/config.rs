@@ -26,7 +26,7 @@ pub struct Config {
     pub language: Option<String>,
     /// Persisted grouping preset (`group=`, lowercase preset name —
     /// "none"/"author_series"/"author"/"year"/"genre"/"series"); parsed by
-    /// [`crate::menu::group_from_config`] at boot so the shelf regroups
+    /// `crate::menu::group_from_config` at boot so the shelf regroups
     /// across restarts.  Absent in older cfg files → no grouping.
     pub group: Option<String>,
 }
