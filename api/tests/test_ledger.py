@@ -333,6 +333,34 @@ def test_empty_catalogue_refusal_unless_acknowledged(tmp_path):
         led2.close()
 
 
+def test_tombstone_revs_sit_above_same_walk_updates(tmp_path):
+    """One walk that updates an existing book, inserts a new one, AND
+    removes another must order its revs: every update/insert rev < every
+    tombstone rev.  A device consuming to any intermediate cursor then
+    sees all content changes before the removal — the ordering the
+    "tombstones land in their own final commit" comment promises."""
+    led = SyncLedger(str(tmp_path / "tomb.db"))
+
+    # Round 1: seed three books.
+    led.refresh(FakeProvider([_meta("a"), _meta("b"), _meta("c")]), max_age_s=0)
+    base = led.cursor()
+    assert base == 3
+
+    # Round 2: update b, insert d, remove a.
+    prov = FakeProvider([_meta("b", title="B2"), _meta("c"), _meta("d", title="D")])
+    led.refresh(prov, max_age_s=-1)
+
+    entries, more = led.delta(base, 50)
+    assert more is False
+    # Content changes first (b's update and d's insert, either relative
+    # order), and the tombstone sits strictly ABOVE every one of them.
+    changes = [e for e in entries if e.book_id != "a"]
+    tombs = [e for e in entries if e.added_at is None]
+    assert {e.book_id for e in changes} == {"b", "d"}
+    assert [(e.book_id, e.added_at is None) for e in tombs] == [("a", True)]
+    assert all(t.rev > c.rev for t in tombs for c in changes)
+
+
 def test_delta_during_refresh_smoke(ledger):
     """A delta read racing an in-flight refresh must never raise."""
     walked = threading.Event()
