@@ -5,7 +5,7 @@
 //! integrated reader writes cpage/npage while reading, and the KOReader
 //! pocketbooksync plugin writes into the very same rows — so one query
 //! serves both.  The shelf renders the percent as a black bar at each
-//! cover's bottom edge (see `shelf::draw_progress_bar`).
+//! cover's bottom edge (see `widgets::progress_bar`).
 //!
 //! Like the C app, the live db (+ `-wal` + `-shm`) is copied to a scratch
 //! snapshot first: opening a live WAL set can block on a non-writable

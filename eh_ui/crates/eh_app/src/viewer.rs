@@ -16,7 +16,7 @@ use eh_shell::{
 };
 
 use crate::app::{App, Overlay};
-use crate::settings::{back_rect, draw_header as draw_settings_header, HEADER_H};
+use crate::widgets::header::{back_rect, draw_header as draw_settings_header, HEADER_H};
 
 /// One bundled third-party license (name, type, where-used note, and the
 /// FULL text shipped as a string — C BsLicense).
