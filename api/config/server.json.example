@@ -21,16 +21,34 @@
             "library_name": "pbemu demo library"
         }
     },
-    "open_with": {
-        "epub": ["eink-reader", "bookshelf"],
-        "pdf": ["eink-reader", "pdfviewer"],
-        "fb2": ["eink-reader"],
-        "txt": ["eink-reader"],
-        "djvu": ["djvureader"],
-        "default": ["eink-reader"]
+    "ledger": {
+        "path": "/mnt/ext1/system/bin/sync-ledger.db",
+        "refresh_max_age_s": 30
     },
     "cover_cache": {
         "dir": "/tmp/pbemu-covers",
         "max_age_seconds": 604800
+    },
+    "open_with": {
+        "epub": [
+            "eink-reader",
+            "bookshelf"
+        ],
+        "pdf": [
+            "eink-reader",
+            "pdfviewer"
+        ],
+        "fb2": [
+            "eink-reader"
+        ],
+        "txt": [
+            "eink-reader"
+        ],
+        "djvu": [
+            "djvureader"
+        ],
+        "default": [
+            "eink-reader"
+        ]
     }
 }
