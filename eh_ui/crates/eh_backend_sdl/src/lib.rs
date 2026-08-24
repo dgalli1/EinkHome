@@ -5,7 +5,7 @@
 //! verification without qemu.
 //!
 //! Model mirrors the C SDL backend (`g_px`): the app draws into a CPU-side
-//! RGBA buffer via [`surface_mut`], and [`present`](Framebuffer::present)
+//! RGBA buffer via [`SdlFb::surface_mut`], and [`present`](Framebuffer::present)
 //! uploads it to an SDL streaming texture and blits it.
 
 use eh_hal::{Framebuffer, InputEvent, KeyCode, PixelFormat, Rect, RefreshMode, Screen};

@@ -6,7 +6,7 @@
 //!
 //! A single worker thread consumes the queue and writes each file to disk,
 //! reporting completion over an mpsc channel the app drains on its next
-//! event.  The thread reconstructs its own [`ApiClient`] from the job's
+//! event.  The thread reconstructs its own [`ApiClient`](crate::client::ApiClient) from the job's
 //! base/token so the worker never shares the app's client.
 //!
 //! Durability model (C dl_fetch / sweep_stale_parts / g_dl_gen):

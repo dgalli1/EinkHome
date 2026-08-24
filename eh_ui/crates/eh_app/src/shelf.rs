@@ -6,8 +6,9 @@
 //!
 //! Cover art is fetched BEFORE building the widgets (the caller passes
 //!   books + their decoded covers), so the shell stays free of
-//!   image-lifetime concerns — [`apply_cover_art`] mutates a `Cover`
-//!   through a downcast the caller drives once.
+//!   image-lifetime concerns — every [`ShelfEntry`](crate::shelf::ShelfEntry)
+//!   carries its already decoded `art`, which build_shelf attaches to
+//!   the tiles.
 
 use std::path::Path;
 

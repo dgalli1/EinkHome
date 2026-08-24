@@ -6,8 +6,8 @@
 //!
 //! Geometry is the sheet's own (the C sheet does NOT use the shared
 //! overlay header — no back arrow): pw=w*3/4, ph=72+3*96+24, vertically
-//! centred in the content area; rows at py+80, 96px each.  [`sheet`]
-//! and [`widgets::sheet::open_sheet`] derive the same rect by formula,
+//! centred in the content area; rows at py+80, 96px each.  [`sheet`](fn@sheet)
+//! and [`crate::widgets::sheet::open_sheet`] derive the same rect by formula,
 //! so tap routing and paint cannot drift.
 
 use eh_hal::Rect;

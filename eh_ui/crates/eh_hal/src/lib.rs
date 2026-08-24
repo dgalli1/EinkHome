@@ -160,7 +160,7 @@ pub enum KeyCode {
 }
 
 /// The platform backend a UI runs on.  Implemented by eh_backend_* crates;
-/// the shell ([`crate::err::Err`] plumbing in eh_shell) is generic over it.
+/// the shell (whose `Err` plumbing lives in eh_shell) is generic over it.
 pub trait Framebuffer {
     /// The logical screen geometry the renderer lays out against.
     fn screen(&self) -> Screen;
@@ -180,7 +180,7 @@ pub trait Framebuffer {
     fn refresh(&mut self, region: Rect, mode: RefreshMode);
 
     /// Reserve a dirty region accumulated across draw calls; cleared on the
-    /// next [`present`](crate::frame::Frame::present).  Refreshes collapse
+    /// next `present()` call.  Refreshes collapse
     /// what was actually drawn.
     fn mark_dirty(&mut self, region: Rect);
 
@@ -203,7 +203,7 @@ pub trait Framebuffer {
 
     /// Launch another on-device application (the launcher's action).
     /// `args` are the item's launch parameters (C NewTaskEx passes the
-    /// argv array through as-is: argv[0] is the app path).  Default: not
+    /// argv array through as-is: argv\[0\] is the app path).  Default: not
     /// available on this platform.
     fn launch_app(&mut self, _path: &str, _name: &str, _args: &[String]) -> bool {
         false
