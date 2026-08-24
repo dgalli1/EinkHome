@@ -220,6 +220,11 @@ class SyncLedger:
         # never block on (or take the lock for) an in-flight walk.
         self.rdcon = sqlite3.connect(path, check_same_thread=False)
         self.rdcon.execute("PRAGMA busy_timeout=3000")
+        # Serialises every statement on ``rdcon``: ThreadingTCPServer
+        # serves each request on its own thread, and two threads sharing
+        # one sqlite3 Connection race their cursors (InterfaceError /
+        # reset pending fetches) unless reads are mutually exclusive.
+        self._rd_lock = threading.Lock()
         self._lock = threading.Lock()
         self._walking = False
         self._walk_done: threading.Event | None = None
@@ -696,12 +701,13 @@ class SyncLedger:
 
         Reads run on the dedicated read connection (a committed WAL
         snapshot), so they never block on an in-flight walk."""
-        rows = self.rdcon.execute(
-            "SELECT rev, id, added_at, title, authors, series, series_id, "
-            "series_idx, format, size, file_name, search_text, suggest, genre "
-            "FROM books WHERE rev > ? ORDER BY rev LIMIT ?",
-            (cursor, limit + 1),
-        ).fetchall()
+        with self._rd_lock:
+            rows = self.rdcon.execute(
+                "SELECT rev, id, added_at, title, authors, series, series_id, "
+                "series_idx, format, size, file_name, search_text, suggest, genre "
+                "FROM books WHERE rev > ? ORDER BY rev LIMIT ?",
+                (cursor, limit + 1),
+            ).fetchall()
         more = len(rows) > limit
         entries = [
             LedgerEntry(
@@ -726,14 +732,16 @@ class SyncLedger:
 
     def cursor(self) -> int:
         """Highest rev assigned so far (0 for an empty ledger)."""
-        row = self.rdcon.execute("SELECT MAX(rev) FROM books").fetchone()
+        with self._rd_lock:
+            row = self.rdcon.execute("SELECT MAX(rev) FROM books").fetchone()
         return int(row[0]) if row and row[0] is not None else 0
 
     def count(self) -> int:
         """Number of live (non-tombstone) books."""
-        row = self.rdcon.execute(
-            "SELECT COUNT(*) FROM books WHERE added_at IS NOT NULL"
-        ).fetchone()
+        with self._rd_lock:
+            row = self.rdcon.execute(
+                "SELECT COUNT(*) FROM books WHERE added_at IS NOT NULL"
+            ).fetchone()
         return int(row[0])
 
     def record_device(self, device_id: str, last_rev: int) -> None:
@@ -755,7 +763,8 @@ class SyncLedger:
     def min_device_rev(self) -> int | None:
         """Smallest ``last_rev`` any device has reported, or None when
         no device has ever posted a cursor."""
-        row = self.rdcon.execute("SELECT MIN(last_rev) FROM device_cursors").fetchone()
+        with self._rd_lock:
+            row = self.rdcon.execute("SELECT MIN(last_rev) FROM device_cursors").fetchone()
         return int(row[0]) if row and row[0] is not None else None
 
     def compact_tombstones(self, min_rev: int | None = None) -> int:
