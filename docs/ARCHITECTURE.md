@@ -42,10 +42,20 @@ Rules that keep this shape:
   `launcher::assemble`, `downloads::BatchUi::sheet_status`.  If a branch
   decides what the user sees, it lives in a pure function with a test,
   not inside a draw fn.
+* **Errors carry their real reason — no sentinels, no swallowed errs.**
+  `sync::SyncError` exists because transport failures once returned a
+  bogus SQLite error that reached the failure popup; the e2e harness's
+  `cmd()` raises on any `err` reply so a failed tap or screenshot can
+  never pass silently.
 
 ## App lifecycle
 
-`App<B>` (eh_app/src/app.rs) owns the `Screen` and routes everything:
+`App<B>` owns the `Screen` and routes everything.  The type lives in
+`eh_app/src/app/mod.rs`; its `impl` blocks are split by concern into
+sibling modules — `app/frame.rs` (present, theme resources, the
+self-drawn status strip), `app/events.rs` (`on_event`, keyboard
+draining, worker ticks, back navigation) and `app/data.rs` (shelf
+rebuilds, drill paging, config persistence).  Lifecycle shape:
 
 * **boot** — `App::new` → `sync_fb_cache` → `boot()` (resolve reader,
   kick sync or the Local import scan, rebuild the materialised view,
@@ -106,6 +116,10 @@ Two invariants every worker shares:
    against the inkview build inside qemu — catches backend/firmware
    divergences the SDL tier cannot see.  Hosted-runner boot flakiness is
    absorbed by fresh-runner retry jobs.
+
+Local recipes for tiers 2 and 3 (firmware-path symlink,
+`stage-mock-books.sh`, the scale-suite env vars) live in the
+README's Tests section — keep the two in sync when the env changes.
 
 ## Porting conventions
 
