@@ -40,7 +40,8 @@ fn init_once() {
     // C eh_plat_log_identity: model + firmware version telemetry once at
     // boot (diagnostics only — conditionals resolve from device_profile).
     let (model, fw) = eh_backend_inkview::device_identity();
-    eh_app::logger::log(&format!("[bookshelf] model={model} fw={fw}"));
+    let version = env!("CARGO_PKG_VERSION");
+    eh_app::logger::log(&format!("[bookshelf] EinkHome v{version} model={model} fw={fw}"));
     eh_app::logger::evt_init(
         s.height.saturating_sub(s.content_height()),
         s.width,
