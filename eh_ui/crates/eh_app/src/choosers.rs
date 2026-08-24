@@ -71,7 +71,10 @@ impl<B: Framebuffer> App<B> {
     /// The pinned drill scopes for the store, level 0..drill (C
     /// eh_g_drill_values[0..eh_g_drill_level]).
     pub(crate) fn drill_scopes(&self) -> Vec<&str> {
-        self.drill_values[..self.drill as usize].iter().map(String::as_str).collect()
+        self.drill_values[..self.drill as usize]
+            .iter()
+            .map(String::as_str)
+            .collect()
     }
 
     /// Drill into a tapped stack card (C eh_group_drill): record the

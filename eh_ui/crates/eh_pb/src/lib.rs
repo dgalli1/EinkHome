@@ -29,7 +29,6 @@ thread_local! {
     static APP: RefCell<Option<eh_app::app::App<InkviewFb>>> = const { RefCell::new(None) };
 }
 
-
 /// Build the app, sync the library, draw the first frame, store it.  Called
 /// lazily from the first EVT_INIT / EVT_SHOW so it runs inside the inkview
 /// event context (matching how hello.c draws on EVT_INIT).
@@ -42,7 +41,11 @@ fn init_once() {
     // boot (diagnostics only — conditionals resolve from device_profile).
     let (model, fw) = eh_backend_inkview::device_identity();
     eh_app::logger::log(&format!("[bookshelf] model={model} fw={fw}"));
-    eh_app::logger::evt_init(s.height.saturating_sub(s.content_height()), s.width, s.height);
+    eh_app::logger::evt_init(
+        s.height.saturating_sub(s.content_height()),
+        s.width,
+        s.height,
+    );
     // C eh_plat_start_services (the stock bookshelf's initsync kick): ask
     // monitor.app to start the resident firmware services
     // (reader_controller/taskmgr/control_panel/explorer) so a fresh boot
@@ -144,7 +147,11 @@ pub extern "C" fn eh_pb_on_event(evt: i32, par1: i32, par2: i32) -> i32 {
             }
         });
     }
-    if handled { 0 } else { -1 }
+    if handled {
+        0
+    } else {
+        -1
+    }
 }
 
 /// Reserved native panel height (0 on live devices where the app self-draws

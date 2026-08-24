@@ -37,9 +37,40 @@ pub fn draw_context_menu<B: Framebuffer>(
             ContextAction::DownloadAll => crate::i18n::tr("ctx.download_all"),
             ContextAction::DeleteAll => crate::i18n::tr("ctx.delete_series"),
         };
-        surf.fill_gray(Rect { x: sh.px + 12, y: iy, w: sh.pw - 24, h: 84 }, GRAY_WHITE);
-        surf.rect_outline(Rect { x: sh.px + 12, y: iy, w: sh.pw - 24, h: 84 }, 1, GRAY_BLACK);
-        eh_render::draw_text(surf, font, 28.0, label, (sh.px + 32) as i32, (iy + 30) as i32, GRAY_BLACK, &mut g);
-        app.context.rects.push(Rect { x: sh.px + 12, y: iy, w: sh.pw - 24, h: 84 });
+        surf.fill_gray(
+            Rect {
+                x: sh.px + 12,
+                y: iy,
+                w: sh.pw - 24,
+                h: 84,
+            },
+            GRAY_WHITE,
+        );
+        surf.rect_outline(
+            Rect {
+                x: sh.px + 12,
+                y: iy,
+                w: sh.pw - 24,
+                h: 84,
+            },
+            1,
+            GRAY_BLACK,
+        );
+        eh_render::draw_text(
+            surf,
+            font,
+            28.0,
+            label,
+            (sh.px + 32) as i32,
+            (iy + 30) as i32,
+            GRAY_BLACK,
+            &mut g,
+        );
+        app.context.rects.push(Rect {
+            x: sh.px + 12,
+            y: iy,
+            w: sh.pw - 24,
+            h: 84,
+        });
     }
 }

@@ -36,5 +36,8 @@ fn root_must_fill_available_space() {
     println!("res ok={}", res.is_ok());
     let l = tree.layout(child).unwrap();
     println!("child: size={:?}", l.size);
-    assert!(l.size.width > 0.0, "percent child should resolve against fill root");
+    assert!(
+        l.size.width > 0.0,
+        "percent child should resolve against fill root"
+    );
 }

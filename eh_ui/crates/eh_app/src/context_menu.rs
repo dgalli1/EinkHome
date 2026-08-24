@@ -62,7 +62,14 @@ impl<B: Framebuffer> App<B> {
         if y < topbar.y as i32 || y >= pager.y as i32 {
             return false;
         }
-        for (i, w) in self.screen().widgets.iter().enumerate().skip(1).take(last.saturating_sub(1)) {
+        for (i, w) in self
+            .screen()
+            .widgets
+            .iter()
+            .enumerate()
+            .skip(1)
+            .take(last.saturating_sub(1))
+        {
             if w.hit(x, y) {
                 let pos = i - 2; // widget 0 = topbar, 1 = grid container
                 if pos < self.entries.len() {
@@ -99,7 +106,11 @@ impl<B: Framebuffer> App<B> {
 
     /// Open the book context menu (Open/Download/Delete).
     pub(crate) fn open_context_book(&mut self, book: &Book) {
-        self.context.items = vec![ContextAction::Open, ContextAction::Download, ContextAction::Delete];
+        self.context.items = vec![
+            ContextAction::Open,
+            ContextAction::Download,
+            ContextAction::Delete,
+        ];
         self.context.series = 0;
         self.context.book = Some(book.clone());
         crate::logger::log("[bookshelf] context menu open series=0");
@@ -164,20 +175,26 @@ impl<B: Framebuffer> App<B> {
             crate::log(&format!("[eh_app] set_downloaded: {e}"));
         }
         if removed {
-            crate::logger::log(&format!("[bookshelf] delete_book_file removed path={}", cur.display()));
+            crate::logger::log(&format!(
+                "[bookshelf] delete_book_file removed path={}",
+                cur.display()
+            ));
         } else {
-            crate::log(&format!("[eh_app] delete_book_file missing path={}", cur.display()));
+            crate::log(&format!(
+                "[eh_app] delete_book_file missing path={}",
+                cur.display()
+            ));
         }
     }
 
     /// Download every book of a series (C eh_context Download all): queue
     /// the scope's books on the worker + open the modal popup.
     pub(crate) fn download_series(&mut self, scope: &str, _label: &str, _count: i64) {
-        let books = self
-            .store
-            .list_series(scope)
-            .unwrap_or_default();
-        crate::logger::log(&format!("[bookshelf] download_series scope={scope} queued={}", books.len()));
+        let books = self.store.list_series(scope).unwrap_or_default();
+        crate::logger::log(&format!(
+            "[bookshelf] download_series scope={scope} queued={}",
+            books.len()
+        ));
         // Fresh batch state BEFORE the popup draws: a previous batch's
         // tally must not mislabel this popup's status line.
         self.dl.reset();
@@ -195,11 +212,11 @@ impl<B: Framebuffer> App<B> {
     /// Delete every downloaded file of a series (C eh_context Delete
     /// series).
     pub(crate) fn delete_series(&mut self, scope: &str) {
-        let books = self
-            .store
-            .list_series(scope)
-            .unwrap_or_default();
-        crate::logger::log(&format!("[bookshelf] delete_series scope={scope} books={}", books.len()));
+        let books = self.store.list_series(scope).unwrap_or_default();
+        crate::logger::log(&format!(
+            "[bookshelf] delete_series scope={scope} books={}",
+            books.len()
+        ));
         for b in &books {
             self.delete_book(b);
         }
@@ -217,7 +234,12 @@ mod tests {
         // dismiss must keep them (only rows, geometry and book go).
         let mut m = MenuState {
             items: vec![ContextAction::DownloadAll, ContextAction::DeleteAll],
-            rects: vec![Rect { x: 0, y: 0, w: 10, h: 10 }],
+            rects: vec![Rect {
+                x: 0,
+                y: 0,
+                w: 10,
+                h: 10,
+            }],
             series: 1,
             book: Some(Book::default()),
             scope: "author:Rex".into(),

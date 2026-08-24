@@ -32,7 +32,7 @@ const FBIOGET_FSCREENINFO: libc::c_ulong = 0x4602;
 #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
 mod epdc {
     pub const SEND_UPDATE: libc::c_ulong = 0x4040_462e; // _IOW('F', 0x2e, struct)
-    // Partial/full modes map to EPDC UPDATE_MODE_* as the C app's eh_flush_*.
+                                                        // Partial/full modes map to EPDC UPDATE_MODE_* as the C app's eh_flush_*.
     pub const MODE_PARTIAL: u32 = 0x01;
     pub const MODE_FULL: u32 = 0x04;
 }
@@ -89,8 +89,22 @@ impl LinuxFb {
             return Err(std::io::Error::last_os_error());
         }
 
-        let mut var = FbVarScreeninfo { xres: 0, yres: 0, xres_virtual: 0, yres_virtual: 0, xoffset: 0, yoffset: 0, bits_per_pixel: 0, _pad: [0; 96] };
-        let mut fix = FbFixScreeninfo { smem_start: 0, smem_len: 0, line_length: 0, _pad: [0; 64] };
+        let mut var = FbVarScreeninfo {
+            xres: 0,
+            yres: 0,
+            xres_virtual: 0,
+            yres_virtual: 0,
+            xoffset: 0,
+            yoffset: 0,
+            bits_per_pixel: 0,
+            _pad: [0; 96],
+        };
+        let mut fix = FbFixScreeninfo {
+            smem_start: 0,
+            smem_len: 0,
+            line_length: 0,
+            _pad: [0; 64],
+        };
 
         let r = unsafe { libc::ioctl(fd, FBIOGET_VSCREENINFO, &mut var) };
         if r < 0 {
@@ -119,7 +133,14 @@ impl LinuxFb {
         let stride = fix.line_length as usize;
         let len = fix.smem_len as usize;
         let map = unsafe {
-            let p = libc::mmap(std::ptr::null_mut(), len, libc::PROT_READ | libc::PROT_WRITE, libc::MAP_SHARED, fd, 0);
+            let p = libc::mmap(
+                std::ptr::null_mut(),
+                len,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_SHARED,
+                fd,
+                0,
+            );
             if p == libc::MAP_FAILED {
                 close_quiet(fd);
                 return Err(std::io::Error::last_os_error());
@@ -163,7 +184,11 @@ impl Drop for LinuxFb {
 
 impl Framebuffer for LinuxFb {
     fn screen(&self) -> Screen {
-        Screen { width: self.width, height: self.height, content_bottom: self.content_bottom }
+        Screen {
+            width: self.width,
+            height: self.height,
+            content_bottom: self.content_bottom,
+        }
     }
     fn format(&self) -> PixelFormat {
         self.format
@@ -176,12 +201,21 @@ impl Framebuffer for LinuxFb {
     }
     fn refresh(&mut self, region: Rect, mode: RefreshMode) {
         // Never touch the native panel strip.
-        let limit = Rect { x: 0, y: 0, w: self.width, h: self.content_bottom };
+        let limit = Rect {
+            x: 0,
+            y: 0,
+            w: self.width,
+            h: self.content_bottom,
+        };
         let region = region.intersect(&limit);
         if region.is_empty() {
             return;
         }
-        let umode = if mode.is_partial() { epdc::MODE_PARTIAL } else { epdc::MODE_FULL };
+        let umode = if mode.is_partial() {
+            epdc::MODE_PARTIAL
+        } else {
+            epdc::MODE_FULL
+        };
         unsafe {
             // EPDC update request: region + mode; kernel copies from the map.
             #[repr(C)]
@@ -192,7 +226,13 @@ impl Framebuffer for LinuxFb {
                 h: u32,
                 m: u32,
             }
-            let upd = UpdateRegion { x: region.x, y: region.y, w: region.w, h: region.h, m: umode };
+            let upd = UpdateRegion {
+                x: region.x,
+                y: region.y,
+                w: region.w,
+                h: region.h,
+                m: umode,
+            };
             libc::ioctl(self.fd, epdc::SEND_UPDATE, &upd);
         }
     }
@@ -202,6 +242,14 @@ impl Framebuffer for LinuxFb {
     }
     fn wait_for_event(&mut self, _timeout_ms: u32) {}
     fn present(&mut self, mode: RefreshMode) {
-        self.refresh(Rect { x: 0, y: 0, w: self.width, h: self.content_bottom }, mode);
+        self.refresh(
+            Rect {
+                x: 0,
+                y: 0,
+                w: self.width,
+                h: self.content_bottom,
+            },
+            mode,
+        );
     }
 }

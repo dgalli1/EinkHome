@@ -58,14 +58,20 @@ type FetchFn = Arc<dyn Fn(&Job, &AtomicU32) -> bool + Send + Sync>;
 /// a stray `.part` ever survives the call.
 pub fn write_part_atomic(path: &str, bytes: &[u8], cancelled: impl Fn() -> bool) -> bool {
     if cancelled() {
-        crate::log(&format!("[bookshelf] download_book_file CANCELED path={path}"));
+        crate::log(&format!(
+            "[bookshelf] download_book_file CANCELED path={path}"
+        ));
         return false;
     }
     let tmp = format!("{path}.part");
-    let ok = std::fs::write(&tmp, bytes).and_then(|_| std::fs::rename(&tmp, path)).is_ok();
+    let ok = std::fs::write(&tmp, bytes)
+        .and_then(|_| std::fs::rename(&tmp, path))
+        .is_ok();
     if !ok {
         let _ = std::fs::remove_file(&tmp); // never leave the .part behind
-        crate::log(&format!("[bookshelf] download_book_file write/rename FAILED path={path}"));
+        crate::log(&format!(
+            "[bookshelf] download_book_file write/rename FAILED path={path}"
+        ));
     }
     ok
 }
@@ -84,7 +90,10 @@ fn http_fetch(job: &Job, epoch: &AtomicU32) -> bool {
             write_part_atomic(&job.path, &bytes, cancelled)
         }
         Err(e) => {
-            crate::log(&format!("[eh_app] download worker FAILED id={}: {e}", job.id));
+            crate::log(&format!(
+                "[eh_app] download worker FAILED id={}: {e}",
+                job.id
+            ));
             false
         }
     }
@@ -136,7 +145,12 @@ impl Downloader {
                     continue;
                 }
                 crate::log(&format!("[eh_app] dl worker: write ok={ok}"));
-                let _ = dtx.send(Done { id: job.id, path: job.path, ok, gen: job.gen });
+                let _ = dtx.send(Done {
+                    id: job.id,
+                    path: job.path,
+                    ok,
+                    gen: job.gen,
+                });
             }
             crate::log("[eh_app] dl worker: exiting");
         });
@@ -186,7 +200,8 @@ impl Downloader {
     /// landed.  Files that renamed into place before the cancel stay on
     /// disk; boot's flag reconciliation catches up on the next launch.
     pub fn cancel_all(&mut self) {
-        self.epoch.store(self.gen.load(Ordering::SeqCst), Ordering::SeqCst);
+        self.epoch
+            .store(self.gen.load(Ordering::SeqCst), Ordering::SeqCst);
         self.pending = 0;
         self.live.clear();
         while self.rx.try_recv().is_ok() {}
@@ -304,9 +319,12 @@ pub fn refresh_downloaded_flags(store: &crate::store::Store, dir: &str) -> usize
         let got = books.len();
         for b in &books {
             let path = book_local_path(b, dir);
-            let mut dl =
-                names.contains(path.file_name().unwrap_or_default().to_string_lossy().as_ref())
-                    && path.is_file();
+            let mut dl = names.contains(
+                path.file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .as_ref(),
+            ) && path.is_file();
             // The path a fresh flag records: the downloads-dir location,
             // or the stored location when only that still exists (C
             // book_existing_path keeps the stored path there).
@@ -330,7 +348,9 @@ pub fn refresh_downloaded_flags(store: &crate::store::Store, dir: &str) -> usize
         offset += got;
     }
     if changed > 0 {
-        crate::log(&format!("[bookshelf] refresh_downloaded_flags changed={changed}"));
+        crate::log(&format!(
+            "[bookshelf] refresh_downloaded_flags changed={changed}"
+        ));
     }
     changed
 }
@@ -400,7 +420,11 @@ pub struct BatchUi {
 impl BatchUi {
     /// A fresh single-book press: the reader opens when the queue drains.
     pub fn start_single(&mut self, autopen: (String, String)) {
-        *self = BatchUi { single: true, autopen: Some(autopen), ..Default::default() };
+        *self = BatchUi {
+            single: true,
+            autopen: Some(autopen),
+            ..Default::default()
+        };
     }
 
     /// Drop every batch trace (cancel / plain popup batch): the next
@@ -431,7 +455,10 @@ impl BatchUi {
     /// count down — a previous batch can never bleed its numbers in.
     pub fn sheet_status(&self, pending: usize) -> SheetStatus {
         if !self.batch_all && self.total > 0 {
-            SheetStatus::Tally { done: self.done, failed: self.failed }
+            SheetStatus::Tally {
+                done: self.done,
+                failed: self.failed,
+            }
         } else {
             SheetStatus::Remaining { count: pending }
         }
@@ -459,13 +486,13 @@ impl<B: Framebuffer> App<B> {
         self.set_overlay(Overlay::None);
     }
 
-
     /// Queue one book file on the worker + open the modal download popup
     /// (logging `draw_dl_popup` once per popup).
     pub(crate) fn enqueue_download(&mut self, id: &str, path: &Path) {
         let base = self.config.api_url.clone();
         let token = self.config.api_token.clone();
-        self.downloader.enqueue(&base, &token, id, &path.to_string_lossy());
+        self.downloader
+            .enqueue(&base, &token, id, &path.to_string_lossy());
         if self.overlay != Overlay::Download {
             crate::logger::log("[bookshelf] draw_dl_popup");
         }
@@ -475,7 +502,9 @@ impl<B: Framebuffer> App<B> {
     /// close the popup + auto-open the reader for a single-book press.
     pub(crate) fn drain_downloads(&mut self) {
         loop {
-            let Some(d) = self.downloader.try_next() else { break };
+            let Some(d) = self.downloader.try_next() else {
+                break;
+            };
             self.downloader.pending = self.downloader.pending.saturating_sub(1);
             // The popup shows the remaining count: repaint it.
             self.dirty = true;
@@ -484,10 +513,16 @@ impl<B: Framebuffer> App<B> {
                 if let Err(e) = self.store.set_downloaded(&d.id, true, &d.path) {
                     crate::log(&format!("[eh_app] set_downloaded: {e}"));
                 }
-                crate::logger::log(&format!("[bookshelf] download_book_file OK id={} path={}", d.id, d.path));
+                crate::logger::log(&format!(
+                    "[bookshelf] download_book_file OK id={} path={}",
+                    d.id, d.path
+                ));
             } else {
                 self.dl.failed += 1;
-                crate::logger::log(&format!("[bookshelf] download_book_file FAILED id={}", d.id));
+                crate::logger::log(&format!(
+                    "[bookshelf] download_book_file FAILED id={}",
+                    d.id
+                ));
             }
             if self.dl.batch_all {
                 crate::logger::log(&format!(
@@ -503,7 +538,10 @@ impl<B: Framebuffer> App<B> {
                 self.top_up_batch();
             }
         }
-        if self.downloader.pending == 0 && self.dl.queue.is_empty() && self.overlay == Overlay::Download {
+        if self.downloader.pending == 0
+            && self.dl.queue.is_empty()
+            && self.overlay == Overlay::Download
+        {
             if self.dl.single {
                 // Single-book press: close the popup + auto-open the reader.
                 self.set_overlay(Overlay::None);
@@ -555,7 +593,10 @@ impl<B: Framebuffer> App<B> {
         }
         self.dl = BatchUi::start_all(targets);
         self.top_up_batch();
-        crate::logger::log(&format!("[bookshelf] download-all queued={}", self.dl.total));
+        crate::logger::log(&format!(
+            "[bookshelf] download-all queued={}",
+            self.dl.total
+        ));
         crate::logger::log("[bookshelf] draw_dl_popup");
         self.set_overlay(Overlay::Download);
     }
@@ -580,7 +621,8 @@ impl<B: Framebuffer> App<B> {
                     let cur = book_local_path(&b, &dl);
                     let base = self.config.api_url.clone();
                     let token = self.config.api_token.clone();
-                    self.downloader.enqueue(&base, &token, &b.id, &cur.to_string_lossy());
+                    self.downloader
+                        .enqueue(&base, &token, &b.id, &cur.to_string_lossy());
                 }
                 None => break,
             }
@@ -605,7 +647,10 @@ mod tests {
         let dst = dir.join("book.epub");
         assert!(write_part_atomic(dst.to_str().unwrap(), b"hello", || false));
         assert_eq!(std::fs::read(&dst).unwrap(), b"hello");
-        assert!(!dir.join("book.epub.part").exists(), "fragment must be renamed away");
+        assert!(
+            !dir.join("book.epub.part").exists(),
+            "fragment must be renamed away"
+        );
     }
 
     #[test]
@@ -614,7 +659,11 @@ mod tests {
         let dst = dir.join("book.epub");
         std::fs::write(&dst, b"old").unwrap();
         assert!(!write_part_atomic(dst.to_str().unwrap(), b"new", || true));
-        assert_eq!(std::fs::read(&dst).unwrap(), b"old", "cancel must not clobber the final file");
+        assert_eq!(
+            std::fs::read(&dst).unwrap(),
+            b"old",
+            "cancel must not clobber the final file"
+        );
         assert!(!dir.join("book.epub.part").exists());
     }
 
@@ -640,7 +689,10 @@ mod tests {
     fn dedup_enqueue_is_a_no_op() {
         let mut dl = Downloader::inert();
         assert!(dl.enqueue("b", "t", "a", "/tmp/a.epub"));
-        assert!(!dl.enqueue("b", "t", "a", "/tmp/a.epub"), "duplicate id must be absorbed");
+        assert!(
+            !dl.enqueue("b", "t", "a", "/tmp/a.epub"),
+            "duplicate id must be absorbed"
+        );
         assert!(dl.enqueue("b", "t", "c", "/tmp/c.epub"));
         assert_eq!(dl.pending, 2);
         assert_eq!(dl.live_ids(), vec!["a".to_string(), "c".to_string()]);
@@ -715,12 +767,18 @@ mod tests {
             if let Some(d) = dl.try_next() {
                 break d;
             }
-            assert!(std::time::Instant::now() < deadline, "fresh job never settled");
+            assert!(
+                std::time::Instant::now() < deadline,
+                "fresh job never settled"
+            );
             std::thread::sleep(std::time::Duration::from_millis(5));
         };
         assert!(done.ok);
         assert_eq!(done.gen, 2);
-        assert!(dl.try_next().is_none(), "the stale gen-1 job must stay silent");
+        assert!(
+            dl.try_next().is_none(),
+            "the stale gen-1 job must stay silent"
+        );
         // Exactly ONE settle was delivered; the app-side tally decrements
         // once for it (drain_downloads) and never sees the stale job.
         dl.pending -= 1;
@@ -742,11 +800,27 @@ mod tests {
             epoch: Arc::new(AtomicU32::new(0)),
         };
         // Stale completion first: swallowed, the live entry survives.
-        _dtx.send(Done { id: "a".into(), path: "/p".into(), ok: false, gen: 9_999 }).unwrap();
+        _dtx.send(Done {
+            id: "a".into(),
+            path: "/p".into(),
+            ok: false,
+            gen: 9_999,
+        })
+        .unwrap();
         assert!(dl.try_next().is_none());
-        assert_eq!(dl.live_ids(), vec!["a".to_string()], "stale settle must not evict the entry");
+        assert_eq!(
+            dl.live_ids(),
+            vec!["a".to_string()],
+            "stale settle must not evict the entry"
+        );
         // The matching generation settles normally.
-        _dtx.send(Done { id: "a".into(), path: "/p".into(), ok: false, gen: 1 }).unwrap();
+        _dtx.send(Done {
+            id: "a".into(),
+            path: "/p".into(),
+            ok: false,
+            gen: 1,
+        })
+        .unwrap();
         let d = dl.try_next().unwrap();
         assert!(!d.ok);
         assert!(dl.live_ids().is_empty());
@@ -755,7 +829,10 @@ mod tests {
     // ── BatchUi contracts ───────────────────────────────────────────
 
     fn batch_book(id: &str) -> Book {
-        Book { id: id.into(), ..Default::default() }
+        Book {
+            id: id.into(),
+            ..Default::default()
+        }
     }
 
     #[test]
@@ -770,7 +847,10 @@ mod tests {
 
         b.start_single(("/books/a.epub".into(), "A".into()));
         assert!(b.single);
-        assert_eq!(b.autopen.as_ref().map(|(p, t)| (p.as_str(), t.as_str())), Some(("/books/a.epub", "A")));
+        assert_eq!(
+            b.autopen.as_ref().map(|(p, t)| (p.as_str(), t.as_str())),
+            Some(("/books/a.epub", "A"))
+        );
         assert!(!b.batch_all);
         assert_eq!((b.done, b.failed, b.total), (0, 0, 0));
         assert!(b.queue.is_empty());
@@ -794,12 +874,30 @@ mod tests {
     #[test]
     fn sheet_status_tally_only_after_a_finished_batch() {
         // Live download-all: the line counts down what is left.
-        let live = BatchUi { batch_all: true, total: 12, done: 5, failed: 1, ..Default::default() };
+        let live = BatchUi {
+            batch_all: true,
+            total: 12,
+            done: 5,
+            failed: 1,
+            ..Default::default()
+        };
         assert_eq!(live.sheet_status(4), SheetStatus::Remaining { count: 4 });
         // Drained download-all (flag latched off, tally kept on the
         // still-open modal): the finished tally.
-        let drained = BatchUi { batch_all: false, total: 12, done: 11, failed: 1, ..Default::default() };
-        assert_eq!(drained.sheet_status(0), SheetStatus::Tally { done: 11, failed: 1 });
+        let drained = BatchUi {
+            batch_all: false,
+            total: 12,
+            done: 11,
+            failed: 1,
+            ..Default::default()
+        };
+        assert_eq!(
+            drained.sheet_status(0),
+            SheetStatus::Tally {
+                done: 11,
+                failed: 1
+            }
+        );
         // Fresh single/series batches start wholesale with total == 0:
         // even right after a finished batch they count down and never
         // inherit the stale tally (the bug wholesale starts killed).

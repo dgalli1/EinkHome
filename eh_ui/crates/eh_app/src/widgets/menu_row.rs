@@ -23,14 +23,36 @@ pub(crate) fn draw_menu_row(
 ) -> Rect {
     use eh_shell::{GRAY_BLACK, GRAY_DGRAY, GRAY_WHITE};
     const ITEM_H: u32 = crate::menu::ITEM_H;
-    surf.fill_gray(Rect { x: px + 12, y: ry, w: pw - 24, h: ITEM_H - 12 }, GRAY_WHITE);
+    surf.fill_gray(
+        Rect {
+            x: px + 12,
+            y: ry,
+            w: pw - 24,
+            h: ITEM_H - 12,
+        },
+        GRAY_WHITE,
+    );
     let mid = ry as i32 + ((ITEM_H - 28) / 2) as i32 - 2;
     // draw_text takes a baseline; C DrawString takes the glyph top.
-    eh_render::draw_text(surf, font, 28.0, label, (px + 32) as i32, mid + 21, GRAY_BLACK, glyph);
+    eh_render::draw_text(
+        surf,
+        font,
+        28.0,
+        label,
+        (px + 32) as i32,
+        mid + 21,
+        GRAY_BLACK,
+        glyph,
+    );
     if let Some(v) = value {
         let vw = font.width(v, 24.0) as i32;
         let vx = (px + pw - 32) as i32 - vw;
         eh_render::draw_text(surf, font, 24.0, v, vx, mid + 20, GRAY_DGRAY, glyph);
     }
-    Rect { x: px + 12, y: ry, w: pw - 24, h: ITEM_H - 12 }
+    Rect {
+        x: px + 12,
+        y: ry,
+        w: pw - 24,
+        h: ITEM_H - 12,
+    }
 }

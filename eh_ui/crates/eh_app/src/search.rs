@@ -20,9 +20,7 @@ impl<B: Framebuffer> App<B> {
     /// CloseKeyboard, then the tab switch; the handler tears the band down).
     pub(crate) fn leave_search(&mut self) {
         if self.search_kb {
-            self.screen()
-                .framebuffer_mut()
-                .cancel_keyboard();
+            self.screen().framebuffer_mut().cancel_keyboard();
             // The cancelled keyboard never delivers a commit, so drain the
             // band state here (the C handler's teardown).
             self.search_kb = false;

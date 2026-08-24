@@ -44,7 +44,10 @@ pub fn extract_book_meta(path: &Path, ext: &str) -> ExtractedMeta {
         cover_hint: r.cover_hint,
     };
     if r.is_empty() {
-        crate::log(&format!("[eh_app] extract: no metadata in {}", path.display()));
+        crate::log(&format!(
+            "[eh_app] extract: no metadata in {}",
+            path.display()
+        ));
     }
     r
 }
@@ -100,10 +103,7 @@ fn find_cover_member(ar: &mut zip::ZipArchive<std::fs::File>) -> Option<String> 
 
 /// Match an OPF href against actual zip members: exact, `./`-stripped,
 /// percent-decoded, then base-name only (hrefs are OPF-dir relative).
-fn resolve_member(
-    ar: &mut zip::ZipArchive<std::fs::File>,
-    member: &str,
-) -> Option<String> {
+fn resolve_member(ar: &mut zip::ZipArchive<std::fs::File>, member: &str) -> Option<String> {
     for cand in [
         member.to_string(),
         member.trim_start_matches("./").to_string(),
@@ -112,7 +112,11 @@ fn resolve_member(
         if ar.by_name(&cand).is_ok() {
             return Some(cand);
         }
-        let want = cand.rsplit('/').next().unwrap_or(&cand).to_ascii_lowercase();
+        let want = cand
+            .rsplit('/')
+            .next()
+            .unwrap_or(&cand)
+            .to_ascii_lowercase();
         let hit = (0..ar.len()).find_map(|i| {
             let n = ar.by_index(i).ok()?.name().to_string();
             let base = n.rsplit('/').next().unwrap_or(&n).to_ascii_lowercase();
@@ -126,7 +130,9 @@ fn resolve_member(
 }
 
 fn img_ext(base_lower: &str) -> bool {
-    [".png", ".jpg", ".jpeg"].iter().any(|e| base_lower.ends_with(e))
+    [".png", ".jpg", ".jpeg"]
+        .iter()
+        .any(|e| base_lower.ends_with(e))
 }
 
 /// Render the PDF's FIRST page to PNG with the statically linked MuPDF
@@ -158,8 +164,11 @@ fn pdf_first_page_png(path: &Path) -> Option<Vec<u8>> {
 fn txt_word_cover(path: &Path) -> Option<Vec<u8>> {
     let buf = read_capped(path, 2048);
     let text = String::from_utf8_lossy(&buf);
-    let words: Vec<&str> =
-        text.split_whitespace().filter(|w| w.chars().any(char::is_alphanumeric)).take(6).collect();
+    let words: Vec<&str> = text
+        .split_whitespace()
+        .filter(|w| w.chars().any(char::is_alphanumeric))
+        .take(6)
+        .collect();
     if words.is_empty() {
         return None; // empty file — nothing to catch
     }
@@ -174,7 +183,11 @@ fn txt_word_cover(path: &Path) -> Option<Vec<u8>> {
     let mut lines: Vec<String> = Vec::new();
     let mut cur = String::new();
     for w in &words {
-        let cand = if cur.is_empty() { (*w).into() } else { format!("{cur} {w}") };
+        let cand = if cur.is_empty() {
+            (*w).into()
+        } else {
+            format!("{cur} {w}")
+        };
         if font.width(&cand, 26.0) <= max_w || cur.is_empty() {
             cur = cand;
         } else {
@@ -188,14 +201,24 @@ fn txt_word_cover(path: &Path) -> Option<Vec<u8>> {
 
     let mut px = vec![0xFFu8; (W * H) as usize];
     {
-        let mut surf = eh_render::Surface::new(&mut px, W, H, W as usize, eh_hal::PixelFormat::Grayscale8);
+        let mut surf =
+            eh_render::Surface::new(&mut px, W, H, W as usize, eh_hal::PixelFormat::Grayscale8);
         let asc = font.line_h(26.0).0 as i32;
         let top = ((H as i32 - LINE_H * lines.len() as i32) / 2).max(24) + asc;
         let mut g = eh_render::Glyph::new();
         for (i, line) in lines.iter().enumerate() {
             let lw = font.width(line, 26.0) as i32;
             let lx = ((W as i32 - lw) / 2).max(24);
-            eh_render::draw_text(&mut surf, font, 26.0, line, lx, top + i as i32 * LINE_H, eh_shell::GRAY_BLACK, &mut g);
+            eh_render::draw_text(
+                &mut surf,
+                font,
+                26.0,
+                line,
+                lx,
+                top + i as i32 * LINE_H,
+                eh_shell::GRAY_BLACK,
+                &mut g,
+            );
         }
     }
 
@@ -232,7 +255,13 @@ struct Grab<'a> {
 
 impl<'a> Grab<'a> {
     fn new(names: &'a [&'a str]) -> Grab<'a> {
-        Grab { names, out: String::new(), done: false, depth: 0, capturing: false }
+        Grab {
+            names,
+            out: String::new(),
+            done: false,
+            depth: 0,
+            capturing: false,
+        }
     }
 
     fn start(&mut self, local: &str) {
@@ -292,7 +321,12 @@ impl<'a> Grab<'a> {
 /// Pull the text of the first element named by `names` (local names,
 /// namespace-prefix agnostic — `dc:title` matches "title") and the first
 /// named by `authors`, each capped at `limit` bytes.
-fn grab_two_fields(xml: &[u8], titles: &[&str], authors: &[&str], limit: usize) -> (String, String) {
+fn grab_two_fields(
+    xml: &[u8],
+    titles: &[&str],
+    authors: &[&str],
+    limit: usize,
+) -> (String, String) {
     use quick_xml::events::Event;
     let mut rd = quick_xml::Reader::from_reader(xml);
     rd.config_mut().trim_text(true);
@@ -343,13 +377,19 @@ fn extract_epub(path: &Path) -> Option<ExtractedMeta> {
     // Locate the OPF via the container.
     let mut c = String::new();
     use std::io::Read as _;
-    ar.by_name("META-INF/container.xml").ok()?.read_to_string(&mut c).ok()?;
+    ar.by_name("META-INF/container.xml")
+        .ok()?
+        .read_to_string(&mut c)
+        .ok()?;
     let opf_path = rootfile_path(&c)?;
     let mut opf = String::new();
     ar.by_name(&opf_path).ok()?.read_to_string(&mut opf).ok()?;
-    let (title, author) =
-        grab_two_fields(opf.as_bytes(), &["title"], &["creator"], MAX_TITLE_LEN);
-    Some(ExtractedMeta { title, author, cover_hint: cover_hint(&opf) })
+    let (title, author) = grab_two_fields(opf.as_bytes(), &["title"], &["creator"], MAX_TITLE_LEN);
+    Some(ExtractedMeta {
+        title,
+        author,
+        cover_hint: cover_hint(&opf),
+    })
 }
 
 /// The full-path attribute of the container's first <rootfile> element.
@@ -425,7 +465,11 @@ fn extract_fb2(path: &Path) -> Option<ExtractedMeta> {
     let xml = read_capped(path, 1 << 20);
     let (title, _) = grab_two_fields(&xml, &["book-title"], &[], MAX_TITLE_LEN);
     let author = fb2_author(&xml);
-    Some(ExtractedMeta { title, author, cover_hint: None })
+    Some(ExtractedMeta {
+        title,
+        author,
+        cover_hint: None,
+    })
 }
 
 /// The first title-info author's name parts folded into one line.
@@ -495,7 +539,11 @@ fn extract_pdf(path: &Path) -> Option<ExtractedMeta> {
     let buf = read_capped(path, 8 << 20);
     let title = pdf_dict_string(&buf, b"/Title", MAX_TITLE_LEN);
     let author = pdf_dict_string(&buf, b"/Author", 80);
-    Some(ExtractedMeta { title, author, cover_hint: None })
+    Some(ExtractedMeta {
+        title,
+        author,
+        cover_hint: None,
+    })
 }
 
 /// The string value following `key` in raw PDF bytes, or "".
@@ -562,10 +610,7 @@ fn pdf_literal_string(body: &[u8]) -> Option<(String, usize)> {
                         // Up to three octal digits.
                         let mut v: u32 = (body[i] - b'0') as u32;
                         let mut k = 0;
-                        while k < 2
-                            && i + 1 < body.len()
-                            && (b'0'..=b'7').contains(&body[i + 1])
-                        {
+                        while k < 2 && i + 1 < body.len() && (b'0'..=b'7').contains(&body[i + 1]) {
                             i += 1;
                             k += 1;
                             v = v * 8 + (body[i] - b'0') as u32;
@@ -677,10 +722,16 @@ mod tests {
     fn pdf_dict_string_scans_past_nonstring_values_and_caps_chars() {
         // Whitespace between key and value; a non-string value (`true`)
         // keeps the scan going to the next occurrence of the key.
-        assert_eq!(pdf_dict_string(b"/Title\n true /Title (Real)", b"/Title", 96), "Real");
+        assert_eq!(
+            pdf_dict_string(b"/Title\n true /Title (Real)", b"/Title", 96),
+            "Real"
+        );
         // The cap counts characters, not bytes: multibyte text survives
         // whole (a byte truncate would split a char).
-        assert_eq!(pdf_dict_string(b"/Title <FEFF043404350436>", b"/Title", 2), "де");
+        assert_eq!(
+            pdf_dict_string(b"/Title <FEFF043404350436>", b"/Title", 2),
+            "де"
+        );
         // No usable value anywhere: empty string.
         assert_eq!(pdf_dict_string(b"/Author null", b"/Author", 8), "");
     }
@@ -690,7 +741,10 @@ mod tests {
         // No BOM: bytes map through PDFDocEncoding (≈ Latin-1).
         assert_eq!(pdf_decode_bytes(&[0x41, 0xE9]), "Aé");
         // FEFF BOM: the remainder reads as UTF-16BE units.
-        assert_eq!(pdf_decode_bytes(&[0xFE, 0xFF, 0x00, 0x64, 0x04, 0x34]), "dд");
+        assert_eq!(
+            pdf_decode_bytes(&[0xFE, 0xFF, 0x00, 0x64, 0x04, 0x34]),
+            "dд"
+        );
     }
 
     // ── XML field grabbing ──────────────────────────────────────────────
@@ -750,7 +804,10 @@ mod tests {
         let meta = r#"<metadata><meta name="cover" content="my-img"/></metadata><manifest><item id="my-img" href="meta.png"/></manifest>"#;
         assert_eq!(cover_hint(meta).as_deref(), Some("meta.png"));
         // Neither convention: no hint.
-        assert_eq!(cover_hint(r#"<manifest><item id="x" href="a.png"/></manifest>"#), None);
+        assert_eq!(
+            cover_hint(r#"<manifest><item id="x" href="a.png"/></manifest>"#),
+            None
+        );
     }
 
     #[test]
@@ -769,9 +826,11 @@ mod tests {
         let path = dir.path().join("a.epub");
         let f = std::fs::File::create(&path).unwrap();
         let mut z = zip::ZipWriter::new(f);
-        z.start_file("OEBPS/plain.png", SimpleFileOptions::default()).unwrap();
+        z.start_file("OEBPS/plain.png", SimpleFileOptions::default())
+            .unwrap();
         z.write_all(b"x").unwrap();
-        z.start_file("OEBPS/imgs/my cover.png", SimpleFileOptions::default()).unwrap();
+        z.start_file("OEBPS/imgs/my cover.png", SimpleFileOptions::default())
+            .unwrap();
         z.write_all(b"x").unwrap();
         z.finish().unwrap();
         let mut ar = zip::ZipArchive::new(std::fs::File::open(&path).unwrap()).unwrap();

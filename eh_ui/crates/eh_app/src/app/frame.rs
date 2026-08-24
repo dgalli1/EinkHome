@@ -7,7 +7,6 @@ use super::*;
 impl<B: Framebuffer> App<B> {
     // ── screen access ─────────────────────────────────────────────────
 
-
     /// Refresh the framebuffer caches from the live screen; call after
     /// building/moving the screen so overlay draws (which run while the
     /// screen is take()n) can use the cached values.
@@ -39,7 +38,12 @@ impl<B: Framebuffer> App<B> {
     pub fn theme_resource(&mut self, name: &str) -> Option<eh_hal::ThemeBitmap> {
         if self.screen.is_some() {
             self.sync_fb_cache();
-            let t = self.screen.as_mut().unwrap().framebuffer().theme_resource(name);
+            let t = self
+                .screen
+                .as_mut()
+                .unwrap()
+                .framebuffer()
+                .theme_resource(name);
             self.theme_cache.insert(name.to_string(), t.clone());
             t
         } else {
@@ -112,20 +116,41 @@ impl<B: Framebuffer> App<B> {
             let mut dirty: Vec<Rect> = s.drain_dirty();
             {
                 let fb = s.framebuffer_mut();
-                let mut surf = eh_render::Surface::new(fb.surface_mut(), scr.width, scr.height, stride, fmt);
+                let mut surf =
+                    eh_render::Surface::new(fb.surface_mut(), scr.width, scr.height, stride, fmt);
                 match ov {
                     Overlay::More => crate::menu::draw(&mut surf, self, &mut dirty),
                     Overlay::Settings => crate::settings::draw(&mut surf, self, &mut dirty),
                     Overlay::Launcher => crate::launcher::draw(&mut surf, self, &mut dirty),
                     Overlay::Source => crate::source::draw(&mut surf, self, &mut dirty),
-                    Overlay::Download => crate::widgets::download::draw_download_popup(&mut surf, self, &mut dirty),
-                    Overlay::Sync => crate::widgets::sync_popup::draw_sync_popup(&mut surf, self, &mut dirty),
-                    Overlay::Context => crate::widgets::context::draw_context_menu(&mut surf, self, &mut dirty),
-                    Overlay::GroupChooser => crate::widgets::chooser::draw_chooser_sheet(&mut surf, self, &mut dirty, ChooserKind::Group),
-                    Overlay::SortChooser => crate::widgets::chooser::draw_chooser_sheet(&mut surf, self, &mut dirty, ChooserKind::Sort),
-                    Overlay::LogViewer => crate::viewer::draw_log_viewer(&mut surf, self, &mut dirty),
+                    Overlay::Download => {
+                        crate::widgets::download::draw_download_popup(&mut surf, self, &mut dirty)
+                    }
+                    Overlay::Sync => {
+                        crate::widgets::sync_popup::draw_sync_popup(&mut surf, self, &mut dirty)
+                    }
+                    Overlay::Context => {
+                        crate::widgets::context::draw_context_menu(&mut surf, self, &mut dirty)
+                    }
+                    Overlay::GroupChooser => crate::widgets::chooser::draw_chooser_sheet(
+                        &mut surf,
+                        self,
+                        &mut dirty,
+                        ChooserKind::Group,
+                    ),
+                    Overlay::SortChooser => crate::widgets::chooser::draw_chooser_sheet(
+                        &mut surf,
+                        self,
+                        &mut dirty,
+                        ChooserKind::Sort,
+                    ),
+                    Overlay::LogViewer => {
+                        crate::viewer::draw_log_viewer(&mut surf, self, &mut dirty)
+                    }
                     Overlay::Licenses => crate::viewer::draw_licenses(&mut surf, self, &mut dirty),
-                    Overlay::LicenseDetail => crate::viewer::draw_license_detail(&mut surf, self, &mut dirty),
+                    Overlay::LicenseDetail => {
+                        crate::viewer::draw_license_detail(&mut surf, self, &mut dirty)
+                    }
                     Overlay::None => {}
                 }
             }
@@ -192,11 +217,15 @@ fn union_rects(dirty: &[Rect]) -> Option<Rect> {
         let y0 = u.y.min(d.y);
         let x1 = (u.x + u.w).max(d.x + d.w);
         let y1 = (u.y + u.h).max(d.y + d.h);
-        u = Rect { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
+        u = Rect {
+            x: x0,
+            y: y0,
+            w: x1 - x0,
+            h: y1 - y0,
+        };
     }
     Some(u)
 }
-
 
 /// The clock's current minute (the self-panel strip's redraw cadence).
 fn panel_minute() -> i64 {
@@ -222,11 +251,28 @@ fn stamp_self_panel<B: Framebuffer>(fb: &mut B, y0: u32, panel: u32) {
     let font = shelf::shelf_font();
     let mut glyph = eh_render::Glyph::new();
     use eh_shell::{GRAY_BLACK, GRAY_WHITE};
-    surf.fill_gray(Rect { x: 0, y: y0, w: s.width, h: panel }, GRAY_WHITE);
+    surf.fill_gray(
+        Rect {
+            x: 0,
+            y: y0,
+            w: s.width,
+            h: panel,
+        },
+        GRAY_WHITE,
+    );
     surf.hline(0, y0, s.width, 2, GRAY_BLACK);
     let top = y0 as i32 + h / 2;
     let clock = clock_label();
-    eh_render::draw_text(&mut surf, font, 40.0, &clock, 24, top - 12, GRAY_BLACK, &mut glyph);
+    eh_render::draw_text(
+        &mut surf,
+        font,
+        40.0,
+        &clock,
+        24,
+        top - 12,
+        GRAY_BLACK,
+        &mut glyph,
+    );
     // Frontlight bulb (C eh_draw_system_strip: circle with short rays),
     // drawn only when the light is actually on.
     if frontlight {
@@ -252,12 +298,45 @@ fn stamp_self_panel<B: Framebuffer>(fb: &mut B, y0: u32, panel: u32) {
     let bh = 40u32;
     let bx = s.width.saturating_sub(116);
     let by = y0 + (panel.saturating_sub(bh)) / 2;
-    surf.rect_outline(Rect { x: bx, y: by, w: bw, h: bh }, 3, GRAY_BLACK);
-    surf.fill_gray(Rect { x: bx + bw + 1, y: by + bh / 2 - 7, w: 6, h: 14 }, GRAY_BLACK);
+    surf.rect_outline(
+        Rect {
+            x: bx,
+            y: by,
+            w: bw,
+            h: bh,
+        },
+        3,
+        GRAY_BLACK,
+    );
+    surf.fill_gray(
+        Rect {
+            x: bx + bw + 1,
+            y: by + bh / 2 - 7,
+            w: 6,
+            h: 14,
+        },
+        GRAY_BLACK,
+    );
     let lvl = battery.unwrap_or(0) as u32;
     let fw = (bw - 8) * lvl.min(100) / 100;
     if fw > 0 {
-        surf.fill_gray(Rect { x: bx + 4, y: by + 4, w: fw, h: bh - 8 }, GRAY_BLACK);
+        surf.fill_gray(
+            Rect {
+                x: bx + 4,
+                y: by + 4,
+                w: fw,
+                h: bh - 8,
+            },
+            GRAY_BLACK,
+        );
     }
-    fb.refresh(Rect { x: 0, y: y0, w: s.width, h: panel }, eh_hal::RefreshMode::Partial);
+    fb.refresh(
+        Rect {
+            x: 0,
+            y: y0,
+            w: s.width,
+            h: panel,
+        },
+        eh_hal::RefreshMode::Partial,
+    );
 }

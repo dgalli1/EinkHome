@@ -89,21 +89,56 @@ pub fn draw_self_panel<B: Framebuffer>(fb: &mut B) {
     let bpp = fmt.bytes_per_pixel() as u32;
     let stride = fb.stride() as u32;
     {
-        let mut surf = eh_render::Surface::new(fb.surface_mut(), s.width, s.height, stride as usize, fmt);
+        let mut surf =
+            eh_render::Surface::new(fb.surface_mut(), s.width, s.height, stride as usize, fmt);
         let mut glyph = eh_render::Glyph::new();
         let font = load_font();
-        surf.fill_gray(eh_hal::Rect { x: 0, y: y0, w: s.width, h }, GRAY_WHITE);
+        surf.fill_gray(
+            eh_hal::Rect {
+                x: 0,
+                y: y0,
+                w: s.width,
+                h,
+            },
+            GRAY_WHITE,
+        );
         surf.hline(0, y0, s.width, 2, GRAY_BLACK);
         // clock text vertically centred
         let top = y0 + h / 2;
-        eh_render::draw_text(&mut surf, font, 40.0, "Sun 12:00", 24, top as i32 - 12, GRAY_BLACK, &mut glyph);
+        eh_render::draw_text(
+            &mut surf,
+            font,
+            40.0,
+            "Sun 12:00",
+            24,
+            top as i32 - 12,
+            GRAY_BLACK,
+            &mut glyph,
+        );
         // battery
         let bw = 84u32;
         let bh = 40u32;
         let bx = s.width - 116;
         let by = y0 + (h - bh) / 2;
-        surf.rect_outline(eh_hal::Rect { x: bx, y: by, w: bw, h: bh }, 3, GRAY_BLACK);
-        surf.fill_gray(eh_hal::Rect { x: bx + 4, y: by + 4, w: (bw - 8) / 2, h: bh - 8 }, GRAY_BLACK);
+        surf.rect_outline(
+            eh_hal::Rect {
+                x: bx,
+                y: by,
+                w: bw,
+                h: bh,
+            },
+            3,
+            GRAY_BLACK,
+        );
+        surf.fill_gray(
+            eh_hal::Rect {
+                x: bx + 4,
+                y: by + 4,
+                w: (bw - 8) / 2,
+                h: bh - 8,
+            },
+            GRAY_BLACK,
+        );
         let _ = bpp;
         let _ = glyph;
     }

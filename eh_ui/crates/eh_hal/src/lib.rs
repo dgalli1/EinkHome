@@ -31,7 +31,11 @@ pub struct Screen {
 
 impl Screen {
     pub fn full(width: u32, height: u32) -> Self {
-        Self { width, height, content_bottom: height }
+        Self {
+            width,
+            height,
+            content_bottom: height,
+        }
     }
 
     pub fn content_height(&self) -> u32 {
@@ -113,14 +117,28 @@ impl Rect {
     pub fn intersect(&self, bounds: &Rect) -> Rect {
         let x0 = self.x.max(bounds.x);
         let y0 = self.y.max(bounds.y);
-        let x1 = self.x.saturating_add(self.w).min(bounds.x.saturating_add(bounds.w));
-        let y1 = self.y.saturating_add(self.h).min(bounds.y.saturating_add(bounds.h));
-        Rect { x: x0, y: y0, w: x1.saturating_sub(x0), h: y1.saturating_sub(y0) }
+        let x1 = self
+            .x
+            .saturating_add(self.w)
+            .min(bounds.x.saturating_add(bounds.w));
+        let y1 = self
+            .y
+            .saturating_add(self.h)
+            .min(bounds.y.saturating_add(bounds.h));
+        Rect {
+            x: x0,
+            y: y0,
+            w: x1.saturating_sub(x0),
+            h: y1.saturating_sub(y0),
+        }
     }
 
     /// True when `(x, y)` (surface pixels) falls inside the rect.
     pub fn contains(&self, x: i32, y: i32) -> bool {
-        x >= self.x as i32 && x < (self.x + self.w) as i32 && y >= self.y as i32 && y < (self.y + self.h) as i32
+        x >= self.x as i32
+            && x < (self.x + self.w) as i32
+            && y >= self.y as i32
+            && y < (self.y + self.h) as i32
     }
 }
 
@@ -128,12 +146,28 @@ impl Rect {
 /// the drawing surface).  Backends translate OS co-ordinates into this space.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum InputEvent {
-    PointerDown { x: i32, y: i32 },
-    PointerMove { x: i32, y: i32 },
-    PointerUp { x: i32, y: i32 },
-    PointerLongPress { x: i32, y: i32 },
-    KeyDown { key: KeyCode },
-    KeyUp { key: KeyCode },
+    PointerDown {
+        x: i32,
+        y: i32,
+    },
+    PointerMove {
+        x: i32,
+        y: i32,
+    },
+    PointerUp {
+        x: i32,
+        y: i32,
+    },
+    PointerLongPress {
+        x: i32,
+        y: i32,
+    },
+    KeyDown {
+        key: KeyCode,
+    },
+    KeyUp {
+        key: KeyCode,
+    },
     /// App is being shown / brought to foreground (used to (re)draw).
     WidgetShown,
     WidgetHidden,

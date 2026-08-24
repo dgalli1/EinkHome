@@ -11,13 +11,30 @@ fn main() {
     let client = ApiClient::new(&base, "pbemu-dev-token");
     let store = Store::open(&db).expect("open");
 
-    let n = eh_app::sync::sync(&client, &store, 50, &AtomicBool::new(false),
-        &mut |_| {}, None).expect("sync");
-    println!("sync done: {n} books, cursor={}", store.cursor().expect("cursor"));
+    let n = eh_app::sync::sync(
+        &client,
+        &store,
+        50,
+        &AtomicBool::new(false),
+        &mut |_| {},
+        None,
+    )
+    .expect("sync");
+    println!(
+        "sync done: {n} books, cursor={}",
+        store.cursor().expect("cursor")
+    );
 
     // A second sync should be a cheap no-op delta (cursor already advanced).
-    let n2 = eh_app::sync::sync(&client, &store, 50, &AtomicBool::new(false),
-        &mut |_| {}, None).expect("sync2");
+    let n2 = eh_app::sync::sync(
+        &client,
+        &store,
+        50,
+        &AtomicBool::new(false),
+        &mut |_| {},
+        None,
+    )
+    .expect("sync2");
     println!("second sync: {n2} books (should be same, cheap)");
     let _ = std::fs::remove_file(&db);
 }

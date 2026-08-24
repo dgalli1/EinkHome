@@ -99,7 +99,13 @@ pub fn draw_sync_popup<B: Framebuffer>(
         GRAY_BLACK,
         &mut g,
     );
-    surf.hline(sh.px + PAD, sh.py + TITLE_H - 1, sh.pw - 2 * PAD, 2, GRAY_LGRAY);
+    surf.hline(
+        sh.px + PAD,
+        sh.py + TITLE_H - 1,
+        sh.pw - 2 * PAD,
+        2,
+        GRAY_LGRAY,
+    );
 
     // Whether the cover warm pass has drained — computed before the popup
     // borrow (the probe needs &mut self).
@@ -138,21 +144,49 @@ pub fn draw_sync_popup<B: Framebuffer>(
     }
     let asc28 = font.line_h(28.0).0 as i32;
     let asc24 = font.line_h(24.0).0 as i32;
-    eh_render::draw_text(surf, font, 28.0, &line, (sh.px + PAD) as i32, (sh.py + TITLE_H + 24) as i32 + asc28, GRAY_BLACK, &mut g);
-    eh_render::draw_text(surf, font, 24.0, &subline, (sh.px + PAD) as i32, (sh.py + TITLE_H + 68) as i32 + asc24, GRAY_DGRAY, &mut g);
+    eh_render::draw_text(
+        surf,
+        font,
+        28.0,
+        &line,
+        (sh.px + PAD) as i32,
+        (sh.py + TITLE_H + 24) as i32 + asc28,
+        GRAY_BLACK,
+        &mut g,
+    );
+    eh_render::draw_text(
+        surf,
+        font,
+        24.0,
+        &subline,
+        (sh.px + PAD) as i32,
+        (sh.py + TITLE_H + 68) as i32 + asc24,
+        GRAY_DGRAY,
+        &mut g,
+    );
 
     // Covers stage: progress bar under the counter (C draw_sync_popup_
     // sheet: bar top TITLE_H+96, h 12), filled by done/total with a
     // striped overlay over the unfilled part while covers still load.
     if p.stage == SyncStage::Covers && p.covers_total > 0 {
         use eh_shell::GRAY_WHITE;
-        let bar = Rect { x: sh.px + PAD, y: sh.py + TITLE_H + 96, w: sh.pw - 48, h: 12 };
+        let bar = Rect {
+            x: sh.px + PAD,
+            y: sh.py + TITLE_H + 96,
+            w: sh.pw - 48,
+            h: 12,
+        };
         surf.fill_gray(bar, GRAY_WHITE);
         surf.rect_outline(bar, 1, GRAY_BLACK);
         let fill = (p.covers_done * (bar.w - 2)) / p.covers_total;
         if fill > 0 {
             surf.fill_gray(
-                Rect { x: bar.x + 1, y: bar.y + 1, w: fill.min(bar.w - 2), h: bar.h - 2 },
+                Rect {
+                    x: bar.x + 1,
+                    y: bar.y + 1,
+                    w: fill.min(bar.w - 2),
+                    h: bar.h - 2,
+                },
                 GRAY_BLACK,
             );
         }
@@ -160,7 +194,14 @@ pub fn draw_sync_popup<B: Framebuffer>(
         let from = bar.x + 1 + fill;
         let mut sx = from;
         while sx + 3 < bar.x + bar.w - 1 && !drained {
-            surf.line(sx as i32, (bar.y + 1) as i32, (sx + 2) as i32, (bar.y + bar.h - 2) as i32, 1, GRAY_DGRAY);
+            surf.line(
+                sx as i32,
+                (bar.y + 1) as i32,
+                (sx + 2) as i32,
+                (bar.y + bar.h - 2) as i32,
+                1,
+                GRAY_DGRAY,
+            );
             sx += 6;
         }
     }

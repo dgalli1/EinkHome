@@ -4,8 +4,8 @@
 //! and the Library / Search sub-page builders.  The SCREEN SWAP itself
 //! (`App::refresh_shelf`) stays in `app.rs` — it owns the take-and-
 //! rebuild framebuffer contract.
-use std::path::Path;
 use eh_hal::Framebuffer;
+use std::path::Path;
 
 use crate::app::{App, Source, ViewMode};
 use crate::appui::{PAGER_H, TOP_BAR_H};
@@ -20,10 +20,12 @@ impl<B: Framebuffer> App<B> {
     pub(crate) fn page_size(&self, width: u32) -> usize {
         match self.view_mode {
             ViewMode::List => {
-                let band = (self.content_bottom as i32 - TOP_BAR_H as i32
+                let band = (self.content_bottom as i32
+                    - TOP_BAR_H as i32
                     - crate::appui::TOP_BAR_PAD as i32
-                    - PAGER_H as i32 - 8)
-                    .max(1) as u32;
+                    - PAGER_H as i32
+                    - 8)
+                .max(1) as u32;
                 (band / shelf::LIST_ROW_H).max(1) as usize
             }
             ViewMode::Grid => {
@@ -56,8 +58,13 @@ impl<B: Framebuffer> App<B> {
         let pages = self.pages;
         let content_bottom = self.content_bottom;
         let title = self.top_title().to_string();
-        let (view_mode, source, syncing, drilled, sync_angle) =
-            (self.view_mode, self.source, self.syncing, self.drill > 0, self.sync_angle);
+        let (view_mode, source, syncing, drilled, sync_angle) = (
+            self.view_mode,
+            self.source,
+            self.syncing,
+            self.drill > 0,
+            self.sync_angle,
+        );
         shelf::build_shelf(
             fb,
             &title,
@@ -92,7 +99,12 @@ impl<B: Framebuffer> App<B> {
         let rows = self.store.view_page(per, offset).unwrap_or_default();
         let mut entries = Vec::with_capacity(rows.len());
         for v in rows {
-            let book = self.store.get_book(&v.book_id).ok().flatten().unwrap_or_default();
+            let book = self
+                .store
+                .get_book(&v.book_id)
+                .ok()
+                .flatten()
+                .unwrap_or_default();
             let art = crate::cover::load_cached(&self.covers_dir, &book.id)
                 .and_then(|bytes| crate::cover::decode_rgb(&bytes).ok())
                 .map(|(w, h, rgb)| (rgb, w, h))
@@ -101,7 +113,11 @@ impl<B: Framebuffer> App<B> {
                 crate::logger::log(&format!("[bookshelf] cover_tick cache hit id={}", book.id));
             }
             let stack = v.kind == 1;
-            let scope = if stack { v.series_id.clone() } else { String::new() };
+            let scope = if stack {
+                v.series_id.clone()
+            } else {
+                String::new()
+            };
             let progress = crate::progress::percent(&self.progress, &book.local_path);
             entries.push(ShelfEntry {
                 book,
@@ -147,22 +163,32 @@ impl<B: Framebuffer> App<B> {
         if bytes.is_empty() {
             return None; // known-no-cover tombstone
         }
-        crate::logger::log(&format!("[bookshelf] cover_tick local extract id={}", book.id));
-        crate::cover::decode_rgb(&bytes).ok().map(|(w, h, rgb)| (rgb, w, h))
+        crate::logger::log(&format!(
+            "[bookshelf] cover_tick local extract id={}",
+            book.id
+        ));
+        crate::cover::decode_rgb(&bytes)
+            .ok()
+            .map(|(w, h, rgb)| (rgb, w, h))
     }
 
     /// The Search sub-page at the current page (input row + history).
     pub(crate) fn build_search_page(&mut self, fb: B, width: u32) -> Screen<B> {
         let _ = width;
         // History rows per page: the C eh_history_pagesize formula.
-        let rows_per = ((self.content_bottom as i32 - PAGER_H as i32
+        let rows_per = ((self.content_bottom as i32
+            - PAGER_H as i32
             - TOP_BAR_H as i32
             - crate::appui::TOP_BAR_PAD as i32
             - 88)
             / 96)
             .max(1) as usize;
         let total = self.store.search_count().unwrap_or(0) as usize;
-        self.pages = if total == 0 { 1 } else { total.div_ceil(rows_per) };
+        self.pages = if total == 0 {
+            1
+        } else {
+            total.div_ceil(rows_per)
+        };
         if self.page >= self.pages {
             self.page = self.pages.saturating_sub(1);
         }
@@ -173,9 +199,27 @@ impl<B: Framebuffer> App<B> {
         // replaces the history list (C suggest_debounce_tick →
         // eh_draw_suggestions); empty hits keep the history visible.
         let using_suggestions = self.search_kb && !self.suggestions.is_empty();
-        let rows = if using_suggestions { &self.suggestions } else { &history };
-        let (page, pages, query, content_bottom, syncing) =
-            (self.page, self.pages, self.query.clone(), self.content_bottom, self.syncing);
-        shelf::build_search(fb, &query, page, pages, rows, content_bottom, syncing, self.search_kb)
+        let rows = if using_suggestions {
+            &self.suggestions
+        } else {
+            &history
+        };
+        let (page, pages, query, content_bottom, syncing) = (
+            self.page,
+            self.pages,
+            self.query.clone(),
+            self.content_bottom,
+            self.syncing,
+        );
+        shelf::build_search(
+            fb,
+            &query,
+            page,
+            pages,
+            rows,
+            content_bottom,
+            syncing,
+            self.search_kb,
+        )
     }
 }

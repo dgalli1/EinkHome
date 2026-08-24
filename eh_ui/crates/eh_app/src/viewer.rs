@@ -16,7 +16,7 @@ use eh_shell::{
 };
 
 use crate::app::{App, Overlay};
-use crate::settings::{HEADER_H, back_rect, draw_header as draw_settings_header};
+use crate::settings::{back_rect, draw_header as draw_settings_header, HEADER_H};
 
 /// One bundled third-party license (name, type, where-used note, and the
 /// FULL text shipped as a string — C BsLicense).
@@ -249,7 +249,9 @@ fn log_rows(w: u32, h: u32) -> Option<(String, Vec<eh_shell::WrapRow>)> {
 /// the anchor for paging up from the tail.  0 when the log is absent or
 /// fits entirely on one page.
 fn log_tail_first(w: u32, h: u32) -> usize {
-    let Some((_, rows)) = log_rows(w, h) else { return 0 };
+    let Some((_, rows)) = log_rows(w, h) else {
+        return 0;
+    };
     rows.len().saturating_sub(log_rows_vis(h))
 }
 
@@ -258,7 +260,11 @@ fn log_tail_first(w: u32, h: u32) -> usize {
 /// the corner buttons; the log file path rides in its own band just below
 /// the header border (inside the header it would collide with the centred
 /// title).
-pub fn draw_log_viewer<B: Framebuffer>(surf: &mut eh_render::Surface, app: &mut App<B>, dirty: &mut Vec<Rect>) {
+pub fn draw_log_viewer<B: Framebuffer>(
+    surf: &mut eh_render::Surface,
+    app: &mut App<B>,
+    dirty: &mut Vec<Rect>,
+) {
     let w = surf.width();
     let h = app.content_bottom;
     dirty.push(Rect { x: 0, y: 0, w, h });
@@ -269,16 +275,40 @@ pub fn draw_log_viewer<B: Framebuffer>(surf: &mut eh_render::Surface, app: &mut 
 
     let shown = log_path().display().to_string();
     let mut fitted = String::new();
-    eh_render::fit_width(font, 20.0, &shown, (w.saturating_sub(64)) as f32, &mut fitted);
+    eh_render::fit_width(
+        font,
+        20.0,
+        &shown,
+        (w.saturating_sub(64)) as f32,
+        &mut fitted,
+    );
     let tw = font.width(&fitted, 20.0) as i32;
     // C DrawString takes the glyph TOP; draw_text a baseline — +20 keeps
     // the 20px path fully below the header rule instead of straddling it.
-    draw_text(surf, font, 20.0, &fitted, ((w as i32 - tw) / 2).max(0), (HEADER_H + 30) as i32, GRAY_DGRAY, &mut glyph);
+    draw_text(
+        surf,
+        font,
+        20.0,
+        &fitted,
+        ((w as i32 - tw) / 2).max(0),
+        (HEADER_H + 30) as i32,
+        GRAY_DGRAY,
+        &mut glyph,
+    );
 
     let body_top = LOG_BODY_TOP;
     let rows_vis = log_rows_vis(h);
     let Some((text, rows)) = log_rows(w, h) else {
-        draw_text(surf, font, 26.0, crate::i18n::tr("log.empty"), 32, (body_top + 40) as i32, GRAY_DGRAY, &mut glyph);
+        draw_text(
+            surf,
+            font,
+            26.0,
+            crate::i18n::tr("log.empty"),
+            32,
+            (body_top + 40) as i32,
+            GRAY_DGRAY,
+            &mut glyph,
+        );
         return;
     };
 
@@ -296,7 +326,16 @@ pub fn draw_log_viewer<B: Framebuffer>(surf: &mut eh_render::Surface, app: &mut 
     };
     for i in 0..rows_vis.min(rows.len().saturating_sub(first)) {
         let r = &rows[first + i];
-        draw_text(surf, font, LOG_FONT, &text[r.start..r.end], 24, (body_top + i as u32 * LOG_ROW_H + 20) as i32, GRAY_BLACK, &mut glyph);
+        draw_text(
+            surf,
+            font,
+            LOG_FONT,
+            &text[r.start..r.end],
+            24,
+            (body_top + i as u32 * LOG_ROW_H + 20) as i32,
+            GRAY_BLACK,
+            &mut glyph,
+        );
     }
     // Corner scroll buttons: older = up, newer = down.
     draw_scroll_buttons(surf, h, first > 0, first < max_first);
@@ -304,7 +343,11 @@ pub fn draw_log_viewer<B: Framebuffer>(surf: &mut eh_render::Surface, app: &mut 
 
 /// The licenses LIST view (C lic_draw_list): one bordered row per license
 /// (name over type), scrollable, with the corner scroll buttons.
-pub fn draw_licenses<B: Framebuffer>(surf: &mut eh_render::Surface, app: &mut App<B>, dirty: &mut Vec<Rect>) {
+pub fn draw_licenses<B: Framebuffer>(
+    surf: &mut eh_render::Surface,
+    app: &mut App<B>,
+    dirty: &mut Vec<Rect>,
+) {
     let w = surf.width();
     let h = app.content_bottom;
     dirty.push(Rect { x: 0, y: 0, w, h });
@@ -330,10 +373,45 @@ pub fn draw_licenses<B: Framebuffer>(surf: &mut eh_render::Surface, app: &mut Ap
         }
         let lic = &LICENSES[idx];
         let ry = body_top + i as u32 * LIC_LIST_H;
-        surf.fill_gray(Rect { x: 16, y: ry, w: w - 32, h: LIC_LIST_H - 12 }, GRAY_WHITE);
-        surf.rect_outline(Rect { x: 16, y: ry, w: w - 32, h: LIC_LIST_H - 12 }, 2, GRAY_BLACK);
-        draw_text(surf, font, 30.0, lic.name, 32, (ry + 40) as i32, GRAY_BLACK, &mut glyph);
-        draw_text(surf, font, 24.0, lic.kind, 32, (ry + 76) as i32, GRAY_DGRAY, &mut glyph);
+        surf.fill_gray(
+            Rect {
+                x: 16,
+                y: ry,
+                w: w - 32,
+                h: LIC_LIST_H - 12,
+            },
+            GRAY_WHITE,
+        );
+        surf.rect_outline(
+            Rect {
+                x: 16,
+                y: ry,
+                w: w - 32,
+                h: LIC_LIST_H - 12,
+            },
+            2,
+            GRAY_BLACK,
+        );
+        draw_text(
+            surf,
+            font,
+            30.0,
+            lic.name,
+            32,
+            (ry + 40) as i32,
+            GRAY_BLACK,
+            &mut glyph,
+        );
+        draw_text(
+            surf,
+            font,
+            24.0,
+            lic.kind,
+            32,
+            (ry + 76) as i32,
+            GRAY_DGRAY,
+            &mut glyph,
+        );
     }
     draw_scroll_buttons(surf, h, first > 0, first < max_first);
 }
@@ -341,12 +419,19 @@ pub fn draw_licenses<B: Framebuffer>(surf: &mut eh_render::Surface, app: &mut Ap
 /// One license's FULL text (C lic_draw_detail): a one-line attribution
 /// band under the header ("type · where used"), then the word-wrapped
 /// text with blank-line paragraph gaps, page-scrolled via the buttons.
-pub fn draw_license_detail<B: Framebuffer>(surf: &mut eh_render::Surface, app: &mut App<B>, dirty: &mut Vec<Rect>) {
+pub fn draw_license_detail<B: Framebuffer>(
+    surf: &mut eh_render::Surface,
+    app: &mut App<B>,
+    dirty: &mut Vec<Rect>,
+) {
     let w = surf.width();
     let h = app.content_bottom;
     dirty.push(Rect { x: 0, y: 0, w, h });
     surf.fill_gray(Rect { x: 0, y: 0, w, h }, GRAY_WHITE);
-    let sel = app.license_selected.map(|i| i.min(LICENSES.len() - 1)).unwrap_or(0);
+    let sel = app
+        .license_selected
+        .map(|i| i.min(LICENSES.len() - 1))
+        .unwrap_or(0);
     let lic = &LICENSES[sel];
     draw_header(surf, lic.name);
     let font = crate::shelf::shelf_font();
@@ -355,14 +440,35 @@ pub fn draw_license_detail<B: Framebuffer>(surf: &mut eh_render::Surface, app: &
     // Attribution band: type · where it is used.
     let band = format!("{}  \u{b7}  {}", lic.kind, lic.note);
     let mut fitted = String::new();
-    eh_render::fit_width(font, 20.0, &band, (w.saturating_sub(64)) as f32, &mut fitted);
+    eh_render::fit_width(
+        font,
+        20.0,
+        &band,
+        (w.saturating_sub(64)) as f32,
+        &mut fitted,
+    );
     let tw = font.width(&fitted, 20.0) as i32;
-    draw_text(surf, font, 20.0, &fitted, ((w as i32 - tw) / 2).max(0), (HEADER_H + 30) as i32, GRAY_DGRAY, &mut glyph);
+    draw_text(
+        surf,
+        font,
+        20.0,
+        &fitted,
+        ((w as i32 - tw) / 2).max(0),
+        (HEADER_H + 30) as i32,
+        GRAY_DGRAY,
+        &mut glyph,
+    );
 
     let btn_y = h.saturating_sub(8 + SCROLL_BTN_H);
     let body_h = btn_y.saturating_sub(LOG_BODY_TOP + 8).max(LOG_ROW_H);
     let rows_vis = (body_h / LOG_ROW_H).max(1) as usize;
-    let rows = wrap_rows_forward(font, LOG_FONT, lic.text, (w.saturating_sub(48)) as f32, LIC_MAX_ROWS);
+    let rows = wrap_rows_forward(
+        font,
+        LOG_FONT,
+        lic.text,
+        (w.saturating_sub(48)) as f32,
+        LIC_MAX_ROWS,
+    );
     let max_first = rows.len().saturating_sub(rows_vis);
     let first = {
         let f = (app.lic_scroll.max(0) as usize).min(max_first);
@@ -374,7 +480,16 @@ pub fn draw_license_detail<B: Framebuffer>(surf: &mut eh_render::Surface, app: &
         if r.blank {
             continue; // paragraph gap row
         }
-        draw_text(surf, font, LOG_FONT, &lic.text[r.start..r.end], 24, (LOG_BODY_TOP + i as u32 * LOG_ROW_H) as i32, GRAY_BLACK, &mut glyph);
+        draw_text(
+            surf,
+            font,
+            LOG_FONT,
+            &lic.text[r.start..r.end],
+            24,
+            (LOG_BODY_TOP + i as u32 * LOG_ROW_H) as i32,
+            GRAY_BLACK,
+            &mut glyph,
+        );
     }
     draw_scroll_buttons(surf, h, first > 0, first < max_first);
 }
@@ -434,10 +549,10 @@ pub fn tap<B: Framebuffer>(x: i32, y: i32, app: &mut App<B>) {
         let btn_y = sh - SCROLL_BTN_H as i32 - 8;
         match app.overlay {
             Overlay::LogViewer => {
-                let page = (((btn_y - LOG_BODY_TOP as i32).max(0) as u32) / LOG_ROW_H).max(1) as i32;
+                let page =
+                    (((btn_y - LOG_BODY_TOP as i32).max(0) as u32) / LOG_ROW_H).max(1) as i32;
                 let tf = log_tail_first(sw as u32, app.content_bottom);
-                app.log_scroll =
-                    log_scroll_after(app.log_scroll, dir, page, tf);
+                app.log_scroll = log_scroll_after(app.log_scroll, dir, page, tf);
             }
             Overlay::Licenses | Overlay::LicenseDetail => {
                 let detail = app.overlay == Overlay::LicenseDetail;
@@ -459,7 +574,9 @@ pub fn tap<B: Framebuffer>(x: i32, y: i32, app: &mut App<B>) {
         // A tap on a visible row opens that license's full text.
         let body_top = LIC_LIST_TOP as i32;
         if y >= body_top {
-            let rows_vis = ((((sh - 8 - SCROLL_BTN_H as i32) - body_top - 8).max(0) as u32) / LIC_LIST_H).max(1) as i32;
+            let rows_vis = ((((sh - 8 - SCROLL_BTN_H as i32) - body_top - 8).max(0) as u32)
+                / LIC_LIST_H)
+                .max(1) as i32;
             let rel = (y - body_top) / LIC_LIST_H as i32;
             if rel >= 0 && rel < rows_vis {
                 let idx = app.lic_scroll as usize + rel as usize;
@@ -505,11 +622,19 @@ mod tests {
 
         let rex = by_name("Rust extraction (zip / roxmltree / miniz_oxide)");
         assert!(rex.text.starts_with("Handles: zip archive reading"));
-        ends("Rust extraction", rex.text, "OTHER DEALINGS IN THE SOFTWARE.");
+        ends(
+            "Rust extraction",
+            rex.text,
+            "OTHER DEALINGS IN THE SOFTWARE.",
+        );
 
         let curl = by_name("libcurl");
         assert_eq!(curl.kind, "MIT / ISC");
-        ends("libcurl", curl.text, "written authorization of the copyright holder.");
+        ends(
+            "libcurl",
+            curl.text,
+            "written authorization of the copyright holder.",
+        );
     }
 
     /// The detail wrap keeps paragraph shape: blank source lines become

@@ -157,11 +157,7 @@ impl Config {
                 }
             })
             .unwrap_or_else(|| Path::new(CONFIG_BASE_DIR).join(CONFIG_FILENAME));
-        if primary
-            .parent()
-            .map(dir_writable)
-            .unwrap_or(false)
-        {
+        if primary.parent().map(dir_writable).unwrap_or(false) {
             return primary;
         }
         Path::new(CONFIG_WRITE_ROOT).join(CONFIG_FILENAME)
@@ -178,9 +174,18 @@ impl Config {
                 text.push_str(&format!("downloads_dir={d}\n"));
             }
         }
-        text.push_str(&format!("source={}\n", self.source.as_deref().unwrap_or("kavita")));
-        text.push_str(&format!("group={}\n", self.group.as_deref().unwrap_or("none")));
-        text.push_str(&format!("reader={}\n", self.reader.as_deref().unwrap_or("auto")));
+        text.push_str(&format!(
+            "source={}\n",
+            self.source.as_deref().unwrap_or("kavita")
+        ));
+        text.push_str(&format!(
+            "group={}\n",
+            self.group.as_deref().unwrap_or("none")
+        ));
+        text.push_str(&format!(
+            "reader={}\n",
+            self.reader.as_deref().unwrap_or("auto")
+        ));
         std::fs::write(path, text)
     }
 }
@@ -318,7 +323,10 @@ mod tests {
         )
         .unwrap();
         std::fs::write(dir.path().join("bookshelf.cfg"), "api_url=http://run:2\n").unwrap();
-        let cfg = Config::load_for_run(dir.path(), Some(bin_dir.join("bookshelf.pc").to_str().unwrap()));
+        let cfg = Config::load_for_run(
+            dir.path(),
+            Some(bin_dir.join("bookshelf.pc").to_str().unwrap()),
+        );
         assert_eq!(cfg.api_url, "http://run:2");
         // Keys the run layer does not carry keep the argv0 value.
         assert_eq!(cfg.api_token, "argv0tok");

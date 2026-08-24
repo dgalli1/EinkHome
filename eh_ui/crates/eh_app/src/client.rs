@@ -133,8 +133,8 @@ impl ApiClient {
             #[serde(default)]
             items: Vec<BookMeta>,
         }
-        let frame: Frame = serde_json::from_str(&text)
-            .map_err(|e| format!("bad book list json: {e}"))?;
+        let frame: Frame =
+            serde_json::from_str(&text).map_err(|e| format!("bad book list json: {e}"))?;
         Ok(frame.items)
     }
 
@@ -195,8 +195,7 @@ mod tests {
 
     #[test]
     fn deserializes_delta() {
-        let j =
-            r#"{"added":[{"id":"x","title":"X"}],"removed":["y"],"nextCursor":5,"more":false}"#;
+        let j = r#"{"added":[{"id":"x","title":"X"}],"removed":["y"],"nextCursor":5,"more":false}"#;
         let d: Delta = serde_json::from_str(j).unwrap();
         assert_eq!(d.added.len(), 1);
         assert_eq!(d.removed, vec!["y"]);

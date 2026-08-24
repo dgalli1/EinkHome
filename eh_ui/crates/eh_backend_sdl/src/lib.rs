@@ -159,7 +159,9 @@ impl SdlFb {
                         self.kb_buf.extend_from_slice(text.as_bytes());
                         continue;
                     }
-                    Event::KeyDown { keycode: Some(k), .. } => {
+                    Event::KeyDown {
+                        keycode: Some(k), ..
+                    } => {
                         match classify_kb_key(*k) {
                             Some(KbKey::Backspace) => pop_char(&mut self.kb_buf),
                             Some(KbKey::Commit) => self.kb_commit(),
@@ -420,7 +422,7 @@ pub fn dump_ppm(buf: &[u8], w: u32, h: u32, path: &str) -> std::io::Result<()> {
 }
 #[cfg(test)]
 mod tests {
-    use super::{parse_pbemu_battery, pop_char, classify_kb_key, KbKey};
+    use super::{classify_kb_key, parse_pbemu_battery, pop_char, KbKey};
     use sdl2::keyboard::Keycode;
 
     #[test]

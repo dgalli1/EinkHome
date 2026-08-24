@@ -39,7 +39,10 @@ const H0: u32 = 1448;
 fn main() -> Result<(), String> {
     let (width, height) = std::env::var("EH_RES")
         .ok()
-        .and_then(|r| r.split_once('x').and_then(|(w, h)| Some((w.parse().ok()?, h.parse().ok()?))))
+        .and_then(|r| {
+            r.split_once('x')
+                .and_then(|(w, h)| Some((w.parse().ok()?, h.parse().ok()?)))
+        })
         .unwrap_or((W0, H0));
 
     let base = std::env::var("API").unwrap_or_else(|_| "http://127.0.0.1:18765".into());
@@ -90,26 +93,36 @@ fn main() -> Result<(), String> {
 
     // ── tap script ────────────────────────────────────────────────────
     let script = std::env::var("EH_TAP").unwrap_or_default();
-    for tok in script.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()) {
+    for tok in script
+        .split(',')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+    {
         let (cmd, arg) = match tok.split_once(':') {
             Some((c, a)) => (c, Some(a)),
             None => (tok, None),
         };
-        let mut tap = |app: &mut App<eh_backend_sdl::SdlFb>, x: i32, y: i32| -> Result<(), String> {
-            app.on_event(&InputEvent::PointerDown { x, y });
-            app.on_event(&InputEvent::PointerUp { x, y });
-            dump(app, cmd)
-        };
-        let geo = |a: &mut App<eh_backend_sdl::SdlFb>| -> (eh_hal::Rect, eh_hal::Rect, eh_hal::Rect) {
-            let s = a.screen();
-            let n = s.widgets.len();
-            (s.widget_rect(0), s.widget_rect(n - 1), s.widget_rect(2))
-        };
+        let mut tap =
+            |app: &mut App<eh_backend_sdl::SdlFb>, x: i32, y: i32| -> Result<(), String> {
+                app.on_event(&InputEvent::PointerDown { x, y });
+                app.on_event(&InputEvent::PointerUp { x, y });
+                dump(app, cmd)
+            };
+        let geo =
+            |a: &mut App<eh_backend_sdl::SdlFb>| -> (eh_hal::Rect, eh_hal::Rect, eh_hal::Rect) {
+                let s = a.screen();
+                let n = s.widgets.len();
+                (s.widget_rect(0), s.widget_rect(n - 1), s.widget_rect(2))
+            };
         match cmd {
             "menu" => {
                 // Top bar: the "…" box is the right BTN_SIZE+2*BTN_PAD band.
                 let (tb, _, _) = geo(&mut app);
-                tap(&mut app, (tb.x + tb.w) as i32 - 56, (tb.y + tb.h / 2) as i32)?;
+                tap(
+                    &mut app,
+                    (tb.x + tb.w) as i32 - 56,
+                    (tb.y + tb.h / 2) as i32,
+                )?;
             }
             "settings" => {
                 // Drawer row 4 (Settings): y = 96 + 3*88 = 360..448, card x.
@@ -139,14 +152,21 @@ fn main() -> Result<(), String> {
                 tap(&mut app, x, by)?;
             }
             "cover" => {
-                let n: i32 = arg.unwrap_or("0").parse::<i32>().map_err(|e: std::num::ParseIntError| e.to_string())?;
+                let n: i32 = arg
+                    .unwrap_or("0")
+                    .parse::<i32>()
+                    .map_err(|e: std::num::ParseIntError| e.to_string())?;
                 // The first cover tile's rect defines the grid cell pitch.
                 let (_, _, tile) = geo(&mut app);
                 let col = n % 3;
                 let row = n / 3;
                 let tw = tile.w as i32;
                 let th = tile.h as i32;
-                tap(&mut app, tile.x as i32 + col * tw + tw / 2, tile.y as i32 + row * th + th / 2)?;
+                tap(
+                    &mut app,
+                    tile.x as i32 + col * tw + tw / 2,
+                    tile.y as i32 + row * th + th / 2,
+                )?;
             }
             "save" => {
                 // Settings buttons sit at y = 112 + 5*120 + 24 = 736..832.
@@ -187,17 +207,13 @@ fn main() -> Result<(), String> {
             }
             other => return Err(format!("unknown tap token: {other}")),
         }
-        if std::env::var("EH_GEO_LAUNCHER").is_ok() && app.overlay == eh_app::app::Overlay::Launcher {
+        if std::env::var("EH_GEO_LAUNCHER").is_ok() && app.overlay == eh_app::app::Overlay::Launcher
+        {
             for (i, it) in app.launcher_items.iter().enumerate() {
                 let r = app.launcher_rects[i];
                 println!(
                     "lgeo[{i}] group={} text={:?} rect=({},{},{},{})",
-                    it.group,
-                    it.text,
-                    r.x,
-                    r.y,
-                    r.w,
-                    r.h
+                    it.group, it.text, r.x, r.y, r.w, r.h
                 );
             }
         }

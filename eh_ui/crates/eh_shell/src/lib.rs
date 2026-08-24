@@ -80,11 +80,21 @@ impl<'a> DrawCtx<'a> {
     }
     pub fn hline(&mut self, x: u32, y: u32, len: u32, thick: u32, gray: u8) {
         self.surf.hline(x, y, len, thick, gray);
-        self.push(Rect { x, y, w: len, h: thick });
+        self.push(Rect {
+            x,
+            y,
+            w: len,
+            h: thick,
+        });
     }
     pub fn vline(&mut self, x: u32, y: u32, len: u32, thick: u32, gray: u8) {
         self.surf.vline(x, y, len, thick, gray);
-        self.push(Rect { x, y, w: thick, h: len });
+        self.push(Rect {
+            x,
+            y,
+            w: thick,
+            h: len,
+        });
     }
     /// 2D Bresenham line (the C app's `DrawLine`), tracking the bounding
     /// box for dirty regions (over-approximated by the line thickness).
@@ -95,7 +105,12 @@ impl<'a> DrawCtx<'a> {
         let y = y0.min(y1).max(0);
         let w = (x0 - x1).abs() + t;
         let h = (y0 - y1).abs() + t;
-        self.push(Rect { x: x as u32, y: y as u32, w: w as u32, h: h as u32 });
+        self.push(Rect {
+            x: x as u32,
+            y: y as u32,
+            w: w as u32,
+            h: h as u32,
+        });
     }
     pub fn text(&mut self, x: i32, baseline: i32, size: f32, s: &str, gray: u8) {
         let w = draw_text(self.surf, self.font, size, s, x, baseline, gray, self.glyph) as i32;
@@ -112,10 +127,18 @@ impl<'a> DrawCtx<'a> {
         self.push(Rect::from_xy(x, baseline - size as i32, w, size as i32));
     }
 
-/// Centre `s` on `cx`, truncating (whole glyphs + `…`) so it never exceeds
-/// `max_w` px AND stays within `[cx - max_w/2, cx + max_w/2]` — the C app's
-/// `utf8_fit_width` analog for cover captions that must stay in their cell.
-pub fn text_center_fit(&mut self, cx: i32, baseline: i32, size: f32, s: &str, max_w: i32, gray: u8) {
+    /// Centre `s` on `cx`, truncating (whole glyphs + `…`) so it never exceeds
+    /// `max_w` px AND stays within `[cx - max_w/2, cx + max_w/2]` — the C app's
+    /// `utf8_fit_width` analog for cover captions that must stay in their cell.
+    pub fn text_center_fit(
+        &mut self,
+        cx: i32,
+        baseline: i32,
+        size: f32,
+        s: &str,
+        max_w: i32,
+        gray: u8,
+    ) {
         let full = self.font.width(s, size);
         if full as i32 <= max_w {
             // Fits whole; centre normally but never bleed off the left edge.
@@ -157,7 +180,12 @@ pub struct Fill {
 }
 impl Fill {
     pub fn new(color: u8) -> Self {
-        Self { color, rect: None, on_tap: None, tag: 0 }
+        Self {
+            color,
+            rect: None,
+            on_tap: None,
+            tag: 0,
+        }
     }
 }
 impl Widget for Fill {
@@ -200,7 +228,14 @@ pub struct Label {
 }
 impl Label {
     pub fn new(text: impl Into<String>, size: f32) -> Self {
-        Self { text: text.into(), size, gray: GRAY_BLACK, centered: false, baseline: None, rect: None }
+        Self {
+            text: text.into(),
+            size,
+            gray: GRAY_BLACK,
+            centered: false,
+            baseline: None,
+            rect: None,
+        }
     }
 }
 impl Widget for Label {
@@ -214,7 +249,13 @@ impl Widget for Label {
         self.baseline = Some(baseline);
         self.rect = Some(rect);
         if self.centered {
-            ctx.text_center(rect.x as i32 + rect.w as i32 / 2, baseline, self.size, &self.text, self.gray);
+            ctx.text_center(
+                rect.x as i32 + rect.w as i32 / 2,
+                baseline,
+                self.size,
+                &self.text,
+                self.gray,
+            );
         } else {
             ctx.text(rect.x as i32, baseline, self.size, &self.text, self.gray);
         }
@@ -222,7 +263,12 @@ impl Widget for Label {
     fn dirty(&self, out: &mut Vec<Rect>) {
         if let (Some(r), Some(b)) = (self.rect, self.baseline) {
             let w = (self.text.len() * (self.size as usize) / 2).min(r.w as usize) as i32;
-            out.push(Rect::from_xy(r.x as i32, b - self.size as i32, w, self.size as i32));
+            out.push(Rect::from_xy(
+                r.x as i32,
+                b - self.size as i32,
+                w,
+                self.size as i32,
+            ));
         }
     }
     fn hit(&self, x: i32, y: i32) -> bool {
@@ -310,7 +356,12 @@ impl Cover {
         }
         let cx = rect.x as i32 + THUMB_BORDER as i32 + (inner_w - cw0) / 2;
         let cy = rect.y as i32 + THUMB_BORDER as i32;
-        Rect { x: cx.max(0) as u32, y: cy.max(0) as u32, w: cw0.max(0) as u32, h: ch0.max(0) as u32 }
+        Rect {
+            x: cx.max(0) as u32,
+            y: cy.max(0) as u32,
+            w: cw0.max(0) as u32,
+            h: ch0.max(0) as u32,
+        }
     }
 }
 impl Widget for Cover {
@@ -324,7 +375,13 @@ impl Widget for Cover {
         // 1px BLACK outline of the same card.
         let card = Self::cover_card(rect);
         if let Some(img) = &self.img {
-            ctx.surf.blit_image_stretch(img, self.img_w, self.img_h, eh_hal::PixelFormat::Rgb24, card);
+            ctx.surf.blit_image_stretch(
+                img,
+                self.img_w,
+                self.img_h,
+                eh_hal::PixelFormat::Rgb24,
+                card,
+            );
             ctx.push(card);
         } else {
             ctx.outline(card, 1, GRAY_BLACK);
@@ -341,13 +398,37 @@ impl Widget for Cover {
             fitted.push_str(&self.title[..1.min(self.title.chars().count())]);
         }
         let baseline1 = cap_y + self.title_size as i32;
-        draw_text(ctx.surf, ctx.bold, self.title_size, &fitted, tx, baseline1, GRAY_BLACK, ctx.glyph);
+        draw_text(
+            ctx.surf,
+            ctx.bold,
+            self.title_size,
+            &fitted,
+            tx,
+            baseline1,
+            GRAY_BLACK,
+            ctx.glyph,
+        );
         ctx.push(rect);
         let text_h = rect.h.saturating_sub(card.y - rect.y + card.h) as i32;
         if !self.author.is_empty() && text_h >= (self.title_size + self.author_size) as i32 {
             let mut afitted = String::new();
-            eh_render::fit_width(ctx.font, self.author_size, &self.author, max_px, &mut afitted);
-            draw_text(ctx.surf, ctx.font, self.author_size, &afitted, tx, cap_y + 24 + self.author_size as i32, GRAY_DGRAY, ctx.glyph);
+            eh_render::fit_width(
+                ctx.font,
+                self.author_size,
+                &self.author,
+                max_px,
+                &mut afitted,
+            );
+            draw_text(
+                ctx.surf,
+                ctx.font,
+                self.author_size,
+                &afitted,
+                tx,
+                cap_y + 24 + self.author_size as i32,
+                GRAY_DGRAY,
+                ctx.glyph,
+            );
         }
     }
     fn dirty(&self, out: &mut Vec<Rect>) {
@@ -366,7 +447,11 @@ fn rect_contains(r: Rect, x: i32, y: i32) -> bool {
 
 /// Byte length of the first `n` chars of `s` (for slicing on a boundary).
 fn byte_len(s: &str, n: usize) -> usize {
-    s.chars().take(n).map(|c| c.len_utf8()).sum::<usize>().min(s.len())
+    s.chars()
+        .take(n)
+        .map(|c| c.len_utf8())
+        .sum::<usize>()
+        .min(s.len())
 }
 
 /// A screen: the widget tree + layout engine + dirty tracking driving one
@@ -438,10 +523,14 @@ impl<B: Framebuffer> Screen<B> {
     pub fn widget_rect(&self, idx: usize) -> Rect {
         match self.nodes.get(idx) {
             Some(&n) => self.clamp(self.layout.rect(n)).0,
-            None => Rect { x: 0, y: 0, w: 0, h: 0 },
+            None => Rect {
+                x: 0,
+                y: 0,
+                w: 0,
+                h: 0,
+            },
         }
     }
-
 
     /// Push a widget, giving it a taffy node with the given style.  The app
     /// calls this once when building its screen.  `present()` places the
@@ -479,7 +568,12 @@ impl<B: Framebuffer> Screen<B> {
     /// Add a widget inside `container_idx` (a node created by
     /// [`add_container`](Self::add_container)).  The container becomes that
     /// node's parent in taffy.  Returns the widget's index.
-    pub fn add_to(&mut self, container_idx: usize, w: Box<dyn Widget>, style: eh_layout::Style) -> usize {
+    pub fn add_to(
+        &mut self,
+        container_idx: usize,
+        w: Box<dyn Widget>,
+        style: eh_layout::Style,
+    ) -> usize {
         let parent = self.nodes[container_idx];
         let node = self.layout.leaf(style);
         self.layout.tree_mut().add_child(parent, node).ok();
@@ -559,7 +653,7 @@ impl<B: Framebuffer> Screen<B> {
                 widget.layout(rect);
             }
         }
-        }
+    }
 
     /// Take the dirty regions [`paint`](Self::paint) accumulated, leaving
     /// it empty (the app merges them with its overlay regions before its
@@ -573,12 +667,16 @@ impl<B: Framebuffer> Screen<B> {
     pub fn present(&mut self, mode: RefreshMode) {
         self.paint();
         if !self.dirty.is_empty() {
-            let content = Rect { x: 0, y: 0, w: self.fb.screen().width, h: self.content_h };
+            let content = Rect {
+                x: 0,
+                y: 0,
+                w: self.fb.screen().width,
+                h: self.content_h,
+            };
             self.fb.refresh(content, mode);
         }
         self.dirty.clear();
     }
-
 
     /// Flush the regions accumulated since the last present (used by the
     /// app layer after drawing overlays onto the canvas without a full
@@ -593,14 +691,24 @@ impl<B: Framebuffer> Screen<B> {
             let y0 = r.y.min(d.y);
             let x1 = (r.x + r.w).max(d.x + d.w);
             let y1 = (r.y + r.h).max(d.y + d.h);
-            r = Rect { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
+            r = Rect {
+                x: x0,
+                y: y0,
+                w: x1 - x0,
+                h: y1 - y0,
+            };
         }
         self.fb.refresh(r, mode);
         self.dirty.clear();
     }
 
     fn clamp(&self, r: Rect) -> (Rect, bool) {
-        let limit = Rect { x: 0, y: 0, w: self.fb.screen().width, h: self.content_h };
+        let limit = Rect {
+            x: 0,
+            y: 0,
+            w: self.fb.screen().width,
+            h: self.content_h,
+        };
         let clipped = r.intersect(&limit);
         (clipped, clipped == r)
     }
@@ -648,8 +756,25 @@ pub fn draw_scroll_buttons_at(surf: &mut Surface, y0: u32, up_ok: bool, down_ok:
     }
     let w = surf.width();
     // Left button: an up chevron.
-    surf.fill_gray(Rect { x: 0, y: y0, w: SCROLL_BTN_W, h: SCROLL_BTN_H }, GRAY_WHITE);
-    surf.rect_outline(Rect { x: 0, y: y0, w: SCROLL_BTN_W, h: SCROLL_BTN_H }, 2, if up_ok { GRAY_BLACK } else { GRAY_LGRAY });
+    surf.fill_gray(
+        Rect {
+            x: 0,
+            y: y0,
+            w: SCROLL_BTN_W,
+            h: SCROLL_BTN_H,
+        },
+        GRAY_WHITE,
+    );
+    surf.rect_outline(
+        Rect {
+            x: 0,
+            y: y0,
+            w: SCROLL_BTN_W,
+            h: SCROLL_BTN_H,
+        },
+        2,
+        if up_ok { GRAY_BLACK } else { GRAY_LGRAY },
+    );
     let col = if up_ok { GRAY_BLACK } else { GRAY_LGRAY };
     let cx = (SCROLL_BTN_W / 2) as i32;
     let cy = (y0 + SCROLL_BTN_H / 2) as i32;
@@ -657,8 +782,25 @@ pub fn draw_scroll_buttons_at(surf: &mut Surface, y0: u32, up_ok: bool, down_ok:
     surf.line(cx + 24, cy + 14, cx, cy - 14, 2, col);
     // Right button: a down chevron.
     let x2 = w - SCROLL_BTN_W;
-    surf.fill_gray(Rect { x: x2, y: y0, w: SCROLL_BTN_W, h: SCROLL_BTN_H }, GRAY_WHITE);
-    surf.rect_outline(Rect { x: x2, y: y0, w: SCROLL_BTN_W, h: SCROLL_BTN_H }, 2, if down_ok { GRAY_BLACK } else { GRAY_LGRAY });
+    surf.fill_gray(
+        Rect {
+            x: x2,
+            y: y0,
+            w: SCROLL_BTN_W,
+            h: SCROLL_BTN_H,
+        },
+        GRAY_WHITE,
+    );
+    surf.rect_outline(
+        Rect {
+            x: x2,
+            y: y0,
+            w: SCROLL_BTN_W,
+            h: SCROLL_BTN_H,
+        },
+        2,
+        if down_ok { GRAY_BLACK } else { GRAY_LGRAY },
+    );
     let col = if down_ok { GRAY_BLACK } else { GRAY_LGRAY };
     let cx = (x2 + SCROLL_BTN_W / 2) as i32;
     surf.line(cx - 24, cy - 14, cx, cy + 14, 2, col);
@@ -668,7 +810,12 @@ pub fn draw_scroll_buttons_at(surf: &mut Surface, y0: u32, up_ok: bool, down_ok:
 /// Scroll buttons on the content area's bottom edge (C
 /// eh_draw_scroll_buttons: y0 = eh_content_bottom() - EH_SCROLL_BTN_H).
 pub fn draw_scroll_buttons(surf: &mut Surface, content_bottom: u32, up_ok: bool, down_ok: bool) {
-    draw_scroll_buttons_at(surf, content_bottom.saturating_sub(SCROLL_BTN_H), up_ok, down_ok);
+    draw_scroll_buttons_at(
+        surf,
+        content_bottom.saturating_sub(SCROLL_BTN_H),
+        up_ok,
+        down_ok,
+    );
 }
 
 /// Scroll buttons on the content area's bottom edge (C
@@ -705,7 +852,15 @@ pub struct WrapRow {
 /// would overflow `max_w` (the C fudge factor).  A single word wider
 /// than `max_w` gets its own overflowing row — the C app does the same
 /// rather than splitting words.
-fn wrap_line(font: &Font, size: f32, line: &str, base: usize, max_w: f32, out: &mut Vec<WrapRow>, cap: usize) {
+fn wrap_line(
+    font: &Font,
+    size: f32,
+    line: &str,
+    base: usize,
+    max_w: f32,
+    out: &mut Vec<WrapRow>,
+    cap: usize,
+) {
     let b = line.as_bytes();
     // Scan for the space byte directly: ' ' (0x20) can never occur
     // inside a multi-byte UTF-8 sequence, so byte indices stay on char
@@ -728,7 +883,11 @@ fn wrap_line(font: &Font, size: f32, line: &str, base: usize, max_w: f32, out: &
             None => 0.0,
         };
         if row_start.is_some() && cur_w + word_w + 6.0 > max_w {
-            out.push(WrapRow { start: base + row_start.unwrap(), end: base + row_end, blank: false });
+            out.push(WrapRow {
+                start: base + row_start.unwrap(),
+                end: base + row_end,
+                blank: false,
+            });
             row_start = None;
             if out.len() >= cap {
                 return; // no room on a fresh row
@@ -746,7 +905,11 @@ fn wrap_line(font: &Font, size: f32, line: &str, base: usize, max_w: f32, out: &
     if out.len() < cap {
         if let Some(s) = row_start {
             // Finalise the trailing partial row.
-            out.push(WrapRow { start: base + s, end: base + row_end, blank: false });
+            out.push(WrapRow {
+                start: base + s,
+                end: base + row_end,
+                blank: false,
+            });
         }
     }
 }
@@ -754,7 +917,13 @@ fn wrap_line(font: &Font, size: f32, line: &str, base: usize, max_w: f32, out: &
 /// Greedy word wrap of `text` into rows no wider than `max_w` px, oldest
 /// line first (C lic_wrap_rows).  Blank source lines become dedicated
 /// gap rows so paragraph shape survives.  At most `cap` rows.
-pub fn wrap_rows_forward(font: &Font, size: f32, text: &str, max_w: f32, cap: usize) -> Vec<WrapRow> {
+pub fn wrap_rows_forward(
+    font: &Font,
+    size: f32,
+    text: &str,
+    max_w: f32,
+    cap: usize,
+) -> Vec<WrapRow> {
     let mut rows = Vec::new();
     let mut base = 0usize;
     for line in text.split('\n') {
@@ -762,7 +931,11 @@ pub fn wrap_rows_forward(font: &Font, size: f32, text: &str, max_w: f32, cap: us
             break;
         }
         if line.is_empty() {
-            rows.push(WrapRow { start: base, end: base, blank: true });
+            rows.push(WrapRow {
+                start: base,
+                end: base,
+                blank: true,
+            });
         } else {
             wrap_line(font, size, line, base, max_w, &mut rows, cap);
         }

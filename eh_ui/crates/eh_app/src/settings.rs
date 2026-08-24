@@ -25,7 +25,15 @@ pub const ROWS_Y0: u32 = 112;
 /// bottom rule, back chevron in the shared touch box, centred title.
 pub fn draw_header(surf: &mut eh_render::Surface, title: &str, _dirty: &mut [Rect]) {
     let w = surf.width();
-    surf.fill_gray(Rect { x: 0, y: 0, w, h: HEADER_H }, GRAY_WHITE);
+    surf.fill_gray(
+        Rect {
+            x: 0,
+            y: 0,
+            w,
+            h: HEADER_H,
+        },
+        GRAY_WHITE,
+    );
     surf.hline(0, HEADER_H - 1, w, 1, GRAY_BLACK);
     let bx = BACK_X as i32 + BACK_W as i32 / 2;
     let by = (HEADER_H as i32 - BACK_H as i32) / 2 + BACK_H as i32 / 2;
@@ -36,7 +44,16 @@ pub fn draw_header(surf: &mut eh_render::Surface, title: &str, _dirty: &mut [Rec
     // C DrawString tops the 36px bold title at (HEADER_H-36)/2; draw_text
     // takes the BASELINE — add the face's ascent.
     let asc = font.line_h(36.0).0 as i32;
-    draw_text(surf, font, 36.0, title, (w as i32 - tw) / 2, (HEADER_H as i32 - 36) / 2 + asc, GRAY_BLACK, &mut glyph);
+    draw_text(
+        surf,
+        font,
+        36.0,
+        title,
+        (w as i32 - tw) / 2,
+        (HEADER_H as i32 - 36) / 2 + asc,
+        GRAY_BLACK,
+        &mut glyph,
+    );
 }
 
 /// Left-pointing back chevron (C eh_draw_back_icon: two 2px strokes, 26px
@@ -53,11 +70,20 @@ pub fn draw_back_icon(surf: &mut eh_render::Surface, cx: i32, cy: i32, col: u8) 
 /// The back-button touch box (C eh_overlay_back_rect).
 pub fn back_rect() -> Rect {
     let y = (HEADER_H.saturating_sub(BACK_H)) / 2;
-    Rect { x: BACK_X, y, w: BACK_W, h: BACK_H }
+    Rect {
+        x: BACK_X,
+        y,
+        w: BACK_W,
+        h: BACK_H,
+    }
 }
 
 /// Draw the settings page; records row rects into `app.settings_rows`.
-pub fn draw<B: Framebuffer>(surf: &mut eh_render::Surface, app: &mut App<B>, dirty: &mut Vec<Rect>) {
+pub fn draw<B: Framebuffer>(
+    surf: &mut eh_render::Surface,
+    app: &mut App<B>,
+    dirty: &mut Vec<Rect>,
+) {
     let w = surf.width();
     let h = app.content_bottom;
     dirty.push(Rect { x: 0, y: 0, w, h });
@@ -70,18 +96,38 @@ pub fn draw<B: Framebuffer>(surf: &mut eh_render::Surface, app: &mut App<B>, dir
 
     let dl = app.config.downloads_dir.clone().unwrap_or_default();
     let reader_val = app.reader_label(); // Auto + every detected reader (C eh_settings_reader_label)
-    // Live install state (C eh_sysapp_detect): toggling flips the row.
+                                         // Live install state (C eh_sysapp_detect): toggling flips the row.
     let sysapp_val = if crate::sysapp::detect() {
         crate::i18n::tr("settings.sysapp_on")
     } else {
         crate::i18n::tr("settings.sysapp_off")
     };
     let rows: [(SettingsRow, &str, &str); 5] = [
-        (SettingsRow::ApiHost, crate::i18n::tr("settings.api_host"), &app.config.api_url),
-        (SettingsRow::ApiKey, crate::i18n::tr("settings.api_key"), &app.config.api_token),
-        (SettingsRow::ReaderApp, crate::i18n::tr("settings.reader"), &reader_val),
-        (SettingsRow::DownloadFolder, crate::i18n::tr("settings.dl_dir"), &dl),
-        (SettingsRow::SystemApp, crate::i18n::tr("settings.system_app"), sysapp_val),
+        (
+            SettingsRow::ApiHost,
+            crate::i18n::tr("settings.api_host"),
+            &app.config.api_url,
+        ),
+        (
+            SettingsRow::ApiKey,
+            crate::i18n::tr("settings.api_key"),
+            &app.config.api_token,
+        ),
+        (
+            SettingsRow::ReaderApp,
+            crate::i18n::tr("settings.reader"),
+            &reader_val,
+        ),
+        (
+            SettingsRow::DownloadFolder,
+            crate::i18n::tr("settings.dl_dir"),
+            &dl,
+        ),
+        (
+            SettingsRow::SystemApp,
+            crate::i18n::tr("settings.system_app"),
+            sysapp_val,
+        ),
     ];
     let mut y = ROWS_Y0 as i32;
     for (row, label, value) in rows.iter() {
@@ -93,14 +139,60 @@ pub fn draw<B: Framebuffer>(surf: &mut eh_render::Surface, app: &mut App<B>, dir
             (Some(KbField::ApiHost), SettingsRow::ApiHost)
                 | (Some(KbField::ApiKey), SettingsRow::ApiKey)
         );
-        let (card_col, text_col, value_col) =
-            if editing { (GRAY_BLACK, GRAY_WHITE, GRAY_WHITE) } else { (GRAY_WHITE, GRAY_BLACK, GRAY_BLACK) };
+        let (card_col, text_col, value_col) = if editing {
+            (GRAY_BLACK, GRAY_WHITE, GRAY_WHITE)
+        } else {
+            (GRAY_WHITE, GRAY_BLACK, GRAY_BLACK)
+        };
         let ry = y as u32;
-        surf.fill_gray(Rect { x: MARGIN, y: ry, w: w - 2 * MARGIN, h: ROW_H - 12 }, card_col);
-        surf.rect_outline(Rect { x: MARGIN, y: ry, w: w - 2 * MARGIN, h: ROW_H - 12 }, 2, GRAY_BLACK);
-        draw_text(surf, eh_shell::bold_font(), 26.0, label, (MARGIN + 16) as i32, ry as i32 + 40, text_col, &mut glyph);
-        draw_text(surf, font, 30.0, value, (MARGIN + 16) as i32, ry as i32 + 82, value_col, &mut glyph);
-        app.settings_rows.push((Rect { x: MARGIN, y: ry, w: w - 2 * MARGIN, h: ROW_H - 12 }, *row));
+        surf.fill_gray(
+            Rect {
+                x: MARGIN,
+                y: ry,
+                w: w - 2 * MARGIN,
+                h: ROW_H - 12,
+            },
+            card_col,
+        );
+        surf.rect_outline(
+            Rect {
+                x: MARGIN,
+                y: ry,
+                w: w - 2 * MARGIN,
+                h: ROW_H - 12,
+            },
+            2,
+            GRAY_BLACK,
+        );
+        draw_text(
+            surf,
+            eh_shell::bold_font(),
+            26.0,
+            label,
+            (MARGIN + 16) as i32,
+            ry as i32 + 40,
+            text_col,
+            &mut glyph,
+        );
+        draw_text(
+            surf,
+            font,
+            30.0,
+            value,
+            (MARGIN + 16) as i32,
+            ry as i32 + 82,
+            value_col,
+            &mut glyph,
+        );
+        app.settings_rows.push((
+            Rect {
+                x: MARGIN,
+                y: ry,
+                w: w - 2 * MARGIN,
+                h: ROW_H - 12,
+            },
+            *row,
+        ));
         y += ROW_H as i32;
     }
     y += 24;
@@ -108,19 +200,58 @@ pub fn draw<B: Framebuffer>(surf: &mut eh_render::Surface, app: &mut App<B>, dir
     // Show logs + Licenses.
     for (row, label, filled) in [
         (SettingsRow::Save, crate::i18n::tr("settings.save"), true),
-        (SettingsRow::ShowLogs, crate::i18n::tr("settings.logs"), false),
-        (SettingsRow::Licenses, crate::i18n::tr("settings.licenses"), false),
+        (
+            SettingsRow::ShowLogs,
+            crate::i18n::tr("settings.logs"),
+            false,
+        ),
+        (
+            SettingsRow::Licenses,
+            crate::i18n::tr("settings.licenses"),
+            false,
+        ),
     ] {
         let ry = y as u32;
         surf.fill_gray(
-            Rect { x: MARGIN, y: ry, w: w - 2 * MARGIN, h: BTN_H - 12 },
+            Rect {
+                x: MARGIN,
+                y: ry,
+                w: w - 2 * MARGIN,
+                h: BTN_H - 12,
+            },
             if filled { GRAY_BLACK } else { GRAY_WHITE },
         );
-        surf.rect_outline(Rect { x: MARGIN, y: ry, w: w - 2 * MARGIN, h: BTN_H - 12 }, 2, GRAY_BLACK);
+        surf.rect_outline(
+            Rect {
+                x: MARGIN,
+                y: ry,
+                w: w - 2 * MARGIN,
+                h: BTN_H - 12,
+            },
+            2,
+            GRAY_BLACK,
+        );
         let col = if filled { GRAY_WHITE } else { GRAY_BLACK };
         let tw = font.width(label, 32.0) as i32;
-        draw_text(surf, eh_shell::bold_font(), 32.0, label, (w as i32 - tw) / 2, ry as i32 + (BTN_H - 12) as i32 / 2 + 11, col, &mut glyph);
-        app.settings_rows.push((Rect { x: MARGIN, y: ry, w: w - 2 * MARGIN, h: BTN_H - 12 }, row));
+        draw_text(
+            surf,
+            eh_shell::bold_font(),
+            32.0,
+            label,
+            (w as i32 - tw) / 2,
+            ry as i32 + (BTN_H - 12) as i32 / 2 + 11,
+            col,
+            &mut glyph,
+        );
+        app.settings_rows.push((
+            Rect {
+                x: MARGIN,
+                y: ry,
+                w: w - 2 * MARGIN,
+                h: BTN_H - 12,
+            },
+            row,
+        ));
         y += BTN_H as i32;
     }
 }

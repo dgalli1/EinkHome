@@ -21,7 +21,7 @@ use std::path::Path;
 
 use eh_hal::{Framebuffer, Rect};
 use eh_layout::taffy::{self, Dimension, Style};
-use eh_shell::{DrawCtx, GRAY_LGRAY, GRAY_WHITE, Screen, Widget};
+use eh_shell::{DrawCtx, Screen, Widget, GRAY_LGRAY, GRAY_WHITE};
 
 use crate::app::{App, Source, ViewMode};
 use crate::appui::{TopBar, TopBarState, TOP_BAR_H, TOP_BAR_PAD};
@@ -46,8 +46,9 @@ pub const FOLDER_ROW_H: u32 = 96;
 
 /// Extensions the shelf treats as book files (C BOOK_EXTS in
 /// eh_browser.c; shared by the Local import and the Folder browser).
-pub const BOOK_EXTS: [&str; 10] =
-    ["epub", "pdf", "mobi", "azw", "azw3", "fb2", "djvu", "txt", "cbr", "cbz"];
+pub const BOOK_EXTS: [&str; 10] = [
+    "epub", "pdf", "mobi", "azw", "azw3", "fb2", "djvu", "txt", "cbr", "cbz",
+];
 
 /// True when `ext` (already lowercase) is a book extension (C eh_is_book_ext).
 pub fn is_book_ext(ext: &str) -> bool {
@@ -116,7 +117,7 @@ pub fn default_downloads_dir() -> String {
     } else {
         format!("{}/Downloads", home_dir())
     }
- }
+}
 
 // ── scanner (C eh_local.c) ───────────────────────────────────────────────
 
@@ -165,7 +166,9 @@ fn scan_limited(root: &str, cap: usize) -> Vec<LocalFile> {
     let mut truncated = false;
     collect(Path::new(root), 0, cap, &mut out, &mut truncated);
     if truncated {
-        crate::log(&format!("[eh_app] local: scan cap {cap} reached, import truncated"));
+        crate::log(&format!(
+            "[eh_app] local: scan cap {cap} reached, import truncated"
+        ));
     }
     out
 }
@@ -257,15 +260,23 @@ pub fn kick_import<B: Framebuffer>(app: &mut App<B>) {
     let (tx, rx) = std::sync::mpsc::channel();
     app.scan_job.rx = Some(rx);
     app.syncing = true;
-    let _ = std::thread::Builder::new().name("local-scan".into()).spawn(move || {
-        let files = scan(&root);
-        let books: Vec<LocalBook> = files
-            .iter()
-            .map(|f| LocalBook { book: f.to_book(), meta: extract_book_meta(Path::new(&f.local_path), &f.ext) })
-            .collect();
-        crate::log(&format!("[eh_app] local: scanned {} books under {root}", books.len()));
-        let _ = tx.send((gen, books));
-    });
+    let _ = std::thread::Builder::new()
+        .name("local-scan".into())
+        .spawn(move || {
+            let files = scan(&root);
+            let books: Vec<LocalBook> = files
+                .iter()
+                .map(|f| LocalBook {
+                    book: f.to_book(),
+                    meta: extract_book_meta(Path::new(&f.local_path), &f.ext),
+                })
+                .collect();
+            crate::log(&format!(
+                "[eh_app] local: scanned {} books under {root}",
+                books.len()
+            ));
+            let _ = tx.send((gen, books));
+        });
 }
 
 /// Drop an in-flight local import scan: bump the generation so a landed
@@ -281,7 +292,9 @@ pub fn cancel_scan<B: Framebuffer>(app: &mut App<B>) {
 /// metadata, then rebuild the view.  Stale generations drop their result.
 pub fn poll_import<B: Framebuffer>(app: &mut App<B>) {
     let Some(rx) = &app.scan_job.rx else { return };
-    let Ok((gen, books)) = rx.try_recv() else { return };
+    let Ok((gen, books)) = rx.try_recv() else {
+        return;
+    };
     app.scan_job.rx = None;
     if gen != app.scan_job.gen {
         return; // stale chain (source switch / settings change): drop
@@ -308,7 +321,8 @@ pub fn poll_import<B: Framebuffer>(app: &mut App<B>) {
                     if !lb.meta.author.is_empty() {
                         b.author = lb.meta.author.clone();
                     }
-                    app.store.local_meta_put(&b.id, &lb.meta.title, &lb.meta.author)?;
+                    app.store
+                        .local_meta_put(&b.id, &lb.meta.title, &lb.meta.author)?;
                 }
             }
             app.store.upsert_book_row(&b)?;
@@ -376,7 +390,10 @@ impl Browser {
     pub fn load(&mut self) {
         self.entries.clear();
         if self.can_go_up() {
-            self.entries.push(BrowseEntry { name: "..".into(), is_dir: true });
+            self.entries.push(BrowseEntry {
+                name: "..".into(),
+                is_dir: true,
+            });
         }
         let Ok(rd) = std::fs::read_dir(&self.path) else {
             crate::log(&format!("[eh_app] browser: opendir {} failed", self.path));
@@ -414,10 +431,15 @@ impl Browser {
         }
         dirs.sort();
         files.sort();
+        self.entries.extend(
+            dirs.into_iter()
+                .map(|name| BrowseEntry { name, is_dir: true }),
+        );
         self.entries
-            .extend(dirs.into_iter().map(|name| BrowseEntry { name, is_dir: true }));
-        self.entries
-            .extend(files.into_iter().map(|name| BrowseEntry { name, is_dir: false }));
+            .extend(files.into_iter().map(|name| BrowseEntry {
+                name,
+                is_dir: false,
+            }));
         crate::logger::log(&format!(
             "[bookshelf] browser: {} -> {} entries",
             self.path,
@@ -514,7 +536,11 @@ struct BrowseRow {
 
 impl BrowseRow {
     fn blank() -> Self {
-        Self { name: None, is_dir: false, rect: None }
+        Self {
+            name: None,
+            is_dir: false,
+            rect: None,
+        }
     }
 }
 
@@ -525,7 +551,11 @@ impl Widget for BrowseRow {
         let w = ctx.surf.width();
         ctx.hline(0, rect.y + rect.h - 1, w, 1, GRAY_LGRAY);
         let Some(name) = &self.name else { return };
-        let label = if self.is_dir { format!("{name}/") } else { name.clone() };
+        let label = if self.is_dir {
+            format!("{name}/")
+        } else {
+            name.clone()
+        };
         // Pixel-fit truncation to w - 64 (C eh_utf8_fit_width).
         let mut label = label;
         while label.len() > 1 && ctx.font.width(&label, 28.0) as i32 > w as i32 - 64 {
@@ -547,10 +577,14 @@ impl Widget for BrowseRow {
 /// Build the browser screen: the top bar carries the current directory as
 /// its title; the body lists the visible rows (C eh_draw_browse — body
 /// only, the caller owns the chrome).
-pub fn build_browse_page<B: Framebuffer>(fb: B, browser: &Browser, content_bottom: u32) -> Screen<B> {
+pub fn build_browse_page<B: Framebuffer>(
+    fb: B,
+    browser: &Browser,
+    content_bottom: u32,
+) -> Screen<B> {
     let font = crate::shelf::shelf_font();
     let mut screen = Screen::new(fb, font);
-    screen.bg_fill = true;  // browser rows may not cover the band
+    screen.bg_fill = true; // browser rows may not cover the band
     screen.layout_mut().root_flex_column();
     let tb = TopBar::new(TopBarState {
         back: false,
@@ -594,7 +628,11 @@ pub fn build_browse_page<B: Framebuffer>(fb: B, browser: &Browser, content_botto
     for i in 0..rows {
         let idx = browser.scroll + i;
         let row = match browser.entries.get(idx) {
-            Some(e) => BrowseRow { name: Some(e.name.clone()), is_dir: e.is_dir, rect: None },
+            Some(e) => BrowseRow {
+                name: Some(e.name.clone()),
+                is_dir: e.is_dir,
+                rect: None,
+            },
             None => BrowseRow::blank(),
         };
         screen.add_to(
@@ -625,14 +663,16 @@ pub fn start_browse<B: Framebuffer>(app: &mut App<B>) {
 /// directory row navigates, a book file opens through the reader flow.
 pub fn tap_browse<B: Framebuffer>(app: &mut App<B>, x: i32, y: i32) {
     let _ = x; // rows span the full width; only y matters
-    // C eh_on_tap_browse origin: rows start at TOP_BAR_H+TOP_BAR_PAD+8 —
-    // the same offset build_browse_page's body padding gives the paint.
+               // C eh_on_tap_browse origin: rows start at TOP_BAR_H+TOP_BAR_PAD+8 —
+               // the same offset build_browse_page's body padding gives the paint.
     let top = TOP_BAR_H + TOP_BAR_PAD + 8;
     if (y as u32) < top {
         return;
     }
     let idx = ((y as u32 - top) / FOLDER_ROW_H) as usize + app.browser.scroll;
-    let Some(entry) = app.browser.entries.get(idx).cloned() else { return };
+    let Some(entry) = app.browser.entries.get(idx).cloned() else {
+        return;
+    };
     if entry.is_dir {
         app.browser.navigate(&entry.name);
         app.refresh_shelf();
@@ -678,7 +718,9 @@ pub fn tap_picker<B: Framebuffer>(app: &mut App<B>, _x: i32, y: i32) {
         (b.scroll, b.path.clone())
     };
     let idx = ((y as u32 - top) / FOLDER_ROW_H) as usize + scroll;
-    let Some(entry) = app.dl_picker.as_ref().unwrap().entries.get(idx).cloned() else { return };
+    let Some(entry) = app.dl_picker.as_ref().unwrap().entries.get(idx).cloned() else {
+        return;
+    };
     if entry.name == ".." {
         app.dl_picker.as_mut().unwrap().up();
         app.dirty = true;
@@ -742,9 +784,11 @@ mod tests {
         use zip::write::SimpleFileOptions;
         let f = std::fs::File::create(path).unwrap();
         let mut z = zip::ZipWriter::new(f);
-        z.start_file("mimetype", SimpleFileOptions::default()).unwrap();
+        z.start_file("mimetype", SimpleFileOptions::default())
+            .unwrap();
         z.write_all(b"application/epub+zip").unwrap();
-        z.start_file("META-INF/container.xml", SimpleFileOptions::default()).unwrap();
+        z.start_file("META-INF/container.xml", SimpleFileOptions::default())
+            .unwrap();
         z.write_all(
             br#"<?xml version="1.0"?>
 <container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
@@ -752,7 +796,8 @@ mod tests {
 </container>"#,
         )
         .unwrap();
-        z.start_file("OEBPS/content.opf", SimpleFileOptions::default()).unwrap();
+        z.start_file("OEBPS/content.opf", SimpleFileOptions::default())
+            .unwrap();
         z.write_all(
             br#"<?xml version="1.0"?>
 <package xmlns="http://www.idpf.org/2007/opf" xmlns:dc="http://purl.org/dc/elements/1.1/">
@@ -794,17 +839,23 @@ mod tests {
             use zip::write::SimpleFileOptions;
             let f = std::fs::File::create(&path).unwrap();
             let mut z = zip::ZipWriter::new(f);
-            z.start_file("META-INF/container.xml", SimpleFileOptions::default()).unwrap();
+            z.start_file("META-INF/container.xml", SimpleFileOptions::default())
+                .unwrap();
             z.write_all(br#"<container><rootfiles><rootfile full-path="OEBPS/content.opf"/></rootfiles></container>"#).unwrap();
-            z.start_file("OEBPS/content.opf", SimpleFileOptions::default()).unwrap();
+            z.start_file("OEBPS/content.opf", SimpleFileOptions::default())
+                .unwrap();
             z.write_all(br#"<package xmlns="http://www.idpf.org/2007/opf"><metadata><meta name="cover" content="cover-img"/></metadata><manifest><item id="cover-img" href="cover.png"/></manifest></package>"#).unwrap();
-            z.start_file("OEBPS/cover.png", SimpleFileOptions::default()).unwrap();
+            z.start_file("OEBPS/cover.png", SimpleFileOptions::default())
+                .unwrap();
             z.write_all(&tiny_png()).unwrap();
             z.finish().unwrap();
         }
         let bytes = extract_book_cover(&path, "epub").expect("epub cover extracted");
         assert!(bytes.starts_with(b"\x89PNG"));
-        assert!(crate::cover::decode_rgb(&bytes).is_ok(), "extracted cover must decode");
+        assert!(
+            crate::cover::decode_rgb(&bytes).is_ok(),
+            "extracted cover must decode"
+        );
     }
 
     #[test]
@@ -815,7 +866,10 @@ mod tests {
         // Metadata extraction fails cleanly -> poll_import keeps the
         // to_book() title, i.e. the filename WITHOUT the extension.
         assert!(extract_book_meta(&path, "epub").is_empty());
-        assert_eq!(stem_title(path.file_name().unwrap().to_str().unwrap()), "My Great Novel");
+        assert_eq!(
+            stem_title(path.file_name().unwrap().to_str().unwrap()),
+            "My Great Novel"
+        );
     }
 
     #[test]
@@ -1001,4 +1055,3 @@ mod tests {
         assert_eq!(f.to_book().source, "local");
     }
 }
-

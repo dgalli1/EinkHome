@@ -20,8 +20,13 @@ fn main() {
 
     match client.delta(0, 3) {
         Ok(d) => {
-            println!("delta(0,3): added={} removed={} nextCursor={} more={}",
-                d.added.len(), d.removed.len(), d.next_cursor, d.more);
+            println!(
+                "delta(0,3): added={} removed={} nextCursor={} more={}",
+                d.added.len(),
+                d.removed.len(),
+                d.next_cursor,
+                d.more
+            );
             for b in d.added.iter().take(3) {
                 println!("  + {} / {} / {}", b.id, b.title, b.author());
             }

@@ -55,55 +55,126 @@ struct IBitmapHdr {
 #[allow(non_snake_case)]
 mod imp {
     use super::{IBitmapHdr, ICanvas};
-    pub unsafe extern "C" fn GetCanvas() -> *const ICanvas { std::ptr::null() }
+    pub unsafe extern "C" fn GetCanvas() -> *const ICanvas {
+        std::ptr::null()
+    }
     pub unsafe extern "C" fn FullUpdate() {}
     pub unsafe extern "C" fn PartialUpdate(_x: i32, _y: i32, _w: i32, _h: i32) {}
     pub unsafe extern "C" fn iv_update_panel(_reading_mode: i32) {}
-    pub unsafe extern "C" fn DrawPanel(_icon: *const core::ffi::c_void, _text: *const u8, _title: *const u8, _percent: i32) -> i32 { 0 }
+    pub unsafe extern "C" fn DrawPanel(
+        _icon: *const core::ffi::c_void,
+        _text: *const u8,
+        _title: *const u8,
+        _percent: i32,
+    ) -> i32 {
+        0
+    }
     pub unsafe extern "C" fn Repaint() {}
-    pub unsafe extern "C" fn ScreenWidth() -> i32 { 758 }
-    pub unsafe extern "C" fn ScreenHeight() -> i32 { 1024 }
-    pub unsafe extern "C" fn PanelHeight() -> i32 { 0 }
-    pub unsafe extern "C" fn OpenBook(_path: *const u8, _params: *const u8, _flags: i32) -> i32 { 0 }
-    pub unsafe extern "C" fn NewTaskEx(_path: *const u8, _args: *mut *mut u8, _appname: *const u8, _name: *const u8, _icon: *const core::ffi::c_void, _flags: u32, _as_reader: i32) -> i32 { 0 }
+    pub unsafe extern "C" fn ScreenWidth() -> i32 {
+        758
+    }
+    pub unsafe extern "C" fn ScreenHeight() -> i32 {
+        1024
+    }
+    pub unsafe extern "C" fn PanelHeight() -> i32 {
+        0
+    }
+    pub unsafe extern "C" fn OpenBook(_path: *const u8, _params: *const u8, _flags: i32) -> i32 {
+        0
+    }
+    pub unsafe extern "C" fn NewTaskEx(
+        _path: *const u8,
+        _args: *mut *mut u8,
+        _appname: *const u8,
+        _name: *const u8,
+        _icon: *const core::ffi::c_void,
+        _flags: u32,
+        _as_reader: i32,
+    ) -> i32 {
+        0
+    }
     #[allow(dead_code)]
-    pub unsafe extern "C" fn OpenKeyboard(_title: *const u8, _buf: *mut i8, _max: i32, _flags: i32, _h: extern "C" fn(*mut i8)) {}
+    pub unsafe extern "C" fn OpenKeyboard(
+        _title: *const u8,
+        _buf: *mut i8,
+        _max: i32,
+        _flags: i32,
+        _h: extern "C" fn(*mut i8),
+    ) {
+    }
     #[allow(dead_code)]
     pub unsafe extern "C" fn CloseKeyboard() {}
     #[allow(dead_code)]
-    pub unsafe extern "C" fn SetWeakTimerEx(_name: *const u8, _h: extern "C" fn(*mut core::ffi::c_void), _d: *mut core::ffi::c_void, _ms: i32) -> i32 { 0 }
+    pub unsafe extern "C" fn SetWeakTimerEx(
+        _name: *const u8,
+        _h: extern "C" fn(*mut core::ffi::c_void),
+        _d: *mut core::ffi::c_void,
+        _ms: i32,
+    ) -> i32 {
+        0
+    }
     #[allow(dead_code)]
-    pub unsafe extern "C" fn QueryNetwork() -> i32 { 0 }
+    pub unsafe extern "C" fn QueryNetwork() -> i32 {
+        0
+    }
     #[allow(dead_code)]
-    pub unsafe extern "C" fn GetBatteryPower() -> i32 { -1 }
+    pub unsafe extern "C" fn GetBatteryPower() -> i32 {
+        -1
+    }
     #[allow(dead_code)]
     pub unsafe extern "C" fn BanSleep(_sec: i32) {}
     #[allow(dead_code)]
-    pub unsafe extern "C" fn GetDeviceModel() -> *mut u8 { std::ptr::null_mut() }
+    pub unsafe extern "C" fn GetDeviceModel() -> *mut u8 {
+        std::ptr::null_mut()
+    }
     #[allow(dead_code)]
-    pub unsafe extern "C" fn GetSoftwareVersion() -> *mut u8 { std::ptr::null_mut() }
+    pub unsafe extern "C" fn GetSoftwareVersion() -> *mut u8 {
+        std::ptr::null_mut()
+    }
     #[allow(dead_code)]
-    pub unsafe extern "C" fn device_number() -> u32 { 0 }
+    pub unsafe extern "C" fn device_number() -> u32 {
+        0
+    }
     #[allow(dead_code)]
-    pub unsafe extern "C" fn device_has_touchpanel() -> bool { false }
+    pub unsafe extern "C" fn device_has_touchpanel() -> bool {
+        false
+    }
     #[allow(dead_code)]
-    pub unsafe extern "C" fn device_has_audio() -> bool { false }
+    pub unsafe extern "C" fn device_has_audio() -> bool {
+        false
+    }
     #[allow(dead_code)]
-    pub unsafe extern "C" fn iv_ipc_cmd(_typ: core::ffi::c_long, _param: core::ffi::c_long) -> core::ffi::c_long { 0 }
+    pub unsafe extern "C" fn iv_ipc_cmd(
+        _typ: core::ffi::c_long,
+        _param: core::ffi::c_long,
+    ) -> core::ffi::c_long {
+        0
+    }
     #[allow(dead_code)]
     pub unsafe extern "C" fn OpenControlPanel(_ctx: *mut core::ffi::c_void) {}
     #[allow(dead_code)]
-    pub unsafe extern "C" fn GetResource(_name: *const u8, _deflt: *const IBitmapHdr) -> *mut IBitmapHdr { std::ptr::null_mut() }
+    pub unsafe extern "C" fn GetResource(
+        _name: *const u8,
+        _deflt: *const IBitmapHdr,
+    ) -> *mut IBitmapHdr {
+        std::ptr::null_mut()
+    }
     #[allow(dead_code)]
-    pub unsafe extern "C" fn LoadPNG(_name: *const u8, _deflt: i32) -> *mut IBitmapHdr { std::ptr::null_mut() }
+    pub unsafe extern "C" fn LoadPNG(_name: *const u8, _deflt: i32) -> *mut IBitmapHdr {
+        std::ptr::null_mut()
+    }
     #[allow(dead_code)]
-    pub unsafe extern "C" fn GetFrontlightState() -> i32 { -1 }
+    pub unsafe extern "C" fn GetFrontlightState() -> i32 {
+        -1
+    }
     #[allow(dead_code)]
     pub unsafe extern "C" fn SetOrientation(_n: i32) {}
     #[allow(dead_code)]
     pub unsafe extern "C" fn SetPanelType(_t: i32) {}
     #[allow(dead_code)]
-    pub unsafe extern "C" fn GetFrontlightEnabled() -> i32 { 0 }
+    pub unsafe extern "C" fn GetFrontlightEnabled() -> i32 {
+        0
+    }
 }
 #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
 #[allow(non_snake_case)]
@@ -117,13 +188,37 @@ mod imp {
         pub(super) fn ScreenHeight() -> i32;
         pub(super) fn PanelHeight() -> i32;
         pub(super) fn iv_update_panel(reading_mode: i32);
-        pub(super) fn DrawPanel(icon: *const core::ffi::c_void, text: *const u8, title: *const u8, percent: i32) -> i32;
+        pub(super) fn DrawPanel(
+            icon: *const core::ffi::c_void,
+            text: *const u8,
+            title: *const u8,
+            percent: i32,
+        ) -> i32;
         pub(super) fn Repaint();
         pub(super) fn OpenBook(path: *const u8, parameters: *const u8, flags: i32) -> i32;
-        pub(super) fn NewTaskEx(path: *const u8, args: *mut *mut u8, appname: *const u8, name: *const u8, icon: *const core::ffi::c_void, flags: u32, run_as_reader: i32) -> i32;
-        pub(super) fn OpenKeyboard(title: *const u8, buffer: *mut i8, maxlen: i32, flags: i32, hproc: extern "C" fn(*mut i8));
+        pub(super) fn NewTaskEx(
+            path: *const u8,
+            args: *mut *mut u8,
+            appname: *const u8,
+            name: *const u8,
+            icon: *const core::ffi::c_void,
+            flags: u32,
+            run_as_reader: i32,
+        ) -> i32;
+        pub(super) fn OpenKeyboard(
+            title: *const u8,
+            buffer: *mut i8,
+            maxlen: i32,
+            flags: i32,
+            hproc: extern "C" fn(*mut i8),
+        );
         pub(super) fn CloseKeyboard();
-        pub(super) fn SetWeakTimerEx(name: *const u8, handler: extern "C" fn(*mut core::ffi::c_void), data: *mut core::ffi::c_void, ms: i32) -> i32;
+        pub(super) fn SetWeakTimerEx(
+            name: *const u8,
+            handler: extern "C" fn(*mut core::ffi::c_void),
+            data: *mut core::ffi::c_void,
+            ms: i32,
+        ) -> i32;
         pub(super) fn QueryNetwork() -> i32;
         pub(super) fn GetBatteryPower() -> i32;
         pub(super) fn BanSleep(sec: i32);
@@ -132,7 +227,10 @@ mod imp {
         pub(super) fn device_number() -> u32;
         pub(super) fn device_has_touchpanel() -> bool;
         pub(super) fn device_has_audio() -> bool;
-        pub(super) fn iv_ipc_cmd(typ: core::ffi::c_long, param: core::ffi::c_long) -> core::ffi::c_long;
+        pub(super) fn iv_ipc_cmd(
+            typ: core::ffi::c_long,
+            param: core::ffi::c_long,
+        ) -> core::ffi::c_long;
         pub(super) fn SetOrientation(n: i32);
         pub(super) fn SetPanelType(type_: i32);
         pub(super) fn OpenControlPanel(ctx: *mut core::ffi::c_void);
@@ -143,9 +241,21 @@ mod imp {
     }
 }
 #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
-use imp::{BanSleep, CloseKeyboard, DrawPanel, FullUpdate, GetBatteryPower, GetCanvas, GetDeviceModel, GetFrontlightEnabled, GetFrontlightState, GetResource, GetSoftwareVersion, LoadPNG, NewTaskEx, OpenBook, OpenControlPanel, OpenKeyboard, PanelHeight, PartialUpdate, QueryNetwork, Repaint, ScreenHeight, ScreenWidth, SetWeakTimerEx, device_has_audio, device_has_touchpanel, device_number, iv_ipc_cmd, iv_update_panel};
+use imp::{
+    device_has_audio, device_has_touchpanel, device_number, iv_ipc_cmd, iv_update_panel, BanSleep,
+    CloseKeyboard, DrawPanel, FullUpdate, GetBatteryPower, GetCanvas, GetDeviceModel,
+    GetFrontlightEnabled, GetFrontlightState, GetResource, GetSoftwareVersion, LoadPNG, NewTaskEx,
+    OpenBook, OpenControlPanel, OpenKeyboard, PanelHeight, PartialUpdate, QueryNetwork, Repaint,
+    ScreenHeight, ScreenWidth, SetWeakTimerEx,
+};
 #[cfg(not(any(target_arch = "arm", target_arch = "aarch64")))]
-use imp::{BanSleep, DrawPanel, FullUpdate, GetBatteryPower, GetCanvas, GetDeviceModel, GetFrontlightEnabled, GetFrontlightState, GetResource, GetSoftwareVersion, LoadPNG, NewTaskEx, OpenBook, OpenControlPanel, PanelHeight, PartialUpdate, QueryNetwork, Repaint, ScreenHeight, ScreenWidth, SetWeakTimerEx, device_has_audio, device_has_touchpanel, device_number, iv_ipc_cmd, iv_update_panel};
+use imp::{
+    device_has_audio, device_has_touchpanel, device_number, iv_ipc_cmd, iv_update_panel, BanSleep,
+    DrawPanel, FullUpdate, GetBatteryPower, GetCanvas, GetDeviceModel, GetFrontlightEnabled,
+    GetFrontlightState, GetResource, GetSoftwareVersion, LoadPNG, NewTaskEx, OpenBook,
+    OpenControlPanel, PanelHeight, PartialUpdate, QueryNetwork, Repaint, ScreenHeight, ScreenWidth,
+    SetWeakTimerEx,
+};
 
 /// The inkview canvas-backed framebuffer.
 pub struct InkviewFb {
@@ -178,7 +288,12 @@ impl InkviewFb {
                 PanelHeight().max(0) as u32,
             )
         };
-        Self { panel_h: panel, width, height, _p: PhantomData }
+        Self {
+            panel_h: panel,
+            width,
+            height,
+            _p: PhantomData,
+        }
     }
 
     fn canvas(&self) -> ICanvas {
@@ -189,7 +304,11 @@ impl InkviewFb {
 impl Framebuffer for InkviewFb {
     fn screen(&self) -> Screen {
         let content = self.height.saturating_sub(self.panel_h);
-        Screen { width: self.width, height: self.height, content_bottom: content }
+        Screen {
+            width: self.width,
+            height: self.height,
+            content_bottom: content,
+        }
     }
 
     fn format(&self) -> PixelFormat {
@@ -205,9 +324,7 @@ impl Framebuffer for InkviewFb {
         let cv = self.canvas();
         let stride = cv.scanline.max(cv.width) as usize;
         let bytes = stride * cv.height.max(0) as usize;
-        unsafe {
-            core::slice::from_raw_parts_mut(cv.addr, bytes)
-        }
+        unsafe { core::slice::from_raw_parts_mut(cv.addr, bytes) }
     }
 
     fn stride(&self) -> usize {
@@ -215,7 +332,12 @@ impl Framebuffer for InkviewFb {
     }
 
     fn refresh(&mut self, region: Rect, mode: RefreshMode) {
-        let limit = Rect { x: 0, y: 0, w: self.width, h: self.height.saturating_sub(self.panel_h) };
+        let limit = Rect {
+            x: 0,
+            y: 0,
+            w: self.width,
+            h: self.height.saturating_sub(self.panel_h),
+        };
         let r = region.intersect(&limit);
         if r.is_empty() {
             return;
@@ -249,7 +371,15 @@ impl Framebuffer for InkviewFb {
     }
     fn wait_for_event(&mut self, _timeout_ms: u32) {}
     fn present(&mut self, mode: RefreshMode) {
-        self.refresh(Rect { x: 0, y: 0, w: self.width, h: self.height.saturating_sub(self.panel_h) }, mode);
+        self.refresh(
+            Rect {
+                x: 0,
+                y: 0,
+                w: self.width,
+                h: self.height.saturating_sub(self.panel_h),
+            },
+            mode,
+        );
     }
 
     fn open_book(&mut self, path: &str, title: &str) -> bool {
@@ -275,9 +405,14 @@ impl Framebuffer for InkviewFb {
                     buf[..n].copy_from_slice(&initial.as_bytes()[..n]);
                     *g = Some((buf, on_done));
                     let (b, _) = g.as_ref().unwrap();
-                                        unsafe {
-                        OpenKeyboard(t.as_ptr() as *const u8, b.as_ptr() as *mut i8, 260,
-                                     KBD_PASSEVENTS, kb_commit_handler);
+                    unsafe {
+                        OpenKeyboard(
+                            t.as_ptr() as *const u8,
+                            b.as_ptr() as *mut i8,
+                            260,
+                            KBD_PASSEVENTS,
+                            kb_commit_handler,
+                        );
                     }
                 }
             });
@@ -295,9 +430,7 @@ impl Framebuffer for InkviewFb {
             KB.with(|k| {
                 k.borrow().as_ref().and_then(|(buf, _)| {
                     let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
-                    std::str::from_utf8(&buf[..end])
-                        .ok()
-                        .map(|s| s.to_string())
+                    std::str::from_utf8(&buf[..end]).ok().map(|s| s.to_string())
                 })
             })
         }
@@ -316,7 +449,9 @@ impl Framebuffer for InkviewFb {
             // suggestion-tap path commits the term itself afterwards).
             KB.with(|k| {
                 if k.borrow_mut().take().is_some() {
-                    unsafe { CloseKeyboard(); }
+                    unsafe {
+                        CloseKeyboard();
+                    }
                 }
             });
         }
@@ -347,7 +482,11 @@ impl Framebuffer for InkviewFb {
     /// unknown on this vintage).
     fn battery_level(&self) -> Option<u8> {
         let v = unsafe { GetBatteryPower() };
-        if v < 0 { None } else { Some(v.min(100) as u8) }
+        if v < 0 {
+            None
+        } else {
+            Some(v.min(100) as u8)
+        }
     }
 
     /// Firmware frontlight probe: `GetFrontlightState()` (0..=100, negative
@@ -419,10 +558,19 @@ unsafe fn parse_ibitmap(bm: *mut IBitmapHdr) -> Option<eh_hal::ThemeBitmap> {
     }
     let hdr: IBitmapHdr = std::ptr::read(bm as *const IBitmapHdr);
     let len = hdr.scanline as usize * hdr.height as usize;
-    let data = core::slice::from_raw_parts((bm as *const u8).add(core::mem::size_of::<IBitmapHdr>()), len).to_vec();
-    Some(eh_hal::ThemeBitmap { width: hdr.width, height: hdr.height, depth: hdr.depth, scanline: hdr.scanline, data })
+    let data = core::slice::from_raw_parts(
+        (bm as *const u8).add(core::mem::size_of::<IBitmapHdr>()),
+        len,
+    )
+    .to_vec();
+    Some(eh_hal::ThemeBitmap {
+        width: hdr.width,
+        height: hdr.height,
+        depth: hdr.depth,
+        scanline: hdr.scanline,
+        data,
+    })
 }
-
 
 fn launch_app_impl(path: &str, name: &str, args: &[String]) -> bool {
     let base = path.rsplit('/').next().unwrap_or(path);
@@ -481,8 +629,12 @@ pub fn device_identity() -> (String, String) {
     }
     unsafe {
         (
-            c_str(GetDeviceModel()).filter(|s| !s.is_empty()).unwrap_or_else(|| "?".into()),
-            c_str(GetSoftwareVersion()).filter(|s| !s.is_empty()).unwrap_or_else(|| "?".into()),
+            c_str(GetDeviceModel())
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "?".into()),
+            c_str(GetSoftwareVersion())
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "?".into()),
         )
     }
 }
@@ -521,7 +673,8 @@ impl InkviewFb {
 
 /// Owners of the C strings passed to NewTaskEx (kept alive until the next
 /// launch — the task system may read argv asynchronously).
-static LAUNCH_ARG_OWN: std::sync::Mutex<Option<Vec<std::ffi::CString>>> = std::sync::Mutex::new(None);
+static LAUNCH_ARG_OWN: std::sync::Mutex<Option<Vec<std::ffi::CString>>> =
+    std::sync::Mutex::new(None);
 
 // Keyboard commit state: the firmware's keyboard handler is a single
 // global function pointer, so the in-flight (buffer, on_done) pair lives
@@ -534,10 +687,12 @@ thread_local! {
 #[allow(non_snake_case)]
 #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
 extern "C" fn kb_commit_handler(buf: *mut i8) {
-        if buf.is_null() {
+    if buf.is_null() {
         return;
     }
-    let s = unsafe { std::ffi::CStr::from_ptr(buf as *const u8) }.to_bytes().to_vec();
+    let s = unsafe { std::ffi::CStr::from_ptr(buf as *const u8) }
+        .to_bytes()
+        .to_vec();
     KB.with(|k| {
         if let Some((_, f)) = k.borrow_mut().take() {
             f(&s);
@@ -553,7 +708,9 @@ pub fn evt_to_input(evt: i32, par1: i32, par2: i32) -> Option<InputEvent> {
         30 => Some(InputEvent::PointerDown { x: par1, y: par2 }),
         31 => Some(InputEvent::PointerMove { x: par1, y: par2 }),
         34 => Some(InputEvent::PointerLongPress { x: par1, y: par2 }),
-        25 => Some(InputEvent::KeyDown { key: iv_to_key(par1) }),
+        25 => Some(InputEvent::KeyDown {
+            key: iv_to_key(par1),
+        }),
         // EVT_INIT (21) and EVT_SHOW (23) both mean "screen is ready to draw".
         21 | 23 => Some(InputEvent::WidgetShown),
         _ => None,
@@ -576,8 +733,17 @@ fn iv_to_key(code: i32) -> KeyCode {
 /// Arm an inkview weak timer (C SetWeakTimerEx).  `name` must be a
 /// NUL-terminated static buffer kept alive for the timer's lifetime.
 /// Public wrapper around the crate-internal SDK import.
-pub fn arm_weak_timer(name: &'static std::ffi::CStr, handler: extern "C" fn(*mut std::ffi::c_void), ms: i32) {
+pub fn arm_weak_timer(
+    name: &'static std::ffi::CStr,
+    handler: extern "C" fn(*mut std::ffi::c_void),
+    ms: i32,
+) {
     unsafe {
-        SetWeakTimerEx(name.as_ptr() as *const u8, handler, std::ptr::null_mut(), ms);
+        SetWeakTimerEx(
+            name.as_ptr() as *const u8,
+            handler,
+            std::ptr::null_mut(),
+            ms,
+        );
     }
 }

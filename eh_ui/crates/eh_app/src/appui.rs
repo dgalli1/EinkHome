@@ -14,7 +14,7 @@
 //! icons exactly as drawn.
 
 use eh_hal::Rect;
-use eh_shell::{DrawCtx, GRAY_BLACK, GRAY_DGRAY, GRAY_LGRAY, GRAY_WHITE, Widget};
+use eh_shell::{DrawCtx, Widget, GRAY_BLACK, GRAY_DGRAY, GRAY_LGRAY, GRAY_WHITE};
 
 use crate::app::{Source, ViewMode};
 
@@ -147,7 +147,15 @@ impl Widget for TopBar {
 fn draw_source_button(ctx: &mut DrawCtx, _w: i32, _y0: i32, cy: i32, source: Source, col: u8) {
     let x0 = SOURCE_BTN_X;
     let btn_w = SOURCE_BTN_W;
-    ctx.fill(Rect { x: x0 as u32, y: 0, w: btn_w as u32, h: TOP_BAR_H }, GRAY_WHITE);
+    ctx.fill(
+        Rect {
+            x: x0 as u32,
+            y: 0,
+            w: btn_w as u32,
+            h: TOP_BAR_H,
+        },
+        GRAY_WHITE,
+    );
     let ic_x = x0 + 8;
     let ic_y = cy - TOP_ICON_HALF;
     match source {
@@ -240,7 +248,16 @@ fn draw_layout_icon(ctx: &mut DrawCtx, cx0: i32, cy: i32, view_mode: ViewMode, c
     if view_mode == ViewMode::List {
         for i in 0..3 {
             let ry = cy - 16 + i * 16;
-            ctx.outline(Rect { x: (cx - 18) as u32, y: ry as u32, w: 14, h: 13 }, 2, col);
+            ctx.outline(
+                Rect {
+                    x: (cx - 18) as u32,
+                    y: ry as u32,
+                    w: 14,
+                    h: 13,
+                },
+                2,
+                col,
+            );
             ctx.line(cx - 1, ry, cx + 22, ry, 2, col);
         }
     } else {
@@ -293,7 +310,14 @@ fn draw_sync_icon(ctx: &mut DrawCtx, cx0: i32, cy: i32, angle: i32, col: u8) {
         let ta = (a0 + 120.0).to_radians() + std::f64::consts::FRAC_PI_2;
         for t in 0..2 {
             let ha = ta + std::f64::consts::PI + if t == 0 { 0.6 } else { -0.6 };
-            ctx.line(ex, ey, ex + (11.0 * ha.cos()).round() as i32, ey + (11.0 * ha.sin()).round() as i32, 2, col);
+            ctx.line(
+                ex,
+                ey,
+                ex + (11.0 * ha.cos()).round() as i32,
+                ey + (11.0 * ha.sin()).round() as i32,
+                2,
+                col,
+            );
         }
     }
 }
@@ -328,7 +352,11 @@ pub struct Pager {
 
 impl Pager {
     pub fn new(page: usize, pages: usize) -> Self {
-        Self { page, pages, rect: None }
+        Self {
+            page,
+            pages,
+            rect: None,
+        }
     }
 }
 
@@ -386,8 +414,26 @@ impl Widget for Pager {
 /// One C pager button: a bordered box with a centered label; disabled state
 /// forces the grey label (the C app skips the selected fill and greys the
 /// text instead).
-fn draw_pager_button(ctx: &mut DrawCtx, x: i32, y: i32, w: i32, h: i32, label: &str, enabled: bool, gray: u8) {
-    ctx.outline(Rect { x: x as u32, y: y as u32, w: w as u32, h: h as u32 }, 2, GRAY_BLACK);
+fn draw_pager_button(
+    ctx: &mut DrawCtx,
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+    label: &str,
+    enabled: bool,
+    gray: u8,
+) {
+    ctx.outline(
+        Rect {
+            x: x as u32,
+            y: y as u32,
+            w: w as u32,
+            h: h as u32,
+        },
+        2,
+        GRAY_BLACK,
+    );
     let col = if enabled { GRAY_BLACK } else { gray };
     ctx.text_center_fit(x + w / 2, y + h / 2 + 10, 28.0, label, w - 12, col);
 }
@@ -399,7 +445,7 @@ fn draw_house(ctx: &mut DrawCtx, cx: i32, cy: i32, col: u8) {
     ctx.line(cx - 24, cy + 8, cx, cy - 24, 2, col); // roof left
     ctx.line(cx, cy - 24, cx + 24, cy + 8, 2, col); // roof right
     ctx.line(cx + 24, cy + 8, cx + 24, cy + 26, 2, col); // right wall
-    // floor with a break for the door
+                                                         // floor with a break for the door
     ctx.line(cx - 24, cy + 26, cx - 8, cy + 26, 2, col);
     ctx.line(cx + 8, cy + 26, cx + 24, cy + 26, 2, col);
     // door
@@ -425,10 +471,18 @@ pub struct SearchInput {
 
 impl SearchInput {
     pub fn new(text: impl Into<String>) -> Self {
-        Self { text: text.into(), rect: None, active: false }
+        Self {
+            text: text.into(),
+            rect: None,
+            active: false,
+        }
     }
     pub fn new_active(text: impl Into<String>) -> Self {
-        Self { text: text.into(), rect: None, active: true }
+        Self {
+            text: text.into(),
+            rect: None,
+            active: true,
+        }
     }
 }
 
@@ -440,10 +494,27 @@ impl Widget for SearchInput {
         let by = rect.y + 10;
         let bh = rect.h.saturating_sub(20);
         let bw = rect.w.saturating_sub(32);
-        ctx.outline(Rect { x: bx, y: by, w: bw, h: bh }, 2, GRAY_BLACK);
+        ctx.outline(
+            Rect {
+                x: bx,
+                y: by,
+                w: bw,
+                h: bh,
+            },
+            2,
+            GRAY_BLACK,
+        );
         let fill_col = if self.active { GRAY_BLACK } else { GRAY_WHITE };
         let glyph_col = if self.active { GRAY_WHITE } else { GRAY_BLACK };
-        ctx.fill(Rect { x: bx + 1, y: by + 1, w: bw.saturating_sub(2), h: bh.saturating_sub(2) }, fill_col);
+        ctx.fill(
+            Rect {
+                x: bx + 1,
+                y: by + 1,
+                w: bw.saturating_sub(2),
+                h: bh.saturating_sub(2),
+            },
+            fill_col,
+        );
         // Magnifier ring + handle.
         let gx = (bx + 30) as i32;
         let gy = (by + bh / 2) as i32;
@@ -452,8 +523,18 @@ impl Widget for SearchInput {
         ctx.line(gx + 10, gy + 9, gx + 23, gy + 22, 2, glyph_col);
         // Query text (or placeholder), vertically centred in the box
         // (draw_text takes a baseline; C centres the hint in the field).
-        let text = if self.text.is_empty() { crate::i18n::tr("search.ph") } else { self.text.as_str() };
-        ctx.text((bx + 68) as i32, (by + bh / 2) as i32, 28.0, text, glyph_col);
+        let text = if self.text.is_empty() {
+            crate::i18n::tr("search.ph")
+        } else {
+            self.text.as_str()
+        };
+        ctx.text(
+            (bx + 68) as i32,
+            (by + bh / 2) as i32,
+            28.0,
+            text,
+            glyph_col,
+        );
         // Edit cursor while the keyboard is open (C draw_search_input_text):
         // a white line right after the query.
         if self.active && !self.text.is_empty() {
@@ -483,7 +564,11 @@ pub struct HistoryRow {
 
 impl HistoryRow {
     pub fn new(term: impl Into<String>) -> Self {
-        Self { term: term.into(), hint: false, rect: None }
+        Self {
+            term: term.into(),
+            hint: false,
+            rect: None,
+        }
     }
 }
 
@@ -511,7 +596,13 @@ impl Widget for HistoryRow {
             );
         }
         if rect.h > 0 && !self.hint {
-            ctx.hline(rect.x + 20, rect.y + rect.h - 1, rect.w.saturating_sub(40), 2, GRAY_LGRAY);
+            ctx.hline(
+                rect.x + 20,
+                rect.y + rect.h - 1,
+                rect.w.saturating_sub(40),
+                2,
+                GRAY_LGRAY,
+            );
         }
     }
     fn dirty(&self, out: &mut Vec<Rect>) {

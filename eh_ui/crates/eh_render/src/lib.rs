@@ -36,23 +36,41 @@ impl<'a> Surface<'a> {
         stride: usize,
         format: PixelFormat,
     ) -> Self {
-        Self { data, width, height, stride, format }
+        Self {
+            data,
+            width,
+            height,
+            stride,
+            format,
+        }
     }
 
-    pub fn width(&self) -> u32 { self.width }
-    pub fn height(&self) -> u32 { self.height }
-    pub fn format(&self) -> PixelFormat { self.format }
+    pub fn width(&self) -> u32 {
+        self.width
+    }
+    pub fn height(&self) -> u32 {
+        self.height
+    }
+    pub fn format(&self) -> PixelFormat {
+        self.format
+    }
 
     #[inline]
-    fn bpp(&self) -> usize { self.format.bytes_per_pixel() }
+    fn bpp(&self) -> usize {
+        self.format.bytes_per_pixel()
+    }
 
     /// Pixel row slice for `y` (may be out of range; returns empty then).
     #[inline]
     fn row_mut(&mut self, y: u32) -> &mut [u8] {
-        if y >= self.height { return &mut []; }
+        if y >= self.height {
+            return &mut [];
+        }
         let from = (y as usize) * self.stride;
         let len = self.width as usize * self.bpp();
-        if from + len > self.data.len() { return &mut []; }
+        if from + len > self.data.len() {
+            return &mut [];
+        }
         &mut self.data[from..from + len]
     }
 
@@ -65,12 +83,21 @@ impl<'a> Surface<'a> {
         let (format, bpp) = (self.format, self.bpp());
         let row = self.row_mut(y);
         let off = (x as usize) * bpp;
-        if off + bpp > row.len() { return; }
+        if off + bpp > row.len() {
+            return;
+        }
         match format {
             PixelFormat::Grayscale8 => row[off] = gray,
-            PixelFormat::Rgb24 => { row[off] = gray; row[off + 1] = gray; row[off + 2] = gray; }
+            PixelFormat::Rgb24 => {
+                row[off] = gray;
+                row[off + 1] = gray;
+                row[off + 2] = gray;
+            }
             PixelFormat::Rgba32 => {
-                row[off] = gray; row[off + 1] = gray; row[off + 2] = gray; row[off + 3] = 0xff;
+                row[off] = gray;
+                row[off + 1] = gray;
+                row[off + 2] = gray;
+                row[off + 3] = 0xff;
             }
         }
     }
@@ -79,27 +106,43 @@ impl<'a> Surface<'a> {
     /// surface format: luma for 8bpp, direct RGB for 24/32bpp.
     #[inline]
     fn set_px_rgb(&mut self, x: u32, y: u32, r: u8, g: u8, b: u8) {
-        if x >= self.width || y >= self.height { return; }
+        if x >= self.width || y >= self.height {
+            return;
+        }
         let (format, bpp) = (self.format, self.bpp());
         let row = self.row_mut(y);
         let off = (x as usize) * bpp;
-        if off + bpp > row.len() { return; }
+        if off + bpp > row.len() {
+            return;
+        }
         match format {
             PixelFormat::Grayscale8 => {
                 // Rec.601 luma of a greyscale-equal-RGB colour.
                 let gray = ((r as u32 * 299 + g as u32 * 587 + b as u32 * 114) / 1000) as u8;
                 row[off] = gray;
             }
-            PixelFormat::Rgb24 => { row[off] = r; row[off + 1] = g; row[off + 2] = b; }
+            PixelFormat::Rgb24 => {
+                row[off] = r;
+                row[off + 1] = g;
+                row[off + 2] = b;
+            }
             PixelFormat::Rgba32 => {
-                row[off] = r; row[off + 1] = g; row[off + 2] = b; row[off + 3] = 0xff;
+                row[off] = r;
+                row[off + 1] = g;
+                row[off + 2] = b;
+                row[off + 3] = 0xff;
             }
         }
     }
 
     /// Fill a rectangle with a grayscale intensity, clipped to the surface.
     pub fn fill_gray(&mut self, rect: Rect, gray: u8) {
-        let clip = rect.intersect(&Rect { x: 0, y: 0, w: self.width, h: self.height });
+        let clip = rect.intersect(&Rect {
+            x: 0,
+            y: 0,
+            w: self.width,
+            h: self.height,
+        });
         if clip.is_empty() {
             return;
         }
@@ -135,14 +178,30 @@ impl<'a> Surface<'a> {
     /// Horizontal line.
     pub fn hline(&mut self, x: u32, y: u32, len: u32, thick: u32, gray: u8) {
         if y + thick <= self.height {
-            self.fill_gray(Rect { x, y, w: len, h: thick }, gray);
+            self.fill_gray(
+                Rect {
+                    x,
+                    y,
+                    w: len,
+                    h: thick,
+                },
+                gray,
+            );
         }
     }
 
     /// Vertical line.
     pub fn vline(&mut self, x: u32, y: u32, len: u32, thick: u32, gray: u8) {
         if x + thick <= self.width {
-            self.fill_gray(Rect { x, y, w: thick, h: len }, gray);
+            self.fill_gray(
+                Rect {
+                    x,
+                    y,
+                    w: thick,
+                    h: len,
+                },
+                gray,
+            );
         }
     }
 
@@ -179,10 +238,18 @@ impl<'a> Surface<'a> {
         let mut err = dx + dy;
         loop {
             self.fill_gray(Rect::from_xy(x, y, thick as i32, thick as i32), gray);
-            if x == x1 && y == y1 { break; }
+            if x == x1 && y == y1 {
+                break;
+            }
             let e2 = 2 * err;
-            if e2 >= dy { err += dy; x += sx; }
-            if e2 <= dx { err += dx; y += sy; }
+            if e2 >= dy {
+                err += dy;
+                x += sx;
+            }
+            if e2 <= dx {
+                err += dx;
+                y += sy;
+            }
         }
     }
 
@@ -197,10 +264,22 @@ impl<'a> Surface<'a> {
         src_fmt: PixelFormat,
         dst: Rect,
     ) -> Rect {
-        if src_w == 0 || src_h == 0 || dst.is_empty() { return Rect { x: 0, y: 0, w: 0, h: 0 }; }
+        if src_w == 0 || src_h == 0 || dst.is_empty() {
+            return Rect {
+                x: 0,
+                y: 0,
+                w: 0,
+                h: 0,
+            };
+        }
         let bpp = src_fmt.bytes_per_pixel();
         if src.len() < (src_w as usize) * (src_h as usize) * bpp {
-            return Rect { x: 0, y: 0, w: 0, h: 0 };
+            return Rect {
+                x: 0,
+                y: 0,
+                w: 0,
+                h: 0,
+            };
         }
 
         // Fit the source aspect inside dst, letterboxing.
@@ -212,13 +291,37 @@ impl<'a> Surface<'a> {
         } else if src_a < dst_a {
             dw = (dst.h as f32 * src_a) as u32;
         }
-        if dw == 0 || dh == 0 { return Rect { x: 0, y: 0, w: 0, h: 0 }; }
+        if dw == 0 || dh == 0 {
+            return Rect {
+                x: 0,
+                y: 0,
+                w: 0,
+                h: 0,
+            };
+        }
         let ox = dst.x + (dst.w - dw) / 2;
         let oy = dst.y + (dst.h - dh) / 2;
 
-        let clip = Rect { x: ox, y: oy, w: dw, h: dh }
-            .intersect(&Rect { x: 0, y: 0, w: self.width, h: self.height });
-        if clip.is_empty() { return Rect { x: 0, y: 0, w: 0, h: 0 }; }
+        let clip = Rect {
+            x: ox,
+            y: oy,
+            w: dw,
+            h: dh,
+        }
+        .intersect(&Rect {
+            x: 0,
+            y: 0,
+            w: self.width,
+            h: self.height,
+        });
+        if clip.is_empty() {
+            return Rect {
+                x: 0,
+                y: 0,
+                w: 0,
+                h: 0,
+            };
+        }
 
         for py in clip.y..clip.y + clip.h {
             let sy = (((py - oy) as f32 * src_h as f32) / dh as f32) as u32;
@@ -227,14 +330,21 @@ impl<'a> Surface<'a> {
                 let so = (sy as usize) * src_w as usize * bpp + (sx as usize) * bpp;
                 match src_fmt {
                     PixelFormat::Grayscale8 => self.set_px(px, py, src[so]),
-                    PixelFormat::Rgb24 => self.set_px_rgb(px, py, src[so], src[so + 1], src[so + 2]),
+                    PixelFormat::Rgb24 => {
+                        self.set_px_rgb(px, py, src[so], src[so + 1], src[so + 2])
+                    }
                     PixelFormat::Rgba32 => {
                         self.set_px_rgb(px, py, src[so], src[so + 1], src[so + 2]);
                     }
                 }
             }
         }
-        Rect { x: ox, y: oy, w: dw, h: dh }
+        Rect {
+            x: ox,
+            y: oy,
+            w: dw,
+            h: dh,
+        }
     }
 
     /// Blend a coverage run (fontdue bitmap: 0=bkg, 255=fg) tinted `gray`.
@@ -248,9 +358,13 @@ impl<'a> Surface<'a> {
         src_fmt: PixelFormat,
         dst: Rect,
     ) {
-        if src_w == 0 || src_h == 0 || dst.is_empty() { return; }
+        if src_w == 0 || src_h == 0 || dst.is_empty() {
+            return;
+        }
         let bpp = src_fmt.bytes_per_pixel();
-        if src.len() < (src_w as usize) * (src_h as usize) * bpp { return; }
+        if src.len() < (src_w as usize) * (src_h as usize) * bpp {
+            return;
+        }
         let dw = dst.w.max(1);
         let dh = dst.h.max(1);
         for row in 0..dh {
@@ -258,8 +372,7 @@ impl<'a> Surface<'a> {
             for col in 0..dw {
                 let sx = (col as u64 * src_w as u64 / dw as u64) as usize;
                 let s = (sy * src_w as usize + sx) * bpp;
-                let d = (dst.y + row) as usize * self.stride
-                    + (dst.x + col) as usize * self.bpp();
+                let d = (dst.y + row) as usize * self.stride + (dst.x + col) as usize * self.bpp();
                 let e = d + bpp;
                 if e <= self.data.len() {
                     self.data[d..e].copy_from_slice(&src[s..s + bpp]);
@@ -268,28 +381,37 @@ impl<'a> Surface<'a> {
         }
     }
 
-
     pub fn blit_glyph(&mut self, x: i32, y: i32, w: u32, h: u32, coverage: &[u8], gray: u8) {
-        if coverage.len() < (w as usize) * (h as usize) { return; }
+        if coverage.len() < (w as usize) * (h as usize) {
+            return;
+        }
         let (format, bpp) = (self.format, self.bpp());
         let width = self.width;
         let height = self.height;
         let inv_base = 255 - gray as u32;
         for gy in 0..h {
             let py = (y + gy as i32) as u32;
-            if py >= height { continue; }
+            if py >= height {
+                continue;
+            }
             // Compute row bounds once per row; index within a row is cheaper
             // than re-borrowing self per pixel.
             let row = self.row_mut(py);
             for gx in 0..w {
                 let c = coverage[(gy as usize) * (w as usize) + (gx as usize)];
-                if c == 0 { continue; }
+                if c == 0 {
+                    continue;
+                }
                 let px = (x + gx as i32) as u32;
-                if px >= width { continue; }
+                if px >= width {
+                    continue;
+                }
                 let inv = 255 - c as u32;
                 let gg = gray as u32;
                 let off = (px as usize) * bpp;
-                if off + bpp > row.len() { continue; }
+                if off + bpp > row.len() {
+                    continue;
+                }
                 match format {
                     PixelFormat::Grayscale8 => {
                         let cur = row[off] as u32;
@@ -328,12 +450,14 @@ pub struct Font {
 /// Rasterised-glyph cache keyed by (font id, char, size): the first draw
 /// of each glyph pays fontdue's rasterize; every later draw copies the
 /// cached coverage (the emulator's text-heavy overlays went ~1s -> ~20ms).
-static GLYPH_CACHE: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<(u8, char, u32), (fontdue::Metrics, Vec<u8>)>>> =
-    std::sync::OnceLock::new();
-fn glyph_cache() -> &'static std::sync::Mutex<std::collections::HashMap<(u8, char, u32), (fontdue::Metrics, Vec<u8>)>> {
+static GLYPH_CACHE: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<(u8, char, u32), (fontdue::Metrics, Vec<u8>)>>,
+> = std::sync::OnceLock::new();
+fn glyph_cache() -> &'static std::sync::Mutex<
+    std::collections::HashMap<(u8, char, u32), (fontdue::Metrics, Vec<u8>)>,
+> {
     GLYPH_CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
 }
-
 
 /// A glyph rasterisation: coverage bitmap + the metrics that position it.
 pub struct Glyph {
@@ -343,12 +467,17 @@ pub struct Glyph {
 
 impl Glyph {
     pub fn new() -> Self {
-        Self { metrics: fontdue::Metrics::default(), coverage: Vec::new() }
+        Self {
+            metrics: fontdue::Metrics::default(),
+            coverage: Vec::new(),
+        }
     }
 }
 
 impl Default for Glyph {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Font {
@@ -372,13 +501,18 @@ impl Font {
         let (metrics, coverage) = self.face.rasterize(ch, size_px);
         glyph.metrics = metrics;
         glyph.coverage = coverage.clone();
-        glyph_cache().lock().unwrap().insert(key, (glyph.metrics, coverage));
+        glyph_cache()
+            .lock()
+            .unwrap()
+            .insert(key, (glyph.metrics, coverage));
         true
     }
 
     /// Horizontal advance of a whole run (text width in px at `size_px`).
     pub fn width(&self, text: &str, size_px: f32) -> f32 {
-        text.chars().map(|c| self.face.metrics(c, size_px).advance_width).sum()
+        text.chars()
+            .map(|c| self.face.metrics(c, size_px).advance_width)
+            .sum()
     }
 
     /// Height above baseline (ascent) + below (descent), for vertical
@@ -408,7 +542,9 @@ pub fn draw_text(
 ) -> u32 {
     let mut pen_x = x as f32;
     for ch in text.chars() {
-        if !font.raster(ch, size_px, glyph) { continue; }
+        if !font.raster(ch, size_px, glyph) {
+            continue;
+        }
         let m = &glyph.metrics;
         let gx = pen_x as i32 + m.xmin;
         let gy = baseline_y - m.height as i32 - m.ymin;
@@ -427,7 +563,9 @@ pub fn fit_width(font: &Font, size_px: f32, text: &str, max_px: f32, out: &mut S
     let mut w = 0.0f32;
     for ch in text.chars() {
         let adv = font.face.metrics(ch, size_px).advance_width;
-        if w + adv > max_px && !out.is_empty() { break; }
+        if w + adv > max_px && !out.is_empty() {
+            break;
+        }
         w += adv;
         out.push(ch);
     }
@@ -443,16 +581,27 @@ pub struct DrawScratch {
 
 impl DrawScratch {
     pub fn new() -> Self {
-        Self { glyph: Glyph::new(), tmp: String::new(), dirty: Vec::new(), _range: core::marker::PhantomData }
+        Self {
+            glyph: Glyph::new(),
+            tmp: String::new(),
+            dirty: Vec::new(),
+            _range: core::marker::PhantomData,
+        }
     }
-    pub fn full() -> Self { Self::new() }
+    pub fn full() -> Self {
+        Self::new()
+    }
 
     pub fn track(&mut self, r: Rect) {
-        if !r.is_empty() { self.dirty.push(r); }
+        if !r.is_empty() {
+            self.dirty.push(r);
+        }
     }
 }
 impl Default for DrawScratch {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[cfg(test)]
@@ -468,14 +617,14 @@ mod tests {
     /// multibyte scripts, emoji, combining marks, control bytes.
     const ADVERSARIAL: [&str; 9] = [
         "War and Peace",
-        "Капита́нская до́чка",               // Cyrillic + combining marks
-        "日本語のタイトル",                    // CJK
-        "🦀 ferris 📚 shelf",                 // emoji (4-byte chars)
+        "Капита́нская до́чка",                 // Cyrillic + combining marks
+        "日本語のタイトル",                  // CJK
+        "🦀 ferris 📚 shelf",                // emoji (4-byte chars)
         "a\u{0301}\u{0302}b",                // combining diacritics
         "\u{200b}\u{feff}zero\u{200d}width", // zero-width + ZWJ + BOM
         "tab\there\nnewline\0nul",           // control bytes
-        "﷽",                                  // longest single char (U+FDFD)
-        "",                                   // empty input
+        "﷽",                                 // longest single char (U+FDFD)
+        "",                                  // empty input
     ];
 
     #[test]
@@ -506,7 +655,12 @@ mod tests {
     fn blit_helpers_reject_out_of_bounds_geometry() {
         let mut buf = vec![0u8; 16 * 16 * 3];
         let mut surf = Surface::new(&mut buf, 16, 16, 16 * 3, PixelFormat::Rgb24);
-        let far = Rect { x: 10_000, y: 10_000, w: 64, h: 64 };
+        let far = Rect {
+            x: 10_000,
+            y: 10_000,
+            w: 64,
+            h: 64,
+        };
         surf.fill_gray(far, 0);
         surf.hline(10_000, 10_000, 32, 2, 0);
         surf.vline(10_000, 10_000, 32, 2, 0);

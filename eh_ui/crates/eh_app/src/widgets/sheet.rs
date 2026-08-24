@@ -38,17 +38,48 @@ pub fn open_sheet(
 ) -> Sheet {
     use eh_shell::{GRAY_BLACK, GRAY_WHITE};
     let w = surf.width();
-    dirty.push(Rect { x: 0, y: 0, w, h: dirty_h });
+    dirty.push(Rect {
+        x: 0,
+        y: 0,
+        w,
+        h: dirty_h,
+    });
     eh_shell::dim_hatch(surf, dim_y0, dim_y1);
     let pw = w * 3 / 4;
     let px = (w - pw) / 2;
     let py = ((center_base as i32 - ph as i32) / 2).max(0) as u32;
-    surf.fill_gray(Rect { x: px, y: py, w: pw, h: ph }, GRAY_WHITE);
+    surf.fill_gray(
+        Rect {
+            x: px,
+            y: py,
+            w: pw,
+            h: ph,
+        },
+        GRAY_WHITE,
+    );
     // C draws the chooser border twice (outer + inset); an outline of 2
     // plus a 1px inset covers both.
-    surf.rect_outline(Rect { x: px, y: py, w: pw, h: ph }, 2, GRAY_BLACK);
+    surf.rect_outline(
+        Rect {
+            x: px,
+            y: py,
+            w: pw,
+            h: ph,
+        },
+        2,
+        GRAY_BLACK,
+    );
     if double_border {
-        surf.rect_outline(Rect { x: px + 1, y: py + 1, w: pw - 2, h: ph - 2 }, 1, GRAY_BLACK);
+        surf.rect_outline(
+            Rect {
+                x: px + 1,
+                y: py + 1,
+                w: pw - 2,
+                h: ph - 2,
+            },
+            1,
+            GRAY_BLACK,
+        );
     }
     Sheet { px, py, pw, ph }
 }

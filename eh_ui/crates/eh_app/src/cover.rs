@@ -140,9 +140,15 @@ fn decode_png(png: &[u8]) -> Result<(u32, u32, Vec<u8>), String> {
     // Forgiving on grayscale covers (1 sample: our generated TXT covers
     // and real-world scans): replicate the sample to RGB.
     let rgb: Vec<u8> = match ct.samples() {
-        4 => out.chunks_exact(4).flat_map(|px| [px[0], px[1], px[2]]).collect(),
+        4 => out
+            .chunks_exact(4)
+            .flat_map(|px| [px[0], px[1], px[2]])
+            .collect(),
         3 => out,
-        2 => out.chunks_exact(2).flat_map(|px| [px[0], px[0], px[0]]).collect(),
+        2 => out
+            .chunks_exact(2)
+            .flat_map(|px| [px[0], px[0], px[0]])
+            .collect(),
         1 => out.iter().flat_map(|&v| [v, v, v]).collect(),
         n => return Err(format!("unsupported decoded samples={n}")),
     };
@@ -158,9 +164,10 @@ fn decode_jpeg(jpeg: &[u8]) -> Result<(u32, u32, Vec<u8>), String> {
     let h = info.height as u32;
     let rgb = match pixels.len() {
         n if n == (w as usize) * (h as usize) * 3 => pixels,
-        n if n == (w as usize) * (h as usize) * 4 => {
-            pixels.chunks_exact(4).flat_map(|px| [px[0], px[1], px[2]]).collect()
-        }
+        n if n == (w as usize) * (h as usize) * 4 => pixels
+            .chunks_exact(4)
+            .flat_map(|px| [px[0], px[1], px[2]])
+            .collect(),
         _ => {
             return Err("jpeg: unexpected pixel count".to_string());
         }
@@ -224,12 +231,14 @@ impl<B: Framebuffer> App<B> {
             .map(|b| b.id)
             .collect();
         self.warm.total = ids.len();
-        self.warm.remaining
+        self.warm
+            .remaining
             .store(ids.len(), std::sync::atomic::Ordering::Relaxed);
         if ids.is_empty() {
             return;
         }
-        self.warm.active
+        self.warm
+            .active
             .store(true, std::sync::atomic::Ordering::Relaxed);
         // One persistent worker drains the queue (C: one fetch per bcov
         // tick).  A spawn-per-cover model created 100k threads for a
@@ -267,7 +276,9 @@ impl<B: Framebuffer> App<B> {
     pub(crate) fn cover_warm_tick(&mut self) {
         // The worker thread polls this gate between fetches.
         let online = self.screen().framebuffer().net_active();
-        self.warm.online.store(online, std::sync::atomic::Ordering::Relaxed);
+        self.warm
+            .online
+            .store(online, std::sync::atomic::Ordering::Relaxed);
     }
     /// True while the full-library warm pass still has covers to fetch
     /// (C eh_cover_warm_active); offline counts as drained — the pass is
@@ -283,7 +294,12 @@ impl<B: Framebuffer> App<B> {
         } else {
             self.fb_net_active
         };
-        online && self.warm.remaining.load(std::sync::atomic::Ordering::Relaxed) > 0
+        online
+            && self
+                .warm
+                .remaining
+                .load(std::sync::atomic::Ordering::Relaxed)
+                > 0
     }
 }
 
@@ -303,8 +319,14 @@ mod tests {
         assert!(b.chars().all(|c| c.is_ascii_hexdigit()));
         let dir = tempfile::tempdir().unwrap();
         let p = cache_path(dir.path(), id);
-        assert_eq!(p.file_name().and_then(|n| n.to_str()), Some(format!("{safe}.png").as_str()));
-        assert_eq!(p.parent().unwrap().file_name().and_then(|n| n.to_str()), Some(b.as_str()));
+        assert_eq!(
+            p.file_name().and_then(|n| n.to_str()),
+            Some(format!("{safe}.png").as_str())
+        );
+        assert_eq!(
+            p.parent().unwrap().file_name().and_then(|n| n.to_str()),
+            Some(b.as_str())
+        );
     }
 
     #[test]

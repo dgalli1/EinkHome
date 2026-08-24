@@ -16,7 +16,9 @@ impl<B: Framebuffer> App<B> {
             // Page-turn buttons paginate the shelf; with an overlay open
             // they fall through to the Back logic (close the topmost
             // sheet), matching the stock bookshelf (C eh_evt_keypress).
-            InputEvent::KeyDown { key: key @ (KeyCode::PrevPage | KeyCode::NextPage) } => {
+            InputEvent::KeyDown {
+                key: key @ (KeyCode::PrevPage | KeyCode::NextPage),
+            } => {
                 if self.overlay == Overlay::None {
                     // Folder source: the browser body pages its listing
                     // (C eh_evt_keypress → eh_browse_page).
@@ -81,7 +83,11 @@ impl<B: Framebuffer> App<B> {
                 };
                 self.press_pos = None;
                 self.press_start = None;
-                if self.overlay == Overlay::None && is_long && self.tab == Tab::Library && self.long_press_at(x, y) {
+                if self.overlay == Overlay::None
+                    && is_long
+                    && self.tab == Tab::Library
+                    && self.long_press_at(x, y)
+                {
                     return;
                 }
                 // A drag (moved > 48px) is not a tap.
@@ -231,7 +237,6 @@ impl<B: Framebuffer> App<B> {
         }
     }
 
-
     /// The active downloads dir (C eh_resolve_downloads_dir default).
     pub(crate) fn downloads_dir(&self) -> String {
         self.config
@@ -246,7 +251,10 @@ impl<B: Framebuffer> App<B> {
     /// harness's row order: None, Author>Series, Series, Author, Year,
     /// Genre, minus dims the store has no values for.
     pub(crate) fn group_offer(&self) -> Vec<crate::store::GroupPreset> {
-        let (a, s, y, g) = self.store.dim_availability().unwrap_or((true, false, true, true));
+        let (a, s, y, g) = self
+            .store
+            .dim_availability()
+            .unwrap_or((true, false, true, true));
         use crate::store::GroupPreset;
         let mut out = vec![GroupPreset::None];
         if a && s {
@@ -308,7 +316,10 @@ impl<B: Framebuffer> App<B> {
                 return name;
             }
         }
-        if self.query.is_empty() { "" } else { &self.query }
+        if self.query.is_empty() {
+            ""
+        } else {
+            &self.query
+        }
     }
-
 }

@@ -48,7 +48,11 @@ pub fn init(app_dir: Option<&str>) {
     LOGGER.get_or_init(|| {
         let path = resolve_path(app_dir);
         let _ = LOG_PATH.set(path.clone());
-        let mut file = OpenOptions::new().create(true).append(true).open(&path).ok();
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .ok();
         if let Some(f) = file.as_mut() {
             let argv0 = std::env::args().next().unwrap_or_else(|| "(null)".into());
             // The banner must appear exactly once per process.
@@ -82,5 +86,7 @@ pub fn log(msg: &str) {
 /// Emit the C `EVT_INIT panel_h=… sw=… sh=…` geometry line (the harness's
 /// geometry + respawn-ready source).
 pub fn evt_init(panel_h: u32, sw: u32, sh: u32) {
-    log(&format!("[bookshelf] EVT_INIT panel_h={panel_h} sw={sw} sh={sh}"));
+    log(&format!(
+        "[bookshelf] EVT_INIT panel_h={panel_h} sw={sw} sh={sh}"
+    ));
 }

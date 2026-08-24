@@ -120,7 +120,10 @@ pub(crate) struct WorkerHandle {
 impl WorkerHandle {
     /// Arm a fresh chain: new channel + clear cancel flag, returning the
     /// cancel clone the worker thread closes over.
-    pub fn arm(&mut self, rx: std::sync::mpsc::Receiver<SyncMsg>) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+    pub fn arm(
+        &mut self,
+        rx: std::sync::mpsc::Receiver<SyncMsg>,
+    ) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
         let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         self.rx = Some(rx);
         self.cancel = std::sync::Arc::clone(&cancel);
@@ -221,7 +224,10 @@ pub fn sync(
             Round::Applied { next_cursor, more } => {
                 cursor = next_cursor;
                 rounds += 1;
-                on_event(SyncEvent::MetaBatch { done: rounds, total: 0 });
+                on_event(SyncEvent::MetaBatch {
+                    done: rounds,
+                    total: 0,
+                });
                 rearm_ban(&mut ban_sleep, &mut ban_until);
                 if !more {
                     cancelled = false;
@@ -289,7 +295,10 @@ fn apply_round(store: &Store, delta: &Delta, _cursor: i64) -> Result<Round> {
     store.set_cursor(delta.next_cursor)?;
     let more = delta.more;
     store.commit()?;
-    Ok(Round::Applied { next_cursor: delta.next_cursor, more })
+    Ok(Round::Applied {
+        next_cursor: delta.next_cursor,
+        more,
+    })
 }
 
 fn store_ids(store: &Store) -> Vec<String> {
@@ -339,7 +348,10 @@ impl<B: Framebuffer> App<B> {
         // Logged synchronously on the UI thread so the e2e log slicer
         // always sees the entry even though the chain runs async
         // (C eh_evt_init's synchronous eh_do_sync entry log).
-        crate::logger::log(&format!("[bookshelf] do_sync ENTER batch={}", crate::sync::EH_SYNC_BATCH));
+        crate::logger::log(&format!(
+            "[bookshelf] do_sync ENTER batch={}",
+            crate::sync::EH_SYNC_BATCH
+        ));
         // Initial anti-suspend ban (C eh_do_sync's eh_sync_keep_awake);
         // per-round re-arms come back as SyncMsg::BanSleep.
         self.screen()
@@ -424,8 +436,11 @@ impl<B: Framebuffer> App<B> {
     /// Drain the sync worker's messages + advance the sheet's auto-close
     /// timers.  Returns true when the frame changed and a repaint is due.
     pub(crate) fn sync_poll(&mut self) -> bool {
-        let msgs: Vec<crate::sync::SyncMsg> =
-            self.sync_worker.rx.as_ref().map_or_else(Vec::new, |rx| rx.try_iter().collect());
+        let msgs: Vec<crate::sync::SyncMsg> = self
+            .sync_worker
+            .rx
+            .as_ref()
+            .map_or_else(Vec::new, |rx| rx.try_iter().collect());
         let mut changed = !msgs.is_empty();
         for m in msgs {
             match m {
@@ -496,7 +511,11 @@ impl<B: Framebuffer> App<B> {
             self.cover_warm_start();
         }
         if self.sync_popup.open {
-            self.sync_popup.stage = if ok { SyncStage::Covers } else { SyncStage::Fail };
+            self.sync_popup.stage = if ok {
+                SyncStage::Covers
+            } else {
+                SyncStage::Fail
+            };
             self.sync_popup.stage_at = Some(std::time::Instant::now());
         }
         self.refresh_shelf();
@@ -509,7 +528,9 @@ impl<B: Framebuffer> App<B> {
     /// the error for SYNC_FAIL_CLOSE_MS.  Returns true when the frame
     /// changed.
     pub(crate) fn sync_popup_close_tick(&mut self) -> bool {
-        let Some(at) = self.sync_popup.stage_at else { return false };
+        let Some(at) = self.sync_popup.stage_at else {
+            return false;
+        };
         match self.sync_popup.stage {
             SyncStage::Fail => {
                 if at.elapsed() >= std::time::Duration::from_millis(SYNC_FAIL_CLOSE_MS) {
@@ -631,7 +652,10 @@ mod tests {
 
     impl DeltaSource for MockSource {
         fn delta(&self, _cursor: i64, _batch: u32) -> std::result::Result<Delta, String> {
-            self.pages.borrow_mut().pop_front().expect("no more scripted pages")
+            self.pages
+                .borrow_mut()
+                .pop_front()
+                .expect("no more scripted pages")
         }
         fn report_state(&self, _ids: &[String]) -> std::result::Result<(), String> {
             self.reported.set(true);
@@ -724,7 +748,11 @@ mod tests {
             vec![SyncEvent::Start, SyncEvent::MetaBatch { done: 1, total: 0 }],
             "aborted chain: no Complete event"
         );
-        assert_eq!(store.cursor().unwrap(), 10, "cursor at the last applied batch");
+        assert_eq!(
+            store.cursor().unwrap(),
+            10,
+            "cursor at the last applied batch"
+        );
         assert_eq!(store.count().unwrap(), 1);
         assert!(!src.reported.get(), "aborted chain sends no state report");
     }
@@ -754,7 +782,11 @@ mod tests {
         .unwrap();
         assert_eq!(n, 0);
         assert_eq!(*events.borrow(), vec![SyncEvent::Start]);
-        assert_eq!(store.cursor().unwrap(), 7, "fetched-but-aborted round never applies");
+        assert_eq!(
+            store.cursor().unwrap(),
+            7,
+            "fetched-but-aborted round never applies"
+        );
         assert_eq!(store.count().unwrap(), 0);
     }
 
@@ -779,12 +811,13 @@ mod tests {
         assert_eq!(res.unwrap_err().to_string(), "boom");
         assert_eq!(
             *events.borrow(),
-            vec![
-                SyncEvent::Start,
-                SyncEvent::Failed("boom".to_string()),
-            ]
+            vec![SyncEvent::Start, SyncEvent::Failed("boom".to_string()),]
         );
-        assert_eq!(store.cursor().unwrap(), 30, "failure leaves the cursor untouched");
+        assert_eq!(
+            store.cursor().unwrap(),
+            30,
+            "failure leaves the cursor untouched"
+        );
         assert!(!src.reported.get());
     }
 

@@ -18,8 +18,8 @@
 #![allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub mod app;
 pub mod appui;
-pub mod client;
 pub mod choosers;
+pub mod client;
 pub mod config;
 pub mod context_menu;
 pub mod cover;
@@ -28,11 +28,11 @@ pub mod extract;
 pub mod i18n;
 pub mod input;
 pub mod launcher;
+pub mod local;
 pub mod logger;
 pub mod menu;
 pub mod pages;
 pub mod progress;
-pub mod local;
 pub mod reader;
 pub mod search;
 pub mod settings;
@@ -42,8 +42,8 @@ pub mod store;
 pub mod sync;
 pub mod sysapp;
 pub mod util;
-pub mod widgets;
 pub mod viewer;
+pub mod widgets;
 
 /// Simple diagnostic logger.  On the device this writes to the same
 /// guest-writable path the demo used; on host it prints to stderr.  Hook
@@ -71,6 +71,10 @@ pub mod testutil {
 
     /// A BookMeta fixture with just an id + title.
     pub fn book(id: &str, title: &str) -> BookMeta {
-        BookMeta { id: id.into(), title: title.into(), ..Default::default() }
+        BookMeta {
+            id: id.into(),
+            title: title.into(),
+            ..Default::default()
+        }
     }
 }

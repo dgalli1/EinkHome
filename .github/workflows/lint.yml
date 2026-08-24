@@ -36,6 +36,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: eh_ui
+      - name: Run cargo fmt check
+        run: make fmt
       - name: Run make clippy
         run: make clippy
 

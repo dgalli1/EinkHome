@@ -83,7 +83,10 @@ fn snapshot(src_root: &Path, dst_root: &Path) {
         }
         // Skip when the snapshot is already at least as new as the source
         // (a fresh-enough copy from a prior reload).
-        if let (Ok(sm), Ok(dm)) = (md.modified(), std::fs::metadata(&dst).and_then(|m| m.modified())) {
+        if let (Ok(sm), Ok(dm)) = (
+            md.modified(),
+            std::fs::metadata(&dst).and_then(|m| m.modified()),
+        ) {
             if dm >= sm {
                 continue;
             }
@@ -104,7 +107,10 @@ pub fn read_db(path: &Path) -> ProgressMap {
     ) {
         Ok(c) => c,
         Err(e) => {
-            crate::log(&format!("[eh_app] progress: cannot open {}: {e}", path.display()));
+            crate::log(&format!(
+                "[eh_app] progress: cannot open {}: {e}",
+                path.display()
+            ));
             return ProgressMap::new();
         }
     };

@@ -9,7 +9,7 @@
 //! This module implements the row CRUD the shelf needs, plus FTS5 search,
 //! suggest/rank prefix completion, and the materialised `view` projection.
 
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::client::BookMeta;
 
@@ -108,7 +108,9 @@ impl Store {
     pub fn cursor(&self) -> rusqlite::Result<i64> {
         let raw: Option<String> = self
             .conn
-            .query_row("SELECT value FROM meta WHERE key='cursor'", [], |r| r.get(0))
+            .query_row("SELECT value FROM meta WHERE key='cursor'", [], |r| {
+                r.get(0)
+            })
             .optional()?;
         match raw {
             None => Ok(0),
@@ -265,7 +267,11 @@ impl Store {
                 b.local_path,
                 b.added_at,
                 b.filename,
-                if b.source.is_empty() { "kavita" } else { &b.source },
+                if b.source.is_empty() {
+                    "kavita"
+                } else {
+                    &b.source
+                },
                 b.search_text,
                 b.genre,
             ],
@@ -312,7 +318,12 @@ impl Store {
     /// Mark a book as downloaded (or not), storing the local path.
     /// Same semantics as eh_store_set_downloaded: sets the flag
     /// plus the on-disk path when downloaded, "" otherwise.
-    pub fn set_downloaded(&self, id: &str, downloaded: bool, local_path: &str) -> rusqlite::Result<()> {
+    pub fn set_downloaded(
+        &self,
+        id: &str,
+        downloaded: bool,
+        local_path: &str,
+    ) -> rusqlite::Result<()> {
         self.conn.execute(
             "UPDATE books SET downloaded=?2, local_path=?3 WHERE id=?1",
             params![id, downloaded as i64, local_path],
@@ -388,7 +399,9 @@ impl Store {
             "SELECT term FROM search_history ORDER BY ts DESC, rowid DESC LIMIT ?1 OFFSET ?2",
         )?;
         let rows = stmt
-            .query_map(params![limit as i64, offset as i64], |r| r.get::<_, String>(0))?
+            .query_map(params![limit as i64, offset as i64], |r| {
+                r.get::<_, String>(0)
+            })?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(rows)
     }
@@ -398,7 +411,13 @@ impl Store {
     /// case-insensitive substring, `%`/`_`/`\` escaped).  When FTS5 is
     /// available and the query is safe, uses FTS MATCH for better ranking.
     /// Empty query = the whole shelf.  Same column/order shape as `list_books`.
-    pub fn search(&self, query: &str, limit: usize, offset: usize, source: &str) -> rusqlite::Result<Vec<Book>> {
+    pub fn search(
+        &self,
+        query: &str,
+        limit: usize,
+        offset: usize,
+        source: &str,
+    ) -> rusqlite::Result<Vec<Book>> {
         if query.trim().is_empty() {
             // '%%' matches everything: reuse the LIKE scan for the
             // source-filtered empty-query page.
@@ -429,7 +448,13 @@ impl Store {
         self.search_like_sql(&like_query, source, limit, offset)
     }
 
-    fn search_fts_sql(&self, fts_q: &str, limit: usize, offset: usize, source: &str) -> rusqlite::Result<Vec<Book>> {
+    fn search_fts_sql(
+        &self,
+        fts_q: &str,
+        limit: usize,
+        offset: usize,
+        source: &str,
+    ) -> rusqlite::Result<Vec<Book>> {
         let mut stmt = self.conn.prepare(concat!(
             "SELECT id,title,author,series,series_id,series_idx,",
             " ext,size,downloaded,local_path,added_at,",
@@ -441,12 +466,21 @@ impl Store {
             " LIMIT ?2 OFFSET ?3"
         ))?;
         let rows = stmt
-            .query_map(params![fts_q, limit as i64, offset as i64, source], row_to_book)?
+            .query_map(
+                params![fts_q, limit as i64, offset as i64, source],
+                row_to_book,
+            )?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(rows)
     }
 
-    fn search_like_sql(&self, like_query: &str, source: &str, limit: usize, offset: usize) -> rusqlite::Result<Vec<Book>> {
+    fn search_like_sql(
+        &self,
+        like_query: &str,
+        source: &str,
+        limit: usize,
+        offset: usize,
+    ) -> rusqlite::Result<Vec<Book>> {
         let mut stmt = self.conn.prepare(concat!(
             "SELECT id,title,author,series,series_id,series_idx,",
             " ext,size,downloaded,local_path,added_at,",
@@ -459,7 +493,10 @@ impl Store {
             " LIMIT ?2 OFFSET ?3"
         ))?;
         let rows = stmt
-            .query_map(params![like_query, limit as i64, offset as i64, source], row_to_book)?
+            .query_map(
+                params![like_query, limit as i64, offset as i64, source],
+                row_to_book,
+            )?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(rows)
     }
@@ -473,14 +510,17 @@ impl Store {
         // Snapshot old terms for rank refresh.
         let mut old: Vec<String> = Vec::new();
         {
-            let mut q = self.conn.prepare("SELECT term FROM suggest WHERE book_id=?1")?;
+            let mut q = self
+                .conn
+                .prepare("SELECT term FROM suggest WHERE book_id=?1")?;
             let rows = q.query_map([book_id], |r| r.get::<_, String>(0))?;
             for t in rows.flatten() {
                 old.push(t);
             }
         }
         // Delete old edges.
-        self.conn.execute("DELETE FROM suggest WHERE book_id=?1", [book_id])?;
+        self.conn
+            .execute("DELETE FROM suggest WHERE book_id=?1", [book_id])?;
         // Insert new non-empty terms.
         for t in terms {
             if !t.is_empty() {
@@ -500,7 +540,8 @@ impl Store {
             }
         }
         // Drop zero-count rank rows.
-        self.conn.execute_batch("DELETE FROM suggest_rank WHERE cnt=0")?;
+        self.conn
+            .execute_batch("DELETE FROM suggest_rank WHERE cnt=0")?;
         Ok(())
     }
 
@@ -529,21 +570,31 @@ impl Store {
         }
         // Fallback: edge-table GROUP BY.
         let sql = "SELECT term FROM suggest WHERE term >= ?1 AND term < ?2 \
-             GROUP BY term ORDER BY COUNT(*) DESC, term ASC LIMIT ?3".to_string();
+             GROUP BY term ORDER BY COUNT(*) DESC, term ASC LIMIT ?3"
+            .to_string();
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt
-            .query_map(params![norm, bound, limit as i64], |r| r.get::<_, String>(0))?
+            .query_map(params![norm, bound, limit as i64], |r| {
+                r.get::<_, String>(0)
+            })?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(rows)
     }
 
-    fn suggest_list_ranked(&self, norm: &str, bound: &str, limit: usize) -> rusqlite::Result<Vec<String>> {
+    fn suggest_list_ranked(
+        &self,
+        norm: &str,
+        bound: &str,
+        limit: usize,
+    ) -> rusqlite::Result<Vec<String>> {
         let mut stmt = self.conn.prepare(
             "SELECT term FROM suggest_rank WHERE term >= ?1 AND term < ?2 \
-             ORDER BY cnt DESC, term ASC LIMIT ?3"
+             ORDER BY cnt DESC, term ASC LIMIT ?3",
         )?;
         let rows = stmt
-            .query_map(params![norm, bound, limit as i64], |r| r.get::<_, String>(0))?
+            .query_map(params![norm, bound, limit as i64], |r| {
+                r.get::<_, String>(0)
+            })?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(rows)
     }
@@ -604,7 +655,7 @@ impl Store {
         if empty {
             let _ = self.conn.execute_batch(
                 "INSERT INTO search_fts(rowid, title, author, series, search_text) \
-                 SELECT rowid, title, author, series, COALESCE(search_text,'') FROM books"
+                 SELECT rowid, title, author, series, COALESCE(search_text,'') FROM books",
             );
         }
     }
@@ -664,7 +715,14 @@ impl Store {
             }
             let members = &groups[&k];
             if members.len() > 1 {
-                self.insert_view_row(*pos, 1, &members[0].id, &k, &group_label(members, group), members.len() as i64)?;
+                self.insert_view_row(
+                    *pos,
+                    1,
+                    &members[0].id,
+                    &k,
+                    &group_label(members, group),
+                    members.len() as i64,
+                )?;
             } else {
                 self.insert_view_row(*pos, 0, &b.id, &b.series_id, &b.title, 1)?;
             }
@@ -730,11 +788,10 @@ impl Store {
                             .partial_cmp(&b.series_idx)
                             .unwrap_or(std::cmp::Ordering::Equal)
                     }),
-                SortMode::Recent => {
-                    b.added_at.cmp(&a.added_at).then_with(|| {
-                        a.title.to_lowercase().cmp(&b.title.to_lowercase())
-                    })
-                }
+                SortMode::Recent => b
+                    .added_at
+                    .cmp(&a.added_at)
+                    .then_with(|| a.title.to_lowercase().cmp(&b.title.to_lowercase())),
             };
             c.then(a.id.cmp(&b.id))
         });
@@ -765,7 +822,9 @@ impl Store {
                     ),
                     [source],
                 )?;
-                let n: i64 = self.conn.query_row("SELECT COUNT(*) FROM view", [], |r| r.get(0))?;
+                let n: i64 = self
+                    .conn
+                    .query_row("SELECT COUNT(*) FROM view", [], |r| r.get(0))?;
                 return Ok(n);
             }
             let mut pos = 0i64;
@@ -778,7 +837,11 @@ impl Store {
                     let want = scopes.get(l).copied().unwrap_or("");
                     all.retain(|b| {
                         let k = dim_key(b, group, l);
-                        if want.is_empty() { k.is_empty() } else { k == want }
+                        if want.is_empty() {
+                            k.is_empty()
+                        } else {
+                            k == want
+                        }
                     });
                 }
                 if levels < group_levels(group) {
@@ -814,11 +877,7 @@ impl Store {
             .query_row("SELECT COUNT(*) FROM view", [], |r| r.get(0))
     }
 
-    pub fn view_page(
-        &self,
-        limit: usize,
-        offset: usize,
-    ) -> rusqlite::Result<Vec<ViewRow>> {
+    pub fn view_page(&self, limit: usize, offset: usize) -> rusqlite::Result<Vec<ViewRow>> {
         let mut stmt = self.conn.prepare(concat!(
             "SELECT v.kind,v.book_id,v.series_id,v.series_name,v.series_count",
             " FROM view v ORDER BY v.pos LIMIT ?1 OFFSET ?2"
@@ -853,13 +912,21 @@ impl Store {
             ))?
             .query_map([scope], |r| {
                 Ok(Book {
-                    id: r.get(0)?, title: r.get(1)?, author: r.get(2)?,
-                    series: r.get(3)?, series_id: r.get(4)?, series_idx: r.get(5)?,
-                    ext: r.get(6)?, size: r.get(7)?,
+                    id: r.get(0)?,
+                    title: r.get(1)?,
+                    author: r.get(2)?,
+                    series: r.get(3)?,
+                    series_id: r.get(4)?,
+                    series_idx: r.get(5)?,
+                    ext: r.get(6)?,
+                    size: r.get(7)?,
                     downloaded: r.get::<_, i64>(8)? != 0,
-                    local_path: r.get(9)?, added_at: r.get(10)?,
-                    filename: r.get(11)?, source: r.get(12)?,
-                    search_text: r.get(13)?, genre: r.get(14)?,
+                    local_path: r.get(9)?,
+                    added_at: r.get(10)?,
+                    filename: r.get(11)?,
+                    source: r.get(12)?,
+                    search_text: r.get(13)?,
+                    genre: r.get(14)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()
@@ -968,11 +1035,7 @@ fn parse_ts(s: Option<&str>) -> i64 {
         return ts;
     }
     // "YYYY-MM-DDTHH:MM:SS" — strip the 'Z'/offset, treat as UTC.
-    let digits: String = s
-        .chars()
-        .filter(|c| c.is_ascii_digit())
-        .take(14)
-        .collect();
+    let digits: String = s.chars().filter(|c| c.is_ascii_digit()).take(14).collect();
     if digits.len() != 14 {
         return 0;
     }
@@ -1195,7 +1258,11 @@ mod tests {
     fn upsert_preserves_downloaded_state() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(&dir.path().join("t.db")).unwrap();
-        let b = BookMeta { id: "k1".into(), title: "k1".into(), ..Default::default() };
+        let b = BookMeta {
+            id: "k1".into(),
+            title: "k1".into(),
+            ..Default::default()
+        };
         store.upsert_book(&b).unwrap();
         // mark downloaded
         store
@@ -1209,9 +1276,11 @@ mod tests {
         store.upsert_book(&b).unwrap();
         let (dl, lp): (i64, String) = store
             .conn
-            .query_row("SELECT downloaded, local_path FROM books WHERE id='k1'", [], |r| {
-                Ok((r.get(0)?, r.get(1)?))
-            })
+            .query_row(
+                "SELECT downloaded, local_path FROM books WHERE id='k1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
             .unwrap();
         assert_eq!(dl, 1);
         assert_eq!(lp, "/mnt/x/t.epub");
@@ -1221,9 +1290,17 @@ mod tests {
     fn list_orders_by_added_desc() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(&dir.path().join("t.db")).unwrap();
-        for (id, ts) in [("older", "2026-01-01T00:00:00Z"), ("newer", "2026-06-01T00:00:00Z")] {
+        for (id, ts) in [
+            ("older", "2026-01-01T00:00:00Z"),
+            ("newer", "2026-06-01T00:00:00Z"),
+        ] {
             store
-                .upsert_book(&BookMeta { id: id.into(), title: id.into(), added_at: Some(ts.into()), ..Default::default() })
+                .upsert_book(&BookMeta {
+                    id: id.into(),
+                    title: id.into(),
+                    added_at: Some(ts.into()),
+                    ..Default::default()
+                })
                 .unwrap();
         }
         let list = store.list_books(10, 0).unwrap();
@@ -1262,11 +1339,7 @@ mod tests {
     fn grouped_view_makes_interleaved_cards() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(&dir.path().join("t.db")).unwrap();
-        for (id, author) in [
-            ("a1", "Ann"),
-            ("a2", "Ann"),
-            ("b1", "Bob"),
-        ] {
+        for (id, author) in [("a1", "Ann"), ("a2", "Ann"), ("b1", "Bob")] {
             store
                 .upsert_book(&BookMeta {
                     id: id.into(),
@@ -1301,10 +1374,18 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(&dir.path().join("t.db")).unwrap();
         store
-            .upsert_book(&BookMeta { id: "k1".into(), title: "Alpha".into(), ..Default::default() })
+            .upsert_book(&BookMeta {
+                id: "k1".into(),
+                title: "Alpha".into(),
+                ..Default::default()
+            })
             .unwrap();
         store
-            .upsert_book(&BookMeta { id: "k2".into(), title: "Beta".into(), ..Default::default() })
+            .upsert_book(&BookMeta {
+                id: "k2".into(),
+                title: "Beta".into(),
+                ..Default::default()
+            })
             .unwrap();
         let r = store.search("alpha", 10, 0, "kavita").unwrap();
         assert_eq!(r.len(), 1);
@@ -1317,7 +1398,11 @@ mod tests {
         // showing the local rows (C views filter on view_source()).
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(&dir.path().join("t.db")).unwrap();
-        let mut k = BookMeta { id: "kav1".into(), title: "Kavita only".into(), ..Default::default() };
+        let mut k = BookMeta {
+            id: "kav1".into(),
+            title: "Kavita only".into(),
+            ..Default::default()
+        };
         k.authors = vec!["K Author".into()];
         store.upsert_book(&k).unwrap();
         let mut l = Book {
@@ -1398,9 +1483,13 @@ mod tests {
         let rows = store.view_page(10, 0).unwrap();
         // Alpha is a 2-book stack; Beta has a single member so it stays a
         // flat tile at its own sort position.
-        assert!(rows.iter().any(|r| r.kind == 1 && r.series_id == "s-alpha" && r.series_count == 2));
+        assert!(rows
+            .iter()
+            .any(|r| r.kind == 1 && r.series_id == "s-alpha" && r.series_count == 2));
         assert!(rows.iter().any(|r| r.kind == 0 && r.series_id == "s-beta"));
-        let n = store.view_rebuild(1, 0, 2, "", &["Ann", "s-alpha"], "kavita").unwrap();
+        let n = store
+            .view_rebuild(1, 0, 2, "", &["Ann", "s-alpha"], "kavita")
+            .unwrap();
         assert_eq!(n, 2);
         let rows = store.view_page(10, 0).unwrap();
         assert!(rows.iter().all(|r| r.kind == 0));
@@ -1411,9 +1500,17 @@ mod tests {
     fn suggest_roundtrip() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(&dir.path().join("t.db")).unwrap();
-        store.suggest_set("b1", &["potter".into(), "harry".into(), "harry potter".into()]).unwrap();
+        store
+            .suggest_set(
+                "b1",
+                &["potter".into(), "harry".into(), "harry potter".into()],
+            )
+            .unwrap();
         let list = store.suggest_list("pott", 10).unwrap();
-        assert!(list.contains(&"potter".into()), "suggest_list should find 'potter' from prefix 'pott'");
+        assert!(
+            list.contains(&"potter".into()),
+            "suggest_list should find 'potter' from prefix 'pott'"
+        );
     }
 
     #[test]
@@ -1430,14 +1527,20 @@ mod tests {
     fn search_text_stored_and_searchable() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(&dir.path().join("t.db")).unwrap();
-        store.upsert_book(&BookMeta {
-            id: "d1".into(),
-            title: "Sŏnggong".into(),
-            search_text: Some("songgong".into()),
-            ..Default::default()
-        }).unwrap();
+        store
+            .upsert_book(&BookMeta {
+                id: "d1".into(),
+                title: "Sŏnggong".into(),
+                search_text: Some("songgong".into()),
+                ..Default::default()
+            })
+            .unwrap();
         let r = store.search("songgong", 10, 0, "kavita").unwrap();
-        assert_eq!(r.len(), 1, "search_text should match folded diacritic query");
+        assert_eq!(
+            r.len(),
+            1,
+            "search_text should match folded diacritic query"
+        );
         assert_eq!(r[0].id, "d1");
     }
 
@@ -1460,21 +1563,30 @@ mod tests {
     fn search_text_null_not_stored() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(&dir.path().join("t.db")).unwrap();
-        store.upsert_book(&BookMeta {
-            id: "n1".into(),
-            title: "Normal".into(),
-            search_text: None,
-            ..Default::default()
-        }).unwrap();
+        store
+            .upsert_book(&BookMeta {
+                id: "n1".into(),
+                title: "Normal".into(),
+                search_text: None,
+                ..Default::default()
+            })
+            .unwrap();
         let b = store.get_book("n1").unwrap().unwrap();
-        assert!(b.search_text.is_empty(), "null search_text should store empty string");
+        assert!(
+            b.search_text.is_empty(),
+            "null search_text should store empty string"
+        );
     }
     #[test]
     fn delete_source_and_local_meta_roundtrip() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(&dir.path().join("t.db")).unwrap();
         store
-            .upsert_book(&BookMeta { id: "k1".into(), title: "Kavita".into(), ..Default::default() })
+            .upsert_book(&BookMeta {
+                id: "k1".into(),
+                title: "Kavita".into(),
+                ..Default::default()
+            })
             .unwrap();
         let local = Book {
             id: "fld_abc".into(),
@@ -1492,7 +1604,10 @@ mod tests {
         // Metadata cache roundtrip (C eh_store_local_meta_get/put).
         assert!(store.local_meta_get("fld_abc").is_none());
         store.local_meta_put("fld_abc", "T", "A").unwrap();
-        assert_eq!(store.local_meta_get("fld_abc"), Some(("T".into(), "A".into())));
+        assert_eq!(
+            store.local_meta_get("fld_abc"),
+            Some(("T".into(), "A".into()))
+        );
 
         // A local re-import replaces the source wholesale; Kavita survives.
         store.delete_source("local").unwrap();
@@ -1551,23 +1666,37 @@ mod tests {
             for i in 0..n {
                 // Distinct authors => one lone tile per book when grouped,
                 // so the grouped row count exposes the scan width.
-                ins.execute(params![format!("k{i}"), format!("t{i}"), format!("a{i}")]).unwrap();
+                ins.execute(params![format!("k{i}"), format!("t{i}"), format!("a{i}")])
+                    .unwrap();
             }
         }
         store.conn.execute("COMMIT", []).unwrap();
 
         // Flat: the SQL projection sees EVERY book — no cap.
         let flat = store
-            .view_rebuild(GroupPreset::None as i64, SortMode::Title as i64, 0, "", &[], "kavita")
+            .view_rebuild(
+                GroupPreset::None as i64,
+                SortMode::Title as i64,
+                0,
+                "",
+                &[],
+                "kavita",
+            )
             .unwrap();
         assert_eq!(flat as usize, n);
         assert_eq!(store.view_total(), n);
 
         // Grouped by author: exactly the documented cap survives.
         let grouped = store
-            .view_rebuild(GroupPreset::Author as i64, SortMode::Title as i64, 0, "", &[], "kavita")
+            .view_rebuild(
+                GroupPreset::Author as i64,
+                SortMode::Title as i64,
+                0,
+                "",
+                &[],
+                "kavita",
+            )
             .unwrap();
         assert_eq!(grouped as usize, VIEW_SCAN_CAP);
     }
 }
-

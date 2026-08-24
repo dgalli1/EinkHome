@@ -10,7 +10,9 @@ use eh_demo::{build_screen, draw_self_panel};
 use eh_hal::{Framebuffer, RefreshMode};
 
 fn main() -> Result<(), String> {
-    let path = std::env::args().nth(1).unwrap_or_else(|| "/dev/fb0".to_owned());
+    let path = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "/dev/fb0".to_owned());
     let mut fb = LinuxFb::open(&path).map_err(|e| format!("open {path}: {e}"))?;
 
     // Let callers reserve a native panel strip (firmware paints it).

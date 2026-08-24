@@ -16,8 +16,15 @@ fn main() {
 
     let client = ApiClient::new(&base, "pbemu-dev-token");
     let store = Store::open(&db).expect("open");
-    eh_app::sync::sync(&client, &store, 50, &std::sync::atomic::AtomicBool::new(false),
-        &mut |_| {}, None).expect("sync");
+    eh_app::sync::sync(
+        &client,
+        &store,
+        50,
+        &std::sync::atomic::AtomicBool::new(false),
+        &mut |_| {},
+        None,
+    )
+    .expect("sync");
 
     let covers = cover::resolve_covers_dir(&app);
     let shelf = store.list_books(1, 0).expect("list");

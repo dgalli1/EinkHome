@@ -72,7 +72,9 @@ pub fn promote<B: Framebuffer>(app: &mut App<B>) -> bool {
     // Fresh cfg FIRST: a failure leaves no binary installed.
     let cfg_tmp = Path::new(&cfg);
     if let Err(e) = app.config.clone().save(cfg_tmp) {
-        crate::logger::log(&format!("[bookshelf] sysapp: promote cfg write {cfg} failed: {e}"));
+        crate::logger::log(&format!(
+            "[bookshelf] sysapp: promote cfg write {cfg} failed: {e}"
+        ));
         return false;
     }
     // Already the home task?  Copying would truncate the running exe.
@@ -86,10 +88,7 @@ pub fn promote<B: Framebuffer>(app: &mut App<B>) -> bool {
             ));
             return false;
         }
-        let _ = std::fs::set_permissions(
-            &dst,
-            std::os::unix::fs::PermissionsExt::from_mode(0o755),
-        );
+        let _ = std::fs::set_permissions(&dst, std::os::unix::fs::PermissionsExt::from_mode(0o755));
     }
     crate::logger::log(&format!(
         "[bookshelf] sysapp: {dst} installed as home task ({})",

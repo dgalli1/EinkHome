@@ -18,7 +18,11 @@ impl<B: Framebuffer> App<B> {
         self.dirty = true;
         // Take the framebuffer out first: the new screen is built from the
         // same canvas (the C app's full-redraw navigation).
-        let fb = self.screen.take().expect("screen present").into_framebuffer();
+        let fb = self
+            .screen
+            .take()
+            .expect("screen present")
+            .into_framebuffer();
         if let Some(b) = self.dl_picker.as_mut() {
             // The download-folder picker owns the whole page (C
             // BR_MODE_PICKER draws over the settings screen).
@@ -103,8 +107,7 @@ impl<B: Framebuffer> App<B> {
                 crate::log(&format!("[eh_app] settings: saved {}", p.display()));
                 crate::logger::log(&format!(
                     "[bookshelf] settings: reader_pref={} (cfg `{}`)",
-                    self.reader_pref,
-                    self.reader_path,
+                    self.reader_pref, self.reader_path,
                 ));
             }
         }

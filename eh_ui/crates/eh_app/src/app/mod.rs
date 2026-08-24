@@ -15,12 +15,12 @@ use eh_hal::{Framebuffer, InputEvent, KeyCode, Rect};
 use eh_shell::Screen;
 
 use crate::client::ApiClient;
-use crate::config::{Config, parse_kv_file};
+use crate::config::{parse_kv_file, Config};
 use crate::cover;
 use crate::shelf::{self, ShelfEntry};
+use crate::store::Store;
 use crate::widgets::chooser::ChooserKind;
 use crate::widgets::sync_popup::SyncPopup;
-use crate::store::Store;
 
 mod data;
 mod events;
@@ -97,7 +97,6 @@ pub enum Overlay {
     /// One license's full-text page.
     LicenseDetail,
 }
-
 
 /// Suggestion rows shown in the live band (C EH_SUGGEST_MAX_HITS).
 pub const SUGGEST_MAX_HITS: usize = 10;
@@ -176,7 +175,9 @@ pub(crate) fn kb_arm(field: KbField) {
 /// Drain a committed keyboard edit (field, text), if one is pending.
 pub(crate) fn kb_take_pending() -> Option<(KbField, String)> {
     let field = KB_FIELD.with(|f| *f.borrow());
-    KB_PENDING.with(|p| p.borrow_mut().take()).map(|t| (field, t))
+    KB_PENDING
+        .with(|p| p.borrow_mut().take())
+        .map(|t| (field, t))
 }
 
 /// The bookshelf app bound to one framebuffer backend.
@@ -324,7 +325,11 @@ fn ensure_writable_dir(path: &str) -> bool {
         return false;
     }
     let probe = format!("{path}/.eh-probe");
-    match std::fs::OpenOptions::new().write(true).create_new(true).open(&probe) {
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&probe)
+    {
         Ok(_) => {
             let _ = std::fs::remove_file(&probe);
             true
@@ -509,7 +514,9 @@ impl<B: Framebuffer> App<B> {
         let src = self.source.config_value();
         let total = {
             let scopes = self.drill_scopes();
-            self.store.view_rebuild(g as i64, s as i64, d as i64, &q, &scopes, &src).unwrap_or(0)
+            self.store
+                .view_rebuild(g as i64, s as i64, d as i64, &q, &scopes, &src)
+                .unwrap_or(0)
         };
         crate::logger::log(&format!(
             "[bookshelf] view_rebuild: view={} sort={} group={} drill={}",
@@ -558,10 +565,7 @@ impl<B: Framebuffer> App<B> {
         }
         config
     }
-
-
 }
-
 
 /// A bare `host[:port]` becomes `http://host[:port]` (C
 /// eh_settings_keyboard_handler normalization).
@@ -574,16 +578,14 @@ pub fn normalize_host(v: &str) -> String {
     }
 }
 
-
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::reader::reader_pref_from_path;
-    use crate::widgets::sync_popup::{SyncStage, SYNC_DONE_CLOSE_MS, SYNC_FAIL_CLOSE_MS};
-    use crate::store::Book;
     use crate::downloads::book_local_path;
+    use crate::reader::reader_pref_from_path;
     use crate::reader::STANDARD_READER;
+    use crate::store::Book;
+    use crate::widgets::sync_popup::{SyncStage, SYNC_DONE_CLOSE_MS, SYNC_FAIL_CLOSE_MS};
     fn book(filename: &str, ext: &str) -> Book {
         Book {
             id: "1".into(),
@@ -622,7 +624,10 @@ mod tests {
 
     #[test]
     fn host_normalization_adds_scheme() {
-        assert_eq!(normalize_host("192.168.1.5:8080"), "http://192.168.1.5:8080");
+        assert_eq!(
+            normalize_host("192.168.1.5:8080"),
+            "http://192.168.1.5:8080"
+        );
         assert_eq!(normalize_host("http://x/"), "http://x/");
         assert_eq!(normalize_host("https://x:1/"), "https://x:1/");
     }
@@ -688,7 +693,9 @@ mod tests {
     }
 
     impl Framebuffer for FakeKb {
-        fn net_active(&self) -> bool { !self.offline }
+        fn net_active(&self) -> bool {
+            !self.offline
+        }
 
         fn screen(&self) -> eh_hal::Screen {
             eh_hal::Screen::full(1072, 1448)
@@ -744,7 +751,9 @@ mod tests {
             ..Default::default()
         };
         let app = App::new(fb, cfg, None, &dir);
-        app.store.suggest_set("b1", &["potter".into(), "harry potter".into()]).unwrap();
+        app.store
+            .suggest_set("b1", &["potter".into(), "harry potter".into()])
+            .unwrap();
         app
     }
 
@@ -777,7 +786,11 @@ mod tests {
         app.dirty = true;
         app.present();
         let log = app.screen().framebuffer().refreshes.borrow();
-        assert_eq!(log.len(), 1, "drag step produced {log:?} updates for one frame");
+        assert_eq!(
+            log.len(),
+            1,
+            "drag step produced {log:?} updates for one frame"
+        );
     }
 
     fn kb(app: &mut App<FakeKb>) -> &FakeKb {
@@ -830,7 +843,10 @@ mod tests {
         let mut app = mk_app("closed");
         app.enter_search();
         assert!(!app.search_kb);
-        assert!(!app.tick(), "tick must be a no-op while no keyboard is open");
+        assert!(
+            !app.tick(),
+            "tick must be a no-op while no keyboard is open"
+        );
     }
 
     #[test]
@@ -864,7 +880,10 @@ mod tests {
 
         // C CloseKeyboard + app-side commit: keyboard cancelled (no commit
         // callback fired), the tapped term filters the shelf.
-        assert!(*kb(&mut app).cancelled.borrow(), "keyboard must be cancelled, not committed");
+        assert!(
+            *kb(&mut app).cancelled.borrow(),
+            "keyboard must be cancelled, not committed"
+        );
         assert!(!app.search_kb);
         assert!(app.suggestions.is_empty());
         assert_eq!(app.query, "potter");
@@ -986,7 +1005,10 @@ mod tests {
         app.store.upsert_book(&meta("b")).unwrap();
         app.store.set_downloaded("a", true, "").unwrap();
         app.download_all();
-        assert_eq!(app.downloader.pending, 1, "only the undownloaded book joins");
+        assert_eq!(
+            app.downloader.pending, 1,
+            "only the undownloaded book joins"
+        );
         assert_eq!(app.downloader.live_ids(), vec!["b".to_string()]);
         assert_eq!(app.overlay, Overlay::Download);
     }
@@ -997,7 +1019,11 @@ mod tests {
         app.store.upsert_book(&meta("a")).unwrap();
         app.store.set_downloaded("a", true, "").unwrap();
         app.download_all();
-        assert_eq!(app.overlay, Overlay::None, "no popup without work (C eh_download_all_start)");
+        assert_eq!(
+            app.overlay,
+            Overlay::None,
+            "no popup without work (C eh_download_all_start)"
+        );
         assert_eq!(app.downloader.pending, 0);
     }
 
@@ -1027,13 +1053,21 @@ mod tests {
             app.store.upsert_book(&meta(&format!("b{i}"))).unwrap();
         }
         app.download_all();
-        assert_eq!(app.downloader.pending, App::<FakeKb>::DL_BATCH_WINDOW, "queue stays bounded");
+        assert_eq!(
+            app.downloader.pending,
+            App::<FakeKb>::DL_BATCH_WINDOW,
+            "queue stays bounded"
+        );
         assert_eq!(app.dl.queue.len(), 12 - App::<FakeKb>::DL_BATCH_WINDOW);
         assert_eq!(app.dl.total, 12);
         // One job settles successfully: the window tops back up.
         app.downloader.pending -= 1;
         app.top_up_batch();
-        assert_eq!(app.downloader.pending, App::<FakeKb>::DL_BATCH_WINDOW, "window refilled");
+        assert_eq!(
+            app.downloader.pending,
+            App::<FakeKb>::DL_BATCH_WINDOW,
+            "window refilled"
+        );
         assert_eq!(app.dl.queue.len(), 3, "12 - window - 1 topped up");
     }
 
@@ -1048,7 +1082,11 @@ mod tests {
         app.dl.failed += 1;
         app.dl.failed_ids.insert("x".into());
         app.top_up_batch();
-        assert_eq!(app.downloader.live_ids(), vec!["x".to_string()], "settled entry stays until drained");
+        assert_eq!(
+            app.downloader.live_ids(),
+            vec!["x".to_string()],
+            "settled entry stays until drained"
+        );
         assert!(app.dl.queue.is_empty());
     }
 
@@ -1063,7 +1101,11 @@ mod tests {
         assert_eq!(app.downloader.pending, 1);
         let r = crate::widgets::download::dl_cancel_rect(1072, app.content_bottom);
         app.tap_overlay((r.x + r.w / 2) as i32, (r.y + r.h / 2) as i32);
-        assert_eq!(app.overlay, Overlay::None, "X cancels AND closes (C eh_cancel_downloads)");
+        assert_eq!(
+            app.overlay,
+            Overlay::None,
+            "X cancels AND closes (C eh_cancel_downloads)"
+        );
         assert_eq!(app.downloader.pending, 0);
         assert!(!app.dl.batch_all && app.dl.queue.is_empty());
     }
@@ -1078,8 +1120,7 @@ mod tests {
         let dl = dir.join("dl");
         std::fs::create_dir_all(&dl).unwrap();
         {
-            let store =
-                Store::open(&dir.join(Store::LIB_DB_FILENAME)).expect("seed store");
+            let store = Store::open(&dir.join(Store::LIB_DB_FILENAME)).expect("seed store");
             store.upsert_book(&meta("keep")).unwrap();
             store.upsert_book(&meta("gone")).unwrap();
             store.set_downloaded("keep", true, "").unwrap();
@@ -1127,23 +1168,27 @@ mod tests {
         // 20 series cards, level 2 one series' 2 books.
         use crate::client::BookMeta;
         for i in 0..40 {
-            app.store.upsert_book(&BookMeta {
-                id: format!("l{i}"),
-                title: format!("Lone {i}"),
-                authors: vec![format!("A{i}")],
-                ..Default::default()
-            }).unwrap();
+            app.store
+                .upsert_book(&BookMeta {
+                    id: format!("l{i}"),
+                    title: format!("Lone {i}"),
+                    authors: vec![format!("A{i}")],
+                    ..Default::default()
+                })
+                .unwrap();
         }
         for i in 0..20 {
             for k in 0..2 {
-                app.store.upsert_book(&BookMeta {
-                    id: format!("s{i}-{k}"),
-                    title: format!("Book {i}/{k}"),
-                    authors: vec!["Ann".into()],
-                    series: Some(format!("Series {i:02}")),
-                    series_id: Some(format!("sid-{i:02}")),
-                    ..Default::default()
-                }).unwrap();
+                app.store
+                    .upsert_book(&BookMeta {
+                        id: format!("s{i}-{k}"),
+                        title: format!("Book {i}/{k}"),
+                        authors: vec!["Ann".into()],
+                        series: Some(format!("Series {i:02}")),
+                        series_id: Some(format!("sid-{i:02}")),
+                        ..Default::default()
+                    })
+                    .unwrap();
             }
         }
         app.group = crate::store::GroupPreset::AuthorSeries;
@@ -1232,21 +1277,28 @@ mod tests {
         assert_eq!(app.sync_popup.stage, SyncStage::Scan);
         app.apply_sync_event(crate::sync::SyncEvent::Covers { done: 3, total: 10 });
         assert_eq!(app.sync_popup.stage, SyncStage::Covers);
-        assert_eq!((app.sync_popup.covers_done, app.sync_popup.covers_total), (3, 10));
+        assert_eq!(
+            (app.sync_popup.covers_done, app.sync_popup.covers_total),
+            (3, 10)
+        );
 
         // Complete: the sheet moves to COVERS (warm pass), then flashes
         // DONE and auto-closes (C eh_sync_popup_finish → close tick).
         app.apply_sync_event(crate::sync::SyncEvent::Complete { rounds: 0 });
         assert!(!app.syncing, "spinner stops at the terminal event");
-        assert!(app.sync_worker.rx.is_none(), "event stream detached at completion");
+        assert!(
+            app.sync_worker.rx.is_none(),
+            "event stream detached at completion"
+        );
         assert_eq!(app.sync_popup.stage, SyncStage::Covers);
         // No warm pass queued → the next tick flashes Done, the next one
         // (after the 900 ms delay) closes.
         assert!(app.sync_popup_close_tick());
         assert_eq!(app.sync_popup.stage, SyncStage::Done);
         assert!(app.sync_popup.open);
-        app.sync_popup.stage_at = Some(std::time::Instant::now()
-            - std::time::Duration::from_millis(SYNC_DONE_CLOSE_MS + 1));
+        app.sync_popup.stage_at = Some(
+            std::time::Instant::now() - std::time::Duration::from_millis(SYNC_DONE_CLOSE_MS + 1),
+        );
         assert!(app.sync_popup_close_tick());
         assert!(!app.sync_popup.open);
         assert_eq!(app.overlay, Overlay::None);
@@ -1278,8 +1330,9 @@ mod tests {
         // Not yet expired: stays up.
         assert!(!app.sync_popup_close_tick());
         assert!(app.sync_popup.open);
-        app.sync_popup.stage_at = Some(std::time::Instant::now()
-            - std::time::Duration::from_millis(SYNC_FAIL_CLOSE_MS + 1));
+        app.sync_popup.stage_at = Some(
+            std::time::Instant::now() - std::time::Duration::from_millis(SYNC_FAIL_CLOSE_MS + 1),
+        );
         assert!(app.sync_popup_close_tick());
         assert!(!app.sync_popup.open);
         assert_eq!(app.overlay, Overlay::None);
@@ -1293,10 +1346,18 @@ mod tests {
         app.syncing = true;
         let in_flight = std::sync::Arc::clone(&app.sync_worker.cancel);
         app.settings_apply();
-        assert!(in_flight.load(std::sync::atomic::Ordering::Relaxed),
-            "cancel flag set before the endpoints are rebuilt (C eh_sync_abort)");
-        assert!(app.syncing, "a fresh chain starts against the rebuilt endpoints");
-        assert!(app.sync_worker.rx.is_some(), "the fresh chain's stream is attached");
+        assert!(
+            in_flight.load(std::sync::atomic::Ordering::Relaxed),
+            "cancel flag set before the endpoints are rebuilt (C eh_sync_abort)"
+        );
+        assert!(
+            app.syncing,
+            "a fresh chain starts against the rebuilt endpoints"
+        );
+        assert!(
+            app.sync_worker.rx.is_some(),
+            "the fresh chain's stream is attached"
+        );
     }
 
     /// Draw the current overlay into the FakeKb buffer and return the
@@ -1337,11 +1398,16 @@ mod tests {
         let sx = (1072 - pw) / 2;
         let sy = (((app.content_bottom as i32 - ph) / 2).max(0)) as u32;
         // Border row: the sheet outline spans nearly the full panel width.
-        assert!(dark_in(&px, sx + 4, sy, sx + pw - 4, sy + 3, 100) > (pw - 8) as usize * 3 / 5,
-            "top border row missing");
+        assert!(
+            dark_in(&px, sx + 4, sy, sx + pw - 4, sy + 3, 100) > (pw - 8) as usize * 3 / 5,
+            "top border row missing"
+        );
         // Title + phase line + subline live in the upper half of the sheet.
         let text = dark_in(&px, sx + 20, sy + 10, sx + pw - 20, sy + ph as u32 / 2, 100);
-        assert!(text > 200, "sync sheet title/phase text missing, dark={text}");
+        assert!(
+            text > 200,
+            "sync sheet title/phase text missing, dark={text}"
+        );
         // Content OUTSIDE the sheet must be dimmed hatch, not blank white:
         // sample just above the sheet.
         let above = dark_in(&px, sx + 40, sy - 24, sx + pw - 40, sy - 8, 0xAA);
@@ -1354,7 +1420,14 @@ mod tests {
         let pw = 1072u32 * 3 / 4;
         let panel_x = 1072u32 - pw;
         let ry = crate::menu::Y0 + row * crate::menu::ITEM_H;
-        dark_in(px, panel_x + pw - 260, ry + 8, panel_x + pw - 24, ry + 80, 0xAA)
+        dark_in(
+            px,
+            panel_x + pw - 260,
+            ry + 8,
+            panel_x + pw - 24,
+            ry + 80,
+            0xAA,
+        )
     }
 
     #[test]
@@ -1367,7 +1440,10 @@ mod tests {
         app.overlay = Overlay::More;
         let px = draw_overlay_pixels(&mut app);
         let v0 = menu_row_value_dark(&px, 0);
-        assert!(v0 > 40, "active grouping not shown on the Group-by row, dark={v0}");
+        assert!(
+            v0 > 40,
+            "active grouping not shown on the Group-by row, dark={v0}"
+        );
         let v1 = menu_row_value_dark(&px, 1);
         assert!(v1 > 40, "sort mode not shown on the Sort-by row, dark={v1}");
     }
@@ -1380,5 +1456,4 @@ mod tests {
         let v0 = menu_row_value_dark(&px, 0);
         assert!(v0 > 40, "'None' value missing at boot, dark={v0}");
     }
-
 }

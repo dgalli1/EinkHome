@@ -35,16 +35,7 @@ pub fn draw_download_popup<B: Framebuffer>(
     // Dim starting BELOW the top bar (C eh_dim_content(EH_TOP_BAR_H)): the
     // icons — the spinning sync glyph among them — stay fully visible.
     // Centred on the full content height like the C popup.
-    let sh = super::sheet::open_sheet(
-        surf,
-        dirty,
-        h,
-        crate::appui::TOP_BAR_H,
-        h,
-        h,
-        160,
-        false,
-    );
+    let sh = super::sheet::open_sheet(surf, dirty, h, crate::appui::TOP_BAR_H, h, h, 160, false);
     let font = crate::shelf::shelf_font();
     let mut g = eh_render::Glyph::new();
     eh_render::draw_text(
@@ -67,7 +58,16 @@ pub fn draw_download_popup<B: Framebuffer>(
             crate::i18n::trn("dl.remaining", &[count as i64])
         }
     };
-    eh_render::draw_text(surf, font, 24.0, &label, (sh.px + 32) as i32, (sh.py + 120) as i32, GRAY_BLACK, &mut g);
+    eh_render::draw_text(
+        surf,
+        font,
+        24.0,
+        &label,
+        (sh.px + 32) as i32,
+        (sh.py + 120) as i32,
+        GRAY_BLACK,
+        &mut g,
+    );
     // Cancel X button (C draw_dl_popup_sheet's boxed X).
     let cr = dl_cancel_rect(w, h);
     surf.fill_gray(cr, GRAY_WHITE);

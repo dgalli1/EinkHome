@@ -46,7 +46,7 @@ OUT_TEST := $(CURDIR)/build/bookshelf.test
 # rebuilds the staticlib (cargo's own dep tracking makes this cheap).
 RUST_SRCS := $(EH_UI)/Cargo.toml $(wildcard $(EH_UI)/crates/*/Cargo.toml) $(wildcard $(EH_UI)/crates/*/src/*.rs) $(wildcard $(EH_UI)/crates/*/src/*/*.rs)
 
-.PHONY: all armhf pc test-host test test-rust lint clippy lint-py clean
+.PHONY: all armhf pc test-host test test-rust fmt lint clippy lint-py clean
 
 all: $(OUT)
 
@@ -62,10 +62,14 @@ test:
 test-rust:
 	cd $(EH_UI) && cargo test --workspace
 
-lint: clippy lint-py
+lint: clippy fmt lint-py
 
 clippy:
 	cd $(EH_UI) && cargo clippy --workspace --all-targets -- -D warnings
+
+fmt:
+	cd $(EH_UI) && cargo fmt --check
+
 
 lint-py:
 	@ruff check --fix api scripts tests

@@ -129,7 +129,6 @@ impl<B: Framebuffer> App<B> {
         crate::i18n::tr("settings.reader_auto").to_string()
     }
 
-
     /// The C app's eh_book_press_action: probe the on-disk file (both the
     /// current downloads dir AND the stored path — the folder may have
     /// moved since the fetch), persist the state, then either
@@ -146,7 +145,10 @@ impl<B: Framebuffer> App<B> {
         if exists {
             let path = if cur.is_file() { cur } else { stored };
             if !book.downloaded || book.local_path != path.to_string_lossy() {
-                if let Err(e) = self.store.set_downloaded(&book.id, true, &path.to_string_lossy()) {
+                if let Err(e) = self
+                    .store
+                    .set_downloaded(&book.id, true, &path.to_string_lossy())
+                {
                     crate::log(&format!("[eh_app] set_downloaded: {e}"));
                 }
             }
@@ -154,7 +156,8 @@ impl<B: Framebuffer> App<B> {
         } else {
             // Async: enqueue on the worker, show the modal popup, auto-open
             // the reader when the queue drains.
-            self.dl.start_single((cur.to_string_lossy().into_owned(), book.title.clone()));
+            self.dl
+                .start_single((cur.to_string_lossy().into_owned(), book.title.clone()));
             self.enqueue_download(&book.id, &cur);
         }
     }
@@ -182,7 +185,10 @@ impl<B: Framebuffer> App<B> {
                     rp.rsplit('/').next().unwrap_or(rp),
                     path.display()
                 ));
-                crate::log(&format!("[eh_app] opening reader app={rp} path={}", path.display()));
+                crate::log(&format!(
+                    "[eh_app] opening reader app={rp} path={}",
+                    path.display()
+                ));
                 self.screen()
                     .framebuffer_mut()
                     .launch_app(rp, title, &[path_str.clone()])

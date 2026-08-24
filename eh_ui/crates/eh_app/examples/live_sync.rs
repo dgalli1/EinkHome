@@ -10,9 +10,9 @@ use std::path::PathBuf;
 
 fn main() {
     let base = std::env::var("API").unwrap_or_else(|_| "http://127.0.0.1:18765".into());
-    let db = std::env::var("DB").map(PathBuf::from).unwrap_or_else(|_| {
-        std::env::temp_dir().join("eh_app_live.db")
-    });
+    let db = std::env::var("DB")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| std::env::temp_dir().join("eh_app_live.db"));
     let _ = std::fs::remove_file(&db);
 
     let client = ApiClient::new(&base, "pbemu-dev-token");

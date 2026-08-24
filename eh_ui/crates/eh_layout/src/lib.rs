@@ -8,7 +8,7 @@
 //! hidden by toggling their size to zero — the taffy equivalent of CSS
 //! media-query `display: none`.
 
-use taffy::{AvailableSpace, Dimension, FlexDirection, Size, TaffyTree, NodeId};
+use taffy::{AvailableSpace, Dimension, FlexDirection, NodeId, Size, TaffyTree};
 
 pub use taffy::Style;
 
@@ -110,7 +110,9 @@ impl Layout {
 
     /// Set the root's children (the top-level screen content).
     pub fn set_root_children(&mut self, children: &[NodeId]) {
-        self.tree.set_children(self.root, children).expect("set root children");
+        self.tree
+            .set_children(self.root, children)
+            .expect("set root children");
     }
 
     /// Make the root a wrapping flex row (grid of children) — the common
@@ -139,7 +141,9 @@ impl Layout {
             width: AvailableSpace::Definite(width),
             height: AvailableSpace::Definite(height),
         };
-        self.tree.compute_layout(self.root, avail).expect("layout compute");
+        self.tree
+            .compute_layout(self.root, avail)
+            .expect("layout compute");
     }
 
     /// Output rect for a node (taffy layout: position + size).  Taffy reports
@@ -157,7 +161,12 @@ impl Layout {
             cur = self.tree.parent(n);
         }
         let l = self.tree.layout(id).expect("node layout");
-        eh_hal::Rect::from_xy(x as i32, y as i32, l.size.width as i32, l.size.height as i32)
+        eh_hal::Rect::from_xy(
+            x as i32,
+            y as i32,
+            l.size.width as i32,
+            l.size.height as i32,
+        )
     }
 }
 
@@ -187,17 +196,26 @@ mod tests {
             Breakpoint::Wide => 4,
         };
         let children: Vec<NodeId> = (0..4)
-            .map(|_| lay.leaf(Style {
-                size: Size { width: Dimension::percent(1.0 / cols as f32), height: Dimension::length(100.0) },
-                ..Style::default()
-            }))
+            .map(|_| {
+                lay.leaf(Style {
+                    size: Size {
+                        width: Dimension::percent(1.0 / cols as f32),
+                        height: Dimension::length(100.0),
+                    },
+                    ..Style::default()
+                })
+            })
             .collect();
         lay.set_root_children(&children);
         lay.compute(600.0, 400.0);
         let r0 = lay.rect(children[0]);
         let r2 = lay.rect(children[2]);
         let r3 = lay.rect(children[3]);
-        assert_eq!(r0.w, (600.0 / cols as f32) as u32, "column width from breakpoint");
+        assert_eq!(
+            r0.w,
+            (600.0 / cols as f32) as u32,
+            "column width from breakpoint"
+        );
         // 2 columns => 3rd & 4th tiles wrap onto a second row.
         assert_eq!(r2.x, 0, "3rd tile starts row 2");
         assert!(r3.y > 0, "4th tile on a later row than tile 0");

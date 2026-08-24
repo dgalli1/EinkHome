@@ -25,7 +25,6 @@ pub(crate) fn label_keys() -> [(MenuRow, &'static str); 5] {
     ]
 }
 
-
 /// The persisted config value of a grouping preset (lowercase preset
 /// name, mirroring the Source persistence precedent).
 pub(crate) fn group_config_value(g: crate::store::GroupPreset) -> String {
@@ -54,7 +53,11 @@ pub(crate) fn group_from_config(s: &Option<String>) -> crate::store::GroupPreset
 
 /// Draw the drawer; records each row's rect into `app.menu_rows` for tap
 /// routing (the C app's draw/hit geometry parity).
-pub fn draw<B: eh_hal::Framebuffer>(surf: &mut eh_render::Surface, app: &mut App<B>, dirty: &mut Vec<Rect>) {
+pub fn draw<B: eh_hal::Framebuffer>(
+    surf: &mut eh_render::Surface,
+    app: &mut App<B>,
+    dirty: &mut Vec<Rect>,
+) {
     use eh_shell::{GRAY_BLACK, GRAY_WHITE};
     let w = surf.width();
     let h = app.content_bottom;
@@ -65,7 +68,15 @@ pub fn draw<B: eh_hal::Framebuffer>(surf: &mut eh_render::Surface, app: &mut App
     surf.fill_gray(Rect { x: 0, y: 0, w, h }, GRAY_BLACK);
     let pw = (w as i32 * 3) / 4;
     let px = w - pw as u32;
-    surf.fill_gray(Rect { x: px, y: 0, w: pw as u32, h }, GRAY_WHITE);
+    surf.fill_gray(
+        Rect {
+            x: px,
+            y: 0,
+            w: pw as u32,
+            h,
+        },
+        GRAY_WHITE,
+    );
     surf.vline(px, 0, h, 2, GRAY_BLACK);
 
     app.menu_rows.clear();
@@ -85,14 +96,7 @@ pub fn draw<B: eh_hal::Framebuffer>(surf: &mut eh_render::Surface, app: &mut App
         };
         let ry = Y0 + _i as u32 * ITEM_H;
         let rect = crate::widgets::menu_row::draw_menu_row(
-            surf,
-            font,
-            &mut glyph,
-            px,
-            pw as u32,
-            ry,
-            label,
-            val,
+            surf, font, &mut glyph, px, pw as u32, ry, label, val,
         );
         app.menu_rows.push((rect, *row));
     }

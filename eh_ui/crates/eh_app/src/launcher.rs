@@ -9,10 +9,10 @@
 //! are the firmware's (theme names or image paths); undecodable ones get
 //! the C app's single-letter placeholder box.
 
-use serde_json::Value;
 use eh_hal::{Framebuffer, Rect};
 use eh_render::draw_text;
 use eh_shell::{GRAY_BLACK, GRAY_LGRAY, GRAY_WHITE};
+use serde_json::Value;
 
 use crate::app::{App, LauncherItem, Overlay};
 
@@ -41,7 +41,10 @@ fn user_apps_dir() -> String {
 /// EH_DESKTOP_DIR overrides both for host verification.
 fn desktop_paths() -> (Vec<String>, Vec<String>) {
     if let Ok(d) = std::env::var("EH_DESKTOP_DIR") {
-        (vec![format!("{d}/apps_db.json")], vec![format!("{d}/view.json")])
+        (
+            vec![format!("{d}/apps_db.json")],
+            vec![format!("{d}/view.json")],
+        )
     } else {
         (
             vec![
@@ -92,11 +95,7 @@ impl LcProfile {
             partner: "pocketbook".into(),
             has_audio: if prof.has_audio { "true" } else { "false" }.into(),
             has_cloud: "false".into(),
-            language: app
-                .config
-                .language
-                .clone()
-                .unwrap_or_else(|| "en".into()),
+            language: app.config.language.clone().unwrap_or_else(|| "en".into()),
             localization: "WW".into(),
         }
     }
@@ -219,7 +218,10 @@ pub(crate) fn lc_visible(v: &Value, prof: &LcProfile) -> bool {
     }
     let mut buf = String::new();
     lc_resolve(v, None, prof, &mut buf);
-    !matches!(buf.to_ascii_lowercase().as_str(), "0" | "false" | "no" | "off")
+    !matches!(
+        buf.to_ascii_lowercase().as_str(),
+        "0" | "false" | "no" | "off"
+    )
 }
 
 /// The @Token translation table (C eh_lc_token_en) — the firmware's
@@ -331,7 +333,11 @@ fn add_header(items: &mut Vec<LauncherItem>, text: &str, already: &mut bool) {
         return;
     }
     *already = true;
-    items.push(LauncherItem { group: true, text: text.to_string(), ..Default::default() });
+    items.push(LauncherItem {
+        group: true,
+        text: text.to_string(),
+        ..Default::default()
+    });
 }
 
 fn has_path(items: &[LauncherItem], path: &str) -> bool {
@@ -341,7 +347,9 @@ fn has_path(items: &[LauncherItem], path: &str) -> bool {
 /// 1 when a "User"/"Users" group header is already present (C
 /// launcher_has_user_header) — the ext1 scan reuses an existing one.
 fn has_user_header(items: &[LauncherItem]) -> bool {
-    items.iter().any(|it| it.group && (it.text == "User" || it.text == "Users"))
+    items
+        .iter()
+        .any(|it| it.group && (it.text == "User" || it.text == "Users"))
 }
 
 /// Build the item list (C eh_plat_launcher_build → pb_launcher_build):
@@ -378,7 +386,13 @@ pub fn build<B: Framebuffer>(app: &mut App<B>) -> bool {
     let icons: Vec<String> = app
         .launcher_items
         .iter()
-        .map(|it| if it.group { String::new() } else { it.icon.clone() })
+        .map(|it| {
+            if it.group {
+                String::new()
+            } else {
+                it.icon.clone()
+            }
+        })
         .collect();
     for (i, icon) in icons.iter().enumerate() {
         if !icon.is_empty() && app.launcher_items[i].art.is_none() {
@@ -437,11 +451,18 @@ fn assemble(
                 let Some(apps_arr) = g.get("apps").and_then(|a| a.as_array()) else {
                     continue;
                 };
-                let title = g.get("title").map(|t| lc_title(t, prof)).filter(|t| !t.is_empty());
+                let title = g
+                    .get("title")
+                    .map(|t| lc_title(t, prof))
+                    .filter(|t| !t.is_empty());
                 if let Some(t) = title {
                     // C pb_build_groups: a header row per titled group,
                     // unconditional (no cross-group dedup).
-                    items.push(LauncherItem { group: true, text: t, ..Default::default() });
+                    items.push(LauncherItem {
+                        group: true,
+                        text: t,
+                        ..Default::default()
+                    });
                 }
                 for a in apps_arr {
                     let Some(id) = a.as_str() else {
@@ -462,8 +483,14 @@ fn assemble(
                         .unwrap_or_else(|| id.to_string());
                     let it = LauncherItem {
                         text,
-                        path: def.get("path").map(|v| lc_resolve_str(v, prof)).unwrap_or_default(),
-                        icon: def.get("icon").map(|v| lc_resolve_str(v, prof)).unwrap_or_default(),
+                        path: def
+                            .get("path")
+                            .map(|v| lc_resolve_str(v, prof))
+                            .unwrap_or_default(),
+                        icon: def
+                            .get("icon")
+                            .map(|v| lc_resolve_str(v, prof))
+                            .unwrap_or_default(),
                         params: lc_params(def),
                         ..Default::default()
                     };
@@ -499,8 +526,14 @@ fn assemble(
                     .unwrap_or_else(|| key.clone());
                 let it = LauncherItem {
                     text,
-                    path: val.get("path").map(|v| lc_resolve_str(v, prof)).unwrap_or_default(),
-                    icon: val.get("icon").map(|v| lc_resolve_str(v, prof)).unwrap_or_default(),
+                    path: val
+                        .get("path")
+                        .map(|v| lc_resolve_str(v, prof))
+                        .unwrap_or_default(),
+                    icon: val
+                        .get("icon")
+                        .map(|v| lc_resolve_str(v, prof))
+                        .unwrap_or_default(),
                     ..Default::default()
                 };
                 if !it.path.is_empty() && !has_path(&items, &it.path) {
@@ -521,7 +554,11 @@ fn assemble(
             continue;
         }
         if !has_user_header(&items) {
-            items.push(LauncherItem { group: true, text: "Users".into(), ..Default::default() });
+            items.push(LauncherItem {
+                group: true,
+                text: "Users".into(),
+                ..Default::default()
+            });
         }
         let name = path.rsplit('/').next().unwrap_or(path);
         items.push(LauncherItem {
@@ -623,14 +660,24 @@ pub fn layout<B: Framebuffer>(app: &mut App<B>) {
                 y += CELL_H as i32;
                 col = 0;
             }
-            app.launcher_rects.push(Rect { x: MARGIN, y: y as u32, w: w - 2 * MARGIN, h: GROUP_H });
+            app.launcher_rects.push(Rect {
+                x: MARGIN,
+                y: y as u32,
+                w: w - 2 * MARGIN,
+                h: GROUP_H,
+            });
             y += GROUP_H as i32;
         } else {
             if col >= COLS {
                 col = 0;
                 y += CELL_H as i32;
             }
-            app.launcher_rects.push(Rect { x: MARGIN + col * cell_w, y: y as u32, w: cell_w, h: CELL_H });
+            app.launcher_rects.push(Rect {
+                x: MARGIN + col * cell_w,
+                y: y as u32,
+                w: cell_w,
+                h: CELL_H,
+            });
             col += 1;
         }
     }
@@ -686,7 +733,11 @@ pub fn drag_move<B: Framebuffer>(app: &mut App<B>, dy: i32) -> bool {
 /// align rows to the body, so the gap is never visible), and the shared
 /// header is repainted after the body so a row straddling the body top
 /// can never bleed into it (C's SetClip(0, body_top, ...) discipline).
-pub fn draw<B: Framebuffer>(surf: &mut eh_render::Surface, app: &mut App<B>, dirty: &mut Vec<Rect>) {
+pub fn draw<B: Framebuffer>(
+    surf: &mut eh_render::Surface,
+    app: &mut App<B>,
+    dirty: &mut Vec<Rect>,
+) {
     let w = surf.width();
     let h = app.content_bottom;
     dirty.push(Rect { x: 0, y: 0, w, h });
@@ -703,7 +754,16 @@ pub fn draw<B: Framebuffer>(surf: &mut eh_render::Surface, app: &mut App<B>, dir
     if app.launcher_items.is_empty() {
         let msg = crate::i18n::tr("launcher.empty");
         let tw = font.width(msg, 32.0) as i32;
-        draw_text(surf, font, 32.0, msg, (w as i32 - tw) / 2, (body_top + body_h / 2) as i32, GRAY_BLACK, &mut glyph);
+        draw_text(
+            surf,
+            font,
+            32.0,
+            msg,
+            (w as i32 - tw) / 2,
+            (body_top + body_h / 2) as i32,
+            GRAY_BLACK,
+            &mut glyph,
+        );
         return;
     }
 
@@ -722,13 +782,35 @@ pub fn draw<B: Framebuffer>(surf: &mut eh_render::Surface, app: &mut App<B>, dir
         if *is_group {
             // Group heading row (C launcher_draw_heading): white band,
             // baseline rule, title at the left.
-            surf.fill_gray(Rect::from_xy(r.x as i32, sy, r.w as i32, r.h as i32), GRAY_WHITE);
+            surf.fill_gray(
+                Rect::from_xy(r.x as i32, sy, r.w as i32, r.h as i32),
+                GRAY_WHITE,
+            );
             surf.hline(r.x, (sy + r.h as i32 - 2) as u32, r.w, 2, GRAY_BLACK);
-            draw_text(surf, font, 28.0, text, (r.x + 12) as i32, sy + (r.h as i32) / 2 + 10, GRAY_BLACK, &mut glyph);
+            draw_text(
+                surf,
+                font,
+                28.0,
+                text,
+                (r.x + 12) as i32,
+                sy + (r.h as i32) / 2 + 10,
+                GRAY_BLACK,
+                &mut glyph,
+            );
         } else {
             let cx = (r.x + r.w / 2) as i32;
             let icon_cy = sy + 12 + (ICON_SZ as i32) / 2;
-            draw_icon(surf, art.as_ref(), cx, icon_cy, text, app, font, &mut glyph, fmt);
+            draw_icon(
+                surf,
+                art.as_ref(),
+                cx,
+                icon_cy,
+                text,
+                app,
+                font,
+                &mut glyph,
+                fmt,
+            );
             let ly = sy + 12 + ICON_SZ as i32 + 8;
             let maxw = r.w as i32 - 8;
             draw_label(surf, font, &mut glyph, text, cx, ly, maxw);
@@ -747,9 +829,26 @@ pub fn draw<B: Framebuffer>(surf: &mut eh_render::Surface, app: &mut App<B>, dir
         let y0 = h.saturating_sub(SCROLL_H);
         let (up_ok, down_ok) = (scroll > 0, scroll < max_scroll);
         for (bx, ok, up) in [(0u32, up_ok, true), (w - SCROLL_W, down_ok, false)] {
-            surf.fill_gray(Rect { x: bx, y: y0, w: SCROLL_W, h: SCROLL_H }, GRAY_WHITE);
+            surf.fill_gray(
+                Rect {
+                    x: bx,
+                    y: y0,
+                    w: SCROLL_W,
+                    h: SCROLL_H,
+                },
+                GRAY_WHITE,
+            );
             let col = if ok { GRAY_BLACK } else { GRAY_LGRAY };
-            surf.rect_outline(Rect { x: bx, y: y0, w: SCROLL_W, h: SCROLL_H }, 2, col);
+            surf.rect_outline(
+                Rect {
+                    x: bx,
+                    y: y0,
+                    w: SCROLL_W,
+                    h: SCROLL_H,
+                },
+                2,
+                col,
+            );
             let cx = bx as i32 + SCROLL_W as i32 / 2;
             let cy = y0 as i32 + SCROLL_H as i32 / 2;
             if up {
@@ -798,21 +897,41 @@ fn draw_icon<B: eh_hal::Framebuffer>(
             iw,
             ih,
             fmt,
-            Rect::from_xy(x0 + ((ICON_SZ as i32 - bw as i32) / 2), y0 + ((ICON_SZ as i32 - bh as i32) / 2), bw as i32, bh as i32),
+            Rect::from_xy(
+                x0 + ((ICON_SZ as i32 - bw as i32) / 2),
+                y0 + ((ICON_SZ as i32 - bh as i32) / 2),
+                bw as i32,
+                bh as i32,
+            ),
         );
         ok = true;
     }
     if !ok {
-        surf.fill_gray(Rect::from_xy(x0, y0, ICON_SZ as i32, ICON_SZ as i32), GRAY_WHITE);
-        surf.rect_outline(Rect::from_xy(x0, y0, ICON_SZ as i32, ICON_SZ as i32), 2, GRAY_BLACK);
+        surf.fill_gray(
+            Rect::from_xy(x0, y0, ICON_SZ as i32, ICON_SZ as i32),
+            GRAY_WHITE,
+        );
+        surf.rect_outline(
+            Rect::from_xy(x0, y0, ICON_SZ as i32, ICON_SZ as i32),
+            2,
+            GRAY_BLACK,
+        );
         if let Some(ch) = title.chars().next() {
             let s = ch.to_string();
             let tw = font.width(&s, 56.0) as i32;
-            draw_text(surf, font, 56.0, &s, cx - tw / 2, cy + 20, GRAY_BLACK, glyph);
+            draw_text(
+                surf,
+                font,
+                56.0,
+                &s,
+                cx - tw / 2,
+                cy + 20,
+                GRAY_BLACK,
+                glyph,
+            );
         }
     }
 }
-
 
 /// Resolve one launcher icon to decoded RGB while the framebuffer is
 /// still attached (C eh_launcher.c launcher_icon_get): GetResource first,
@@ -820,7 +939,10 @@ fn draw_icon<B: eh_hal::Framebuffer>(
 /// then a direct file read + decode for absolute paths.  MUST run from
 /// build()/tap context — during the overlay draw the screen is taken out
 /// of App and the firmware theme store cannot be consulted.
-pub(crate) fn resolve_icon_art<B: Framebuffer>(app: &mut App<B>, icon: &str) -> Option<(Vec<u8>, u32, u32)> {
+pub(crate) fn resolve_icon_art<B: Framebuffer>(
+    app: &mut App<B>,
+    icon: &str,
+) -> Option<(Vec<u8>, u32, u32)> {
     if icon.is_empty() {
         return None;
     }
@@ -839,7 +961,15 @@ pub(crate) fn resolve_icon_art<B: Framebuffer>(app: &mut App<B>, icon: &str) -> 
 }
 /// Center the app label in the cell, wrapping to two lines at the last
 /// space or ellipsizing (C launcher_draw_app_label's fallbacks).
-fn draw_label(surf: &mut eh_render::Surface, font: &eh_render::Font, glyph: &mut eh_render::Glyph, text: &str, cx: i32, c_top: i32, maxw: i32) {
+fn draw_label(
+    surf: &mut eh_render::Surface,
+    font: &eh_render::Font,
+    glyph: &mut eh_render::Glyph,
+    text: &str,
+    cx: i32,
+    c_top: i32,
+    maxw: i32,
+) {
     // C launcher_draw_app_label passes the glyph TOP; draw_text takes a
     // baseline — convert once (24px font ascent ≈ 20px) so the label
     // sits below the icon box instead of overlapping it.
@@ -855,7 +985,16 @@ fn draw_label(surf: &mut eh_render::Surface, font: &eh_render::Font, glyph: &mut
         let t1 = font.width(l1, 24.0) as i32;
         let t2 = font.width(l2, 24.0) as i32;
         draw_text(surf, font, 24.0, l1, cx - t1 / 2, ly, GRAY_BLACK, glyph);
-        draw_text(surf, font, 24.0, l2, cx - t2 / 2, ly + 26, GRAY_BLACK, glyph);
+        draw_text(
+            surf,
+            font,
+            24.0,
+            l2,
+            cx - t2 / 2,
+            ly + 26,
+            GRAY_BLACK,
+            glyph,
+        );
         return;
     }
     let mut cut = text.chars().count();
@@ -913,7 +1052,8 @@ pub fn tap_launcher<B: Framebuffer>(x: i32, y: i32, app: &mut App<B>) {
             continue;
         }
         let r = app.launcher_rects[i];
-        if x >= r.x as i32 && x < (r.x + r.w) as i32 && by >= r.y as i32 && by < (r.y + r.h) as i32 {
+        if x >= r.x as i32 && x < (r.x + r.w) as i32 && by >= r.y as i32 && by < (r.y + r.h) as i32
+        {
             let it = it.clone();
             app.overlay = Overlay::None;
             app.launcher_rects.clear();
@@ -962,7 +1102,13 @@ mod tests {
     fn visible_truth_table() {
         let p = prof();
         // Explicit falsey spellings hide; JSON false hides.
-        for v in [json!("0"), json!("false"), json!("no"), json!("off"), json!(false)] {
+        for v in [
+            json!("0"),
+            json!("false"),
+            json!("no"),
+            json!("off"),
+            json!(false),
+        ] {
             assert!(!lc_visible(&v, &p), "must be hidden: {v}");
         }
         // An empty value (missing key) and anything else stays visible —
@@ -1014,8 +1160,14 @@ mod tests {
     #[test]
     fn falls_back_to_all_then_default_then_first() {
         // Wanted key absent → "all" wins over "default" over first.
-        assert_eq!(resolve(&json!({"partner": {"all": "A", "default": "D", "zzz": "Z"}})), "A");
-        assert_eq!(resolve(&json!({"partner": {"default": "D", "zzz": "Z"}})), "D");
+        assert_eq!(
+            resolve(&json!({"partner": {"all": "A", "default": "D", "zzz": "Z"}})),
+            "A"
+        );
+        assert_eq!(
+            resolve(&json!({"partner": {"default": "D", "zzz": "Z"}})),
+            "D"
+        );
         assert_eq!(resolve(&json!({"partner": {"zzz": "Z"}})), "Z");
         // A profile-matched key beats the fallbacks.
         assert_eq!(
@@ -1090,12 +1242,20 @@ mod tests {
             // still emits the titled header unconditionally.
             {"title": "Again", "apps": ["reader"]}
         ]}});
-        let items = assemble(Some(db_apps().as_object().unwrap()), Some(&vw), &prof(), &[]);
+        let items = assemble(
+            Some(db_apps().as_object().unwrap()),
+            Some(&vw),
+            &prof(),
+            &[],
+        );
         let texts: Vec<&str> = items.iter().map(|i| i.text.as_str()).collect();
         assert_eq!(texts, ["Main", "Reader", "Gallery", "Again"]);
         // reader listed in both groups appears exactly once...
         assert_eq!(
-            items.iter().filter(|i| i.path == "/ebrmain/reader.app").count(),
+            items
+                .iter()
+                .filter(|i| i.path == "/ebrmain/reader.app")
+                .count(),
             1
         );
         // ...invisible apps and ids missing from apps_db never land.

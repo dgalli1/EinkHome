@@ -89,7 +89,7 @@ impl<B: Framebuffer> App<B> {
     /// Right stack, in the C order from the corner: menu(3) / sync(2) /
     /// layout(7) / search(5).
     fn tap_top_bar(&mut self, x: i32, _y: i32) {
-        use crate::appui::{BTN_PAD, BTN_SIZE, SOURCE_BTN_X, SOURCE_BTN_W};
+        use crate::appui::{BTN_PAD, BTN_SIZE, SOURCE_BTN_W, SOURCE_BTN_X};
         let r = self.screen().widget_rect(0);
         let w = r.w as i32;
         // Left button: back chevron (search / drilled) or house.
@@ -114,7 +114,9 @@ impl<B: Framebuffer> App<B> {
         // Right stack (w - pad - k*btn for k=4,3,2,1 → search/layout/sync/menu).
         if x >= w - (BTN_PAD + 4 * BTN_SIZE) as i32 && x < w - (BTN_PAD + 3 * BTN_SIZE) as i32 {
             self.enter_search();
-        } else if x >= w - (BTN_PAD + 3 * BTN_SIZE) as i32 && x < w - (BTN_PAD + 2 * BTN_SIZE) as i32 {
+        } else if x >= w - (BTN_PAD + 3 * BTN_SIZE) as i32
+            && x < w - (BTN_PAD + 2 * BTN_SIZE) as i32
+        {
             self.toggle_layout();
         } else if x >= w - (BTN_PAD + 2 * BTN_SIZE) as i32 && x < w - (BTN_PAD + BTN_SIZE) as i32 {
             self.do_sync();
@@ -125,7 +127,11 @@ impl<B: Framebuffer> App<B> {
 
     /// Toggle grid / list view (C layout icon, which==7); resets to page 0.
     fn toggle_layout(&mut self) {
-        self.view_mode = if self.view_mode == ViewMode::Grid { ViewMode::List } else { ViewMode::Grid };
+        self.view_mode = if self.view_mode == ViewMode::Grid {
+            ViewMode::List
+        } else {
+            ViewMode::Grid
+        };
         self.page = 0;
         self.refresh_shelf();
     }
@@ -142,13 +148,18 @@ impl<B: Framebuffer> App<B> {
         let bx0 = band.x as i32;
         let bx1 = (band.x + band.w) as i32;
         let boxes = [
-            (bx0 + 12, PageAction::Prev),     // "<" prev
-            (bx0 + 116, PageAction::First),   // "<<" first
-            (bx1 - 212, PageAction::Last),    // ">>" last
-            (bx1 - 108, PageAction::Next),    // ">" next
+            (bx0 + 12, PageAction::Prev),   // "<" prev
+            (bx0 + 116, PageAction::First), // "<<" first
+            (bx1 - 212, PageAction::Last),  // ">>" last
+            (bx1 - 108, PageAction::Next),  // ">" next
         ];
         for (bx, action) in boxes {
-            let b = Rect { x: bx as u32, y: by as u32, w: bw as u32, h: bh as u32 };
+            let b = Rect {
+                x: bx as u32,
+                y: by as u32,
+                w: bw as u32,
+                h: bh as u32,
+            };
             if b.contains(x, y) {
                 let target = match action {
                     PageAction::Prev => self.page.saturating_sub(1),
@@ -197,7 +208,9 @@ impl<B: Framebuffer> App<B> {
             Overlay::Context => self.tap_context(x, y),
             Overlay::GroupChooser => self.tap_chooser(x, y, ChooserKind::Group),
             Overlay::SortChooser => self.tap_chooser(x, y, ChooserKind::Sort),
-            Overlay::LogViewer | Overlay::Licenses | Overlay::LicenseDetail => crate::viewer::tap(x, y, self),
+            Overlay::LogViewer | Overlay::Licenses | Overlay::LicenseDetail => {
+                crate::viewer::tap(x, y, self)
+            }
             Overlay::Download => {
                 // The X button aborts every open download (C eh_main's
                 // eh_dl_cancel_rect hit → eh_cancel_downloads); any other

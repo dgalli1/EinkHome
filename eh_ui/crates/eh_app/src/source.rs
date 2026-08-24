@@ -31,7 +31,11 @@ fn source_label(s: Source) -> &'static str {
     }
 }
 /// Draw the chooser; records the three row rects for tap routing.
-pub fn draw<B: eh_hal::Framebuffer>(surf: &mut eh_render::Surface, app: &mut App<B>, dirty: &mut Vec<Rect>) {
+pub fn draw<B: eh_hal::Framebuffer>(
+    surf: &mut eh_render::Surface,
+    app: &mut App<B>,
+    dirty: &mut Vec<Rect>,
+) {
     use eh_shell::{GRAY_BLACK, GRAY_LGRAY, GRAY_WHITE};
     let w = surf.width();
     let h = app.content_bottom;
@@ -66,15 +70,46 @@ pub fn draw<B: eh_hal::Framebuffer>(surf: &mut eh_render::Surface, app: &mut App
         let ry = sh.py + 80 + i as u32 * 96;
         let selected = source_index(app.source) == i;
         let bg = if selected { GRAY_BLACK } else { GRAY_WHITE };
-        surf.fill_gray(Rect { x: sh.px + 12, y: ry, w: sh.pw - 24, h: 84 }, bg);
-        surf.rect_outline(Rect { x: sh.px + 12, y: ry, w: sh.pw - 24, h: 84 }, 1, GRAY_BLACK);
+        surf.fill_gray(
+            Rect {
+                x: sh.px + 12,
+                y: ry,
+                w: sh.pw - 24,
+                h: 84,
+            },
+            bg,
+        );
+        surf.rect_outline(
+            Rect {
+                x: sh.px + 12,
+                y: ry,
+                w: sh.pw - 24,
+                h: 84,
+            },
+            1,
+            GRAY_BLACK,
+        );
         let col = if selected { GRAY_WHITE } else { GRAY_BLACK };
-        eh_render::draw_text(surf, font, 28.0, source_label(match i {
-            0 => Source::Kavita,
-            1 => Source::Local,
-            _ => Source::Folder,
-        }), (sh.px + 32) as i32, (ry + 32) as i32 + row_asc, col, &mut glyph);
-        app.source_rows.push(Rect { x: sh.px + 12, y: ry, w: sh.pw - 24, h: 84 });
+        eh_render::draw_text(
+            surf,
+            font,
+            28.0,
+            source_label(match i {
+                0 => Source::Kavita,
+                1 => Source::Local,
+                _ => Source::Folder,
+            }),
+            (sh.px + 32) as i32,
+            (ry + 32) as i32 + row_asc,
+            col,
+            &mut glyph,
+        );
+        app.source_rows.push(Rect {
+            x: sh.px + 12,
+            y: ry,
+            w: sh.pw - 24,
+            h: 84,
+        });
     }
 }
 
@@ -129,7 +164,10 @@ pub fn tap<B: eh_hal::Framebuffer>(app: &mut App<B>, x: i32, y: i32) {
     app.source = new;
     app.config.source = Some(new.config_value());
     app.save_config();
-    crate::log(&format!("[eh_app] source switched to {}", source_label(new)));
+    crate::log(&format!(
+        "[eh_app] source switched to {}",
+        source_label(new)
+    ));
     app.tab = crate::app::Tab::Library;
     app.page = 0;
     match new {
