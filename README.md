@@ -172,6 +172,9 @@ Plus a diagnostic capture: `tests/test_visual_capture.py` shoots every
 UI page to `build/screenshots/visual/` for manual layout review (same
 env as the e2e suite).
 
+Run every pre-commit gate in one shot: `make verify`
+(fmt + clippy + doc-check + unit tests + lint-py).
+
 
 The emulator e2e suite needs podman, the staged firmware and staged
 books in `pbemu/U633_6.8.2817/.live/mnt/ext1/books/` (stage with
