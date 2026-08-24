@@ -1,0 +1,388 @@
+// The shelf body between the chrome bands (C eh_grid.c): grid tiles
+// (cover card + caption, or a series stack card), list rows (thumb +
+// title/author), and the Search sub-page body (input row + history /
+// suggestion rows).  All geometry mirrors the C constants verbatim.
+//
+// Text boxes: the C app anchors BASELINES (draw_text); Slint centers the
+// line box in the element's height.  Each Text here carries an explicit
+// y/height pair placing the line-box centre where the C baseline put the
+// glyph middle (baseline - 0.58*size).
+
+import { ShelfTile } from "types.slint";
+
+// ── one grid tile: series stack card OR book cover ─────────────────────
+component GridTile inherits Rectangle {
+    in-out property <ShelfTile> t;
+    in-out property <int> idx;
+    in-out property <length> cell-w;
+    in-out property <length> cell-h;
+    callback press(int);
+    callback release(int);
+
+    width: cell-w - 8px;
+    height: cell-h - 6px;
+    background: white;
+
+    // Integer pixel math (C eh_cover_rect parity): lengths are converted
+    // to unitless px, all division floors like the C code.
+    property <int> inner-w: Math.floor((self.width - 8px) / 1px);
+    property <int> inner-h: Math.floor((self.height - 8px) / 1px);
+    // C eh_cover_rect: 4px border, 52px caption band below, centred 2:3
+    property <int> card-cw: Math.min(Math.floor((inner-h - 52) * 2 / 3), inner-w);
+    property <int> card-ch: Math.max(
+        Math.min(
+            Math.floor((inner-h - 52) * 2 / 3) > inner-w
+                ? Math.floor(card-cw * 3 / 2)
+                : (inner-h - 52),
+            inner-h),
+        8);
+    property <length> card-w: card-cw * 1px;
+    property <length> card-h: card-ch * 1px;
+    property <length> card-x: 4px + Math.floor((inner-w - card-cw) / 2) * 1px;
+    property <length> card-y: 4px;
+    property <length> cap-y: card-y + card-ch * 1px + 6px;
+    property <bool> stack: t.stack;
+    property <bool> sheets: stack && card-cw > 15 && card-ch > 15;
+
+    TouchArea {
+        pointer-event(e) => {
+            if (e.kind == PointerEventKind.down) { root.press(idx); }
+            if (e.kind == PointerEventKind.up) { root.release(idx); }
+        }
+    }
+
+    // series stack: two offset page sheets behind the cover card
+    for s in [10px, 5px]: Rectangle {
+        x: root.card-x - s;
+        y: root.card-y - s;
+        width: root.card-w;
+        height: root.card-h;
+        background: white;
+        border-width: 1px;
+        border-color: black;
+        visible: root.sheets;
+    }
+
+    // the cover card: stretched art, or a 1px placeholder outline
+    Image {
+        x: root.card-x;
+        y: root.card-y;
+        width: root.card-w;
+        height: root.card-h;
+        source: t.art;
+        visible: t.has-art;
+        image-rendering: pixelated;
+    }
+    Rectangle {
+        x: root.card-x;
+        y: root.card-y;
+        width: root.card-w;
+        height: root.card-h;
+        border-width: 1px;
+        border-color: black;
+        visible: !t.has-art || root.stack;
+    }
+
+    // count badge (white digits on black, top-right over the art)
+    if (root.sheets): Rectangle {
+        property <length> bw: badge-text.preferred-width + 12px;
+        x: root.card-x + root.card-w - bw - 2px;
+        y: root.card-y + 2px;
+        width: bw;
+        height: 26px;
+        background: black;
+        badge-text := Text {
+            x: 6px;
+            y: 0;
+            height: parent.height;
+            vertical-alignment: center;
+            font-size: 20px;
+            color: white;
+            text: t.stack-count;
+        }
+    }
+
+    // caption: bold title flush-left, author below in dark gray
+    Text {
+        x: 4px;
+        y: root.cap-y - 4px;
+        width: parent.width - 8px;
+        height: 26px;
+        vertical-alignment: center;
+        font-size: 22px;
+        font-weight: 700;
+        color: black;
+        overflow: elide;
+        text: t.stack ? t.stack-label : t.title;
+    }
+    if (!t.stack && t.author != "" && (root.height - 4px - root.card-h) >= 40px): Text {
+        x: 4px;
+        y: root.cap-y + 18px;
+        width: parent.width - 8px;
+        height: 27px;
+        vertical-alignment: center;
+        font-size: 18px;
+        color: #555555;
+        overflow: elide;
+        text: t.author;
+    }
+
+    // reading-progress bar over the card's bottom edge (C draw_progress_bar)
+    if (t.progress > 0): Rectangle {
+        property <length> bar-h: root.card-w >= 150px ? 10px : 6px;
+        x: root.card-x;
+        y: root.card-y + root.card-h - bar-h;
+        width: root.card-w;
+        height: bar-h;
+        background: white;
+        border-width: 1px;
+        border-color: black;
+        Rectangle {
+            x: 1px;
+            y: 1px;
+            width: Math.max(0, Math.floor((parent.width - 2px) / 1px * t.progress / 100)) * 1px;
+            height: parent.height - 2px;
+            background: black;
+        }
+    }
+}
+
+// ── one list row ────────────────────────────────────────────────────────
+component ListRow inherits Rectangle {
+    in-out property <ShelfTile> t;
+    in-out property <int> idx;
+    callback press(int);
+    callback release(int);
+
+    width: 100%;
+    height: 150px;
+    background: white;
+
+    property <length> thumb-h: 134px;   // 150 - 2*8
+    property <length> thumb-w: 89px;    // thumb-h * 2 / 3
+
+    TouchArea {
+        pointer-event(e) => {
+            if (e.kind == PointerEventKind.down) { root.press(idx); }
+            if (e.kind == PointerEventKind.up) { root.release(idx); }
+        }
+    }
+
+    Image {
+        x: 8px;
+        y: 8px;
+        width: thumb-w;
+        height: thumb-h;
+        source: t.art;
+        visible: t.has-art;
+        image-rendering: pixelated;
+        image-fit: contain;
+    }
+    if (!t.has-art): Rectangle {
+        x: 8px;
+        y: 8px;
+        width: thumb-w;
+        height: thumb-h;
+        border-width: 2px;
+        border-color: #aaaaaa;
+    }
+
+    // reading-progress bar over the thumb's bottom edge
+    if (t.progress > 0): Rectangle {
+        x: 8px;
+        y: 8px + thumb-h - 6px;
+        width: thumb-w;
+        height: 6px;
+        background: white;
+        border-width: 1px;
+        border-color: black;
+        Rectangle {
+            x: 1px;
+            y: 1px;
+            width: Math.max(0, Math.floor((parent.width - 2px) / 1px * t.progress / 100)) * 1px;
+            height: parent.height - 2px;
+            background: black;
+        }
+    }
+
+    Text {
+        x: 113px;   // 8 + thumb-w + 16
+        y: 11px;
+        width: parent.width - 113px - 8px;
+        height: 35px;
+        vertical-alignment: center;
+        font-size: 30px;
+        font-weight: 700;
+        color: black;
+        overflow: elide;
+        text: t.title;
+    }
+    if (t.author != ""): Text {
+        x: 113px;
+        y: 52px;
+        width: parent.width - 113px - 8px;
+        height: 28px;
+        vertical-alignment: center;
+        font-size: 24px;
+        color: #555555;
+        overflow: elide;
+        text: t.author;
+    }
+}
+
+// ── search page body: input row + history / suggestion rows ────────────
+component SearchBody inherits Rectangle {
+    in-out property <string> query: "";
+    in-out property <string> placeholder: "";
+    in-out property <bool> search-kb: false;
+    in-out property <[string]> rows: [];
+    in-out property <bool> hint: false;
+    in-out property <image> input-icon;
+    in-out property <image> input-icon-inv;
+    callback search-input;
+    callback row-tap(int);
+
+    // input row: 88px band, bordered box inset 16/10
+    Rectangle {
+        y: 0;
+        width: 100%;
+        height: 88px;
+        background: white;
+        Rectangle {
+            x: 16px;
+            y: 10px;
+            width: parent.width - 32px;
+            height: 68px;
+            border-width: 2px;
+            border-color: black;
+            background: root.search-kb ? black : white;
+            Image {
+                x: 0px;
+                y: (parent.height - 60px) / 2;
+                source: root.search-kb ? root.input-icon-inv : root.input-icon;
+            }
+            query-text := Text {
+                x: 68px;
+                y: 0;
+                height: 36px;
+                vertical-alignment: center;
+                font-size: 28px;
+                color: root.search-kb ? white : black;
+                overflow: elide;
+                width: parent.width - 80px;
+                text: root.query == "" ? root.placeholder : root.query;
+            }
+            if (root.search-kb && root.query != ""): Rectangle {
+                x: 68px + query-text.preferred-width + 1px;
+                y: 6px;
+                width: 2px;
+                height: parent.height - 12px;
+                background: white;
+            }
+        }
+        TouchArea {
+            x: 16px;
+            y: 10px;
+            width: parent.width - 32px;
+            height: 68px;
+            clicked => { root.search-input(); }
+        }
+    }
+
+    // history / suggestion rows (fixed 96px, light separator)
+    for r[idx] in root.rows: Rectangle {
+        y: 88px + idx * 96px;
+        width: 100%;
+        height: 96px;
+        background: white;
+        Text {
+            x: root.hint ? 0px : 24px;
+            width: root.hint ? parent.width : (parent.width - 24px);
+            y: 0;
+            height: 36px;
+            vertical-alignment: center;
+            horizontal-alignment: root.hint ? center : left;
+            font-size: 28px;
+            color: root.hint ? #555555 : black;
+            overflow: elide;
+            text: r;
+        }
+        if (!root.hint): Rectangle {
+            x: 20px;
+            y: 93px;
+            width: parent.width - 40px;
+            height: 2px;
+            background: #aaaaaa;
+        }
+        TouchArea {
+            clicked => { root.row-tap(idx); }
+            enabled: !root.hint;
+        }
+    }
+}
+
+// ── the body container: library grid/list OR the search page ───────────
+export component ShelfBody inherits Rectangle {
+    in-out property <[ShelfTile]> entries: [];
+    in-out property <bool> grid-mode: true;
+    in-out property <length> cell-w: 352px;
+    in-out property <length> cell-h: 554px;
+    in-out property <length> grid-x0: 8px;
+    in-out property <int> g-cols: 3;
+    in-out property <string> query: "";
+    in-out property <string> search-placeholder: "";
+    in-out property <bool> search-kb: false;
+    in-out property <[string]> history: [];
+    in-out property <bool> history-hint: false;
+    in-out property <bool> search-tab: false;
+    in-out property <image> input-icon;
+    in-out property <image> input-icon-inv;
+
+    callback tile(int, bool);
+    callback search-input;
+    callback history-row(int);
+
+    if (root.search-tab): SearchBody {
+        y: 16px;    // the grid container's 16px top padding applies too
+        width: 100%;
+        height: parent.height - 16px;
+        query: root.query;
+        placeholder: root.search-placeholder;
+        search-kb: root.search-kb;
+        rows: root.history;
+        hint: root.history-hint;
+        input-icon: root.input-icon;
+        input-icon-inv: root.input-icon-inv;
+        search-input => { root.search-input(); }
+        row-tap(i) => { root.history-row(i); }
+    }
+    if (!root.search-tab && root.grid-mode): Rectangle {
+        x: root.grid-x0;
+        y: 16px;
+        width: parent.width - root.grid-x0 - 8px;
+        height: parent.height - 16px;
+        for t[idx] in root.entries: GridTile {
+            x: Math.mod(idx, g-cols) * cell-w;
+            y: Math.floor(idx / g-cols) * cell-h;
+            t: t;
+            idx: idx;
+            cell-w: root.cell-w;
+            cell-h: root.cell-h;
+            press(i) => { root.tile(i, true); }
+            release(i) => { root.tile(i, false); }
+        }
+    }
+    if (!root.search-tab && !root.grid-mode): Rectangle {
+        x: 0;
+        y: 16px;
+        width: 100%;
+        height: parent.height - 16px;
+        for t[idx] in root.entries: ListRow {
+            y: idx * 150px;
+            t: t;
+            idx: idx;
+            press(i) => { root.tile(i, true); }
+            release(i) => { root.tile(i, false); }
+        }
+    }
+}

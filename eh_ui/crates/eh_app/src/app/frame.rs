@@ -1,30 +1,39 @@
 //! Frame presentation & chrome: dirty-region flush, theme resources,
-//! relayout and the self-drawn status strip (C eh_screen.c / eh_plat
-//! panel stamping).  Split out of app.rs by concern; fields stay
-//! visible here because this is a child of the defining module.
+//! relayout, the property sync into the Slint tree and the self-drawn
+//! status strip (C eh_screen.c / eh_plat panel stamping).  Split out of
+//! app.rs by concern.
+//!
+//! Presenting renders through the Slint software renderer straight into
+//! the framebuffer: plain pages flush the whole content band with a Full
+//! waveform (page flips deep-clean the panel), overlays flush only their
+//! painted region with ONE Partial update — the e-ink discipline the
+//! `overlay_frame_flushes_once` contract pins.
 use super::*;
 
 impl<B: Framebuffer> App<B> {
-    // ── screen access ─────────────────────────────────────────────────
+    // ── framebuffer access ─────────────────────────────────────────────
 
-    /// Refresh the framebuffer caches from the live screen; call after
-    /// building/moving the screen so overlay draws (which run while the
-    /// screen is take()n) can use the cached values.
+    /// Refresh the framebuffer caches from the live fb; call after the
+    /// fb is (re)bound so overlay draws can use the cached values.
     pub(crate) fn sync_fb_cache(&mut self) {
-        if let Some(s) = self.screen.as_mut() {
-            let fb = s.framebuffer();
+        if let Some(fb) = self.fb.as_mut() {
             self.fb_screen_w = fb.screen().width;
             self.fb_profile = fb.device_profile();
             self.fb_net_active = fb.net_active();
         }
     }
-    /// Screen width safe to call from overlay draws (screen may be
-    /// take()n during present).
+    /// Screen width safe to call from overlay draws.
     pub fn screen_width(&self) -> u32 {
-        self.screen
+        self.fb
             .as_ref()
-            .map(|s| s.framebuffer().screen().width)
+            .map(|fb| fb.screen().width)
             .unwrap_or(self.fb_screen_w)
+    }
+
+    /// The live framebuffer (panics when absent — same contract as the
+    /// old `screen()`).
+    pub fn fb(&mut self) -> &mut B {
+        self.fb.as_mut().expect("framebuffer bound")
     }
 
     /// Device profile safe to call from overlay draws.
@@ -33,17 +42,11 @@ impl<B: Framebuffer> App<B> {
         self.fb_profile
     }
 
-    /// Theme-resource lookup safe to call from overlay draws: resolves
-    /// through the framebuffer when it is alive, else replays the cache.
+    /// Theme-resource lookup: resolves through the framebuffer, else
+    /// replays the cache.
     pub fn theme_resource(&mut self, name: &str) -> Option<eh_hal::ThemeBitmap> {
-        if self.screen.is_some() {
-            self.sync_fb_cache();
-            let t = self
-                .screen
-                .as_mut()
-                .unwrap()
-                .framebuffer()
-                .theme_resource(name);
+        if let Some(fb) = self.fb.as_mut() {
+            let t = fb.theme_resource(name);
             self.theme_cache.insert(name.to_string(), t.clone());
             t
         } else {
@@ -54,68 +57,156 @@ impl<B: Framebuffer> App<B> {
     /// consult theme_cache: a failed theme_resource() call caches None for
     /// the same name, which would shadow this lookup.
     pub(crate) fn load_png(&mut self, name: &str) -> Option<eh_hal::ThemeBitmap> {
-        if self.screen.is_some() {
-            let t = self.screen.as_mut().unwrap().framebuffer().load_png(name);
+        if let Some(fb) = self.fb.as_mut() {
+            let t = fb.load_png(name);
             self.theme_cache.insert(name.to_string(), t.clone());
             t
         } else {
             self.theme_cache.get(name).cloned().flatten()
         }
     }
-    pub fn screen(&mut self) -> &mut Screen<B> {
-        self.screen.as_mut().expect("screen built")
+
+    // ── property sync ──────────────────────────────────────────────────
+
+    /// Push the chrome + page-independent state into the Slint tree.
+    /// Per-page models (entries / browse rows / history) are synced by
+    /// `refresh_shelf`; this covers everything present() needs every frame.
+    pub(crate) fn sync_ui(&mut self) {
+        let c = self.ui.comp();
+        c.set_content_bottom(self.content_bottom as f32);
+        c.set_has_self_panel(self.self_panel > 0);
+        c.set_tab(match self.tab {
+            Tab::Library => crate::ui::EhTab::Library,
+            Tab::Search => crate::ui::EhTab::Search,
+        });
+        let back = match self.tab {
+            Tab::Search => true,
+            Tab::Library => self.drill > 0 && !self.browse_active(),
+        };
+        c.set_back(back);
+        c.set_browse_mode(self.browse_active());
+        let slabel = match self.source {
+            Source::Local => crate::i18n::tr("source.local").to_string(),
+            Source::Folder => crate::i18n::tr("source.folder").to_string(),
+            Source::Kavita => crate::i18n::tr("source.kavita").to_string(),
+        };
+        c.set_source_label(slabel.into());
+        c.set_pages(self.pages.max(1) as i32);
+        c.set_syncing(self.syncing);
+        c.set_sync_angle(self.sync_angle);
+        let title = self.ui_title();
+        c.set_top_title(title.into());
+        let icon = self.ui.source_image(self.source);
+        c.set_source_icon(icon);
+        // search page
+        c.set_query(self.query.clone().into());
+        c.set_search_placeholder(crate::i18n::tr("search.ph").to_string().into());
+        c.set_search_kb(self.search_kb);
+        // self panel
+        c.set_clock(clock_label().into());
+        c.set_battery_level(
+            self.fb.as_ref().and_then(|fb| fb.battery_level()).unwrap_or(0) as i32,
+        );
+        c.set_frontlight(self.fb.as_ref().map(|fb| fb.frontlight_on()).unwrap_or(false));
+    }
+    /// The top-bar title for the active body (browser path / drilled
+    /// group / query / Search).
+    fn ui_title(&self) -> String {
+        if self.dl_picker.is_some() {
+            let p = self.dl_picker.as_ref().unwrap();
+            return crate::local::browser::Browser::user_display(&p.path, &p.root).to_string();
+        }
+        if self.browse_active() {
+            return crate::local::browser::Browser::user_display(
+                &self.browser.path,
+                &self.browser.root,
+            )
+            .to_string();
+        }
+        if self.tab == Tab::Search {
+            return crate::i18n::tr("tab.search").to_string();
+        }
+        self.top_title().to_string()
     }
 
-    /// Present the current frame: the screen, then the active overlay on
-    /// top of the canvas.  The overlay + the self status strip flush only
-    /// their own regions (partial update — the e-ink discipline).
+    /// True when the folder browser (or the download-dir picker) owns the
+    /// shelf body.
+    pub(crate) fn browse_active(&self) -> bool {
+        self.dl_picker.is_some() || (self.source == Source::Folder && self.browser.open)
+    }
+
+    /// Present the current frame: render the Slint tree into the canvas,
+    /// then flush.  Plain pages get one Full content-band refresh;
+    /// overlays draw over a silently repainted base and flush their
+    /// merged dirty region ONCE (Partial).
     pub fn present(&mut self) {
         let _t0 = std::time::Instant::now();
         self.drain_keyboard();
         // Complete any worker downloads (may auto-open the reader when a
-        // single-book batch drains) before we take the screen.
+        // single-book batch drains) before rendering.
         self.drain_downloads();
         let ov = self.overlay;
         let changed = self.dirty || ov != self.last_overlay;
         self.dirty = false;
+        let overlay_switched = ov != self.last_overlay;
         self.last_overlay = ov;
+
+        // The self strip re-stamps on the first present and whenever the
+        // clock's minute rolls over.
+        let stamp = self.self_panel > 0 && {
+            let min = panel_minute();
+            if min != self.last_panel_min {
+                self.last_panel_min = min;
+                true
+            } else {
+                false
+            }
+        };
+
         if !changed {
             // Unchanged frame: nothing to repaint (the emulator's full
             // redraw is ~1s, so skipping keeps event processing prompt —
-            // and on e-ink it is the correct discipline).  Only the
-            // self-panel minute rollover still needs the stamp.
-            if self.self_panel > 0 {
-                let min = panel_minute();
-                if min != self.last_panel_min {
-                    self.last_panel_min = min;
-                    if let Some(s) = self.screen.as_mut() {
-                        stamp_self_panel(s.framebuffer_mut(), self.content_bottom, self.self_panel);
+            // and on e-ink it is the correct discipline).  Only the self
+            // strip's minute rollover still re-stamps (band-only flush).
+            if stamp {
+                self.sync_ui();
+                if let Some(r) = self.render_ui(false) {
+                    let band = Rect {
+                        x: 0,
+                        y: self.content_bottom,
+                        w: self.screen_width(),
+                        h: self.self_panel,
+                    };
+                    let cl = r.intersect(&band);
+                    if !cl.is_empty() {
+                        self.fb().refresh(cl, eh_hal::RefreshMode::Partial);
                     }
                 }
             }
             return;
         }
-        let mut s = self.screen.take().expect("screen present");
+
+        self.sync_ui();
+
+        let w = self.screen_width();
         if ov == Overlay::None {
-            // Plain page frame: one full-waveform flush (page flips /
-            // big changes deep-clean the panel).
-            s.redraw_full();
+            let full = overlay_switched; // an overlay just closed: clean slate
+            let region = self.render_ui(full);
+            let band = Rect { x: 0, y: 0, w, h: self.content_bottom };
+            let _ = region;
+            self.fb().refresh(band, eh_hal::RefreshMode::Full);
         } else {
-            // Overlay frame: exactly ONE panel update per input.  The old
-            // flow flushed the repainted base page first and the overlay
-            // second, so every input (launcher drag-scroll, settings taps)
-            // flashed the bare bookshelf for a frame — SDL presented both
-            // updates back-to-back and an e-ink FullUpdate blacks the
-            // panel before settling.  Paint the base into the canvas
-            // silently, draw the overlay over it, then flush their merged
-            // dirty union once.
-            s.paint();
-            let scr = s.framebuffer().screen();
-            let fmt = s.framebuffer().format();
-            let stride = s.framebuffer().stride();
-            let mut dirty: Vec<Rect> = s.drain_dirty();
+            // Overlay frame: exactly ONE panel update per input.  Repaint
+            // the base silently (full — the canvas may still carry the
+            // previous overlay), draw the overlay onto the canvas, then
+            // flush their merged dirty union once.
+            let _ = self.render_ui(true);
+            let mut dirty: Vec<Rect> = Vec::new();
             {
-                let fb = s.framebuffer_mut();
+                let mut fb = self.fb.take().expect("fb");
+                let scr = fb.screen();
+                let fmt = fb.format();
+                let stride = fb.stride();
                 let mut surf =
                     eh_render::Surface::new(fb.surface_mut(), scr.width, scr.height, stride, fmt);
                 match ov {
@@ -153,49 +244,57 @@ impl<B: Framebuffer> App<B> {
                     }
                     Overlay::None => {}
                 }
+                self.fb = Some(fb);
             }
             if let Some(u) = union_rects(&dirty) {
-                s.framebuffer_mut().refresh(u, eh_hal::RefreshMode::Partial);
+                self.fb().refresh(u, eh_hal::RefreshMode::Partial);
             }
         }
-        // The self-drawn status strip lives below the content area (the
-        // firmware owns the band otherwise).  Re-stamp on the first
-        // present and whenever the clock's minute rolls over.
-        if self.self_panel > 0 {
-            let min = panel_minute();
-            if min != self.last_panel_min {
-                self.last_panel_min = min;
-                stamp_self_panel(s.framebuffer_mut(), self.content_bottom, self.self_panel);
-            }
+
+        // The self strip (painted by the render above — sync_ui refreshed
+        // the clock text) flushes as its own band-only partial update.
+        if stamp {
+            let band = Rect {
+                x: 0,
+                y: self.content_bottom,
+                w,
+                h: self.self_panel,
+            };
+            self.fb().refresh(band, eh_hal::RefreshMode::Partial);
         }
-        self.screen = Some(s);
+    }
+
+    /// Render the Slint tree into the canvas.  `full` forces a whole-
+    /// window repaint (overlay open/close: the canvas carries stale
+    /// overlay pixels the incremental buffer would keep).
+    fn render_ui(&mut self, full: bool) -> Option<eh_hal::Rect> {
+        let fb = self.fb.as_mut().expect("framebuffer bound");
+        self.ui.render_full(fb, full)
     }
 
     // ── navigation / input ────────────────────────────────────────────
 
-    /// Route one input event (keyboard commits first, then taps through the
-    /// overlay or the shelf; Back closes overlays).  State-only: the caller
-    /// presents afterwards (the C tap handlers draw + flush themselves).
     /// Re-derive the layout geometry from the framebuffer after a live
-    /// resolution switch (C sdl_set_resolution's EVT_REPAINT: the app
-    /// relayouts against the new ScreenWidth/Height), then rebuild the
-    /// current page.
+    /// resolution switch (C sdl_set_resolution's EVT_REPAINT), then
+    /// rebuild the current page.
     pub fn relayout(&mut self) {
-        let s = self.screen().framebuffer().screen();
-        if self.screen().framebuffer().needs_self_panel() {
-            self.content_bottom = s.height.saturating_sub(106);
-            self.self_panel = 106;
+        self.sync_fb_cache();
+        let scr = self.fb.as_ref().expect("fb").screen();
+        let (content_bottom, self_panel) = if self.fb.as_ref().expect("fb").needs_self_panel() {
+            (scr.height.saturating_sub(106), 106)
         } else {
-            self.content_bottom = s.content_height();
-            self.self_panel = 0;
-        }
+            (scr.content_height(), 0)
+        };
+        self.content_bottom = content_bottom;
+        self.self_panel = self_panel;
+        self.last_panel_min = -1;
+        self.ui.set_size(scr.width, scr.height);
         self.refresh_shelf();
-        self.dirty = true;
     }
 }
 
 /// "Weekday HH:MM" for the self-drawn status strip (real local time).
-fn clock_label() -> String {
+pub(crate) fn clock_label() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -233,112 +332,6 @@ fn panel_minute() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64 / 60)
         .unwrap_or(0)
-}
-
-/// Stamp the self-owned status strip (C `eh_plat_stamp_panel`): a white
-/// band with the real clock + battery glyph, flushed as a band-only
-/// partial update (the e-ink discipline — never a full refresh).
-fn stamp_self_panel<B: Framebuffer>(fb: &mut B, y0: u32, panel: u32) {
-    // Platform probes first (they read the device, not pixels — the
-    // surface borrow below takes fb exclusively).
-    let battery = fb.battery_level();
-    let frontlight = fb.frontlight_on();
-    let s = fb.screen();
-    let h = panel as i32;
-    let fmt = fb.format();
-    let stride = fb.stride();
-    let mut surf = eh_render::Surface::new(fb.surface_mut(), s.width, s.height, stride, fmt);
-    let font = shelf::shelf_font();
-    let mut glyph = eh_render::Glyph::new();
-    use eh_shell::{GRAY_BLACK, GRAY_WHITE};
-    surf.fill_gray(
-        Rect {
-            x: 0,
-            y: y0,
-            w: s.width,
-            h: panel,
-        },
-        GRAY_WHITE,
-    );
-    surf.hline(0, y0, s.width, 2, GRAY_BLACK);
-    let top = y0 as i32 + h / 2;
-    let clock = clock_label();
-    eh_render::draw_text(
-        &mut surf,
-        font,
-        40.0,
-        &clock,
-        24,
-        top - 12,
-        GRAY_BLACK,
-        &mut glyph,
-    );
-    // Frontlight bulb (C eh_draw_system_strip: circle with short rays),
-    // drawn only when the light is actually on.
-    if frontlight {
-        let lx = s.width as i32 - 176;
-        let ly = y0 as i32 + h / 2;
-        surf.circle_outline(lx, ly, 12, 2, GRAY_BLACK);
-        for a in 0..8u32 {
-            let ang = a as f64 * core::f64::consts::PI / 4.0 + core::f64::consts::PI / 8.0;
-            surf.line(
-                lx + (16.0 * ang.cos()) as i32,
-                ly + (16.0 * ang.sin()) as i32,
-                lx + (22.0 * ang.cos()) as i32,
-                ly + (22.0 * ang.sin()) as i32,
-                2,
-                GRAY_BLACK,
-            );
-        }
-    }
-
-    // Battery: outline + nub + fill proportional to charge (the C app's
-    // shape; an unknown level draws empty, like the C lvl<0 clamp).
-    let bw = 84u32;
-    let bh = 40u32;
-    let bx = s.width.saturating_sub(116);
-    let by = y0 + (panel.saturating_sub(bh)) / 2;
-    surf.rect_outline(
-        Rect {
-            x: bx,
-            y: by,
-            w: bw,
-            h: bh,
-        },
-        3,
-        GRAY_BLACK,
-    );
-    surf.fill_gray(
-        Rect {
-            x: bx + bw + 1,
-            y: by + bh / 2 - 7,
-            w: 6,
-            h: 14,
-        },
-        GRAY_BLACK,
-    );
-    let lvl = battery.unwrap_or(0) as u32;
-    let fw = (bw - 8) * lvl.min(100) / 100;
-    if fw > 0 {
-        surf.fill_gray(
-            Rect {
-                x: bx + 4,
-                y: by + 4,
-                w: fw,
-                h: bh - 8,
-            },
-            GRAY_BLACK,
-        );
-    }
-    fb.refresh(
-        Rect {
-            x: 0,
-            y: y0,
-            w: s.width,
-            h: panel,
-        },
-        eh_hal::RefreshMode::Partial,
-    );
 }
 
 #[cfg(test)]

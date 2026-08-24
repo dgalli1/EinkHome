@@ -1,0 +1,145 @@
+// The top bar (C eh_topbar.c verbatim): white 96px band, house/back
+// chevron at x=8, source button (x=112 w=176, icon + label), centered
+// title, right icon stack (search/layout/sync/menu, 96px buttons from the
+// right edge with 8px pad), 2px vertical separators.  Icons are baked at
+// boot by the bridge (src/ui/icons.rs) from the same line-art code the C
+// port drew with, so glyph pixels match the previous renderer exactly.
+
+component TopBarButton inherits TouchArea {
+    width: 96px;
+    height: 96px;
+}
+
+export component TopBar inherits Rectangle {
+    width: 100%;
+    height: 96px;
+    background: white;
+
+    in-out property <bool> back: false;
+    in-out property <string> top-title: "";
+    in-out property <string> source-label: "";
+    in-out property <image> source-icon;
+    in-out property <bool> syncing: false;
+    in-out property <int> sync-angle: 0;
+    in-out property <bool> search-tab: false;
+    in-out property <bool> grid-mode: true;
+    in-out property <image> house-icon;
+    in-out property <image> back-icon;
+    in-out property <image> search-icon;
+    in-out property <image> layout-grid-icon;
+    in-out property <image> layout-list-icon;
+    in-out property <image> sync-icon;
+
+    callback home;
+    callback source-btn;
+    callback search;
+    callback layout;
+    callback sync;
+    callback menu;
+
+    // bottom separator (C draws it below the bar; the source button's
+    // white fill erases it in x112..288 exactly like the C app)
+    Rectangle { y: 95px; height: 2px; background: black; }
+
+    // left button: back chevron (search / drilled) or house
+    TopBarButton {
+        x: 8px;
+        clicked => { root.home(); }
+        Image {
+            source: root.back ? root.back-icon : root.house-icon;
+        }
+    }
+
+    // source button (hidden on the search tab)
+    TopBarButton {
+        x: 112px;
+        width: 176px;
+        visible: !root.search-tab;
+        clicked => { root.source-btn(); }
+        // white fill over the button band (erases the separator below)
+        Rectangle { x: 0; y: 0; width: 176px; height: 96px; background: white; }
+        Image {
+            x: 8px;
+            y: 22px;
+            source: root.source-icon;
+        }
+        Text {
+            x: 68px;
+            y: 28px;
+            height: 40px;
+            vertical-alignment: center;
+            font-size: 30px;
+            color: black;
+            overflow: elide;
+            width: 100px;
+            text: root.source-label;
+        }
+    }
+
+    // centered title (C: 44px, glyph top at y0+28, budget between the
+    // flanking stacks)
+    Text {
+        property <length> left-w: root.search-tab
+            ? 112px : (112px + 176px);
+        property <length> right-w: 8px + 4 * 96px;
+        property <length> band-w: Math.max(root.width - left-w - right-w, 64px);
+        x: left-w;
+        width: band-w;
+        y: 28px;
+        height: 52px;
+        vertical-alignment: center;
+        horizontal-alignment: center;
+        font-size: 44px;
+        color: black;
+        overflow: elide;
+        text: root.top-title;
+    }
+
+    // right icon stack (hidden on the search tab)
+    TopBarButton {
+        x: root.width - 8px - 4 * 96px;
+        visible: !root.search-tab;
+        clicked => { root.search(); }
+        Image { source: root.search-icon; }
+    }
+
+    TopBarButton {
+        x: root.width - 8px - 3 * 96px;
+        visible: !root.search-tab;
+        clicked => { root.layout(); }
+        Image { source: root.grid-mode ? root.layout-grid-icon : root.layout-list-icon; }
+    }
+
+    TopBarButton {
+        x: root.width - 8px - 2 * 96px;
+        visible: !root.search-tab;
+        clicked => { root.sync(); }
+        Image {
+            source: root.sync-icon;
+            transform-rotation: root.syncing ? root.sync-angle * 1deg : 0deg;
+            rotation-origin-x: self.width / 2;
+            rotation-origin-y: self.height / 2;
+        }
+    }
+
+    TopBarButton {
+        x: root.width - 8px - 96px;
+        visible: !root.search-tab;
+        clicked => { root.menu(); }
+        // hamburger: three 48x6 black bars at cy-21/-3/+15
+        Rectangle { x: 24px; y: 27px; width: 48px; height: 6px; background: black; }
+        Rectangle { x: 24px; y: 45px; width: 48px; height: 6px; background: black; }
+        Rectangle { x: 24px; y: 63px; width: 48px; height: 6px; background: black; }
+    }
+
+    // vertical separators (drawn last so button fills don't cover them):
+    // after the left button (108), after the source button (288), and the
+    // left edges of the four right buttons
+    property <bool> seps: !root.search-tab;
+    Rectangle { x: 108px; y: 0; width: 2px; height: 96px; background: black; visible: seps; }
+    Rectangle { x: 288px; y: 0; width: 2px; height: 96px; background: black; visible: seps; }
+    Rectangle { x: root.width - 8px - 4 * 96px; y: 0; width: 2px; height: 96px; background: black; visible: seps; }
+    Rectangle { x: root.width - 8px - 3 * 96px; y: 0; width: 2px; height: 96px; background: black; visible: seps; }
+    Rectangle { x: root.width - 8px - 2 * 96px; y: 0; width: 2px; height: 96px; background: black; visible: seps; }
+    Rectangle { x: root.width - 8px - 96px; y: 0; width: 2px; height: 96px; background: black; visible: seps; }
+}

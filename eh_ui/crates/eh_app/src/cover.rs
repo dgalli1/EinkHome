@@ -275,7 +275,7 @@ impl<B: Framebuffer> App<B> {
     /// whole request duration and the shell feels dead after boot.
     pub(crate) fn cover_warm_tick(&mut self) {
         // The worker thread polls this gate between fetches.
-        let online = self.screen().framebuffer().net_active();
+        let online = self.fb().net_active();
         self.warm
             .online
             .store(online, std::sync::atomic::Ordering::Relaxed);
@@ -287,8 +287,8 @@ impl<B: Framebuffer> App<B> {
         // Safe from overlay draws (screen take()n during present): use
         // the live probe when available, else the cached value.  Offline
         // counts as drained (the worker pauses, C gated it the same way).
-        let online = if self.screen.is_some() {
-            let net = self.screen.as_mut().unwrap().framebuffer().net_active();
+        let online = if self.fb.is_some() {
+            let net = self.fb.as_mut().unwrap().net_active();
             self.fb_net_active = net;
             net
         } else {

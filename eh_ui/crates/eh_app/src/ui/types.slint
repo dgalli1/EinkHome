@@ -1,0 +1,26 @@
+// Shared types between the window and its components.
+
+export enum EhOverlay {
+    none, more, settings, launcher, source, download, sync, context,
+    group-chooser, sort-chooser, log-viewer, licenses, license-detail,
+}
+
+export enum EhTab {
+    library, search,
+}
+
+export struct ShelfTile {
+    title: string,
+    author: string,
+    art: image,
+    has-art: bool,
+    stack: bool,
+    stack-label: string,
+    stack-count: int,
+    progress: int,
+}
+
+export struct BrowseRow {
+    label: string,   // display name, dirs already carry the trailing "/"
+    blank: bool,     // padding row below the listing
+}

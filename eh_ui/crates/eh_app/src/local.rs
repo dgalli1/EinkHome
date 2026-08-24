@@ -13,10 +13,10 @@
 //! `local_meta` table keyed by the stable `fld_<djb2>` id so a re-import
 //! never re-parses a known book.
 
-mod browser;
+pub(crate) mod browser;
 
 pub use browser::{
-    browse_page, browse_up, build_browse_page, folder_book, start_browse, tap_browse, tap_picker,
+    browse_page, browse_up, folder_book, start_browse, tap_browse_row, tap_picker_row,
     BrowseEntry, Browser,
 };
 use std::path::Path;

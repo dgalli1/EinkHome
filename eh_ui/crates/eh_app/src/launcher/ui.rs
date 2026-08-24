@@ -360,8 +360,7 @@ pub fn tap_launcher<B: Framebuffer>(x: i32, y: i32, app: &mut App<B>) {
                 it.params.len()
             ));
             if !app
-                .screen()
-                .framebuffer_mut()
+                .fb()
                 .launch_app(&it.path, &it.text, &it.params)
             {
                 crate::log("[eh_app] launch failed (no task system on this platform)");

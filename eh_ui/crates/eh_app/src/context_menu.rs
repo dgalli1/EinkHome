@@ -54,42 +54,24 @@ impl MenuState {
 
 impl<B: Framebuffer> App<B> {
     /// A long press on a shelf tile opens the book (or stack) context
-    /// menu (C eh_long_press → eh_context).  Returns true when opened.
-    pub(crate) fn long_press_at(&mut self, x: i32, y: i32) -> bool {
-        let topbar = self.screen().widget_rect(0);
-        let last = self.screen().widgets.len().saturating_sub(1);
-        let pager = self.screen().widget_rect(last);
-        if y < topbar.y as i32 || y >= pager.y as i32 {
+    /// menu (C eh_long_press → eh_context).  `idx` is the tile's entry
+    /// index (the Slint TouchArea reports it with the release).
+    pub(crate) fn long_press_entry(&mut self, idx: usize) -> bool {
+        if idx >= self.entries.len() {
             return false;
         }
-        for (i, w) in self
-            .screen()
-            .widgets
-            .iter()
-            .enumerate()
-            .skip(1)
-            .take(last.saturating_sub(1))
-        {
-            if w.hit(x, y) {
-                let pos = i - 2; // widget 0 = topbar, 1 = grid container
-                if pos < self.entries.len() {
-                    if self.entries[pos].stack {
-                        // A stack card long-press opens the SERIES context
-                        // (Download all / Delete series).
-                        let scope = self.entries[pos].stack_scope.clone();
-                        let label = self.entries[pos].stack_label.clone();
-                        let count = self.entries[pos].stack_count;
-                        self.open_context_series(&scope, &label, count);
-                        return true;
-                    }
-                    let book = self.entries[pos].book.clone();
-                    self.open_context_book(&book);
-                    return true;
-                }
-                return false;
-            }
+        if self.entries[idx].stack {
+            // A stack card long-press opens the SERIES context
+            // (Download all / Delete series).
+            let scope = self.entries[idx].stack_scope.clone();
+            let label = self.entries[idx].stack_label.clone();
+            let count = self.entries[idx].stack_count;
+            self.open_context_series(&scope, &label, count);
+            return true;
         }
-        false
+        let book = self.entries[idx].book.clone();
+        self.open_context_book(&book);
+        true
     }
 
     /// Open the series context menu (Download all / Delete series) for a

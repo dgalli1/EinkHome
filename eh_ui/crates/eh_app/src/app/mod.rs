@@ -12,7 +12,6 @@
 use std::path::{Path, PathBuf};
 
 use eh_hal::{Framebuffer, InputEvent, KeyCode, Rect};
-use eh_shell::Screen;
 
 use crate::client::ApiClient;
 use crate::config::{parse_kv_file, Config};
@@ -182,11 +181,18 @@ pub(crate) fn kb_take_pending() -> Option<(KbField, String)> {
 
 /// The bookshelf app bound to one framebuffer backend.
 pub struct App<B: Framebuffer> {
-    pub(crate) screen: Option<Screen<B>>,
+    /// The backend framebuffer (taken during present's overlay draws).
+    pub(crate) fb: Option<B>,
+    /// The Slint presentation bridge (window + component + intent queue).
+    pub ui: crate::ui::Ui,
+    /// Set when the release that just landed was classified as a long
+    /// press — the tile-release action consumes it (opens the context
+    /// menu instead of activating the tile).
+    pub(crate) pending_long: bool,
     /// Framebuffer facts cached so overlay draws (which run while
-    /// `screen` is take()n inside present) never need `screen()` — a
-    /// re-entrant `screen()` there panics.  Refreshed whenever the screen
-    /// is alive (see [`App::sync_fb_cache`]).
+    /// `fb` is taken inside present) never need `fb()` — a re-entrant
+    /// `fb()` there panics.  Refreshed whenever the fb is alive (see
+    /// [`App::sync_fb_cache`]).
     fb_screen_w: u32,
     pub(crate) fb_net_active: bool,
     fb_profile: eh_hal::DeviceProfile,
@@ -370,26 +376,31 @@ impl<B: Framebuffer> App<B> {
         // + sweep_stale_parts): sweep orphan .part fragments, then resync
         // every book's downloaded flag with what is actually on disk.
         crate::downloads::refresh_downloaded_flags(&store, &downloads_dir);
-        let screen = Screen::new(fb, shelf::shelf_font());
-        let (content_bottom, self_panel) = {
-            let s = screen.framebuffer().screen();
+        let (sw, sh, content_bottom, self_panel) = {
+            let s = fb.screen();
             // Live devices with no firmware panel painter draw their own
             // 106px status strip (C eh_plat_panel_height's *self_panel);
             // the SDL/PC build and firmware-panel platforms use the
             // content area as-is.  The BACKEND owns the decision.
-            if screen.framebuffer().needs_self_panel() {
-                (s.height.saturating_sub(106), 106)
+            if fb.needs_self_panel() {
+                (s.width, s.height, s.height.saturating_sub(106), 106)
             } else {
-                (s.content_height(), 0)
+                (s.width, s.height, s.content_height(), 0)
             }
         };
+        // The Slint bridge: platform (once per thread), window, fonts,
+        // baked icons, callback wiring.  Sized to the full panel; the
+        // content band is a layout property.
+        let ui = crate::ui::Ui::new(sw, sh);
         let source = Source::from_config(&config.source);
         // Persisted grouping preset (`group=` in bookshelf.cfg): restore
         // the shelf's grouping across restarts.
         let group = crate::menu::group_from_config(&config.group);
         let mut app = Self {
-            screen: Some(screen),
-            fb_screen_w: 0,
+            fb: Some(fb),
+            ui,
+            pending_long: false,
+            fb_screen_w: sw,
             fb_net_active: true,
             fb_profile: eh_hal::DeviceProfile::default(),
             theme_cache: std::collections::HashMap::new(),
@@ -483,16 +494,14 @@ impl<B: Framebuffer> App<B> {
         // The commit handler lives in eh_backend_inkview (static fn
         // pointer); it pushes into app's thread_local and we drain on the
         // next event.
-        self.screen()
-            .framebuffer_mut()
-            .open_keyboard(title, init, crate::app::kb_commit);
+        self.fb().open_keyboard(title, init, crate::app::kb_commit);
     }
 
     /// Boot: sync the library delta (only when online or the source is
     /// local-only — C eh_evt_init), then build the first shelf page.
     fn boot(&mut self) {
         self.resolve_reader();
-        let online = self.screen().framebuffer().net_active();
+        let online = self.fb().net_active();
         match self.source {
             // The Local source kicks the async storage-root import instead
             // of a remote sync (C EVT_INIT → eh_local_import_scanner); the

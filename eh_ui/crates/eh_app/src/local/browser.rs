@@ -11,7 +11,6 @@ use eh_layout::taffy::{self, Dimension, Style};
 use eh_shell::{DrawCtx, Screen, Widget, GRAY_LGRAY, GRAY_WHITE};
 
 use crate::app::{App, Source, ViewMode};
-use crate::appui::{TopBar, TopBarState, TOP_BAR_H, TOP_BAR_PAD};
 use crate::store::Book;
 
 use super::{
@@ -121,7 +120,7 @@ impl Browser {
     /// Visible row count: the body runs from below the top bar to the
     /// content bottom (C browser_rows_visible, browser branch).
     pub fn rows_visible(content_bottom: u32) -> usize {
-        let avail = (content_bottom as i32 - (TOP_BAR_H + TOP_BAR_PAD) as i32 - 8).max(1);
+        let avail = (content_bottom as i32 - (crate::appui::TOP_BAR_H + crate::appui::TOP_BAR_PAD) as i32 - 8).max(1);
         (avail as u32 / FOLDER_ROW_H).max(1) as usize
     }
 
@@ -195,132 +194,6 @@ pub fn folder_book(path: &str, name: &str) -> Book {
     }
 }
 
-// ── browser page (the Folder source's shelf body) ───────────────────────
-
-/// One full-width directory row (C browser_draw_row): white fill, a
-/// separator line, the name in the row font with a trailing "/" for dirs.
-struct BrowseRow {
-    name: Option<String>,
-    is_dir: bool,
-    rect: Option<Rect>,
-}
-
-impl BrowseRow {
-    fn blank() -> Self {
-        Self {
-            name: None,
-            is_dir: false,
-            rect: None,
-        }
-    }
-}
-
-impl Widget for BrowseRow {
-    fn draw(&mut self, ctx: &mut DrawCtx, rect: Rect) {
-        self.rect = Some(rect);
-        ctx.fill(rect, GRAY_WHITE);
-        let w = ctx.surf.width();
-        ctx.hline(0, rect.y + rect.h - 1, w, 1, GRAY_LGRAY);
-        let Some(name) = &self.name else { return };
-        let label = if self.is_dir {
-            format!("{name}/")
-        } else {
-            name.clone()
-        };
-        // Pixel-fit truncation to w - 64 (C eh_utf8_fit_width).
-        let mut label = label;
-        while label.len() > 1 && ctx.font.width(&label, 28.0) as i32 > w as i32 - 64 {
-            label.pop();
-        }
-        let baseline = rect.y as i32 + (FOLDER_ROW_H as i32 - 28) / 2 + 20;
-        ctx.text(32, baseline, 28.0, &label, eh_shell::GRAY_BLACK);
-    }
-    fn dirty(&self, out: &mut Vec<Rect>) {
-        if let Some(r) = self.rect {
-            out.push(r);
-        }
-    }
-    fn hit(&self, x: i32, y: i32) -> bool {
-        matches!(self.rect, Some(r) if r.contains(x, y))
-    }
-}
-
-/// Build the browser screen: the top bar carries the current directory as
-/// its title; the body lists the visible rows (C eh_draw_browse — body
-/// only, the caller owns the chrome).
-pub fn build_browse_page<B: Framebuffer>(
-    fb: B,
-    browser: &Browser,
-    content_bottom: u32,
-) -> Screen<B> {
-    let font = crate::shelf::shelf_font();
-    let mut screen = Screen::new(fb, font);
-    screen.bg_fill = true; // browser rows may not cover the band
-    screen.layout_mut().root_flex_column();
-    let tb = TopBar::new(TopBarState {
-        back: false,
-        source: Source::Folder,
-        view_mode: ViewMode::Grid,
-        search: false,
-        syncing: false,
-        sync_angle: 0,
-        title: Browser::user_display(&browser.path, &browser.root),
-    });
-    screen.add_styled(
-        Box::new(tb),
-        Style {
-            flex_shrink: 0.0,
-            size: taffy::geometry::Size {
-                width: Dimension::percent(1.0),
-                height: Dimension::length(TOP_BAR_H as f32),
-            },
-            ..Style::default()
-        },
-    );
-    let body = screen.add_container(Style {
-        flex_grow: 1.0,
-        flex_shrink: 1.0,
-        // Full-width rows must STACK: without flex_wrap the container's
-        // default ROW direction lays them out side-by-side and only the
-        // first row is ever on-screen (the rest sit at x ≥ screen width).
-        flex_wrap: taffy::style::FlexWrap::Wrap,
-        align_items: Some(taffy::style::AlignItems::FLEX_START),
-        // C eh_draw_browse: rows start 8px below the TOP_BAR_H+TOP_BAR_PAD
-        // band, and eh_on_tap_browse shares that origin.
-        padding: taffy::geometry::Rect {
-            top: taffy::style::LengthPercentage::length((TOP_BAR_PAD + 8) as f32),
-            left: taffy::style::LengthPercentage::length(0.0),
-            right: taffy::style::LengthPercentage::length(0.0),
-            bottom: taffy::style::LengthPercentage::length(0.0),
-        },
-        ..Style::default()
-    });
-    let rows = Browser::rows_visible(content_bottom);
-    for i in 0..rows {
-        let idx = browser.scroll + i;
-        let row = match browser.entries.get(idx) {
-            Some(e) => BrowseRow {
-                name: Some(e.name.clone()),
-                is_dir: e.is_dir,
-                rect: None,
-            },
-            None => BrowseRow::blank(),
-        };
-        screen.add_to(
-            body,
-            Box::new(row),
-            Style {
-                flex_shrink: 0.0,
-                size: taffy::geometry::Size {
-                    width: Dimension::percent(1.0),
-                    height: Dimension::length(FOLDER_ROW_H as f32),
-                },
-                ..Style::default()
-            },
-        );
-    }
-    screen
-}
 
 /// Open the folder browser at the storage root (C source-tap →
 /// eh_browse_start): the browser becomes the shelf body.
@@ -330,17 +203,10 @@ pub fn start_browse<B: Framebuffer>(app: &mut App<B>) {
     app.refresh_shelf();
 }
 
-/// Body tap in browser mode (C eh_on_tap_browse, below the top bar): a
-/// directory row navigates, a book file opens through the reader flow.
-pub fn tap_browse<B: Framebuffer>(app: &mut App<B>, x: i32, y: i32) {
-    let _ = x; // rows span the full width; only y matters
-               // C eh_on_tap_browse origin: rows start at TOP_BAR_H+TOP_BAR_PAD+8 —
-               // the same offset build_browse_page's body padding gives the paint.
-    let top = TOP_BAR_H + TOP_BAR_PAD + 8;
-    if (y as u32) < top {
-        return;
-    }
-    let idx = ((y as u32 - top) / FOLDER_ROW_H) as usize + app.browser.scroll;
+/// Body tap in browser mode (C eh_on_tap_browse): a directory row
+/// navigates, a book file opens through the reader flow.  `idx` is the
+/// ABSOLUTE entry index (the Slint callback adds the scroll offset).
+pub fn tap_browse_row<B: Framebuffer>(app: &mut App<B>, idx: usize) {
     let Some(entry) = app.browser.entries.get(idx).cloned() else {
         return;
     };
@@ -373,22 +239,13 @@ pub fn browse_up<B: Framebuffer>(app: &mut App<B>) -> bool {
 
 /// Picker-mode row tap (C eh_on_tap_browse in BR_MODE_PICKER): ".."
 /// ascends, any directory tap COMMITS it as the downloads dir (the app
-/// saves the config and re-resolves, C eh_settings_apply).
-pub fn tap_picker<B: Framebuffer>(app: &mut App<B>, _x: i32, y: i32) {
-    // C eh_on_tap_browse (picker mode) shares the browser row origin:
-    // rows start at TOP_BAR_H+TOP_BAR_PAD+8, matching the paint padding.
-    let top = TOP_BAR_H + TOP_BAR_PAD + 8;
-    if (y as u32) < top {
-        return;
-    }
-    let (scroll, path) = {
-        let b = match app.dl_picker.as_ref() {
-            Some(b) => b,
-            None => return,
-        };
-        (b.scroll, b.path.clone())
+/// saves the config and re-resolves, C eh_settings_apply).  `idx` is the
+/// ABSOLUTE entry index.
+pub fn tap_picker_row<B: Framebuffer>(app: &mut App<B>, idx: usize) {
+    let path = match app.dl_picker.as_ref() {
+        Some(b) => b.path.clone(),
+        None => return,
     };
-    let idx = ((y as u32 - top) / FOLDER_ROW_H) as usize + scroll;
     let Some(entry) = app.dl_picker.as_ref().unwrap().entries.get(idx).cloned() else {
         return;
     };
@@ -408,11 +265,6 @@ pub fn tap_picker<B: Framebuffer>(app: &mut App<B>, _x: i32, y: i32) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn touch(dir: &Path, name: &str) {
-        std::fs::write(dir.join(name), b"x").unwrap();
-    }
-
     #[test]
     fn browser_navigation_transitions() {
         let dir = tempfile::tempdir().unwrap();

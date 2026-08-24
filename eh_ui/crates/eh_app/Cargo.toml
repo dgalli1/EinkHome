@@ -13,6 +13,16 @@ eh_render = { path = "../eh_render" }
 eh_layout = { path = "../eh_layout" }
 eh_shell = { path = "../eh_shell" }
 
+# UI toolkit: the whole presentation layer (screens, widgets, hit-testing)
+# is Slint markup rendered by the software renderer straight into the
+# backend framebuffer.  No windowing backend: the app owns the event loop
+# and drives MinimalSoftwareWindow directly (see src/ui/mod.rs).
+slint = { version = "1.17", default-features = false, features = [
+    "std",
+    "compat-1-2",
+    "renderer-software",
+] }
+
 # HTTP to the LAN pbemu-api server.  No TLS: the device talks to the API
 # server over plain http (api_url from bookshelf.cfg); TLS termination (if a
 # remote Kavita needs it) happens in the Python server.  Disabling ureq's tls
@@ -47,6 +57,9 @@ mupdf = { version = "0.8.0", default-features = false, features = ["base14-fonts
 tempfile = "3"
 eh_backend_sdl = { path = "../eh_backend_sdl" }
 parking_lot = "0.12"
+
+[build-dependencies]
+slint-build = "1.17"
 
 [features]
 default = []

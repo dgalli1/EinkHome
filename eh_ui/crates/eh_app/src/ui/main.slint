@@ -1,0 +1,176 @@
+// EinkHome main UI — Slint port of the C app's screen set.
+//
+// Every geometry constant here mirrors the C app (eh_core.h / eh_topbar.c /
+// eh_grid.c) verbatim — the e2e suite taps coordinates computed from the
+// same numbers, so they are contract, not style.  Colors are the grayscale
+// palette (BLACK 0x00 / DGRAY 0x55 / LGRAY 0xaa / WHITE 0xff); the bridge
+// renders through the software renderer into the 8bpp/24bpp/32bpp
+// framebuffer.
+
+import { EhOverlay, EhTab, ShelfTile, BrowseRow } from "types.slint";
+import { TopBar } from "topbar.slint";
+import { ShelfBody } from "shelf.slint";
+import { BrowseBody } from "browser.slint";
+import { Pager } from "pager.slint";
+import { SelfPanel } from "selfpanel.slint";
+
+export { EhOverlay, EhTab, ShelfTile, BrowseRow }
+
+export component EhAppWindow inherits Window {
+    background: white;
+    default-font-family: "DejaVu Sans";
+
+    // ── app state (synced from Rust before every present) ──────────────
+    in-out property <EhOverlay> overlay: EhOverlay.none;
+    in-out property <EhTab> tab: EhTab.library;
+    in-out property <length> content-bottom: 1448px;
+    in-out property <bool> has-self-panel: false;
+    in-out property <bool> back: false;        // drilled or search: chevron
+    in-out property <string> top-title: "";
+    in-out property <string> source-label: "";
+    in-out property <int> page: 0;
+    in-out property <int> pages: 1;
+    in-out property <bool> syncing: false;
+    in-out property <int> sync-angle: 0;
+    in-out property <bool> grid-mode: true;
+    in-out property <[ShelfTile]> entries: [];
+    // folder browser body (Folder source)
+    in-out property <bool> browse-mode: false;
+    in-out property <[BrowseRow]> browse-rows: [];
+    in-out property <int> browse-scroll: 0;
+    // search page
+    in-out property <string> query: "";
+    in-out property <string> search-placeholder: "";
+    in-out property <bool> search-kb: false;
+    in-out property <[string]> history: [];
+    in-out property <bool> history-hint: false;
+    // self panel
+    in-out property <string> clock: "";
+    in-out property <int> battery-level: 0;
+    in-out property <bool> frontlight: false;
+    // baked line-art icons (src/ui/icons.rs)
+    in-out property <image> house-icon;
+    in-out property <image> back-icon;
+    in-out property <image> source-icon;
+    in-out property <image> search-icon;
+    in-out property <image> layout-grid-icon;
+    in-out property <image> layout-list-icon;
+    in-out property <image> sync-icon;
+    in-out property <image> input-icon;
+    in-out property <image> input-icon-inv;
+    in-out property <image> bulb-icon;
+
+    // ── intents (pushed onto the bridge's action queue) ────────────────
+    callback home;
+    callback source-btn;
+    callback search;
+    callback layout;
+    callback sync;
+    callback menu;
+    callback pager(int);          // 0=prev 1=first 2=last 3=next
+    callback tile(int, bool);     // index, press(true)/release(false)
+    callback system-bar;
+    callback search-input;
+    callback history-row(int);
+    callback browse-row(int);     // absolute row index (scroll + visible)
+
+    // ── grid geometry (C eh_grid.c, mirrored exactly) ──────────────────
+    property <length> avail-w: self.width - 16px;
+    property <length> g-bot: content-bottom - 96px;
+    property <length> g-avail-h: g-bot - 96px - 12px - 8px;
+    property <int> g-cols: avail-w >= 1480px ? 4 : (avail-w >= 840px ? 3 : 2);
+    property <int> g-rows: g-avail-h >= 1400px ? 3 : 2;
+    property <length> cell-w: Math.min(Math.max(avail-w / g-cols, 280px), 420px);
+    property <length> cell-h: Math.min(Math.max(g-avail-h / g-rows, 280px), 600px);
+    property <length> grid-x0: 8px + Math.max(0px, (avail-w - g-cols * cell-w) / 2);
+
+    // Touch catcher for the system strip band (below the content area):
+    // any tap there hands control to the firmware panel.
+    TouchArea {
+        y: content-bottom;
+        height: root.height - content-bottom;
+        width: 100%;
+        enabled: root.has-self-panel;
+        clicked => { root.system-bar(); }
+    }
+
+    // ── chrome ──────────────────────────────────────────────────────────
+    TopBar {
+        y: 0;
+        width: 100%;
+        height: 96px;
+        back: root.back;
+        top-title: root.top-title;
+        source-label: root.source-label;
+        source-icon: root.source-icon;
+        syncing: root.syncing;
+        sync-angle: root.sync-angle;
+        search-tab: root.tab == EhTab.search;
+        grid-mode: root.grid-mode;
+        house-icon: root.house-icon;
+        back-icon: root.back-icon;
+        search-icon: root.search-icon;
+        layout-grid-icon: root.layout-grid-icon;
+        layout-list-icon: root.layout-list-icon;
+        sync-icon: root.sync-icon;
+        home => { root.home(); }
+        source-btn => { root.source-btn(); }
+        search => { root.search(); }
+        layout => { root.layout(); }
+        sync => { root.sync(); }
+        menu => { root.menu(); }
+    }
+
+    // ── body: folder browser OR library shelf / search ─────────────────
+    if (root.browse-mode): BrowseBody {
+        y: 96px;
+        width: 100%;
+        height: g-bot - 96px;
+        rows: root.browse-rows;
+        row-tap(i) => { root.browse-row(i + root.browse-scroll); }
+    }
+    if (!root.browse-mode): ShelfBody {
+        y: 96px;
+        width: 100%;
+        height: g-bot - 96px;
+        entries: root.entries;
+        grid-mode: root.grid-mode;
+        cell-w: root.cell-w;
+        cell-h: root.cell-h;
+        grid-x0: root.grid-x0;
+        g-cols: root.g-cols;
+        query: root.query;
+        search-placeholder: root.search-placeholder;
+        search-kb: root.search-kb;
+        history: root.history;
+        history-hint: root.history-hint;
+        search-tab: root.tab == EhTab.search;
+        input-icon: root.input-icon;
+        input-icon-inv: root.input-icon-inv;
+        tile(i, down) => { root.tile(i, down); }
+        search-input => { root.search-input(); }
+        history-row(i) => { root.history-row(i); }
+    }
+
+    Pager {
+        y: g-bot;
+        width: 100%;
+        height: 96px;
+        page: root.page;
+        pages: root.pages;
+        pager(a) => { root.pager(a); }
+    }
+
+    SelfPanel {
+        y: content-bottom;
+        width: 100%;
+        height: root.height - content-bottom;
+        clock: root.clock;
+        battery-level: root.battery-level;
+        frontlight: root.frontlight;
+        bulb-icon: root.bulb-icon;
+        visible: root.has-self-panel;
+    }
+
+    // ── overlays land here (next waves) ─────────────────────────────────
+}

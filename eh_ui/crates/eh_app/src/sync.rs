@@ -354,8 +354,7 @@ impl<B: Framebuffer> App<B> {
         ));
         // Initial anti-suspend ban (C eh_do_sync's eh_sync_keep_awake);
         // per-round re-arms come back as SyncMsg::BanSleep.
-        self.screen()
-            .framebuffer()
+        self.fb()
             .ban_sleep(crate::sync::EH_SYNC_BAN_SLEEP_SEC as u32);
         let (tx, rx) = std::sync::mpsc::channel::<crate::sync::SyncMsg>();
         let cancel = self.sync_worker.arm(rx);
@@ -448,7 +447,7 @@ impl<B: Framebuffer> App<B> {
                     // The hal handle lives on the UI thread; perform the
                     // worker's re-arm request here (C called BanSleep on
                     // the main thread too).
-                    self.screen().framebuffer().ban_sleep(secs);
+                    self.fb().ban_sleep(secs);
                 }
                 crate::sync::SyncMsg::Event(ev) => changed |= self.apply_sync_event(ev),
             }

@@ -10,7 +10,7 @@
 //!   store    — SQLite persistence (schema-compatible with the C app)
 //!   sync     — delta engine (sync/delta + sync/state)
 //!   cover    — cover fetch + on-disk cache
-//!   ui*      — shell widgets bound to real data
+//!   ui       — Slint presentation bridge (screens, hit-testing, painting)
 //!
 //! The shelf screen renders real books (title/author/cover) instead of
 //! placeholder tiles, driven by the sync + store layers.
@@ -42,6 +42,7 @@ pub mod store;
 pub mod sync;
 pub mod sysapp;
 pub mod util;
+pub mod ui;
 pub mod viewer;
 pub mod widgets;
 

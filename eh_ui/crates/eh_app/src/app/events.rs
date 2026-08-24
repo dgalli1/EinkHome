@@ -46,6 +46,12 @@ impl<B: Framebuffer> App<B> {
                 self.press_start = Some(std::time::Instant::now());
                 self.drag_y = Some(*y);
                 self.drag_total = 0;
+                // Slint hit-tests the press (TouchArea grab pairing); the
+                // release reports the semantic target.
+                self.ui.dispatch(slint::platform::WindowEvent::PointerPressed {
+                    position: slint::LogicalPosition::new(*x as f32, *y as f32),
+                    button: slint::platform::PointerEventButton::Left,
+                });
             }
             InputEvent::PointerMove { x, y } => {
                 // Launcher vertical drag (C eh_main.c drag_scroll_move):
@@ -68,7 +74,9 @@ impl<B: Framebuffer> App<B> {
                     }
                 }
                 self.drag_y = Some(*y);
-                let _ = x;
+                self.ui.dispatch(slint::platform::WindowEvent::PointerMoved {
+                    position: slint::LogicalPosition::new(*x as f32, *y as f32),
+                });
             }
             InputEvent::PointerUp { x, y } => {
                 let (x, y) = (*x, *y);
@@ -83,24 +91,28 @@ impl<B: Framebuffer> App<B> {
                 };
                 self.press_pos = None;
                 self.press_start = None;
-                if self.overlay == Overlay::None
-                    && is_long
-                    && self.tab == Tab::Library
-                    && self.long_press_at(x, y)
-                {
-                    return;
-                }
                 // A drag (moved > 48px) is not a tap.
                 let dragged = self.drag_total.abs() > 48;
                 self.drag_total = 0;
                 self.drag_y = None;
-                if dragged {
-                    return;
-                }
+                // Slint hit-tests the release against the pressed
+                // TouchArea and reports the semantic target; tap vs
+                // long-press classification stays App-side (above).
+                self.ui.dispatch(slint::platform::WindowEvent::PointerReleased {
+                    position: slint::LogicalPosition::new(x as f32, y as f32),
+                    button: slint::platform::PointerEventButton::Left,
+                });
                 if self.overlay == Overlay::None {
-                    self.tap_screen(x, y);
+                    self.pending_long = is_long && self.tab == Tab::Library;
+                    self.apply_actions();
                 } else {
-                    self.tap_overlay(x, y);
+                    // Interim: overlays still hit-test their draw-time
+                    // rect caches (ported screen by screen); base-page
+                    // intents under an overlay are dropped.
+                    let _ = crate::ui::drain_actions();
+                    if !dragged {
+                        self.tap_overlay(x, y);
+                    }
                 }
             }
             // EVT_SHOW / EVT_FOREGROUND (C eh_evt_show): a full redraw —
@@ -180,7 +192,7 @@ impl<B: Framebuffer> App<B> {
         if !self.search_kb || self.tab != Tab::Search {
             return due;
         }
-        let Some(text) = self.screen().framebuffer().live_keyboard_text() else {
+        let Some(text) = self.fb().live_keyboard_text() else {
             return false;
         };
         if text == self.suggest_q {

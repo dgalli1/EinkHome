@@ -72,7 +72,7 @@ fn main() -> Result<(), String> {
         libc::signal(libc::SIGTERM, on_signal as libc::sighandler_t);
     }
     loop {
-        if SIGNALED.load(Ordering::SeqCst) || app.screen().framebuffer_mut().close_requested() {
+        if SIGNALED.load(Ordering::SeqCst) || app.fb().close_requested() {
             return Ok(());
         }
         // ── control plane: every command runs to completion (incl. the
@@ -102,9 +102,9 @@ fn main() -> Result<(), String> {
         // burst of N events then costs one flush instead of N full
         // redraws, which is what keeps drags and fast tap sequences
         // responsive while frames are expensive.
-        app.screen().framebuffer_mut().pump_events();
+        app.fb().pump_events();
         let mut handled = false;
-        while let Some(ev) = app.screen().framebuffer_mut().poll_event() {
+        while let Some(ev) = app.fb().poll_event() {
             // F11 (the backend surfaces it as Unknown(0x7A)): cycle the
             // logical canvas to the next screen class (C sdl_set_resolution
             // on EVT key), then have the app relayout against the new
@@ -117,7 +117,7 @@ fn main() -> Result<(), String> {
             ) {
                 res_idx = (res_idx + 1) % RESOLUTIONS.len();
                 let (w, h) = RESOLUTIONS[res_idx];
-                if let Err(e) = app.screen().framebuffer_mut().set_resolution(w, h) {
+                if let Err(e) = app.fb().set_resolution(w, h) {
                     eprintln!("[pc] resolution switch failed: {e}");
                     continue;
                 }
@@ -225,7 +225,7 @@ fn handle_line(app: &mut App<SdlFb>, line: &str) -> Outcome {
         // ── text group
         "type" => match a {
             Some(text) => {
-                app.screen().framebuffer_mut().kb_type_text(text);
+                app.fb().kb_type_text(text);
                 Outcome::Reply("ok\n".into())
             }
             None => Outcome::Reply("err unknown cmd\n".into()),
@@ -234,7 +234,7 @@ fn handle_line(app: &mut App<SdlFb>, line: &str) -> Outcome {
         // (close + fire the app's handler with the buffer); the commit
         // itself drains on the present that follows.
         "kb_commit" => {
-            app.screen().framebuffer_mut().kb_commit();
+            app.fb().kb_commit();
             app.present();
             Outcome::Reply("ok\n".into())
         }
@@ -265,7 +265,7 @@ fn handle_line(app: &mut App<SdlFb>, line: &str) -> Outcome {
         },
         "shot" => match a {
             Some(path) => {
-                let fb = app.screen().framebuffer_mut();
+                let fb = app.fb();
                 // A failed dump must not masquerade as success: the
                 // harness would otherwise fail later on a missing file.
                 match fb.dump_ppm(path) {
@@ -276,7 +276,7 @@ fn handle_line(app: &mut App<SdlFb>, line: &str) -> Outcome {
             None => Outcome::Reply("err unknown cmd\n".into()),
         },
         "hash" => {
-            let fb = app.screen().framebuffer();
+            let fb = app.fb();
             let v = fnv1a_64(fb.pixels());
             Outcome::Reply(format!("hash=0x{v:016x}\n"))
         }

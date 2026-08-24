@@ -1,20 +1,13 @@
-//! App UI chrome: the top bar and pager as shell widgets.
-//!
-//! Ports the C app's eh_topbar.c / eh_draw_pager structure onto the Rust
-//! shell: a white top bar (house or back chevron, source button, centered
-//! title, and the right icon stack — search / layout / sync / menu — with
-//! vertical separators) and a pager band (top border, "<" "<<" "N / M"
-//! ">>" ">", the four C pager buttons with the disabled state greyed).
-//!
-//! Geometry mirrors eh_topbar.c / eh_core.h verbatim (the C app is the
-//! reference model): fixed 96px buttons, 8px pad, source button at x=112
-//! w=176 (the ≤758px growth is skipped — the device/emulator panels are
-//! ≥1072px), right icon stack packed from the right edge.  The hit-testing
-//! in app.rs `tap_top_bar` shares these same numbers so taps land on the
-//! icons exactly as drawn.
+//! App chrome constants + line-art icon drawing (C eh_core.h / eh_topbar.c
+//! geometry, verbatim).  The top bar and pager are Slint markup now
+//! (`ui/topbar.slint`, `ui/pager.slint`); these fns survive because the
+//! icon baker (`ui/icons.rs`) rasterises their glyphs ONCE at boot into
+//! the images the Slint tree displays — pixel-identical to the old
+//! per-frame renderer.
 
 use eh_hal::Rect;
-use eh_shell::{DrawCtx, Widget, GRAY_BLACK, GRAY_LGRAY, GRAY_WHITE};
+
+use eh_shell::{DrawCtx, GRAY_BLACK};
 
 use crate::app::{Source, ViewMode};
 
@@ -28,158 +21,10 @@ pub const TOP_BAR_PAD: u32 = 12;
 /// ≤758px growth is skipped as panels here are ≥1072px).
 pub const SOURCE_BTN_X: i32 = 112;
 pub const SOURCE_BTN_W: i32 = 176;
-const TOP_ICON_HALF: i32 = 26; // EH_TOP_ICON_SIZE/2
-
-/// Everything the top bar needs to draw one frame, driven by app state at
-/// build time (the C app reads eh_g_state in eh_draw_top_bar).
-pub struct TopBarState {
-    /// Draw a back chevron (search tab / drilled) instead of the house.
-    pub back: bool,
-    pub source: Source,
-    pub view_mode: ViewMode,
-    /// On the search tab: only the back affordance + centered "Search"
-    /// title; the source button and right icon stack are hidden.
-    pub search: bool,
-    pub syncing: bool,
-    /// Rotation (deg) of the sync glyph while a sync/download is in
-    /// flight (C eh_g_state.sync_angle; sync_spin_tick advances it 15°/s).
-    pub sync_angle: i32,
-    pub title: String,
-}
-
-/// The white top bar.  See `TopBarState` for what it draws per frame.
-pub struct TopBar {
-    pub state: TopBarState,
-    rect: Option<Rect>,
-}
-
-impl TopBar {
-    pub fn new(state: TopBarState) -> Self {
-        Self { state, rect: None }
-    }
-}
-
-impl Widget for TopBar {
-    fn draw(&mut self, ctx: &mut DrawCtx, rect: Rect) {
-        self.rect = Some(rect);
-        let col = GRAY_BLACK;
-        // White bar + bottom separator.  C draws the separator BELOW the
-        // bar (DrawLine(0, y0+EH_TOP_BAR_H, w, …)) — inside the bar the
-        // source button's white fill erases it (a visible gap x112..288).
-        ctx.fill(rect, GRAY_WHITE);
-        ctx.hline(0, rect.y + rect.h, rect.w, 1, col);
-
-        let cy = (rect.y + rect.h / 2) as i32;
-        let y0 = rect.y as i32;
-        let w = rect.w as i32;
-
-        // Left button: back chevron (search / drilled) or house.
-        let hcx = (BTN_PAD + BTN_SIZE / 2) as i32;
-        if self.state.back {
-            draw_back_chevron(ctx, hcx, cy, col);
-        } else {
-            draw_house(ctx, hcx, cy, col);
-        }
-
-        // Source button (+ label), hidden on the search tab.
-        if !self.state.search {
-            draw_source_button(ctx, w, y0, cy, self.state.source, col);
-        }
-
-        // Centered title: "Search" centered on the whole width on the search
-        // tab; else centered in the free band between the flanking icon
-        // stacks (left = pad+btn+pad+source; right = pad+4*btn).
-        let (center, budget) = if self.state.search {
-            let guard = (BTN_PAD + BTN_SIZE + BTN_PAD) as i32;
-            (w / 2, w - 2 * guard)
-        } else {
-            let left_w = (BTN_PAD + BTN_SIZE + BTN_PAD) as i32 + SOURCE_BTN_W;
-            let right_w = (BTN_PAD + 4 * BTN_SIZE) as i32;
-            let band_w = (w - left_w - right_w).max(64);
-            (left_w + band_w / 2, band_w)
-        };
-        if !self.state.title.is_empty() {
-            // C draws the title (DEFAULTFONT 44) with its TOP at
-            // y0+(TOP_BAR_H-40)/2 (DrawString is top-anchored); draw_text
-            // takes the BASELINE, so add the face's real ascent.
-            let asc = ctx.font.line_h(44.0).0 as i32;
-            ctx.text_center_fit(center, y0 + 28 + asc, 44.0, &self.state.title, budget, col);
-        }
-
-        // Right icon stack, hidden on the search tab.
-        if !self.state.search {
-            draw_search_icon(ctx, w - 344, cy, col);
-            draw_layout_icon(ctx, w - 248, cy, self.state.view_mode, col);
-            draw_sync_icon(ctx, w - 152, cy, self.state.sync_angle, col);
-            // Menu hamburger in the corner button.
-            let menu_cx = (rect.x + rect.w - BTN_PAD - BTN_SIZE / 2) as i32;
-            ctx.fill(Rect::from_xy(menu_cx - 24, cy - 21, 48, 6), col);
-            ctx.fill(Rect::from_xy(menu_cx - 24, cy - 3, 48, 6), col);
-            ctx.fill(Rect::from_xy(menu_cx - 24, cy + 15, 48, 6), col);
-        }
-
-        // Vertical separators (drawn last so no button's white fill covers
-        // them): after the left button, after the source button, and the
-        // left edges of the four right buttons.
-        if !self.state.search {
-            ctx.vline(BTN_PAD + BTN_SIZE + 4, rect.y, rect.h, 2, col);
-            ctx.vline((SOURCE_BTN_X + SOURCE_BTN_W) as u32, rect.y, rect.h, 2, col);
-            for k in 1..=4 {
-                let x = w - (BTN_PAD + k * BTN_SIZE) as i32;
-                ctx.vline(x as u32, rect.y, rect.h, 2, col);
-            }
-        }
-    }
-    fn dirty(&self, out: &mut Vec<Rect>) {
-        if let Some(r) = self.rect {
-            out.push(r);
-        }
-    }
-    fn hit(&self, x: i32, y: i32) -> bool {
-        let w = self.rect.map_or(0, |r| r.w as i32);
-        matches!(self.rect, Some(r) if (x as u32) >= r.x && (x as u32) < r.x + r.w && (y as u32) >= r.y && (y as u32) < r.y + r.h)
-            && w > 0
-    }
-}
-
-/// The source button (C draw_source_button): a white fill over the button
-/// band, the source's line-art icon in the common 52px box, + its label.
-fn draw_source_button(ctx: &mut DrawCtx, _w: i32, _y0: i32, cy: i32, source: Source, col: u8) {
-    let x0 = SOURCE_BTN_X;
-    let btn_w = SOURCE_BTN_W;
-    ctx.fill(
-        Rect {
-            x: x0 as u32,
-            y: 0,
-            w: btn_w as u32,
-            h: TOP_BAR_H,
-        },
-        GRAY_WHITE,
-    );
-    let ic_x = x0 + 8;
-    let ic_y = cy - TOP_ICON_HALF;
-    match source {
-        Source::Kavita => draw_globe_icon(ctx, ic_x, ic_y, col),
-        Source::Local => draw_book_icon(ctx, ic_x, ic_y, col),
-        Source::Folder => draw_folder_icon(ctx, ic_x, ic_y, col),
-    }
-    // C DrawString tops the 30px label at cy-15; add the face's ascent
-    // for our baseline-anchored draw_text.
-    let asc = ctx.font.line_h(30.0).0 as i32;
-    ctx.text(ic_x + 60, cy - 15 + asc, 30.0, source_label(source), col);
-}
-
-/// Short label of the active source (C source_short_label).
-fn source_label(source: Source) -> &'static str {
-    match source {
-        Source::Local => crate::i18n::tr("source.local"),
-        Source::Folder => crate::i18n::tr("source.folder"),
-        Source::Kavita => crate::i18n::tr("source.kavita"),
-    }
-}
+pub(crate) const TOP_ICON_HALF: i32 = 26; // EH_TOP_ICON_SIZE/2
 
 /// Line-art globe (Kavita): circle + equator + meridian.
-fn draw_globe_icon(ctx: &mut DrawCtx, x: i32, y: i32, col: u8) {
+pub(crate) fn draw_globe_icon(ctx: &mut DrawCtx, x: i32, y: i32, col: u8) {
     let cx = x + TOP_ICON_HALF;
     let cy = y + TOP_ICON_HALF;
     let r = 24;
@@ -209,7 +54,7 @@ fn ellipse_piece(ctx: &mut DrawCtx, cx: i32, cy: i32, rx: i32, ry: i32, _eq: boo
 }
 
 /// Line-art open book (Local): two pages over a spine.
-fn draw_book_icon(ctx: &mut DrawCtx, x: i32, y: i32, col: u8) {
+pub(crate) fn draw_book_icon(ctx: &mut DrawCtx, x: i32, y: i32, col: u8) {
     let cx = x + TOP_ICON_HALF;
     let cy = y + TOP_ICON_HALF;
     ctx.line(cx - 24, cy + 20, cx - 24, cy - 16, 2, col);
@@ -221,7 +66,7 @@ fn draw_book_icon(ctx: &mut DrawCtx, x: i32, y: i32, col: u8) {
 }
 
 /// Line-art folder (Folder source): tab + body.
-fn draw_folder_icon(ctx: &mut DrawCtx, x: i32, y: i32, col: u8) {
+pub(crate) fn draw_folder_icon(ctx: &mut DrawCtx, x: i32, y: i32, col: u8) {
     ctx.line(x + 3, y + 10, x + 3, y + 50, 2, col);
     ctx.line(x + 3, y + 50, x + 49, y + 50, 2, col);
     ctx.line(x + 49, y + 50, x + 49, y + 10, 2, col);
@@ -232,7 +77,7 @@ fn draw_folder_icon(ctx: &mut DrawCtx, x: i32, y: i32, col: u8) {
 }
 
 /// Magnifying-glass icon (opens the Search sub-page): ring + handle.
-fn draw_search_icon(ctx: &mut DrawCtx, cx0: i32, cy: i32, col: u8) {
+pub(crate) fn draw_search_icon(ctx: &mut DrawCtx, cx0: i32, cy: i32, col: u8) {
     let cx = cx0 - 5;
     let cyy = cy - 5;
     let r = 20;
@@ -243,7 +88,7 @@ fn draw_search_icon(ctx: &mut DrawCtx, cx0: i32, cy: i32, col: u8) {
 
 /// Layout-switch icon: a 2×2 grid in grid mode, three rows with leading
 /// squares in list mode (the glyph reflects the CURRENT layout).
-fn draw_layout_icon(ctx: &mut DrawCtx, cx0: i32, cy: i32, view_mode: ViewMode, col: u8) {
+pub(crate) fn draw_layout_icon(ctx: &mut DrawCtx, cx0: i32, cy: i32, view_mode: ViewMode, col: u8) {
     let cx = cx0;
     if view_mode == ViewMode::List {
         for i in 0..3 {
@@ -282,7 +127,7 @@ fn draw_layout_icon(ctx: &mut DrawCtx, cx0: i32, cy: i32, view_mode: ViewMode, c
 /// the current rotation in degrees — idle the app passes 0 (a stable
 /// glyph); while a sync/download is in flight the tick advances it 15°/s
 /// and the arcs spin (C eh_draw_sync_icon / sync_spin_tick).
-fn draw_sync_icon(ctx: &mut DrawCtx, cx0: i32, cy: i32, angle: i32, col: u8) {
+pub(crate) fn draw_sync_icon(ctx: &mut DrawCtx, cx0: i32, cy: i32, angle: i32, col: u8) {
     let r = 22;
     // A continuous double-arrow arc: two opposing 120° arcs (C: half*180°),
     // each with an arrowhead at its end.
@@ -342,106 +187,9 @@ pub(crate) fn circle_outline(ctx: &mut DrawCtx, cx: i32, cy: i32, r: i32, col: u
     }
 }
 
-/// Pager band: top border + centered "N / M" + four 96×64 buttons
-/// ("<" prev, "<<" first, ">>" last, ">" next), disabled ones greyed — the
-/// C app's eh_draw_pager verbatim.
-pub struct Pager {
-    pub page: usize,
-    pub pages: usize,
-    rect: Option<Rect>,
-}
-
-impl Pager {
-    pub fn new(page: usize, pages: usize) -> Self {
-        Self {
-            page,
-            pages,
-            rect: None,
-        }
-    }
-}
-
-impl Widget for Pager {
-    fn draw(&mut self, ctx: &mut DrawCtx, rect: Rect) {
-        self.rect = Some(rect);
-        ctx.fill(rect, GRAY_WHITE);
-        ctx.hline(0, rect.y, rect.w, 2, GRAY_BLACK);
-
-        let cy = (rect.y + rect.h / 2) as i32;
-        let mid = (rect.x + rect.w / 2) as i32;
-        let label = format!("{} / {}", self.page + 1, self.pages.max(1));
-        ctx.text_center_fit(mid, cy + 12, 30.0, &label, (rect.w / 2) as i32, GRAY_BLACK);
-
-        // Four 96×64 buttons, the C geometry (x offsets from the band edges).
-        let by = (rect.y + (rect.h - 64) / 2) as i32;
-        let bh = 64i32;
-        let bw = 96i32;
-        let gray = GRAY_LGRAY;
-        let can_prev = self.page > 0;
-        let can_next = self.page + 1 < self.pages;
-        draw_pager_button(ctx, (rect.x + 12) as i32, by, bw, bh, "<", can_prev, gray);
-        draw_pager_button(ctx, (rect.x + 116) as i32, by, bw, bh, "<<", can_prev, gray);
-        draw_pager_button(
-            ctx,
-            (rect.x + rect.w - 212) as i32,
-            by,
-            bw,
-            bh,
-            ">>",
-            can_next,
-            gray,
-        );
-        draw_pager_button(
-            ctx,
-            (rect.x + rect.w - 108) as i32,
-            by,
-            bw,
-            bh,
-            ">",
-            can_next,
-            gray,
-        );
-    }
-    fn dirty(&self, out: &mut Vec<Rect>) {
-        if let Some(r) = self.rect {
-            out.push(r);
-        }
-    }
-    fn hit(&self, x: i32, y: i32) -> bool {
-        matches!(self.rect, Some(r) if (x as u32) >= r.x && (x as u32) < r.x + r.w && (y as u32) >= r.y && (y as u32) < r.y + r.h)
-    }
-}
-
-/// One C pager button: a bordered box with a centered label; disabled state
-/// forces the grey label (the C app skips the selected fill and greys the
-/// text instead).
-fn draw_pager_button(
-    ctx: &mut DrawCtx,
-    x: i32,
-    y: i32,
-    w: i32,
-    h: i32,
-    label: &str,
-    enabled: bool,
-    gray: u8,
-) {
-    ctx.outline(
-        Rect {
-            x: x as u32,
-            y: y as u32,
-            w: w as u32,
-            h: h as u32,
-        },
-        2,
-        GRAY_BLACK,
-    );
-    let col = if enabled { GRAY_BLACK } else { gray };
-    ctx.text_center_fit(x + w / 2, y + h / 2 + 10, 28.0, label, w - 12, col);
-}
-
 /// House outline (the C app's pentagon + door) as Bresenham segments, scaled
 /// to the 96px button box.
-fn draw_house(ctx: &mut DrawCtx, cx: i32, cy: i32, col: u8) {
+pub(crate) fn draw_house(ctx: &mut DrawCtx, cx: i32, cy: i32, col: u8) {
     ctx.line(cx - 24, cy + 8, cx - 24, cy + 26, 2, col); // left wall
     ctx.line(cx - 24, cy + 8, cx, cy - 24, 2, col); // roof left
     ctx.line(cx, cy - 24, cx + 24, cy + 8, 2, col); // roof right
@@ -456,7 +204,12 @@ fn draw_house(ctx: &mut DrawCtx, cx: i32, cy: i32, col: u8) {
 }
 
 /// Left-pointing back chevron (used on drilled/overlay pages).
-fn draw_back_chevron(ctx: &mut DrawCtx, cx: i32, cy: i32, col: u8) {
+pub(crate) fn draw_back_chevron(ctx: &mut DrawCtx, cx: i32, cy: i32, col: u8) {
     ctx.line(cx + 12, cy - 18, cx - 12, cy, 3, col);
     ctx.line(cx - 12, cy, cx + 12, cy + 18, 3, col);
 }
+
+// The Source import survives for the icon dispatch sites (ui/icons.rs
+// matches on the active source to pick the baked glyph).
+#[allow(unused)]
+fn _source_type_assert(_: Source) {}

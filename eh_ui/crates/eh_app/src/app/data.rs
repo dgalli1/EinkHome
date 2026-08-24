@@ -13,37 +13,49 @@ impl<B: Framebuffer> App<B> {
         self.refresh_shelf();
     }
 
-    /// Rebuild the shelf at the current page (the caller presents).
+    /// Rebuild the shelf at the current page (the caller presents):
+    /// recompute page math, fetch the page's entries, and push the page
+    /// model into the Slint tree.
     pub fn refresh_shelf(&mut self) {
         self.dirty = true;
-        // Take the framebuffer out first: the new screen is built from the
-        // same canvas (the C app's full-redraw navigation).
-        let fb = self
-            .screen
-            .take()
-            .expect("screen present")
-            .into_framebuffer();
-        if let Some(b) = self.dl_picker.as_mut() {
+        if self.dl_picker.is_some() {
             // The download-folder picker owns the whole page (C
             // BR_MODE_PICKER draws over the settings screen).
-            let mut screen = crate::local::build_browse_page(fb, b, self.content_bottom);
-            screen.content_h = self.content_bottom;
-            self.screen = Some(screen);
+            self.pages = 1;
+            self.entries.clear();
+            let mut b = self.dl_picker.take().expect("picker");
+            self.sync_browser_model(&b);
+            self.dl_picker = Some(b);
             return;
         }
-        let width = fb.screen().width;
-        let mut screen = if self.tab == Tab::Search {
-            self.build_search_page(fb, width)
+        if self.tab == Tab::Search {
+            self.refresh_search_page();
+            return;
+        }
+        if self.source == Source::Folder && self.browser.open {
+            // Folder source: the directory browser IS the shelf body
+            // (C BR_MODE_BROWSER); the top bar carries the current path.
+            self.pages = 1;
+            self.entries.clear();
+            let browser = std::mem::take(&mut self.browser);
+            self.sync_browser_model(&browser);
+            self.browser = browser;
         } else {
-            self.build_library_page(fb, width)
-        };
-        screen.content_h = self.content_bottom;
-        self.screen = Some(screen);
+            let width = self.screen_width();
+            let per = self.page_size(width);
+            let total = self.view_total_books();
+            self.pages = if total == 0 { 1 } else { total.div_ceil(per) };
+            if self.page >= self.pages {
+                self.page = self.pages.saturating_sub(1);
+            }
+            self.entries = self.store_view_page(per, self.page * per);
+            self.sync_shelf_model();
+        }
         // C draw_grid marker (the e2e harness's wait-for-grid token) with
         // the projected tile total — LIBRARY only: the C Search page logs
         // draw_search_tab instead, and the harness reads a draw_grid in a
         // search-invocation slice as "jumped to the library".
-        if self.tab == Tab::Library {
+        if self.tab == Tab::Library && !self.browse_active() {
             let view = self.view_total_books();
             crate::logger::log(&format!(
                 "[bookshelf] draw_grid view={view} page={} top={} bot={}",
@@ -60,6 +72,109 @@ impl<B: Framebuffer> App<B> {
         ));
     }
 
+    /// Push the library page's tiles into the Slint entries model.
+    fn sync_shelf_model(&mut self) {
+        let tiles: Vec<crate::ui::ShelfTile> = self
+            .entries
+            .iter()
+            .map(|e| {
+                let (art, has_art) = match &e.art {
+                    Some((rgb, w, h)) => (
+                        slint::Image::from_rgb8(slint::SharedPixelBuffer::<
+                            slint::Rgb8Pixel,
+                        >::clone_from_slice(rgb, *w, *h)),
+                        true,
+                    ),
+                    None => (slint::Image::default(), false),
+                };
+                crate::ui::ShelfTile {
+                    title: e.book.title.clone().into(),
+                    author: e.book.author.clone().into(),
+                    art,
+                    has_art,
+                    stack: e.stack,
+                    stack_label: e.stack_label.clone().into(),
+                    stack_count: e.stack_count as i32,
+                    progress: e.progress as i32,
+                }
+            })
+            .collect();
+        let model = slint::VecModel::from(tiles);
+        self.ui.comp().set_entries(slint::ModelRc::new(model));
+    }
+
+    /// Push a browser listing (Folder source body or the download-dir
+    /// picker) into the Slint browse model: `rows_visible` fixed rows
+    /// starting at the scroll offset, blank-padded.
+    fn sync_browser_model(&mut self, browser: &crate::local::browser::Browser) {
+        let rows_visible = crate::local::browser::Browser::rows_visible(self.content_bottom);
+        let mut rows: Vec<crate::ui::BrowseRow> = Vec::with_capacity(rows_visible);
+        for i in 0..rows_visible {
+            match browser.entries.get(browser.scroll + i) {
+                Some(e) => rows.push(crate::ui::BrowseRow {
+                    label: if e.is_dir {
+                        format!("{}/", e.name).into()
+                    } else {
+                        e.name.clone().into()
+                    },
+                    blank: false,
+                }),
+                None => rows.push(crate::ui::BrowseRow {
+                    label: slint::SharedString::new(),
+                    blank: true,
+                }),
+            }
+        }
+        let scroll = browser.scroll as i32;
+        let model = slint::VecModel::from(rows);
+        let c = self.ui.comp();
+        c.set_browse_rows(slint::ModelRc::new(model));
+        c.set_browse_scroll(scroll);
+    }
+
+    /// The Search sub-page: history (or live suggestions) rows + paging.
+    fn refresh_search_page(&mut self) {
+        // History rows per page: the C eh_history_pagesize formula.
+        let rows_per = ((self.content_bottom as i32
+            - crate::appui::PAGER_H as i32
+            - crate::appui::TOP_BAR_H as i32
+            - crate::appui::TOP_BAR_PAD as i32
+            - 88)
+            / 96)
+            .max(1) as usize;
+        let total = self.store.search_count().unwrap_or(0) as usize;
+        self.pages = if total == 0 {
+            1
+        } else {
+            total.div_ceil(rows_per)
+        };
+        if self.page >= self.pages {
+            self.page = self.pages.saturating_sub(1);
+        }
+        let offset = self.page * rows_per;
+        crate::logger::log("[bookshelf] draw_search_tab");
+        let history = self.store.search_list(rows_per, offset).unwrap_or_default();
+        // While the keyboard is open with hits, the suggestion band
+        // replaces the history list (C suggest_debounce_tick →
+        // eh_draw_suggestions); empty hits keep the history visible.
+        let using_suggestions = self.search_kb && !self.suggestions.is_empty();
+        let rows: Vec<String> = if using_suggestions {
+            self.suggestions.clone()
+        } else {
+            history
+        };
+        let hint = rows.is_empty();
+        let list: Vec<String> = if hint {
+            vec![crate::i18n::tr("search.empty").to_string()]
+        } else {
+            rows
+        };
+        let model = slint::VecModel::from(list.into_iter().map(slint::SharedString::from).collect::<Vec<_>>());
+        let c = self.ui.comp();
+        c.set_history(slint::ModelRc::new(model));
+        c.set_history_hint(hint);
+    }
+
     /// Flip to `page` (clamped): fetch the page's covers into the cache
     /// first (C cover-warm pass), then rebuild.
     pub fn goto_page(&mut self, page: usize) {
@@ -67,7 +182,7 @@ impl<B: Framebuffer> App<B> {
             return;
         }
         self.page = page;
-        let width = self.screen().framebuffer().screen().width;
+        let width = self.screen_width();
         let per = self.page_size(width);
         let books = if self.query.is_empty() {
             self.store.list_books(per, page * per).unwrap_or_default()
@@ -78,7 +193,7 @@ impl<B: Framebuffer> App<B> {
         };
         // C cover-warm pass — network-gated: an offline flip renders the
         // cached covers only (no remote fetches, C eh_plat_net_active).
-        if self.screen().framebuffer().net_active() {
+        if self.fb().net_active() {
             for b in &books {
                 let _ = cover::fetch(&self.client, &self.covers_dir, &b.id);
             }

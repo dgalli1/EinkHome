@@ -189,8 +189,7 @@ impl<B: Framebuffer> App<B> {
                     "[eh_app] opening reader app={rp} path={}",
                     path.display()
                 ));
-                self.screen()
-                    .framebuffer_mut()
+                self.fb()
                     .launch_app(rp, title, &[path_str.clone()])
             }
             _ => {
@@ -199,7 +198,7 @@ impl<B: Framebuffer> App<B> {
                     path.display()
                 ));
                 crate::log(&format!("[eh_app] opening reader path={}", path.display()));
-                self.screen().framebuffer_mut().open_book(&path_str, title)
+                self.fb().open_book(&path_str, title)
             }
         };
         if !ok {
