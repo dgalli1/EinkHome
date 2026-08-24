@@ -44,11 +44,12 @@ impl<B: Framebuffer> App<B> {
         // draw_search_tab instead, and the harness reads a draw_grid in a
         // search-invocation slice as "jumped to the library".
         if self.tab == Tab::Library {
-            let sw = self.screen().framebuffer().screen().width;
             let view = self.view_total_books();
             crate::logger::log(&format!(
-                "[bookshelf] draw_grid view={view} page={} cell={}x0 top=96 bot={}",
-                self.page, sw, self.content_bottom
+                "[bookshelf] draw_grid view={view} page={} top={} bot={}",
+                self.page,
+                crate::appui::TOP_BAR_H,
+                self.content_bottom
             ));
         }
         crate::log(&format!(
