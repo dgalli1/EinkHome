@@ -36,10 +36,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: eh_ui
-      - name: Run cargo fmt check
+      - name: Run make fmt
         run: make fmt
       - name: Run make clippy
         run: make clippy
+      - name: Run cargo doc (zero warnings)
+        run: cd eh_ui && RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
 
   python:
     name: Python (ruff, mypy, coverage)
