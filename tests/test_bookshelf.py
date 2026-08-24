@@ -1786,8 +1786,17 @@ def _wait_log_slice(bs: BookshelfSession, before: str, needle: str, *, timeout: 
         if needle in bs.current_log()[len(before):]:
             return
         time.sleep(0.1)
+    # Timeout: distinguish "app stuck" from "app alive but the event
+    # never produced the expected line" — the two need opposite fixes.
+    try:
+        state = bs.cmd("state")
+        alive = f"(app alive, {state.strip()})"
+    except (ConnectionError, OSError):
+        alive = "(app unreachable — crashed or socket lost)"
+    tail = bs.current_log()[-400:]
     raise AssertionError(
-        f"log slice after offset {len(before)} never contained {needle!r}"
+        f"log slice after offset {len(before)} never contained "
+        f"{needle!r} within {timeout}s {alive}; tail:\n{tail}"
     )
 
 
