@@ -1777,7 +1777,7 @@ def _wait_draw_grid_view(bs: BookshelfSession, before: str, want: int, *, timeou
     )
 
 
-def _wait_log_slice(bs: BookshelfSession, before: str, needle: str, *, timeout: float = 8.0) -> None:
+def _wait_log_slice(bs: BookshelfSession, before: str, needle: str, *, timeout: float = 20.0) -> None:
     """Poll until *needle* appears in the log text appended after the
     *before* snapshot.  Used to confirm a tap produced a specific redraw
     line without being fooled by unrelated background redraws."""

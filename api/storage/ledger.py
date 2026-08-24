@@ -791,5 +791,10 @@ class SyncLedger:
         return cur.rowcount
 
     def close(self) -> None:
-        self.rdcon.close()
+        # Take the read lock first so a request thread mid-`delta`/`count`
+        # finishes its statement before the connection disappears
+        # (teardown racing a pending read = the same InterfaceError the
+        # read lock exists to prevent).
+        with self._rd_lock:
+            self.rdcon.close()
         self.con.close()
