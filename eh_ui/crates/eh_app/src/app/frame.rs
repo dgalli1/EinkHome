@@ -84,6 +84,7 @@ impl<B: Framebuffer> App<B> {
             Overlay::Context => crate::ui::EhOverlay::Context,
             Overlay::GroupChooser => crate::ui::EhOverlay::GroupChooser,
             Overlay::SortChooser => crate::ui::EhOverlay::SortChooser,
+            Overlay::Detail => crate::ui::EhOverlay::Detail,
             Overlay::LogViewer => crate::ui::EhOverlay::LogViewer,
             Overlay::Licenses => crate::ui::EhOverlay::Licenses,
             Overlay::LicenseDetail => crate::ui::EhOverlay::LicenseDetail,
@@ -501,6 +502,103 @@ impl<B: Framebuffer> App<B> {
         };
         let c = self.ui.comp();
         match self.overlay {
+            Overlay::Detail => {
+                let Some(book) = self.detail_book.clone() else {
+                    return;
+                };
+                c.set_detail_title(book.title.clone().into());
+                // cover: cache first, then the local extraction path
+                let art = crate::cover::load_cached(&self.covers_dir, &book.id)
+                    .and_then(|bytes| {
+                        crate::cover::decode_rgb(&bytes)
+                            .ok()
+                            .map(|(w, h, rgb)| (rgb, w, h))
+                    })
+                    .or_else(|| {
+                        let book_ref = &book;
+                        self.local_cover_art(book_ref)
+                    });
+                match &art {
+                    Some((rgb, w, h)) => {
+                        c.set_detail_cover(slint::Image::from_rgb8(slint::SharedPixelBuffer::<
+                            slint::Rgb8Pixel,
+                        >::clone_from_slice(
+                            rgb, *w, *h
+                        )));
+                        c.set_detail_has_cover(true);
+                    }
+                    None => {
+                        c.set_detail_cover(slint::Image::default());
+                        c.set_detail_has_cover(false);
+                    }
+                }
+                // metadata rows: every field the store carries
+                let pct = crate::progress::percent(&self.progress, &book.local_path);
+                let series = if book.series.is_empty() {
+                    String::new()
+                } else if book.series_idx > 0.0 {
+                    format!("{} #{:0>2}", book.series, book.series_idx.round() as i64)
+                } else {
+                    book.series.clone()
+                };
+                let year = crate::store::year_of(book.added_at).unwrap_or_default();
+                let added = crate::store::ymd_of(book.added_at)
+                    .map(|(y, m, d)| format!("{y:04}-{m:02}-{d:02}"))
+                    .unwrap_or_else(|| "–".to_string());
+                let size = fmt_size(book.size);
+                let fmt = if book.ext.is_empty() {
+                    "–".to_string()
+                } else {
+                    format!("{} · {}", book.ext.to_uppercase(), size)
+                };
+                let progress = if pct > 0 {
+                    format!("{pct} %")
+                } else {
+                    "–".to_string()
+                };
+                let source = match book.source.as_str() {
+                    "local" => crate::i18n::tr("source.local").to_string(),
+                    "folder" => crate::i18n::tr("source.folder").to_string(),
+                    _ => crate::i18n::tr("source.kavita").to_string(),
+                };
+                let downloaded = if book.downloaded {
+                    crate::i18n::tr("detail.yes").to_string()
+                } else {
+                    crate::i18n::tr("detail.no").to_string()
+                };
+                let rows: Vec<crate::ui::DetailRow> = [
+                    ("detail.author", book.author.clone()),
+                    ("detail.series", series),
+                    ("detail.year", year),
+                    (
+                        "detail.genre",
+                        if book.genre.is_empty() {
+                            "–".into()
+                        } else {
+                            book.genre
+                        },
+                    ),
+                    (
+                        "detail.format",
+                        if book.ext.is_empty() {
+                            "–".into()
+                        } else {
+                            fmt
+                        },
+                    ),
+                    ("detail.added", added),
+                    ("detail.progress", progress),
+                    ("detail.source", source),
+                    ("detail.downloaded", downloaded),
+                ]
+                .iter()
+                .map(|(k, v)| crate::ui::DetailRow {
+                    label: crate::i18n::tr(k).to_string().into(),
+                    value: v.into(),
+                })
+                .collect();
+                c.set_detail_rows(slint::ModelRc::new(slint::VecModel::from(rows)));
+            }
             Overlay::Settings => {
                 c.set_settings_title(crate::i18n::tr("settings.title").to_string().into());
                 let reader_val = self.reader_label();
@@ -710,6 +808,23 @@ impl<B: Framebuffer> App<B> {
             }
             _ => {}
         }
+    }
+}
+
+/// Human-readable file size for the Detail page (C eh_draw_details' size).
+fn fmt_size(bytes: i64) -> String {
+    let b = bytes.max(0) as f64;
+    const KB: f64 = 1024.0;
+    const MB: f64 = KB * 1024.0;
+    const GB: f64 = MB * 1024.0;
+    if b >= GB {
+        format!("{:.1} GB", b / GB)
+    } else if b >= MB {
+        format!("{:.1} MB", b / MB)
+    } else if b >= KB {
+        format!("{:.0} KB", b / KB)
+    } else {
+        format!("{b} B")
     }
 }
 

@@ -115,6 +115,7 @@ impl<B: Framebuffer> App<B> {
                 Action::SettingsBack => self.settings_back(),
                 Action::SettingsRow(i) => self.settings_row(i),
                 Action::ViewerBack => self.viewer_back(),
+                Action::DetailBack => self.detail_back(),
                 Action::ViewerScroll(d) => self.viewer_scroll(d),
                 Action::LicenseRow(i) => self.license_row(i),
                 Action::LauncherBack => self.launcher_back(),
@@ -228,6 +229,12 @@ impl<B: Framebuffer> App<B> {
                 self.dirty = true;
             }
         }
+    }
+
+    /// The book-detail page's back chevron: close + drop the stashed book.
+    pub(crate) fn detail_back(&mut self) {
+        self.overlay = Overlay::None;
+        self.detail_book = None;
     }
 
     /// The viewers' back chevron: detail -> list -> shelf (C

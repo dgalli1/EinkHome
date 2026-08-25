@@ -95,6 +95,8 @@ pub enum Action {
     SettingsRow(usize),
     /// The viewers' back chevron (detail -> list -> shelf).
     ViewerBack,
+    /// The book-detail page's back chevron.
+    DetailBack,
     /// A corner scroll button in a viewer (-1 up, +1 down).
     ViewerScroll(i32),
     /// A licenses-list row.
@@ -353,6 +355,7 @@ impl Ui {
         comp.on_settings_back(|| push_action(Action::SettingsBack));
         comp.on_settings_row(|i| push_action(Action::SettingsRow(i as usize)));
         comp.on_viewer_back(|| push_action(Action::ViewerBack));
+        comp.on_detail_back(|| push_action(Action::DetailBack));
         comp.on_viewer_scroll(|d| push_action(Action::ViewerScroll(d)));
         comp.on_lic_row(|i| push_action(Action::LicenseRow(i as usize)));
         comp.on_launcher_back(|| push_action(Action::LauncherBack));

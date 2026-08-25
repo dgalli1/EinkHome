@@ -6,6 +6,7 @@
 #[derive(Clone, Copy, PartialEq)]
 pub enum ContextAction {
     Open,
+    Details,
     Download,
     Delete,
     DownloadAll,
@@ -17,6 +18,7 @@ impl ContextAction {
     pub fn label_key(self) -> &'static str {
         match self {
             ContextAction::Open => "ctx.open",
+            ContextAction::Details => "ctx.details",
             ContextAction::Download => "ctx.download",
             ContextAction::Delete => "ctx.delete",
             ContextAction::DownloadAll => "ctx.download_all",

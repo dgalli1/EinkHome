@@ -17,7 +17,7 @@ use crate::client::ApiClient;
 use crate::config::{parse_kv_file, Config};
 use crate::cover;
 use crate::shelf::ShelfEntry;
-use crate::store::Store;
+use crate::store::{Book, Store};
 use crate::widgets::sync_popup::SyncPopup;
 
 mod data;
@@ -88,6 +88,8 @@ pub enum Overlay {
     GroupChooser,
     /// The Sort by chooser sheet.
     SortChooser,
+    /// One book's metadata page (long-press → Details).
+    Detail,
     /// The full-screen log viewer.
     LogViewer,
     /// The licenses list viewer.
@@ -325,6 +327,8 @@ pub struct App<B: Framebuffer> {
     pub(crate) sync_worker: crate::sync::WorkerHandle,
     /// Sync-progress sheet state (visible while overlay == Overlay::Sync).
     pub sync_popup: SyncPopup,
+    /// The book shown on the Detail page (long-press → Details).
+    pub(crate) detail_book: Option<Book>,
 }
 
 /// True when `path` exists (or was just created) and accepts a write
@@ -466,6 +470,7 @@ impl<B: Framebuffer> App<B> {
             db_path,
             sync_worker: crate::sync::WorkerHandle::default(),
             sync_popup: SyncPopup::default(),
+            detail_book: None,
         };
         app.sync_fb_cache();
         app.boot();
@@ -642,6 +647,39 @@ mod tests {
         );
         assert_eq!(normalize_host("http://x/"), "http://x/");
         assert_eq!(normalize_host("https://x:1/"), "https://x:1/");
+    }
+
+    #[test]
+    fn detail_opens_from_context_and_back_closes() {
+        // Long-press → Details: the overlay swaps to Detail with the book
+        // stashed; Back clears both (the shelf state stays untouched).
+        let mut app = mk_app("detailopen");
+        let book = Book {
+            id: "d1".into(),
+            title: "Detail Me".into(),
+            author: "Author X".into(),
+            series: "Saga".into(),
+            series_idx: 3.0,
+            ext: "epub".into(),
+            size: 1_572_864,
+            added_at: 1_700_000_000,
+            genre: "Fantasy".into(),
+            ..Default::default()
+        };
+        app.open_context_book(&book);
+        assert_eq!(app.overlay, Overlay::Context);
+        // The menu carries Details as the second row.
+        assert_eq!(app.context.items[1].label_key(), "ctx.details");
+
+        app.context_row(1); // Details
+        assert_eq!(app.overlay, Overlay::Detail);
+        let stashed = app.detail_book.as_ref().unwrap();
+        assert_eq!(stashed.id, "d1");
+        assert_eq!(app.top_title(), ""); // the shelf title is untouched
+
+        app.detail_back();
+        assert_eq!(app.overlay, Overlay::None);
+        assert!(app.detail_book.is_none());
     }
 
     #[test]

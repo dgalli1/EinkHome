@@ -381,6 +381,7 @@ static TABLE: &[(&str, &str, &str, &str, &str)] = &[
         "Scarica",
     ),
     ("ctx.open", "Open", "Öffnen", "Ouvrir", "Apri"),
+    ("ctx.details", "Details", "Details", "Détails", "Dettagli"),
     (
         "ctx.download_all",
         "Download all",
@@ -396,6 +397,29 @@ static TABLE: &[(&str, &str, &str, &str, &str)] = &[
         "Supprimer la série",
         "Elimina serie",
     ),
+    ("detail.author", "Author", "Autor", "Auteur", "Autore"),
+    ("detail.series", "Series", "Reihe", "Série", "Serie"),
+    ("detail.year", "Year", "Jahr", "Année", "Anno"),
+    ("detail.genre", "Genre", "Genre", "Genre", "Genere"),
+    ("detail.format", "Format", "Format", "Format", "Formato"),
+    ("detail.added", "Added", "Hinzugefügt", "Ajouté", "Aggiunto"),
+    (
+        "detail.progress",
+        "Progress",
+        "Fortschritt",
+        "Progression",
+        "Avanzamento",
+    ),
+    ("detail.source", "Source", "Quelle", "Source", "Sorgente"),
+    (
+        "detail.downloaded",
+        "Downloaded",
+        "Heruntergeladen",
+        "Téléchargé",
+        "Scaricato",
+    ),
+    ("detail.yes", "Yes", "Ja", "Oui", "Sì"),
+    ("detail.no", "No", "Nein", "Non", "No"),
     ("dl.failed", "Failed", "Fehlgeschlagen", "Échoué", "Fallito"),
     (
         "dl.in_progress",
@@ -618,8 +642,9 @@ mod tests {
 
     #[test]
     fn table_rows_are_complete_across_languages() {
-        // 83 keys ported verbatim from eh_g_i18n[] + dl.remaining.
-        assert_eq!(TABLE.len(), 85, "unexpected i18n table size");
+        // 83 keys ported verbatim from eh_g_i18n[] + dl.remaining + the
+        // Slint-port additions (ctx.details, detail.* metadata labels).
+        assert_eq!(TABLE.len(), 97, "unexpected i18n table size");
         for row in TABLE {
             for col in [row.1, row.2, row.3, row.4] {
                 assert!(!col.is_empty(), "empty translation for key {}", row.0);

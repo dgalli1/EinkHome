@@ -87,6 +87,7 @@ impl<B: Framebuffer> App<B> {
     pub(crate) fn open_context_book(&mut self, book: &Book) {
         self.context.items = vec![
             ContextAction::Open,
+            ContextAction::Details,
             ContextAction::Download,
             ContextAction::Delete,
         ];
@@ -112,6 +113,11 @@ impl<B: Framebuffer> App<B> {
                     self.press_book(&b);
                 }
             }
+            ContextAction::Details => {
+                if let Some(b) = book {
+                    self.open_detail(&b);
+                }
+            }
             ContextAction::Download => {
                 if let Some(b) = book {
                     let cur = book_local_path(&b, &self.downloads_dir());
@@ -134,6 +140,14 @@ impl<B: Framebuffer> App<B> {
             }
         }
         self.refresh_shelf();
+    }
+
+    /// Open the book's metadata page (long-press → Details): the overlay
+    /// shows the cover large + every store field; Back returns to the
+    /// shelf with the drill/page state untouched.
+    pub(crate) fn open_detail(&mut self, book: &Book) {
+        self.detail_book = Some(book.clone());
+        self.set_overlay(Overlay::Detail);
     }
 
     /// Remove a downloaded book's local file (C eh_context Delete).

@@ -355,6 +355,9 @@ fn fnv1a_64(data: &[u8]) -> u64 {
 /// base state stays), so Download reports NONE.
 fn overlay_int(o: Overlay) -> i32 {
     match o {
+        // Detail is a new page without a C ordinal; report SETTINGS-like
+        // full-screen so the tests' overlay probe stays meaningful.
+        Overlay::Detail => 5,
         Overlay::None | Overlay::Download | Overlay::Sync => 0,
         Overlay::Source => 1,
         Overlay::More => 2,

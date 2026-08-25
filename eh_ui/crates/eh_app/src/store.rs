@@ -1060,19 +1060,39 @@ fn parse_ts(s: Option<&str>) -> i64 {
 }
 
 /// Year from unix timestamp (Howard-Hinnant civil-from-days).
+pub fn ymd_of(ts: i64) -> Option<(i64, i64, i64)> {
+    if ts == 0 {
+        return None;
+    }
+    // Howard-Hinnant civil_from_days: the input is days since 1970-01-01,
+    // shifted into days since 0000-03-01 before the era math.
+    let days = ts.div_euclid(86400) + 719_468;
+    let era = days.div_euclid(146097);
+    let doe = days - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    Some((if m <= 2 { y + 1 } else { y }, m, d))
+}
+
 pub fn year_of(ts: i64) -> Option<String> {
     if ts == 0 {
         return None;
     }
-    let days = ts.div_euclid(86400);
-    let era = if days >= -719468 {
-        days.div_euclid(146097)
-    } else {
-        (days - 146096).div_euclid(146097)
-    };
+    // Same civil_from_days shift as ymd_of (days since 1970 → 0000-03-01).
+    let days = ts.div_euclid(86400) + 719_468;
+    let era = days.div_euclid(146097);
     let doe = days - era * 146097;
     let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
     let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    // The March-based year runs Mar..Feb: January and February belong to
+    // the following calendar year.
+    let y = if mp >= 10 { y + 1 } else { y };
     Some(format!("{y}"))
 }
 
@@ -1698,5 +1718,29 @@ mod tests {
             )
             .unwrap();
         assert_eq!(grouped as usize, VIEW_SCAN_CAP);
+    }
+}
+
+#[cfg(test)]
+mod date_tests {
+    use super::*;
+
+    #[test]
+    fn civil_dates_round_trip_the_epoch_shift() {
+        // 1970-01-01, 2023-01-01 (the mock corpus date), 2026-08-25 and a
+        // leap-day: the +719468 shift must land the civil year exactly.
+        // ts == 0 is the "unknown added_at" sentinel → None by contract.
+        assert!(ymd_of(0).is_none());
+        assert!(year_of(0).is_none());
+        let cases = [
+            (1_672_531_200, (2023, 1, 1)),
+            (1_771_977_600, (2026, 2, 25)),
+            (951_782_400, (2000, 2, 29)),
+        ];
+        for (ts, want) in cases {
+            let (y, m, d) = ymd_of(ts).unwrap();
+            assert_eq!((y, m, d), want, "ymd_of({ts})");
+            assert_eq!(year_of(ts).unwrap(), format!("{y}"));
+        }
     }
 }

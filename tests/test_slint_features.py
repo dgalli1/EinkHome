@@ -187,6 +187,16 @@ def test_exercise_every_feature(feature_env):
         bs.long_press_book(0)
         _settle(bs, 0.6)
         _snap(bs, "08-context-menu")
+
+        # Details: the second row of the 4-row menu (Open/Details/
+        # Download/Delete) opens the metadata page (cover large + every
+        # store field); Back returns to the shelf.
+        bs.tap_context_item(1, n_items=4)
+        _settle(bs, 0.8)
+        _snap(bs, "08b-book-detail")
+        bs.tap_at(*bs.geom.home_button_center())  # the detail back chevron
+        _settle(bs, 0.7)
+
         bs.tap_at(*bs.geom.outside_more_overlay()); _settle(bs, 0.7)
         _settle(bs, 0.5)
 

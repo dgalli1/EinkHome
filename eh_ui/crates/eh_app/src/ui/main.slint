@@ -7,10 +7,12 @@
 // renders through the software renderer into the 8bpp/24bpp/32bpp
 // framebuffer.
 
-import { EhOverlay, EhTab, ShelfTile, BrowseRow } from "types.slint";
+import { EhOverlay, EhTab, ShelfTile, BrowseRow, DetailRow } from "types.slint";
 import { TopBar } from "topbar.slint";
 import { ShelfBody } from "shelf.slint";
 import { BrowseBody } from "browser.slint";
+import { BookDetailPage } from "detail.slint";
+import { DetailRow as DetailRowT } from "types.slint";
 import { Pager } from "pager.slint";
 import { SelfPanel } from "selfpanel.slint";
 import { MoreMenu } from "more.slint";
@@ -25,7 +27,7 @@ import { LauncherPage, LauncherEntry } from "launcher.slint";
 
 export { LauncherEntry }
 
-export { EhOverlay, EhTab, ShelfTile, BrowseRow }
+export { EhOverlay, EhTab, ShelfTile, BrowseRow, DetailRow }
 
 export component EhAppWindow inherits Window {
     background: white;
@@ -90,6 +92,10 @@ export component EhAppWindow inherits Window {
     in-out property <string> settings-logs: "";
     in-out property <string> settings-licenses: "";
     in-out property <string> viewer-path: "";
+    in-out property <string> detail-title: "";
+    in-out property <[DetailRow]> detail-rows: [];
+    in-out property <image> detail-cover;
+    in-out property <bool> detail-has-cover: false;
     in-out property <[string]> viewer-rows: [];
     in-out property <bool> viewer-empty: false;
     in-out property <string> viewer-empty-text: "";
@@ -149,6 +155,7 @@ export component EhAppWindow inherits Window {
     callback settings-back;
     callback settings-row(int);
     callback viewer-back;
+    callback detail-back;
     callback viewer-scroll(int);
     callback lic-row(int);
     callback launcher-back;
@@ -322,6 +329,16 @@ export component EhAppWindow inherits Window {
         back-icon: root.back-icon;
         back => { root.settings-back(); }
         row-tap(i) => { root.settings-row(i); }
+    }
+    if (root.overlay == EhOverlay.detail): BookDetailPage {
+        width: root.width;
+        height: root.height;
+        title: root.detail-title;
+        rows: root.detail-rows;
+        cover: root.detail-cover;
+        has-cover: root.detail-has-cover;
+        back-icon: root.back-icon;
+        back => { root.detail-back(); }
     }
     if (root.overlay == EhOverlay.log-viewer): LogViewerPage {
         width: root.width;

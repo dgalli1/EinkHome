@@ -1,0 +1,80 @@
+// One book's metadata page (long-press → Details): the cover in large
+// (2:3 card, 333×500 at the content's top-left) and every field the store
+// carries beside it, as label/value rows.  Back returns to the shelf.
+
+import { TopBar } from "topbar.slint";
+import { DetailRow } from "types.slint";
+
+export component BookDetailPage inherits Rectangle {
+    in-out property <string> title: "";
+    in-out property <[DetailRow]> rows: [];
+    in-out property <image> cover;
+    in-out property <bool> has-cover: false;
+    in-out property <image> back-icon;
+
+    callback back;
+
+    background: white;
+
+    TopBar {
+        y: 0;
+        back: true;
+        search-tab: true;
+        title-bold: true;
+        top-title: root.title;
+        back-icon: root.back-icon;
+        home => { root.back(); }
+    }
+
+    // the cover in large: 2:3 card at 333×500
+    Image {
+        x: 49px;
+        y: 129px;
+        width: 333px;
+        height: 500px;
+        source: root.cover;
+        visible: root.has-cover;
+        image-rendering: pixelated;
+    }
+    Rectangle {
+        x: 48px;
+        y: 128px;
+        width: 335px;
+        height: 502px;
+        border-width: 1px;
+        border-color: black;
+        visible: !root.has-cover;
+    }
+
+    property <length> rows-x: 429px;
+    property <length> rows-w: root.width - rows-x - 48px;
+
+    for r[idx] in root.rows: Rectangle {
+        x: rows-x;
+        y: (128 + idx * 96) * 1px;
+        width: rows-w;
+        height: 88px;
+        background: transparent;
+        Text {
+            x: 0;
+            y: 0;
+            height: 26px;
+            font-size: 22px;
+            color: #555555;
+            overflow: elide;
+            width: parent.width;
+            text: r.label;
+        }
+        Text {
+            x: 0;
+            y: 30px;
+            height: 34px;
+            vertical-alignment: center;
+            font-size: 28px;
+            color: black;
+            overflow: elide;
+            width: parent.width;
+            text: r.value;
+        }
+    }
+}
