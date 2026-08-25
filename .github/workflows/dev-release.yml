@@ -160,16 +160,28 @@ jobs:
     name: Android APK (arm64 + x86_64)
     # The port lives on the demo line today; build whenever the crate
     # is present so the APK joins the release automatically on merge.
-    if: hashFiles('eh_ui/crates/eh_android/Cargo.toml') != ''
+    # (hashFiles is not available in job-level if, so the gate is a
+    # step: everything after it is skipped on branches without the
+    # crate and the job reports success.)
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v5
+      - name: Gate on the eh_android crate
+        id: gate
+        run: |
+          if [ -f eh_ui/crates/eh_android/Cargo.toml ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          fi
       - uses: actions/setup-java@v4
+        if: steps.gate.outputs.present == 'true'
         with:
           distribution: temurin
           java-version: "17"
       - name: Cache Android SDK components
+        if: steps.gate.outputs.present == 'true'
         id: cache-android
         uses: actions/cache@v4
         with:
@@ -179,22 +191,26 @@ jobs:
             /usr/local/lib/android/sdk/platforms/android-34
           key: android-sdk-ndk-27.2.12479018-bt-37.0.0-p34
       - name: Install Android SDK components
-        if: steps.cache-android.outputs.cache-hit != 'true'
+        if: steps.gate.outputs.present == 'true' && steps.cache-android.outputs.cache-hit != 'true'
         run: |
           sdkmanager --install "ndk;27.2.12479018" "build-tools;37.0.0" "platforms;android-34" > /dev/null
       - name: Set up Rust (android cross targets)
+        if: steps.gate.outputs.present == 'true'
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-linux-android,x86_64-linux-android
       - uses: Swatinem/rust-cache@v2
+        if: steps.gate.outputs.present == 'true'
         with:
           workspaces: eh_ui
       - name: Build APK
+        if: steps.gate.outputs.present == 'true'
         run: scripts/make-apk.sh
         env:
           ANDROID_HOME: /usr/local/lib/android/sdk
           ANDROID_NDK: /usr/local/lib/android/sdk/ndk/27.2.12479018
       - name: Upload APK
+        if: steps.gate.outputs.present == 'true'
         uses: actions/upload-artifact@v7
         with:
           name: dev-release-android
@@ -212,7 +228,7 @@ jobs:
         always() && !cancelled() &&
         needs.device.result == 'success' &&
         needs.host.result == 'success' &&
-        (needs.android.result == 'success' || needs.android.result == 'skipped') &&
+        needs.android.result == 'success' &&
         (github.event_name == 'push' ||
          (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'))
       }}
