@@ -315,7 +315,7 @@ impl<B: Framebuffer> App<B> {
     /// the running counters).
     pub(crate) fn do_sync(&mut self) {
         if self.syncing {
-            self.sync_popup_open();
+            self.sync_popup_open(SyncStage::Meta);
             return;
         }
         self.start_sync(true);
@@ -360,7 +360,7 @@ impl<B: Framebuffer> App<B> {
         let cancel = self.sync_worker.arm(rx);
         self.syncing = true;
         if popup {
-            self.sync_popup_open();
+            self.sync_popup_open(SyncStage::Meta);
         }
         let client = self.client.clone();
         let db_path = self.db_path.clone();
@@ -408,18 +408,18 @@ impl<B: Framebuffer> App<B> {
         self.syncing = false;
     }
 
-    /// Open the sync-progress sheet (C eh_sync_popup_open).
-    pub(crate) fn sync_popup_open(&mut self) {
+    /// Open the sync-progress sheet (C eh_sync_popup_open) at `stage`.
+    /// Re-opening over a LIVE run keeps the running counters (C resets
+    /// only when no sync runs, so the progress lines never jump
+    /// backwards); a fresh run zeroes them.
+    pub(crate) fn sync_popup_open(&mut self, stage: SyncStage) {
         if self.sync_popup.open && self.overlay == Overlay::Sync {
             return;
         }
-        // Re-opening the sheet over a LIVE run keeps the running counters
-        // (C eh_sync_popup_open resets only when no sync is running, so
-        // the progress lines never jump backwards).
         let live = self.syncing;
         let mut p = std::mem::take(&mut self.sync_popup);
         p.open = true;
-        p.stage = SyncStage::Meta;
+        p.stage = stage;
         p.stage_at = Some(std::time::Instant::now());
         if !live {
             p.round = 0;

@@ -1373,7 +1373,7 @@ mod tests {
     #[test]
     fn sync_popup_tap_dismisses_only_after_finish() {
         let mut app = mk_app("syncdismiss");
-        app.sync_popup_open();
+        app.sync_popup_open(SyncStage::Meta);
         app.syncing = true; // simulate the live run
         app.present(); // sync the sheet into the Slint tree before tapping
         tap(&mut app, 536, 700);
@@ -1391,7 +1391,7 @@ mod tests {
     #[test]
     fn sync_popup_fail_auto_closes_after_1500ms() {
         let mut app = mk_app("syncfailclose");
-        app.sync_popup_open();
+        app.sync_popup_open(SyncStage::Meta);
         app.apply_sync_event(crate::sync::SyncEvent::Failed("no server".into()));
         assert_eq!(app.sync_popup.stage, SyncStage::Fail);
         assert!(app.sync_popup.open);
@@ -1523,5 +1523,72 @@ mod tests {
         let px = draw_overlay_pixels(&mut app);
         let v0 = menu_row_value_dark(&px, 0);
         assert!(v0 > 40, "'None' value missing at boot, dark={v0}");
+    }
+    /// The Local import must be VISIBLE: kicking it opens the sync sheet
+    /// at the Scan stage, the landed result fills the store and flashes
+    /// Done, and the sheet auto-closes (the "silent block" regression).
+    #[test]
+    fn local_scan_opens_sheet_and_applies_results() {
+        let mut app = mk_app("localscan");
+        let root = tempfile::tempdir().unwrap();
+        for i in 0..3 {
+            std::fs::write(root.path().join(format!("b{i}.epub")), b"x").unwrap();
+        }
+        crate::local::kick_import_rooted(&mut app, root.path().to_str().unwrap());
+        assert!(app.syncing);
+        assert_eq!(app.overlay, Overlay::Sync, "scan must announce itself");
+        assert!(app.sync_popup.open);
+        assert_eq!(app.sync_popup.stage, SyncStage::Scan);
+        assert_eq!(app.sync_popup.scanned, 0);
+
+        // Wait out the worker (3 tiny files), polling like tick() does.
+        let mut applied = false;
+        for _ in 0..300 {
+            if crate::local::poll_import(&mut app) && !app.syncing {
+                applied = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(applied, "import never landed");
+        assert_eq!(app.store.list_books(10, 0).unwrap().len(), 3);
+        assert_eq!(app.sync_popup.stage, SyncStage::Done, "Done must flash");
+
+        // The Done flash auto-closes the sheet.
+        std::thread::sleep(std::time::Duration::from_millis(SYNC_DONE_CLOSE_MS + 50));
+        assert!(app.sync_popup_close_tick());
+        assert_eq!(app.overlay, Overlay::None);
+    }
+
+    /// Injected progress ticks move the sheet counter; a foreign
+    /// generation is ignored entirely — progress AND result.
+    #[test]
+    fn local_scan_progress_ticks_obey_generation_guard() {
+        let mut app = mk_app("localscangen");
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.scan_job.rx = Some(rx);
+        app.scan_job.gen = 7;
+        app.syncing = true;
+        app.sync_popup.open = true;
+        app.sync_popup.stage = SyncStage::Scan;
+        app.set_overlay(Overlay::Sync);
+
+        tx.send((7, crate::local::ScanMsg::Progress(42))).unwrap();
+        assert!(crate::local::poll_import(&mut app));
+        assert_eq!(app.sync_popup.scanned, 42);
+
+        // Stale generation: neither counter nor store may move.
+        tx.send((6, crate::local::ScanMsg::Progress(99))).unwrap();
+        assert!(!crate::local::poll_import(&mut app));
+        assert_eq!(app.sync_popup.scanned, 42);
+        tx.send((6, crate::local::ScanMsg::Done(Vec::new())))
+            .unwrap();
+        assert!(!crate::local::poll_import(&mut app));
+        assert!(app.syncing, "stale result must not settle the chain");
+        assert_eq!(
+            app.store.list_books(10, 0).unwrap().len(),
+            0,
+            "stale result must not touch the store"
+        );
     }
 }

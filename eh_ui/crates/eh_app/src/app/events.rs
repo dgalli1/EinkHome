@@ -212,9 +212,12 @@ impl<B: Framebuffer> App<B> {
     pub fn tick(&mut self) -> bool {
         // Background full-library cover-warm pass (one fetch per tick).
         self.cover_warm_tick();
-        // Drain a finished local-source import (C apply chain's main-thread
-        // slice): replaces the 'local' source and rebuilds the view.
-        crate::local::poll_import(self);
+        // Drain the local-source import (progress ticks + the terminal
+        // apply): replaces the 'local' source and rebuilds the view when
+        // the scan lands; progress moves the sheet's counter.
+        if crate::local::poll_import(self) {
+            self.dirty = true;
+        }
         // Drain the async sync worker (C's wkr done-callbacks + bsyncp
         // close tick): applies events to the popup state machine and
         // lands the terminal rebuild on the main thread.
@@ -337,7 +340,6 @@ impl<B: Framebuffer> App<B> {
         self.dirty = true;
         self.refresh_shelf();
     }
-
     /// Change the active overlay, marking the frame dirty (the present
     /// skip must repaint when the overlay changes).
     pub(crate) fn set_overlay(&mut self, o: Overlay) {

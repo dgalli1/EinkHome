@@ -78,7 +78,7 @@ rebuilds, drill paging, config persistence).  Lifecycle shape:
 | sync delta chain | `sync::start_sync` | `WorkerHandle` (rx + cancel flag) | `sync_poll` per tick |
 | download jobs | `Downloader::new` | mpsc `Done` stream | `drain_downloads` per tick |
 | cover warm pass | `cover::cover_warm_start` | `WarmHandle` atomics | `cover_warm_tick` gate |
-| local import scan | `local::kick_import` | `ScanJob` rx + generation | `poll_import` per tick |
+| local import scan | `local::kick_import` (opens the sync sheet) | `ScanJob` rx + generation | `poll_import` per tick |
 
 Two invariants every worker shares:
 

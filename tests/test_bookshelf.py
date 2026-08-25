@@ -1573,6 +1573,9 @@ def test_local_pdf_import_renders_mupdf_cover(fresh_bookshelf):
         # the Kavita boot for later tests.
         before = bs.choose_source(1)
         _wait_log_slice(bs, before, "source switched to ", timeout=10.0)
+        # The switch now opens a "Scanning library…" progress sheet over
+        # the shelf; BACK dismisses it while the walk keeps running.
+        bs.send_back_key()
         # The import scan + cover extraction run asynchronously; qemu-arm
         # MuPDF rendering of even a tiny PDF takes a while.
         # Only VISIBLE tiles get cover ticks; with ~20 imported books the

@@ -26,6 +26,7 @@ use eh_hal::Framebuffer;
 use crate::app::App;
 use crate::extract::{extract_book_meta, ExtractedMeta, MAX_TITLE_LEN};
 use crate::store::Book;
+use crate::widgets::sync_popup::{SyncPopup, SyncStage};
 
 // ── shared facts ─────────────────────────────────────────────────────────
 
@@ -237,6 +238,19 @@ pub struct LocalBook {
     pub meta: ExtractedMeta,
 }
 
+/// Worker → UI message for one import-scan chain.
+pub(crate) enum ScanMsg {
+    /// N books walked + extracted so far (the sheet's live counter).
+    Progress(u32),
+    /// The walk finished; the full result set.
+    Done(Vec<LocalBook>),
+}
+
+/// Minimum spacing of [`ScanMsg::Progress`] ticks: frequent enough that
+/// the sheet's counter feels alive on a SCAN_CAP-sized library, rare
+/// enough not to flood the channel (and the eink repaints behind it).
+const SCAN_PROGRESS_MS: u64 = 400;
+
 /// The in-flight Local import scan job (the C g_local_scan* globals):
 /// the worker → main-thread receiver plus the chain generation — a new
 /// kick or a source switch bumps the generation, and a landed result
@@ -244,40 +258,69 @@ pub struct LocalBook {
 #[derive(Default)]
 pub(crate) struct ScanJob {
     /// Scan results arrive here once the worker finishes.
-    pub rx: Option<std::sync::mpsc::Receiver<(u32, Vec<LocalBook>)>>,
+    pub rx: Option<std::sync::mpsc::Receiver<(u32, ScanMsg)>>,
     /// Bumped on every kick/cancel; pollers compare before applying.
     pub gen: u32,
 }
 
 /// Kick the Local-source import (C eh_local_import_scanner): bump the
-/// generation, spawn the scan thread, remember its receiver.  Safe to call
-/// from the boot path and on every Local selection — a new kick invalidates
-/// any in-flight result.
+/// generation, spawn the scan thread, remember its receiver, and open
+/// the sync sheet at the Scan stage — an invisible scan reads as a hung
+/// app (the shelf keeps showing stale rows until the apply lands).
+/// Safe to call from the boot path and on every Local selection — a new
+/// kick invalidates any in-flight result.
 pub fn kick_import<B: Framebuffer>(app: &mut App<B>) {
+    let root = browse_root();
+    kick_import_rooted(app, &root);
+}
+
+/// [`kick_import`] against an explicit root (tests inject a tempdir so
+/// they never touch the process-global EH_BROWSE_ROOT).
+pub(crate) fn kick_import_rooted<B: Framebuffer>(app: &mut App<B>, root: &str) {
     app.scan_job.gen += 1;
     let gen = app.scan_job.gen;
-    let root = browse_root();
     crate::logger::log("[bookshelf] local: import scan started");
     let (tx, rx) = std::sync::mpsc::channel();
     app.scan_job.rx = Some(rx);
+    // Fresh chain → fresh sheet: a leftover sheet's counters must never
+    // leak into the new run (sync_popup_open preserves counters while a
+    // chain is live, so zero it here before arming).
+    app.sync_popup = SyncPopup::default();
     app.syncing = true;
-    let _ = std::thread::Builder::new()
+    app.sync_popup_open(SyncStage::Scan);
+    let root = root.to_string();
+    let spawned = std::thread::Builder::new()
         .name("local-scan".into())
         .spawn(move || {
             let files = scan(&root);
-            let books: Vec<LocalBook> = files
-                .iter()
-                .map(|f| LocalBook {
+            let mut books: Vec<LocalBook> = Vec::with_capacity(files.len());
+            let mut last = std::time::Instant::now();
+            for f in &files {
+                books.push(LocalBook {
                     book: f.to_book(),
                     meta: extract_book_meta(Path::new(&f.local_path), &f.ext),
-                })
-                .collect();
+                });
+                if last.elapsed() >= std::time::Duration::from_millis(SCAN_PROGRESS_MS) {
+                    last = std::time::Instant::now();
+                    let _ = tx.send((gen, ScanMsg::Progress(books.len() as u32)));
+                }
+            }
             crate::log(&format!(
                 "[eh_app] local: scanned {} books under {root}",
                 books.len()
             ));
-            let _ = tx.send((gen, books));
+            let _ = tx.send((gen, ScanMsg::Done(books)));
         });
+    if spawned.is_err() {
+        // Without a worker the sheet would sit modal forever: tear it
+        // back down (start_sync's spawn-failure path, mirrored).
+        app.scan_job.rx = None;
+        app.syncing = false;
+        if app.overlay == crate::app::Overlay::Sync && app.sync_popup.stage == SyncStage::Scan {
+            app.set_overlay(crate::app::Overlay::None); // also clears popup.open
+        }
+        crate::log("[eh_app] local: import worker spawn failed");
+    }
 }
 
 /// Drop an in-flight local import scan: bump the generation so a landed
@@ -288,17 +331,36 @@ pub fn cancel_scan<B: Framebuffer>(app: &mut App<B>) {
     app.scan_job.rx = None;
 }
 
-/// Drain a finished local scan into the store (C local_apply_slice's tail):
-/// replace the whole 'local' source with the fresh results, cache unknown
-/// metadata, then rebuild the view.  Stale generations drop their result.
-pub fn poll_import<B: Framebuffer>(app: &mut App<B>) {
-    let Some(rx) = &app.scan_job.rx else { return };
-    let Ok((gen, books)) = rx.try_recv() else {
-        return;
+/// Drain the local scan worker (C local_apply_slice's tail): progress
+/// ticks advance the sheet's counter; the terminal result replaces the
+/// whole 'local' source, caches unknown metadata, then rebuilds the
+/// view and flashes Done on the still-open sheet.  Stale generations
+/// drop their result.  Returns true when the frame changed (a repaint
+/// is due).
+pub fn poll_import<B: Framebuffer>(app: &mut App<B>) -> bool {
+    let Some(rx) = &app.scan_job.rx else {
+        return false;
+    };
+    let mut changed = false;
+    let mut done: Option<(u32, Vec<LocalBook>)> = None;
+    loop {
+        match rx.try_recv() {
+            Ok((gen, ScanMsg::Progress(n))) => {
+                if gen == app.scan_job.gen && app.sync_popup.scanned != n {
+                    app.sync_popup.scanned = n;
+                    changed = true;
+                }
+            }
+            Ok((gen, ScanMsg::Done(books))) => done = Some((gen, books)),
+            Err(_) => break, // Empty (or disconnected after Done): drained
+        }
+    }
+    let Some((gen, books)) = done else {
+        return changed;
     };
     app.scan_job.rx = None;
     if gen != app.scan_job.gen {
-        return; // stale chain (source switch / settings change): drop
+        return changed; // stale chain (source switch / settings change): drop
     }
     app.syncing = false;
     let applied = (|| -> rusqlite::Result<()> {
@@ -339,13 +401,26 @@ pub fn poll_import<B: Framebuffer>(app: &mut App<B>) {
             ));
             app.rebuild_view();
             app.refresh_shelf();
+            // Flash Done on the still-open sheet; close_tick retires it.
+            if app.sync_popup.open && app.sync_popup.stage == SyncStage::Scan {
+                app.sync_popup.stage = SyncStage::Done;
+                app.sync_popup.stage_at = Some(std::time::Instant::now());
+            }
+            changed = true;
         }
         Err(e) => {
             let _ = app.store.rollback();
             crate::log(&format!("[eh_app] local: import aborted: {e}"));
             app.syncing = false;
+            if app.sync_popup.open && app.sync_popup.stage == SyncStage::Scan {
+                app.sync_popup.error = crate::i18n::tr("sync.failed").to_string();
+                app.sync_popup.stage = SyncStage::Fail;
+                app.sync_popup.stage_at = Some(std::time::Instant::now());
+            }
+            changed = true;
         }
     }
+    changed
 }
 
 #[cfg(test)]

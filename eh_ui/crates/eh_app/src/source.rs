@@ -11,7 +11,7 @@ pub fn apply_source<B: eh_hal::Framebuffer>(app: &mut App<B>, row: usize) {
     if row > 2 {
         return;
     }
-    app.overlay = crate::app::Overlay::None;
+    app.set_overlay(crate::app::Overlay::None);
     // Source switch: abort any in-flight sync chain BEFORE the source
     // changes / config saves (C eh_sync_abort), and drop a still-running
     // local import scan — its result would otherwise land under the new
@@ -44,7 +44,8 @@ pub fn apply_source<B: eh_hal::Framebuffer>(app: &mut App<B>, row: usize) {
         }
         Source::Local => {
             // The import applies on a later tick and rebuilds the view
-            // (C eh_local_import_scanner → async apply chain).
+            // (C eh_local_import_scanner → async apply chain); its
+            // progress shows on the sync sheet until it lands.
             app.browser.open = false;
             crate::local::kick_import(app);
             app.refresh_shelf();
