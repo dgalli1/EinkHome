@@ -92,13 +92,6 @@ static TABLE: &[(&str, &str, &str, &str, &str)] = &[
         "Sync fallito",
     ),
     (
-        "group.all",
-        "All books",
-        "Alle Bücher",
-        "Tous les livres",
-        "Tutti i libri",
-    ),
-    (
         "group.author",
         "By author",
         "Nach Autor",
@@ -644,7 +637,7 @@ mod tests {
     fn table_rows_are_complete_across_languages() {
         // 83 keys ported verbatim from eh_g_i18n[] + dl.remaining + the
         // Slint-port additions (ctx.details, detail.* metadata labels).
-        assert_eq!(TABLE.len(), 97, "unexpected i18n table size");
+        assert_eq!(TABLE.len(), 96, "unexpected i18n table size");
         for row in TABLE {
             for col in [row.1, row.2, row.3, row.4] {
                 assert!(!col.is_empty(), "empty translation for key {}", row.0);

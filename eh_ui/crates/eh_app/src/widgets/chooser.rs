@@ -17,7 +17,7 @@ pub enum ChooserKind {
 /// Indexed by [`crate::store::GroupPreset`] value (None=0, AuthorSeries=1,
 /// Author=2, Year=3, Genre=4, Series=5).
 pub(crate) const GROUP_KEYS: [&str; 6] = [
-    "group.all",
+    "group.none",
     "group.author_series",
     "group.author",
     "group.year",
@@ -51,7 +51,7 @@ mod tests {
     #[test]
     fn group_keys_follow_the_discriminant_order() {
         for (g, key) in [
-            (GroupPreset::None, "group.all"),
+            (GroupPreset::None, "group.none"),
             (GroupPreset::AuthorSeries, "group.author_series"),
             (GroupPreset::Author, "group.author"),
             (GroupPreset::Year, "group.year"),
