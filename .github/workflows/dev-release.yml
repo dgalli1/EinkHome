@@ -323,11 +323,13 @@ jobs:
             echo "| asset | target |"
             echo "| --- | --- |"
             echo "| \`einkhome-<sha>.zip\` | PocketBook: bookshelf.app (armel) + bookshelf.armhf.app (armhf) + install.sh |"
+            echo "| \`bookshelf-linux-armv7\` | Kobo / reMarkable 1 / Cervantes / generic Linux fb (runtime-detecting) |"
             echo "| \`bookshelf.pc\` | desktop SDL (x86_64 linux) |"
             echo "| \`bookshelf.test\` | headless SDL + e2e IPC (x86_64 linux) |"
             echo "| \`einkhome-dev.apk\` | Android (arm64-v8a + x86_64) |"
             echo
-            echo "Device install: unzip, then \`./install.sh <device-ip> [api-url]\`."
+            echo "PocketBook install: unzip, then \`./install.sh <device-ip> [api-url]\`."
+            echo "Kobo/reMarkable: copy \`bookshelf-linux-armv7\` to the device and run it from its directory."
           } > notes.md
           # Rolling release: recreate so the tag always points at the
           # built commit, then upload the fresh assets.

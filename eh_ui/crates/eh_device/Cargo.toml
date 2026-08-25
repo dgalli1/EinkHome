@@ -1,0 +1,15 @@
+[package]
+name = "eh_device"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "bookshelf-device"
+path = "src/main.rs"
+
+[dependencies]
+eh_app = { path = "../eh_app", default-features = false }
+eh_hal = { path = "../eh_hal" }
+eh_backend_linuxfb = { path = "../eh_backend_linuxfb" }
+eh_backend_devices = { path = "../eh_backend_devices" }

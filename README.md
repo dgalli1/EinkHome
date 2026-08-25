@@ -126,12 +126,44 @@ rolling [dev release](https://github.com/dgalli1/EinkHome/releases/tag/dev)
 | asset | target |
 | --- | --- |
 | `einkhome-<sha>.zip` | PocketBook: `bookshelf.app` (armel) + `bookshelf.armhf.app` (armhf) + `install.sh` |
+| `bookshelf-linux-armv7` | Kobo / reMarkable 1 / Cervantes / generic Linux fb (runtime-detecting) |
 | `bookshelf.pc` | desktop SDL (x86_64 linux) |
 | `bookshelf.test` | headless SDL + e2e IPC (x86_64 linux) |
 | `einkhome-dev.apk` | Android (arm64-v8a + x86_64) |
 
 `SHA256SUMS` covers all assets.  Pull requests rehearse the builds but
 never publish.
+
+### Direct-fb devices (Kobo, reMarkable, Cervantes)
+
+`bookshelf-linux-armv7` is the KOReader-style port: one armv7 binary that
+detects the board at startup and wires the right e-ink refresh driver and
+touch panel.  Detection and the EPDC flavors are ported from KOReader
+(`frontend/device/kobo/device.lua`, `frontend/device/remarkable/`) and
+FBInk's hardware tables.
+
+| family | refresh driver | notes |
+| --- | --- | --- |
+| Kobo pre-Mk7 (Touch…Aura One) | MXCFB V1-NTX | |
+| Kobo Mk7 (Clara HD, Forma, Libra, Nia, Clara 2E, Libra 2) | MXCFB V2 (REAGL partials) | |
+| Kobo MTK (Elipsa 2E, Libra/Clara Colour, Clara B&W) | HWTCON | |
+| Cervantes 3/4 | MXCFB V1-NTX | single-touch panels |
+| reMarkable 1 | MXCFB V2 | pen + multitouch |
+| Kobo Elipsa / Sage (sunxi) | — | detected, refused: needs KOReader's ION/G2D layer stack |
+| reMarkable 2 / Paper Pro | — | detected, refused: needs the rm2fb server / qtfb shim |
+| Kindle | — | not ported: KOReader renders through the FBInk C library |
+
+Deploy: copy the binary to the device (e.g. `/mnt/onboard/.adds/einkhome/`
+on a Kobo), `cd` there and run it — `bookshelf.cfg`, `bookshelf_lib.db`
+and `covers/` live in the working directory.  The link-time `fontconfig`
+comes from the PocketBook firmware sysroot; at runtime the device's own
+`libfontconfig.so.1` (shipped by Nickel / reMarkable OS / Cervantes
+firmware) is loaded.
+
+Without hardware, the suite that *is* verified: the detection tables, the
+EPDC struct layouts (size-asserted against KOReader's constants on the
+armv7 build), and the evdev decode state machine (synthetic event streams)
+are all unit-tested, and the binary cross-compiles in the pipeline.
 
 ## Install on a real device
 

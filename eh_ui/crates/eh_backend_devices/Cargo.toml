@@ -1,0 +1,9 @@
+[package]
+name = "eh_backend_devices"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+eh_hal = { path = "../eh_hal" }
+eh_backend_linuxfb = { path = "../eh_backend_linuxfb" }
