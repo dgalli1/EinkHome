@@ -169,7 +169,8 @@ jobs:
             PKG_CONFIG_SYSROOT_DIR="$FW" \
             PKG_CONFIG_PATH="$PWD/resources/pkgconfig" \
             RUSTFLAGS="-L native=$FW/ebrmain/lib" \
-            cargo zigbuild --release --target armv7-unknown-linux-gnueabihf.2.23 -p eh_device
+            cargo zigbuild --release --target armv7-unknown-linux-gnueabihf.2.23 \
+            --manifest-path eh_ui/Cargo.toml -p eh_device
           cp target/armv7-unknown-linux-gnueabihf/release/bookshelf-device \
             build/bookshelf-linux-armv7
       - name: Upload device artifacts
