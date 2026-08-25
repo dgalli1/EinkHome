@@ -73,7 +73,7 @@ SOURCES := \
 
 SRC_PATHS := $(addprefix $(CURDIR)/app/,$(SOURCES))
 
-.PHONY: all clean test armhf pc lint lint-c lint-py compile-commands
+.PHONY: all clean test armhf pc apk lint lint-c lint-py compile-commands
 
 all: $(OUT)
 
@@ -135,3 +135,17 @@ $(OUT_PC): $(addprefix $(CURDIR)/app/,$(PC_SOURCES)) app/platform/bs_plat_sdl.c 
 
 clean:
 	rm -f $(OUT) $(OUT_ARMHF) $(OUT_PC)
+
+# Android APK (arm64-v8a + x86_64 in one file) — only when the
+# eh_android crate is on this branch (the demo/Slint line); main has
+# no Android port yet, so `make apk` there fails with a pointer.
+ifneq ($(wildcard $(CURDIR)/eh_ui/crates/eh_android/Cargo.toml),)
+.PHONY: apk
+apk:
+	scripts/make-apk.sh
+else
+.PHONY: apk
+apk:
+	@echo "make apk: no eh_ui/crates/eh_android on this branch (the Android port lives on the demo line)" >&2
+	@exit 1
+endif

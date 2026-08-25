@@ -89,6 +89,24 @@ seam).  Requires SDL2/SDL2_ttf/SDL2_image/libcurl dev packages.
 # or: make pc; ./build/bookshelf.pc
 ```
 
+## Dev releases (CI)
+
+Every push to `main`/`demo` runs the `dev-release` pipeline, which
+compiles every executable for every target and publishes them to the
+rolling [dev release](https://github.com/dgalli1/EinkHome/releases/tag/dev)
+(prerelease, tag always points at the built commit):
+
+| asset | target |
+| --- | --- |
+| `bookshelf.app` | PocketBook armel (all but InkPad One) |
+| `bookshelf.armhf.app` | PocketBook armhf (InkPad One) |
+| `bookshelf.pc` | desktop SDL (x86_64 linux) |
+| `bookshelf.test` | headless SDL + e2e IPC (x86_64 linux) |
+| `einkhome-dev.apk` | Android (arm64-v8a + x86_64; built when the `eh_android` crate is on the branch) |
+
+`SHA256SUMS` covers all assets.  Pull requests rehearse the builds but
+never publish.
+
 ## Install on a real device
 
 ```sh

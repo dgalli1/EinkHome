@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="de.einkhome.app"
+    android:versionCode="1"
+    android:versionName="0.1.0">
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-sdk android:minSdkVersion="28" android:targetSdkVersion="34" />
+    <application
+        android:label="EinkHome"
+        android:hasCode="false">
+        <activity
+            android:name="android.app.NativeActivity"
+            android:label="EinkHome"
+            android:configChanges="orientation|keyboardHidden|screenSize|smallestScreenSize|screenLayout|keyboard|navigation|uiMode"
+            android:launchMode="singleTop"
+            android:exported="true">
+            <meta-data android:name="android.app.lib_name" android:value="eh_android" />
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>
