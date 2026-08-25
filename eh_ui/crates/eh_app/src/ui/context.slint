@@ -10,7 +10,6 @@ export component ContextMenu inherits Rectangle {
     in-out property <int> w: 0;
     in-out property <int> rows: 0;
     in-out property <[string]> labels: [];
-    in-out property <image> hatch;
 
     callback row-tap(int);
     callback outside;
@@ -26,7 +25,6 @@ export component ContextMenu inherits Rectangle {
     HatchDim {
         dim-y0: 0px;
         dim-y1: root.screen-h * 1px;
-        hatch: root.hatch;
     }
 
     property <int> pw: SheetGeom.pw(w);

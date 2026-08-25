@@ -198,6 +198,13 @@ pub struct App<B: Framebuffer> {
     /// press — the tile-release action consumes it (opens the context
     /// menu instead of activating the tile).
     pub(crate) pending_long: bool,
+    /// Set between a firmware long-press event and the trailing release:
+    /// the gesture already opened the context menu, so the release must
+    /// not re-classify (C handled EVT_POINTER_LONGPRESS directly).
+    pub(crate) long_press_seen: bool,
+    /// Sub-row drag travel for the log/detail viewers (px); a row step
+    /// fires whenever it crosses one row pitch (see `viewer::drag_scroll`).
+    pub(crate) log_drag_acc: i32,
     /// Set when the release that just landed ended a drag (>48px of
     /// travel) — the launcher's cell-release action consumes it (a drag
     /// must not launch).
@@ -411,6 +418,8 @@ impl<B: Framebuffer> App<B> {
             ui,
             pending_long: false,
             pending_drag: false,
+            long_press_seen: false,
+            log_drag_acc: 0,
             fb_screen_w: sw,
             fb_net_active: true,
             fb_profile: eh_hal::DeviceProfile::default(),

@@ -58,7 +58,6 @@ export component EhAppWindow inherits Window {
     in-out property <[string]> history: [];
     in-out property <bool> history-hint: false;
     // overlays
-    in-out property <image> hatch;
     in-out property <[string]> more-labels: [];
     in-out property <string> more-group-value: "";
     in-out property <string> more-sort-value: "";
@@ -119,6 +118,8 @@ export component EhAppWindow inherits Window {
     in-out property <image> house-icon;
     in-out property <image> back-icon;
     in-out property <image> source-icon;
+    in-out property <image> chevron;
+    in-out property <image> chevron-down;
     in-out property <image> search-icon;
     in-out property <image> layout-grid-icon;
     in-out property <image> layout-list-icon;
@@ -192,6 +193,7 @@ export component EhAppWindow inherits Window {
         source-label: root.source-label;
         source-icon: root.source-icon;
         syncing: root.syncing;
+        browse-mode: root.browse-mode;
         sync-angle: root.sync-angle;
         search-tab: root.tab == EhTab.search;
         grid-mode: root.grid-mode;
@@ -277,7 +279,6 @@ export component EhAppWindow inherits Window {
         selected: root.source-selected;
         title: root.source-title;
         labels: root.source-labels;
-        hatch: root.hatch;
         row-tap(i) => { root.source-row(i); }
         outside => { root.source-outside(); }
     }
@@ -290,7 +291,6 @@ export component EhAppWindow inherits Window {
         title: root.chooser-title;
         current: root.chooser-current;
         labels: root.chooser-labels;
-        hatch: root.hatch;
         row-tap(i) => { root.chooser-row(i); }
         outside => { root.chooser-outside(); }
     }
@@ -299,7 +299,6 @@ export component EhAppWindow inherits Window {
         w: Math.floor(root.width / 1px);
         rows: root.context-rows;
         labels: root.context-labels;
-        hatch: root.hatch;
         row-tap(i) => { root.context-row(i); }
         outside => { root.context-outside(); }
     }
@@ -308,7 +307,6 @@ export component EhAppWindow inherits Window {
         w: Math.floor(root.width / 1px);
         title: root.dl-title;
         status: root.dl-status;
-        hatch: root.hatch;
         cancel => { root.dl-cancel(); }
         dismiss => { root.dl-dismiss(); }
     }
@@ -342,6 +340,8 @@ export component EhAppWindow inherits Window {
     }
     if (root.overlay == EhOverlay.log-viewer): LogViewerPage {
         width: root.width;
+        chevron: root.chevron;
+        chevron-down: root.chevron-down;
         height: root.height;
         title: root.viewer-title;
         path-line: root.viewer-path;
@@ -357,6 +357,8 @@ export component EhAppWindow inherits Window {
     if (root.overlay == EhOverlay.licenses): LicensesListPage {
         width: root.width;
         height: root.height;
+        chevron: root.chevron;
+        chevron-down: root.chevron-down;
         title: root.viewer-title;
         names: root.lic-names;
         kinds: root.lic-kinds;
@@ -368,6 +370,8 @@ export component EhAppWindow inherits Window {
         row-tap(i) => { root.lic-row(i); }
     }
     if (root.overlay == EhOverlay.license-detail): LicenseDetailPage {
+        chevron: root.chevron;
+        chevron-down: root.chevron-down;
         width: root.width;
         height: root.height;
         title: root.viewer-title;
@@ -381,6 +385,8 @@ export component EhAppWindow inherits Window {
     }
     if (root.overlay == EhOverlay.launcher): LauncherPage {
         width: root.width;
+        chevron: root.chevron;
+        chevron-down: root.chevron-down;
         height: root.height;
         title: root.viewer-title;
         empty: root.launcher-items.length == 0;
@@ -393,7 +399,6 @@ export component EhAppWindow inherits Window {
         back-icon: root.back-icon;
         back => { root.launcher-back(); }
         scroll-page(d) => { root.launcher-page(d); }
-        cell(i) => { root.launcher-cell(i); }
     }
     if (root.overlay == EhOverlay.sync): SyncSheet {
         content-h: Math.floor(root.content-bottom / 1px);
@@ -404,7 +409,6 @@ export component EhAppWindow inherits Window {
         show-bar: root.sync-show-bar;
         bar-fill: root.sync-bar-fill;
         stripe-path: root.sync-stripes;
-        hatch: root.hatch;
         dismiss => { root.sync-dismiss(); }
     }
 }

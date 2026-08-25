@@ -737,7 +737,7 @@ def test_settings_licenses_opens_viewer_and_drills(fresh_bookshelf):
         "bookshelf respawned after the Licenses tap (crash)"
     )
 
-    # Tap the first license (cJSON): its detail text replaces the list.
+    # Tap the first license row: its detail text replaces the list.
     before_detail = bs.frame_hash()
     bs.tap_licenses_list_row(0)
     bs.wait_hash_change(before_detail)

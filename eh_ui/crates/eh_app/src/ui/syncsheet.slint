@@ -15,7 +15,6 @@ export component SyncSheet inherits Rectangle {
     in-out property <bool> show-bar: false;
     in-out property <float> bar-fill: 0.0;   // 0..1, covers_done/total
     in-out property <string> stripe-path: "";
-    in-out property <image> hatch;
 
     callback dismiss;
 
@@ -30,7 +29,6 @@ export component SyncSheet inherits Rectangle {
     HatchDim {
         dim-y0: 96px;
         dim-y1: root.content-h * 1px;
-        hatch: root.hatch;
     }
 
     property <int> pw: SheetGeom.pw(w);

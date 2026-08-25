@@ -1,6 +1,6 @@
 // The source chooser (C eh_draw_overlay_source / eh_on_tap_source): the
-// LGRAY hatch dim over the content area and the vertically-centred
-// 3/4-width white sheet (double border) with an inline title, a divider,
+// LGRAY hatch dim below the top bar and the vertically-centred 3/4-width
+// white sheet (double border) with an inline title, a divider,
 // and three text-only rows (Kavita / Local / Folder).  The selected row
 // is filled black with white text.  Sheet: ph = 72 + 3*96 + 24, centred
 // in the content area; rows at py+80, 96px apart, 84px tall.
@@ -13,7 +13,6 @@ export component SourceSheet inherits Rectangle {
     in-out property <int> selected: 0;
     in-out property <string> title: "";
     in-out property <[string]> labels: [];
-    in-out property <image> hatch;
 
     callback row-tap(int);
     callback outside;
@@ -28,9 +27,8 @@ export component SourceSheet inherits Rectangle {
     }
 
     HatchDim {
-        dim-y0: 0px;
+        dim-y0: 96px;
         dim-y1: root.content-h * 1px;
-        hatch: root.hatch;
     }
 
     property <int> pw: SheetGeom.pw(w);

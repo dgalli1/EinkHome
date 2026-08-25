@@ -24,6 +24,7 @@ export component TopBar inherits Rectangle {
     in-out property <bool> search-tab: false;
     in-out property <bool> title-bold: false;   // overlay headers draw bold
     in-out property <bool> grid-mode: true;
+    in-out property <bool> browse-mode: false;  // folder body: no layout switch
     in-out property <image> house-icon;
     in-out property <image> back-icon;
     in-out property <image> search-icon;
@@ -104,9 +105,11 @@ export component TopBar inherits Rectangle {
         Image { source: root.search-icon; }
     }
 
+    // layout switch: grid/list only applies to the shelf — hidden while
+    // the folder browser (or picker) owns the body
     TopBarButton {
         x: root.width - 8px - 3 * 96px;
-        visible: !root.search-tab;
+        visible: !root.search-tab && !root.browse-mode;
         clicked => { root.layout(); }
         Image { source: root.grid-mode ? root.layout-grid-icon : root.layout-list-icon; }
     }

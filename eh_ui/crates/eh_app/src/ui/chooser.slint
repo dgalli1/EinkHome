@@ -13,7 +13,6 @@ export component ChooserSheet inherits Rectangle {
     in-out property <string> title: "";
     in-out property <string> current: "";
     in-out property <[string]> labels: [];
-    in-out property <image> hatch;
 
     callback row-tap(int);
     callback outside;
@@ -27,9 +26,8 @@ export component ChooserSheet inherits Rectangle {
     }
 
     HatchDim {
-        dim-y0: 0px;
+        dim-y0: 96px;
         dim-y1: root.content-h * 1px;
-        hatch: root.hatch;
     }
 
     property <int> pw: SheetGeom.pw(w);

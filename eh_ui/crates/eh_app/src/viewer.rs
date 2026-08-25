@@ -8,8 +8,10 @@
 //! .log_scroll`) so new lines stay visible while it is open; an explicit
 //! scroll materialises a concrete first-row index.
 
+use crate::app::{App, Overlay};
 use crate::appui::SCROLL_BTN_H;
 use crate::wrap::wrap_rows_last;
+use eh_hal::Framebuffer;
 
 /// One bundled third-party license (name, type, where-used note, and the
 /// FULL text shipped as a string — C BsLicense).
@@ -23,38 +25,40 @@ pub struct License {
     pub text: &'static str,
 }
 
-/// The licenses the app bundles, verbatim from C data/eh_licenses.c (the
-/// texts are the actual licenses of the bundled components; they live here
-/// as strings so they ship inside the binary and are viewable on every
-/// platform with no filesystem dependency).
+/// The licenses the app bundles (ported from C data/eh_licenses.c; the
+/// C app's cJSON entry was replaced by serde_json when the app went
+/// Rust end to end — commit 00fe99a deleted app/vendor/cJSON.c).
+/// Each carries its COMPLETE text so the detail page shows a real
+/// licence, not a curated excerpt.
 pub const LICENSES: &[License] = &[
     License {
-        name: "cJSON",
-        kind: "MIT",
-        note: "JSON parser, bundled in app/vendor/cJSON.c",
-        text: "Copyright (c) 2009-2017 Dave Gamble and cJSON contributors\n\
-               \n\
-               Permission is hereby granted, free of charge, to any person \
-               obtaining a copy of this software and associated documentation \
-               files (the \"Software\"), to deal in the Software without \
-               restriction, including without limitation the rights to use, \
-               copy, modify, merge, publish, distribute, sublicense, and/or \
-               sell copies of the Software, and to permit persons to whom the \
-               Software is furnished to do so, subject to the following \
-               conditions:\n\
+        name: "serde_json",
+        kind: "MIT / Apache-2.0",
+        note: "JSON parsing (config, launcher apps_db/view.json, API responses)",
+        text: "MIT License: permission is hereby granted, free of charge, to \
+               any person obtaining a copy of this software and associated \
+               documentation files (the \u{201c}Software\u{201d}), to deal in the \
+               Software without restriction, including without limitation the \
+               rights to use, copy, modify, merge, publish, distribute, \
+               sublicense, and/or sell copies of the Software, and to permit \
+               persons to whom the Software is furnished to do so, subject to \
+               the following conditions:\n\
                \n\
                The above copyright notice and this permission notice shall be \
                included in all copies or substantial portions of the \
                Software.\n\
                \n\
-               THE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY \
-               KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE \
+               THE SOFTWARE IS PROVIDED \u{201c}AS IS\u{201d}, WITHOUT WARRANTY OF \
+               ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE \
                WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE \
                AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT \
                HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, \
                WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING \
                FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR \
-               OTHER DEALINGS IN THE SOFTWARE.",
+               OTHER DEALINGS IN THE SOFTWARE.\n\
+               \n\
+               Dual-licensed under MIT OR Apache-2.0 \
+               \u{a0}(apache.org/licenses/LICENSE-2.0); either licence applies.",
     },
     License {
         name: "SQLite",
@@ -64,7 +68,6 @@ pub const LICENSES: &[License] = &[
                of a legal notice, here is a blessing:\n\
                \n\
                    May you do good and not evil.\n\
-                   May you find forgiveness for yourself and forgive others.\n\
                    May you share freely, never taking more than you give.\n\
                \n\
                SQLite is in the public domain and imposes no licence or \
@@ -109,26 +112,26 @@ pub const LICENSES: &[License] = &[
                \u{a0}(roxmltree, MIT or Apache-2.0), and raw-deflate inflation\
                \u{a0}(miniz_oxide, MIT or Apache-2.0 or Zlib).\n\
                \n\
-               MIT License: permission is hereby granted, free of charge, to\
-               any person obtaining a copy of this software and associated\
-               documentation files (the \u{201c}Software\u{201d}), to deal in the\
-               Software without restriction, including without limitation the\
-               rights to use, copy, modify, merge, publish, distribute,\
-               sublicense, and/or sell copies of the Software, and to permit\
-               persons to whom the Software is furnished to do so, subject to\
+               MIT License: permission is hereby granted, free of charge, to \
+               any person obtaining a copy of this software and associated \
+               documentation files (the \u{201c}Software\u{201d}), to deal in the \
+               Software without restriction, including without limitation the \
+               rights to use, copy, modify, merge, publish, distribute, \
+               sublicense, and/or sell copies of the Software, and to permit \
+               persons to whom the Software is furnished to do so, subject to \
                the following conditions:\n\
                \n\
-               The above copyright notice and this permission notice shall be\
-               included in all copies or substantial portions of the\
+               The above copyright notice and this permission notice shall be \
+               included in all copies or substantial portions of the \
                Software.\n\
                \n\
-               THE SOFTWARE IS PROVIDED \u{201c}AS IS\u{201d}, WITHOUT WARRANTY OF\
-               ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE\
-               WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE\
-               AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT\
-               HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,\
-               WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING\
-               FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR\
+               THE SOFTWARE IS PROVIDED \u{201c}AS IS\u{201d}, WITHOUT WARRANTY OF \
+               ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE \
+               WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE \
+               AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT \
+               HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, \
+               WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING \
+               FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR \
                OTHER DEALINGS IN THE SOFTWARE.",
     },
     License {
@@ -165,9 +168,12 @@ pub const LICENSES: &[License] = &[
 
 // ── geometry (C eh_core.h) ──────────────────────────────────────────────
 
-/// Log/detail text row height (C EH_LOG_ROW_H) and font px (EH_LOG_FONT_PX).
-pub(crate) const LOG_ROW_H: u32 = 26;
-pub(crate) const LOG_FONT: f32 = 20.0;
+/// Log/detail text row pitch (C EH_LOG_ROW_H) and font px (EH_LOG_FONT_PX).
+/// Sized so the log fills the screen width (the C 20px wall of text was
+/// unreadable on the panel); the row Text elements size themselves to the
+/// font's natural line box, so the pitch only needs to clear the ink.
+pub(crate) const LOG_ROW_H: u32 = 34;
+pub(crate) const LOG_FONT: f32 = 26.0;
 /// Body band top for the wrapped rows (C EH_LOG_BODY_TOP).
 pub const LOG_BODY_TOP: u32 = 96 + 42;
 /// Licenses list row height + body top (C EH_LIC_LIST_*).
@@ -224,7 +230,7 @@ pub(crate) fn log_rows(w: u32, h: u32) -> Option<(String, Vec<crate::wrap::WrapR
         crate::shelf::shelf_font(),
         LOG_FONT,
         &text,
-        (w.saturating_sub(48)) as f32,
+        (w.saturating_sub(32)) as f32,
         log_rows_vis(h) * 8, // ~8 wrapped rows per source line, as in C
     );
     Some((text, rows))
@@ -259,24 +265,55 @@ pub(crate) fn log_scroll_after(scroll: i32, dir: i32, page: i32, tail_first: usi
     }
 }
 
+/// Feed one pointer-move delta into the log/detail viewer scroll while a
+/// drag is in flight.  Sub-pixel travel accumulates in `App::log_drag_acc`
+/// and one row step fires per crossed row pitch.  Dragging materialises a
+/// pinned tail (`log_scroll < 0`) at the tail's last full page; the draw
+/// pass clamps both ends against the wrapped-row count.  Returns true
+/// when a row step moved the view (the caller marks the frame dirty).
+pub(crate) fn drag_scroll<B: Framebuffer>(app: &mut App<B>, dy: i32) -> bool {
+    app.log_drag_acc += dy;
+    let step = LOG_ROW_H as i32;
+    let mut moved = false;
+    while app.log_drag_acc >= step || app.log_drag_acc <= -step {
+        let dir = if app.log_drag_acc > 0 { 1 } else { -1 };
+        app.log_drag_acc -= dir * step;
+        match app.overlay {
+            Overlay::LogViewer => {
+                if app.log_scroll < 0 {
+                    let tail = log_tail_first(app.screen_width(), app.content_bottom);
+                    app.log_scroll = tail as i32;
+                }
+                app.log_scroll += dir;
+            }
+            Overlay::LicenseDetail => {
+                app.lic_scroll = (app.lic_scroll + dir).max(0);
+            }
+            _ => {}
+        }
+        moved = true;
+    }
+    moved
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// The bundled table mirrors C data/eh_licenses.c: five licenses,
-    /// each carrying its COMPLETE text — spot-check the distinctive
-    /// closing lines so a "curated excerpt" truncation can't slip back.
+    /// The bundled table: five licenses, each carrying its COMPLETE text
+    /// — spot-check the distinctive closing lines so a "curated excerpt"
+    /// truncation can't slip back.
     #[test]
-    fn license_table_matches_c_source() {
+    fn license_table_spot_checks() {
         assert_eq!(LICENSES.len(), 5);
         let by_name = |n: &str| LICENSES.iter().find(|l| l.name == n).unwrap();
         let ends = |name: &str, t: &str, s: &str| {
             assert!(t.trim_end().ends_with(s), "license `{name}` text truncated");
         };
 
-        let cjson = by_name("cJSON");
-        assert_eq!(cjson.kind, "MIT");
-        ends("cJSON", cjson.text, "OTHER DEALINGS IN THE SOFTWARE.");
+        let serde_json_lic = by_name("serde_json");
+        assert_eq!(serde_json_lic.kind, "MIT / Apache-2.0");
+        ends("serde_json", serde_json_lic.text, "either licence applies.");
 
         let sqlite = by_name("SQLite");
         ends("SQLite", sqlite.text, "attribution requirement.");

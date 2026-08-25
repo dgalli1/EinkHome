@@ -10,7 +10,7 @@ use eh_render::{Glyph, Surface};
 use eh_render::DrawCtx;
 use slint::Image;
 
-use crate::app::{Source, ViewMode};
+use crate::app::ViewMode;
 use crate::appui::{
     circle_outline, draw_back_chevron, draw_book_icon, draw_folder_icon, draw_globe_icon,
     draw_house, draw_layout_icon, draw_search_icon, draw_sync_icon,
@@ -51,10 +51,6 @@ fn bake(size: (u32, u32), white_bg: bool, draw: impl FnOnce(&mut DrawCtx)) -> Im
 
 /// All baked icons for one boot.
 pub struct Icons {
-    /// 1x2 hatch tile (LGRAY line + transparent row): stretched with
-    /// nearest-neighbour sampling it reproduces the C eh_dim_content
-    /// every-other-line dim exactly.
-    pub hatch: Image,
     pub house: Image,
     pub back: Image,
     pub source_kavita: Image,
@@ -67,6 +63,11 @@ pub struct Icons {
     pub input: Image,
     pub input_inv: Image,
     pub bulb: Image,
+    /// Scroll-button chevron ("^"); `chevron_down` is the 180° twin — the
+    /// software renderer does not rasterise Path (or reliably rotate), so
+    /// both directions are baked.
+    pub chevron: Image,
+    pub chevron_down: Image,
 }
 
 /// Bake the full icon set (a few ms at boot).
@@ -111,20 +112,17 @@ pub fn bake_all() -> Icons {
             );
         }
     });
-    let _ = Source::Kavita;
-    let hatch = {
-        // row 0 = LGRAY, row 1 = fully transparent
-        let mut buf = vec![0u8; 8];
-        buf[0] = 0xaa;
-        buf[1] = 0xaa;
-        buf[2] = 0xaa;
-        buf[3] = 0xff;
-        Image::from_rgba8(
-            slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(&buf, 1, 2),
-        )
-    };
+    // Scroll-button chevron: a 3px "^" centred in a 48x48 tile (C
+    // eh_draw_scroll_buttons_at drew the same two lines).
+    let chevron = bake((48, 48), true, |ctx| {
+        ctx.line(10, 31, 24, 17, 3, 0);
+        ctx.line(24, 17, 38, 31, 3, 0);
+    });
+    let chevron_down = bake((48, 48), true, |ctx| {
+        ctx.line(10, 17, 24, 31, 3, 0);
+        ctx.line(24, 31, 38, 17, 3, 0);
+    });
     Icons {
-        hatch,
         house,
         back,
         source_kavita,
@@ -137,5 +135,7 @@ pub fn bake_all() -> Icons {
         input,
         input_inv,
         bulb,
+        chevron,
+        chevron_down,
     }
 }

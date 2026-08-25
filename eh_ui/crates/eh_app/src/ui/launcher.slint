@@ -30,6 +30,8 @@ export component LauncherPage inherits Rectangle {
     in-out property <bool> up-ok: false;
     in-out property <bool> down-ok: false;
     in-out property <image> back-icon;
+    in-out property <image> chevron;
+    in-out property <image> chevron-down;
 
     callback back;
     callback scroll-page(int);
@@ -162,6 +164,8 @@ export component LauncherPage inherits Rectangle {
         y: parent.height - 96px;
         up: true;
         enabled-dir: root.up-ok;
+        chevron: root.chevron;
+        chevron-down: root.chevron-down;
         scroll(d) => { root.scroll-page(d); }
     }
     ScrollButton {
@@ -169,6 +173,8 @@ export component LauncherPage inherits Rectangle {
         y: parent.height - 96px;
         up: false;
         enabled-dir: root.down-ok;
+        chevron: root.chevron;
+        chevron-down: root.chevron-down;
         scroll(d) => { root.scroll-page(d); }
     }
 }

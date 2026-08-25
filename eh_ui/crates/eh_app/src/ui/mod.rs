@@ -372,6 +372,8 @@ impl Ui {
         comp.set_sync_icon(icons.sync.clone());
         comp.set_input_icon(icons.input.clone());
         comp.set_input_icon_inv(icons.input_inv.clone());
+        comp.set_chevron(icons.chevron.clone());
+        comp.set_chevron_down(icons.chevron_down.clone());
         comp.set_bulb_icon(icons.bulb.clone());
 
         Ui {
@@ -420,10 +422,6 @@ impl Ui {
             out = Some(region_to_rect(&region, scr.width, scr.height));
         });
         out
-    }
-    /// The hatch dim tile (shared by every sheet backdrop).
-    pub fn hatch(&self) -> slint::Image {
-        self.icons.hatch.clone()
     }
 
     /// Source icon by active source (set at source switches).

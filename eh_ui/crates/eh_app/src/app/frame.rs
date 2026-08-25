@@ -101,6 +101,7 @@ impl<B: Framebuffer> App<B> {
         };
         c.set_back(back);
         c.set_browse_mode(self.browse_active());
+        c.set_grid_mode(self.view_mode == ViewMode::Grid);
         let slabel = match self.source {
             Source::Local => crate::i18n::tr("source.local").to_string(),
             Source::Folder => crate::i18n::tr("source.folder").to_string(),
@@ -316,7 +317,6 @@ impl<B: Framebuffer> App<B> {
         let book_count = self.store.count().unwrap_or(0);
         let c = self.ui.comp();
         let w = self.screen_width();
-        c.set_hatch(self.ui.hatch());
         match self.overlay {
             Overlay::More => {
                 let labels: Vec<slint::SharedString> = crate::menu::label_keys()
@@ -640,9 +640,9 @@ impl<B: Framebuffer> App<B> {
                 let mut fitted = String::new();
                 eh_render::fit_width(
                     crate::shelf::shelf_font(),
-                    20.0,
+                    crate::viewer::LOG_FONT,
                     &shown,
-                    (w.saturating_sub(64)) as f32,
+                    (w.saturating_sub(32)) as f32,
                     &mut fitted,
                 );
                 c.set_viewer_path(fitted.into());
@@ -722,9 +722,9 @@ impl<B: Framebuffer> App<B> {
                 let mut fitted = String::new();
                 eh_render::fit_width(
                     crate::shelf::shelf_font(),
-                    20.0,
+                    crate::viewer::LOG_FONT,
                     &band,
-                    (w.saturating_sub(64)) as f32,
+                    (w.saturating_sub(32)) as f32,
                     &mut fitted,
                 );
                 c.set_lic_attribution(fitted.into());
@@ -738,7 +738,7 @@ impl<B: Framebuffer> App<B> {
                     crate::shelf::shelf_font(),
                     crate::viewer::LOG_FONT,
                     lic.text,
-                    (w.saturating_sub(48)) as f32,
+                    (w.saturating_sub(32)) as f32,
                     512,
                 );
                 let max_first = rows.len().saturating_sub(rows_vis);
@@ -801,7 +801,9 @@ impl<B: Framebuffer> App<B> {
                     });
                 }
                 c.set_launcher_items(slint::ModelRc::new(slint::VecModel::from(entries)));
-                c.set_launcher_scroll(0); // offset baked into the entries
+                // the entries carry raw layout y; the body subtracts the
+                // scroll (launcher.slint: y: it.y - root.scroll)
+                c.set_launcher_scroll(scroll);
                 c.set_launcher_body_h(body_h as i32);
                 c.set_launcher_up(scroll > 0);
                 c.set_launcher_down(scroll < max_scroll);

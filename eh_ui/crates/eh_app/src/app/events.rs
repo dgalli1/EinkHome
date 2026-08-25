@@ -44,8 +44,9 @@ impl<B: Framebuffer> App<B> {
             InputEvent::PointerDown { x, y } => {
                 self.press_pos = Some((*x, *y));
                 self.press_start = Some(std::time::Instant::now());
+                self.long_press_seen = false;
+                self.log_drag_acc = 0;
                 self.drag_y = Some(*y);
-                self.drag_total = 0;
                 // Slint hit-tests the press (TouchArea grab pairing); the
                 // release reports the semantic target.
                 self.ui
@@ -55,23 +56,29 @@ impl<B: Framebuffer> App<B> {
                     });
             }
             InputEvent::PointerMove { x, y } => {
-                // Launcher vertical drag (C eh_main.c drag_scroll_move):
-                // travel below DRAG_SLOP leaves the list alone (a
-                // stationary hold must not jitter it), and once dragging,
-                // launcher::drag_move clamps the offset against the same
-                // geometry the painter uses and reports a change only when
-                // the visible scroll moved — so a held pointer produces at
-                // most one dirty transition per real scroll step, never a
-                // repaint loop.
-                if self.overlay == Overlay::Launcher {
-                    if let (Some(prev), Some(_)) = (self.drag_y, self.press_start) {
-                        let dy = prev - *y;
-                        self.drag_total += dy;
-                        if self.drag_total.abs() >= crate::launcher::DRAG_SLOP
-                            && crate::launcher::drag_move(self, dy)
-                        {
-                            self.dirty = true;
+                // Drag scrolling (C eh_main.c drag_scroll_move): the
+                // launcher list and the log/detail viewers scroll by
+                // vertical drag.  Travel below DRAG_SLOP leaves the list
+                // alone (a stationary hold must not jitter it); each
+                // handler clamps against the same geometry the painter
+                // uses and only reports real scroll steps, so a held
+                // pointer never becomes a repaint loop.
+                if let (Some(prev), Some(_)) = (self.drag_y, self.press_start) {
+                    let dy = prev - *y;
+                    self.drag_total += dy;
+                    let moved = match self.overlay {
+                        Overlay::Launcher => {
+                            self.drag_total.abs() >= crate::launcher::DRAG_SLOP
+                                && crate::launcher::drag_move(self, dy)
                         }
+                        Overlay::LogViewer | Overlay::LicenseDetail => {
+                            self.drag_total.abs() >= crate::launcher::DRAG_SLOP
+                                && crate::viewer::drag_scroll(self, dy)
+                        }
+                        _ => false,
+                    };
+                    if moved {
+                        self.dirty = true;
                     }
                 }
                 self.drag_y = Some(*y);
@@ -82,15 +89,21 @@ impl<B: Framebuffer> App<B> {
             }
             InputEvent::PointerUp { x, y } => {
                 let (x, y) = (*x, *y);
+                // A firmware long-press (handled below) already opened the
+                // menu; the trailing release must not re-classify as a
+                // second long-press (or as a tap on the now-open sheet).
+                let seen = self.long_press_seen;
+                self.long_press_seen = false;
                 // Long-press on the shelf → context menu (C eh_long_press).
-                let is_long = match (self.press_pos, self.press_start) {
-                    (Some((px, py)), Some(t0)) => {
-                        let moved = (x - px).abs() > 24 || (y - py).abs() > 24;
-                        let held = t0.elapsed() >= std::time::Duration::from_millis(450);
-                        !moved && held
-                    }
-                    _ => false,
-                };
+                let is_long = !seen
+                    && match (self.press_pos, self.press_start) {
+                        (Some((px, py)), Some(t0)) => {
+                            let moved = (x - px).abs() > 24 || (y - py).abs() > 24;
+                            let held = t0.elapsed() >= std::time::Duration::from_millis(450);
+                            !moved && held
+                        }
+                        _ => false,
+                    };
                 self.press_pos = None;
                 self.press_start = None;
                 // A drag (moved > 48px) is not a tap.
@@ -109,6 +122,36 @@ impl<B: Framebuffer> App<B> {
                     is_long && self.tab == Tab::Library && self.overlay == Overlay::None;
                 self.pending_drag = dragged;
                 self.apply_actions();
+                // A drag's release already happened: if no launcher cell
+                // consumed the flag in this batch, drop it — otherwise the
+                // NEXT cell tap would be swallowed by a stale gesture.
+                self.pending_drag = false;
+            }
+            // The firmware's own long-press gesture (C EVT_POINTER_LONGPRESS):
+            // many panels swallow the release after it, so the UP-timing
+            // heuristic above never fires on device.  Synthesise the press/
+            // release pair so Slint reports the pressed tile, then flag the
+            // pending long-press exactly as the UP path does.
+            InputEvent::PointerLongPress { x, y } => {
+                if self.tab == Tab::Library && self.overlay == Overlay::None {
+                    self.press_pos = None;
+                    self.press_start = None;
+                    self.drag_total = 0;
+                    self.drag_y = None;
+                    self.ui
+                        .dispatch(slint::platform::WindowEvent::PointerPressed {
+                            position: slint::LogicalPosition::new(*x as f32, *y as f32),
+                            button: slint::platform::PointerEventButton::Left,
+                        });
+                    self.ui
+                        .dispatch(slint::platform::WindowEvent::PointerReleased {
+                            position: slint::LogicalPosition::new(*x as f32, *y as f32),
+                            button: slint::platform::PointerEventButton::Left,
+                        });
+                    self.long_press_seen = true;
+                    self.pending_long = true;
+                    self.apply_actions();
+                }
             }
             // EVT_SHOW / EVT_FOREGROUND (C eh_evt_show): a full redraw —
             // the user may have been reading with the integrated reader

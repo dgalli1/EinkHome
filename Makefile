@@ -44,7 +44,7 @@ OUT_TEST := $(CURDIR)/build/bookshelf.test
 
 # Everything under eh_ui/crates plus the two manifests: any change
 # rebuilds the staticlib (cargo's own dep tracking makes this cheap).
-RUST_SRCS := $(EH_UI)/Cargo.toml $(wildcard $(EH_UI)/crates/*/Cargo.toml) $(wildcard $(EH_UI)/crates/*/src/*.rs) $(wildcard $(EH_UI)/crates/*/src/*/*.rs)
+RUST_SRCS := $(EH_UI)/Cargo.toml $(wildcard $(EH_UI)/crates/*/Cargo.toml) $(wildcard $(EH_UI)/crates/*/src/*.rs) $(wildcard $(EH_UI)/crates/*/src/*/*.rs) $(wildcard $(EH_UI)/crates/*/src/ui/*.slint)
 
 .PHONY: all armhf pc test-host test test-rust fmt doc-check help lint clippy lint-py clean
 

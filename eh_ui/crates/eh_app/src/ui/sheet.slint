@@ -1,21 +1,25 @@
 // Shared modal-sheet pieces (C eh_dim_content + popup_geom): the
-// every-other-line LGRAY hatch dim (a 1x2 tile stretched with nearest-
-// neighbour sampling reproduces it exactly) and the centred 3/4-width
-// white panel with the C double border.
-
-import { BrowseRow } from "types.slint";
+// every-other-line LGRAY hatch dim and the centred 3/4-width white panel
+// with the C double border.
 
 // The hatch backdrop: LGRAY 1px line every other row over [y0, y1).
-export component HatchDim inherits Image {
+// Drawn as explicit 1px rows — stretching a tiny tile through the
+// software renderer's image path produces coarse banded stripes instead
+// of a 1px hatch (the renderer's fixed-point sampling breaks down at
+// ~700x upscales), which is exactly the artifact this replaces.
+export component HatchDim inherits Rectangle {
     in-out property <length> dim-y0: 0px;
     in-out property <length> dim-y1: 0px;
     x: 0;
     y: dim-y0;
     width: 100%;
     height: dim-y1 - dim-y0;
-    source: root.hatch;
-    image-rendering: pixelated;
-    in-out property <image> hatch;
+    for i in Math.floor((self.height / 2px)): Rectangle {
+        y: i * 2px;
+        width: 100%;
+        height: 1px;
+        background: #aaaaaa;
+    }
 }
 
 // The centred white panel: pw = w*3/4 (integer parity with the C),
