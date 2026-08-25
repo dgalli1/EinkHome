@@ -116,6 +116,24 @@ Set `EH_SOCKET=/path/to.sock` to expose the headless IPC control plane
 (`tap x y`, `type TEXT`, `kb_commit`, `hash`, `shot PATH`, `state`,
 `quit`) — the same newline protocol the e2e suite drives.
 
+## Dev releases (CI)
+
+Every push to `main`/`demo` runs the `dev-release` pipeline, which
+compiles every executable for every target and publishes them to the
+rolling [dev release](https://github.com/dgalli1/EinkHome/releases/tag/dev)
+(prerelease, tag always points at the built commit):
+
+| asset | target |
+| --- | --- |
+| `bookshelf.app` | PocketBook armel (all but InkPad One) |
+| `bookshelf.armhf.app` | PocketBook armhf (InkPad One) |
+| `bookshelf.pc` | desktop SDL (x86_64 linux) |
+| `bookshelf.test` | headless SDL + e2e IPC (x86_64 linux) |
+| `einkhome-dev.apk` | Android (arm64-v8a + x86_64) |
+
+`SHA256SUMS` covers all assets.  Pull requests rehearse the builds but
+never publish.
+
 ## Install on a real device
 
 ```sh

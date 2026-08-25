@@ -148,3 +148,7 @@ help:
 	@echo "  make clean      remove built artifacts"
 
 .PHONY: help
+
+.PHONY: apk
+apk:
+	scripts/make-apk.sh

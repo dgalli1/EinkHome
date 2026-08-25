@@ -1,0 +1,265 @@
+name: dev-release
+
+# Build every executable for every target and publish them as a rolling
+# "dev" prerelease on GitHub:
+#
+#   bookshelf.app        PocketBook armel (every device but the InkPad One)
+#   bookshelf.armhf.app  PocketBook armhf (InkPad One)
+#   bookshelf.pc         desktop SDL app (x86_64 linux)
+#   bookshelf.test       headless SDL app with the e2e IPC socket
+#   einkhome-dev.apk     Android (arm64-v8a + x86_64 in one APK; built when
+#                        the eh_android crate is on the branch — the demo
+#                        line today, main once the port merges)
+#   SHA256SUMS
+#
+# The device job mirrors the e2e-suite setup (podman pbdev toolchain,
+# PocketBook SDK, staged firmware trees) but never boots the emulator:
+# the apps only link against the staged rootfs.  The Android job is
+# skipped when the branch has no eh_android crate.  Pull requests build
+# everything but never publish; pushes to main/demo publish.
+
+on:
+  push:
+    branches: [main, demo]
+  pull_request:
+    paths:
+      - ".github/workflows/dev-release.yml"
+      - "scripts/make-apk.sh"
+      - "Makefile"
+      - "sdk/**"
+      - "app/**"
+      - "eh_ui/crates/eh_android/**"
+  workflow_dispatch:
+
+concurrency:
+  group: dev-release-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  # armel: the firmware the emulator suite uses (Verse Pro Color); the
+  # app links against its staged rootfs.
+  FIRMWARE_URL: https://download.pocketbook-int.com/fw/Yitoa/634k3/user/20251201/sw_20251201_U634k3_6.10.2544_user.zip
+  FIRMWARE_ZIP: sw_20251201_U634k3_6.10.2544_user.zip
+  FIRMWARE_NAME: U634k3_6.10.2544
+  # armhf: the InkPad One firmware (the only hard-float device).
+  ARMHF_URL: https://download.pocketbook-int.com/fw/Jezetek/1030/user/20260713/swupdate_user_1030_6.11.1437.zip
+  ARMHF_ZIP: swupdate_user_1030_6.11.1437.zip
+  ARMHF_NAME: U1030_6.11.1437
+
+jobs:
+  device:
+    name: Device apps (armel + armhf)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: true
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Record pbemu submodule revision
+        id: pbemu-rev
+        run: echo "sha=$(git -C pbemu rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - name: Install podman
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends podman catatonit slirp4netns fuse-overlayfs uidmap
+      - name: Cache pbemu venv
+        id: cache-venv
+        uses: actions/cache@v4
+        with:
+          path: pbemu/.venv
+          key: pbemu-venv-${{ steps.pbemu-rev.outputs.sha }}-${{ hashFiles('pbemu/pyproject.toml') }}
+      - name: Set up pbemu venv
+        if: steps.cache-venv.outputs.cache-hit != 'true'
+        run: cd pbemu && ./setup-venv.sh
+      - name: Cache PocketBook SDK
+        id: cache-sdk
+        uses: actions/cache@v4
+        with:
+          path: sdk/pocketbook-sdk-b288
+          key: pb-sdk-b288-${{ hashFiles('sdk/install-sdk.sh') }}
+      - name: Install PocketBook SDK
+        if: steps.cache-sdk.outputs.cache-hit != 'true'
+        run: ./sdk/install-sdk.sh
+      - name: Cache pbdev podman image
+        id: cache-image
+        uses: actions/cache@v4
+        with:
+          path: .cache/pbdev-image.tar
+          key: pbdev-image-${{ steps.pbemu-rev.outputs.sha }}-${{ hashFiles('pbemu/Dockerfile') }}-${{ runner.arch }}
+      - name: Load pbdev image from cache
+        if: steps.cache-image.outputs.cache-hit == 'true'
+        run: podman load -i .cache/pbdev-image.tar
+      - name: Build pbdev image
+        if: steps.cache-image.outputs.cache-hit != 'true'
+        run: cd pbemu && .venv/bin/python -m pbemu image
+      - name: Save pbdev image to cache
+        if: steps.cache-image.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p .cache
+          podman save pbdev -o .cache/pbdev-image.tar
+      - name: Cache firmware zips
+        id: cache-fw
+        uses: actions/cache@v4
+        with:
+          path: .cache/fw
+          key: pb-fw-devrel-${{ hashFiles('resources/supported-firmwares.tsv') }}
+      - name: Download firmwares (armel + armhf)
+        if: steps.cache-fw.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p .cache/fw
+          curl -fL --retry 3 --retry-delay 5 -o ".cache/fw/${FIRMWARE_ZIP}" "${FIRMWARE_URL}"
+          curl -fL --retry 3 --retry-delay 5 -o ".cache/fw/${ARMHF_ZIP}" "${ARMHF_URL}"
+      - name: Stage firmwares
+        run: |
+          cd pbemu
+          .venv/bin/python -m pbemu install "../.cache/fw/${FIRMWARE_ZIP}"
+          .venv/bin/python -m pbemu install "../.cache/fw/${ARMHF_ZIP}"
+      - name: Build bookshelf.app (armel)
+        run: make PBEMU_FIRMWARE_DIR="$PWD/pbemu/${FIRMWARE_NAME}"
+      - name: Build bookshelf.armhf.app (armhf)
+        # The armhf link uses ARMHF_FIRMWARE_DIR, which defaults to the
+        # path `pbemu install` staged the InkPad One tree at.
+        run: make armhf
+      - name: Upload device binaries
+        uses: actions/upload-artifact@v7
+        with:
+          name: dev-release-device
+          path: |
+            build/bookshelf.app
+            build/bookshelf.armhf.app
+          if-no-files-found: error
+          retention-days: 7
+
+  host:
+    name: Host apps (pc + test)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - name: Build desktop app and headless test host
+        run: |
+          make pc
+          BS_ENABLE_TEST_IPC=1 bash sdk/build_pc.sh --output build/bookshelf.test
+      - name: Upload host binaries
+        uses: actions/upload-artifact@v7
+        with:
+          name: dev-release-host
+          path: |
+            build/bookshelf.pc
+            build/bookshelf.test
+          if-no-files-found: error
+          retention-days: 7
+
+  android:
+    name: Android APK (arm64 + x86_64)
+    # The port lives on the demo line today; build whenever the crate
+    # is present so the APK joins the release automatically on merge.
+    if: hashFiles('eh_ui/crates/eh_android/Cargo.toml') != ''
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - name: Cache Android SDK components
+        id: cache-android
+        uses: actions/cache@v4
+        with:
+          path: |
+            /usr/local/lib/android/sdk/ndk
+            /usr/local/lib/android/sdk/build-tools
+            /usr/local/lib/android/sdk/platforms/android-34
+          key: android-sdk-ndk-27.2.12479018-bt-37.0.0-p34
+      - name: Install Android SDK components
+        if: steps.cache-android.outputs.cache-hit != 'true'
+        run: |
+          sdkmanager --install "ndk;27.2.12479018" "build-tools;37.0.0" "platforms;android-34" > /dev/null
+      - name: Set up Rust (android cross targets)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,x86_64-linux-android
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: eh_ui
+      - name: Build APK
+        run: scripts/make-apk.sh
+        env:
+          ANDROID_HOME: /usr/local/lib/android/sdk
+          ANDROID_NDK: /usr/local/lib/android/sdk/ndk/27.2.12479018
+      - name: Upload APK
+        uses: actions/upload-artifact@v7
+        with:
+          name: dev-release-android
+          path: build/einkhome-dev.apk
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish dev release
+    needs: [device, host, android]
+    # PRs only rehearse the build; pushes (main/demo) and manual runs on
+    # main publish.  The android job may be legitimately skipped.
+    if: >
+      always() && !cancelled() &&
+      needs.device.result == 'success' &&
+      needs.host.result == 'success' &&
+      (needs.android.result == 'success' || needs.android.result == 'skipped') &&
+      (github.event_name == 'push' ||
+       (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    concurrency:
+      # main and demo pushes can race for the same rolling release.
+      group: dev-release-publish
+      cancel-in-progress: false
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v7
+        with:
+          path: dist
+          pattern: dev-release-*
+          merge-multiple: true
+      - name: Checksums
+        run: |
+          cd dist
+          sha256sum -- * > SHA256SUMS
+      - name: Publish rolling dev release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REF_NAME: ${{ github.ref_name }}
+          SHA: ${{ github.sha }}
+        run: |
+          {
+            echo "Rolling dev build of \`${REF_NAME}\` @ ${SHA}"
+            echo
+            echo "Built by the [dev-release pipeline](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/workflows/dev-release.yml)."
+            echo
+            echo "| asset | target |"
+            echo "| --- | --- |"
+            echo "| \`bookshelf.app\` | PocketBook armel (all but InkPad One) |"
+            echo "| \`bookshelf.armhf.app\` | PocketBook armhf (InkPad One) |"
+            echo "| \`bookshelf.pc\` | desktop SDL (x86_64 linux) |"
+            echo "| \`bookshelf.test\` | headless SDL + e2e IPC (x86_64 linux) |"
+            echo "| \`einkhome-dev.apk\` | Android (arm64-v8a + x86_64) |"
+            echo
+            echo "Device install: \`scripts/install-device.sh\` or the zip's \`install.sh\` (\`make-release.sh\`)."
+          } > notes.md
+          # Rolling release: recreate so the tag always points at the
+          # built commit, then upload the fresh assets.
+          gh release delete dev --yes --cleanup-tag 2>/dev/null || true
+          gh release create dev --prerelease \
+            --title "Dev build (${REF_NAME} @ ${SHA:0:7})" \
+            --notes-file notes.md \
+            --target "$SHA" \
+            dist/*
+          gh release view dev --json assets --jq '.assets[].name'
