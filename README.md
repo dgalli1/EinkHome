@@ -99,6 +99,7 @@ rolling [dev release](https://github.com/dgalli1/EinkHome/releases/tag/dev)
 | asset | target |
 | --- | --- |
 | `einkhome-<sha>.zip` | PocketBook: `bookshelf.app` (armel) + `bookshelf.armhf.app` (armhf) + `install.sh` |
+| `bookshelf-linux-armv7` | Kobo / reMarkable 1 / Cervantes / generic Linux fb (runtime-detecting; built when the `eh_device` crate is on the branch) |
 | `bookshelf.pc` | desktop SDL (x86_64 linux) |
 | `bookshelf.test` | headless SDL + e2e IPC (x86_64 linux) |
 | `einkhome-dev.apk` | Android (arm64-v8a + x86_64; built when the `eh_android` crate is on the branch) |
