@@ -140,9 +140,10 @@ jobs:
           cd pbemu
           .venv/bin/python -m pbemu install "../.cache/fw/${FIRMWARE_ZIP}"
           # The armhf zip's name doesn't carry the U1030 firmware id, so
-          # the staging dir must be pinned to what build_armhf.sh expects.
+          # the staging dir must be pinned to what build_armhf.sh expects
+          # (cwd is pbemu/, so the bare name lands at pbemu/U1030_...).
           .venv/bin/python -m pbemu install "../.cache/fw/${ARMHF_ZIP}" \
-            --output-dir "../${ARMHF_NAME}"
+            --output-dir "${ARMHF_NAME}"
       - name: Build bookshelf.app (armel)
         run: make PBEMU_FIRMWARE_DIR="$PWD/pbemu/${FIRMWARE_NAME}"
       - name: Build bookshelf.armhf.app (armhf)
