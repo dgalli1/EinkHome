@@ -97,7 +97,7 @@ jobs:
       - name: Install cargo-zigbuild
         run: |
           curl -fsSL https://github.com/rust-cross/cargo-zigbuild/releases/latest/download/cargo-zigbuild-x86_64-unknown-linux-musl.tar.xz | tar xJ
-          install -m755 cargo-zigbuild "$HOME/.cargo/bin/cargo-zigbuild"
+          install -m755 cargo-zigbuild-x86_64-unknown-linux-musl/cargo-zigbuild "$HOME/.cargo/bin/cargo-zigbuild"
       - name: Install zig
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends zig
       - name: Cache Rust build
@@ -164,7 +164,31 @@ jobs:
         # Slint's text stack probes fontconfig; the SDL backend links
         # SDL2 (SDL2_ttf/SDL2_image for the C line's build_pc.sh).
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libfontconfig1-dev libsdl2-dev libsdl2-ttf-dev libsdl2-image-dev
-      - name: Build desktop app and headless test host
+      # The rust line (demo) builds both hosts from the eh_ui workspace;
+      # the C line (main) builds bookshelf.test via build_pc.sh with the
+      # e2e IPC socket enabled.
+      - name: Detect app lineage
+        id: lineage
+        run: |
+          if [ -f eh_ui/Cargo.toml ]; then
+            echo "rust=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "rust=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Set up Rust
+        if: steps.lineage.outputs.rust == 'true'
+        uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        if: steps.lineage.outputs.rust == 'true'
+        with:
+          workspaces: eh_ui
+      - name: Build host binaries (rust line)
+        if: steps.lineage.outputs.rust == 'true'
+        run: |
+          make pc
+          make test-host
+      - name: Build host binaries (C line)
+        if: steps.lineage.outputs.rust == 'false'
         run: |
           make pc
           BS_ENABLE_TEST_IPC=1 bash sdk/build_pc.sh --output build/bookshelf.test
