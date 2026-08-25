@@ -934,6 +934,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "eh_android"
+version = "0.1.0"
+dependencies = [
+ "android-activity",
+ "eh_app",
+ "eh_hal",
+ "ndk",
+]
+
+[[package]]
 name = "eh_app"
 version = "0.1.0"
 dependencies = [

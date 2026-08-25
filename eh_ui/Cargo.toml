@@ -7,6 +7,7 @@ members = [
     "crates/eh_backend_linuxfb",
     "crates/eh_backend_inkview",
     "crates/eh_pb",
+    "crates/eh_android",
     "crates/eh_app",
     "crates/eh_host",
 ]

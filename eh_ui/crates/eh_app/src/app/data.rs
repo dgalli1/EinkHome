@@ -101,12 +101,6 @@ impl<B: Framebuffer> App<B> {
                 }
             })
             .collect();
-        for (i, t) in tiles.iter().enumerate() {
-            crate::log(&format!(
-                "[dbgm] tile[{}] has_art={} title={:?}",
-                i, t.has_art, t.title
-            ));
-        }
         let model = slint::VecModel::from(tiles);
         self.ui.comp().set_entries(slint::ModelRc::new(model));
     }

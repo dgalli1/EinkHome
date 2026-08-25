@@ -68,7 +68,7 @@ pub fn extract_book_meta(path: &Path, ext: &str) -> ExtractedMeta {
 pub fn extract_book_cover(path: &Path, ext: &str) -> Option<Vec<u8>> {
     let bytes = match ext {
         "epub" => extract_epub_cover(path),
-        "pdf" => pdf_first_page_png(path),
+        "pdf" => pdf_first_page_png_or_none(path),
         "txt" => txt_word_cover(path),
         _ => None,
     };
@@ -140,6 +140,19 @@ fn img_ext(base_lower: &str) -> bool {
 /// cargo-zigbuild path as libsqlite3-sys), so the fallback works on the
 /// PocketBook itself: even a metadata-less PDF shows its first page as
 /// the tile art.
+/// Without the MuPDF feature the page-render cover fallback is
+/// unavailable (Android): PDF metadata extraction stays pure-Rust.
+#[cfg(not(feature = "pdf-mupdf"))]
+fn pdf_first_page_png_or_none(_path: &Path) -> Option<Vec<u8>> {
+    None
+}
+
+#[cfg(feature = "pdf-mupdf")]
+fn pdf_first_page_png_or_none(path: &Path) -> Option<Vec<u8>> {
+    pdf_first_page_png(path)
+}
+
+#[cfg(feature = "pdf-mupdf")]
 fn pdf_first_page_png(path: &Path) -> Option<Vec<u8>> {
     let doc = mupdf::Document::open(path.to_str()?).ok()?;
     let page = doc.load_page(0).ok()?;

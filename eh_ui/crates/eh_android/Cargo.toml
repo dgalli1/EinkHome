@@ -1,0 +1,46 @@
+[package]
+name = "eh_android"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# The Android port: one cdylib that is BOTH the platform backend and the
+# host.  `android_main` (NativeActivity glue from android-activity) owns
+# the lifecycle, maps the ANativeWindow to an `eh_hal` Framebuffer over an
+# RGBA buffer, feeds touch/key events into `App::on_event` and presents
+# the rendered frame back to the window after every `App::present`.
+#
+# The APK needs no Java/dex: the manifest declares android.app.NativeActivity
+# with `android.app.lib_name = "eh_android"`, and android-activity's
+# native_activity glue provides ANativeActivity_onCreate inside the .so.
+
+[lib]
+crate-type = ["cdylib"]
+path = "android_main.rs"
+
+[dependencies]
+eh_app = { path = "../eh_app", default-features = false }
+eh_hal = { path = "../eh_hal" }
+android-activity = { version = "0.6", features = ["native-activity"] }
+ndk = "0.9"
+
+[package.metadata.android]
+package = "de.einkhome.app"
+apk_name = "einkhome"
+build_targets = ["x86_64-linux-android", "aarch64-linux-android"]
+
+[package.metadata.android.sdk]
+min_sdk_version = 28
+target_sdk_version = 34
+
+[package.metadata.android.application]
+label = "EinkHome"
+has_code = false
+
+[package.metadata.android.application.activity]
+name = "android.app.NativeActivity"
+config_changes = "orientation|keyboardHidden|screenSize|smallestScreenSize|screenLayout|keyboard|navigation|uiMode"
+launch_mode = "singleTop"
+
+[package.metadata.android.application.activity.meta_data]
+android.app.lib_name = "eh_android"
