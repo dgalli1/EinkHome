@@ -86,6 +86,22 @@ jobs:
       - name: Install PocketBook SDK
         if: steps.cache-sdk.outputs.cache-hit != 'true'
         run: ./sdk/install-sdk.sh
+      # The demo line's `make` first cross-builds libeh_pb.a with
+      # cargo zigbuild; on the C line these steps are unused setup.
+      - name: Set up Rust (armv7 cross + zigbuild)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: armv7-unknown-linux-gnueabi,armv7-unknown-linux-gnueabihf
+      - name: Install cargo-zigbuild + zig
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-zigbuild
+      - name: Install zig
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends zig
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: eh_ui
       - name: Cache pbdev podman image
         id: cache-image
         uses: actions/cache@v4
@@ -142,6 +158,8 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v5
+      - name: Install fontconfig dev
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libfontconfig1-dev
       - name: Build desktop app and headless test host
         run: |
           make pc
