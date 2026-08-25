@@ -44,11 +44,13 @@ pub fn cache_path(covers_dir: &Path, id: &str) -> PathBuf {
     covers_dir.join(bucket).join(format!("{safe}.png"))
 }
 
-/// Resolve the covers dir (next to the store/config file), creating it.
+/// Resolve the covers dir (next to the store/config file), creating it,
+/// and run the one-time raw-cache migration ([`validate_raw_cache`]).
 pub fn resolve_covers_dir(app_dir: &Path) -> PathBuf {
     let dir = app_dir.join(COVERS_SUBDIR);
     let _ = std::fs::create_dir_all(&dir);
     let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o777));
+    validate_raw_cache(&dir);
     dir
 }
 
@@ -71,6 +73,42 @@ pub fn store_raw(covers_dir: &Path, id: &str, bytes: &[u8]) -> std::io::Result<(
     let tmp = path.with_extension("raw.tmp");
     std::fs::write(&tmp, bytes)?;
     std::fs::rename(tmp, path)
+}
+
+/// Cache-format stamp of the RAW extracted-cover cache (`.raw` files).
+/// Bump whenever extraction output changes meaningfully: a mismatch
+/// wipes the whole raw cache once at boot, so stale bytes never outlive
+/// the fix that invalidates them — old no-cover tombstones from builds
+/// without a decoder, first-page renders from before a renderer fix.
+pub const RAW_CACHE_VERSION: u32 = 2;
+
+const RAW_VER_FILE: &str = ".raw_ver";
+
+/// Drop every cached `.raw` when the stamp is missing or from another
+/// version, then write the current stamp.  The `.png` cache (server
+/// covers) is untouched — only local extraction output resets.
+pub fn validate_raw_cache(covers_dir: &Path) {
+    let stamp = covers_dir.join(RAW_VER_FILE);
+    if std::fs::read_to_string(&stamp).is_ok_and(|s| s.trim() == RAW_CACHE_VERSION.to_string()) {
+        return;
+    }
+    if let Ok(buckets) = std::fs::read_dir(covers_dir) {
+        for bucket in buckets.flatten() {
+            let p = bucket.path();
+            if !p.is_dir() {
+                continue; // the stamp file itself lives at the root
+            }
+            if let Ok(files) = std::fs::read_dir(&p) {
+                for f in files.flatten() {
+                    let fp = f.path();
+                    if fp.extension().is_some_and(|x| x == "raw" || x == "tmp") {
+                        let _ = std::fs::remove_file(&fp);
+                    }
+                }
+            }
+        }
+    }
+    let _ = std::fs::write(&stamp, format!("{RAW_CACHE_VERSION}\n"));
 }
 
 /// Return the cached cover PNG bytes for `id`, if present.
@@ -367,5 +405,35 @@ mod tests {
         w.total = 5;
         w.remaining.store(9, Ordering::Relaxed);
         assert_eq!(w.done(), 0);
+    }
+    #[test]
+    fn raw_cache_invalidation_wipes_stale_covers_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let covers = resolve_covers_dir(dir.path());
+        // A good render, a poisoned tombstone, and a server PNG that
+        // must survive the wipe.
+        store_raw(&covers, "bookA", b"\x89PNG-bytes").unwrap();
+        store_raw(&covers, "bookB", &[]).unwrap();
+        let png = cache_path(&covers, "srv");
+        std::fs::create_dir_all(png.parent().unwrap()).unwrap();
+        std::fs::write(&png, b"PNG").unwrap();
+
+        // Simulate the previous cache generation.
+        let stamp = covers.join(".raw_ver");
+        std::fs::write(&stamp, "1\n").unwrap();
+
+        validate_raw_cache(&covers);
+        assert!(!raw_path(&covers, "bookA").exists(), "stale render kept");
+        assert!(!raw_path(&covers, "bookB").exists(), "tombstone kept");
+        assert_eq!(std::fs::read(&png).unwrap(), b"PNG", "server cache hit");
+        assert_eq!(
+            std::fs::read_to_string(&stamp).unwrap().trim(),
+            RAW_CACHE_VERSION.to_string()
+        );
+
+        // Current stamp: a re-run is a no-op (fresh writes survive).
+        store_raw(&covers, "bookC", b"new").unwrap();
+        validate_raw_cache(&covers);
+        assert_eq!(std::fs::read(raw_path(&covers, "bookC")).unwrap(), b"new");
     }
 }
