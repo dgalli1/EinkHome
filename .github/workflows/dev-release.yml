@@ -171,7 +171,7 @@ jobs:
             RUSTFLAGS="-L native=$FW/ebrmain/lib" \
             cargo zigbuild --release --target armv7-unknown-linux-gnueabihf.2.23 \
             --manifest-path eh_ui/Cargo.toml -p eh_device
-          cp target/armv7-unknown-linux-gnueabihf/release/bookshelf-device \
+          cp eh_ui/target/armv7-unknown-linux-gnueabihf/release/bookshelf-device \
             build/bookshelf-linux-armv7
       - name: Upload device artifacts
         uses: actions/upload-artifact@v7
