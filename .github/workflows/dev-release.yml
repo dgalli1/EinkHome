@@ -150,13 +150,16 @@ jobs:
         # The armhf link uses ARMHF_FIRMWARE_DIR, which defaults to the
         # path `pbemu install` staged the InkPad One tree at.
         run: make armhf
-      - name: Upload device binaries
+      - name: Package device release zip
+        # GitHub rejects `.app` as a release-asset extension, so the two
+        # binaries ship inside the standard make-release.sh zip (which
+        # also carries the ssh installer).
+        run: scripts/make-release.sh --no-build
+      - name: Upload device release zip
         uses: actions/upload-artifact@v7
         with:
           name: dev-release-device
-          path: |
-            build/bookshelf.app
-            build/bookshelf.armhf.app
+          path: build/einkhome-*.zip
           if-no-files-found: error
           retention-days: 7
 
@@ -319,13 +322,12 @@ jobs:
             echo
             echo "| asset | target |"
             echo "| --- | --- |"
-            echo "| \`bookshelf.app\` | PocketBook armel (all but InkPad One) |"
-            echo "| \`bookshelf.armhf.app\` | PocketBook armhf (InkPad One) |"
+            echo "| \`einkhome-<sha>.zip\` | PocketBook: bookshelf.app (armel) + bookshelf.armhf.app (armhf) + install.sh |"
             echo "| \`bookshelf.pc\` | desktop SDL (x86_64 linux) |"
             echo "| \`bookshelf.test\` | headless SDL + e2e IPC (x86_64 linux) |"
             echo "| \`einkhome-dev.apk\` | Android (arm64-v8a + x86_64) |"
             echo
-            echo "Device install: \`scripts/install-device.sh\` or the zip's \`install.sh\` (\`make-release.sh\`)."
+            echo "Device install: unzip, then \`./install.sh <device-ip> [api-url]\`."
           } > notes.md
           # Rolling release: recreate so the tag always points at the
           # built commit, then upload the fresh assets.
