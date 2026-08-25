@@ -993,6 +993,7 @@ name = "eh_backend_sdl"
 version = "0.1.0"
 dependencies = [
  "eh_hal",
+ "parking_lot",
  "sdl2",
 ]
 

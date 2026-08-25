@@ -112,6 +112,28 @@ impl<B: Framebuffer> App<B> {
                         self.set_overlay(Overlay::None);
                     }
                 }
+                Action::KbChar(c) => {
+                    self.fb().kb_type_text(&c.to_string());
+                    self.dirty = true;
+                }
+                Action::KbBackspace => {
+                    self.fb().kb_backspace();
+                    self.dirty = true;
+                }
+                Action::KbOk => {
+                    // The static commit handler stashes the buffer; the
+                    // drain applies it to the armed field immediately.
+                    self.fb().kb_commit();
+                    self.drain_keyboard();
+                    self.dirty = true;
+                }
+                Action::KbCancel => {
+                    if self.search_kb {
+                        self.dismiss_search_kb();
+                    }
+                    self.kb_editing = None;
+                    self.dirty = true;
+                }
                 Action::SettingsBack => self.settings_back(),
                 Action::SettingsRow(i) => self.settings_row(i),
                 Action::ViewerBack => self.viewer_back(),

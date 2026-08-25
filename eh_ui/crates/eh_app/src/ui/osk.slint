@@ -1,0 +1,157 @@
+// The app-side on-screen keyboard (SDL hosts: the backend renders no
+// keyboard UI for OpenKeyboard, unlike the firmware platforms).  A
+// bottom-docked panel — title band, live buffer line, and QWERTZ key
+// rows with space / backspace / OK / cancel.  Every key is a plain tap
+// target routed through the app's action queue; the buffer itself stays
+// in the backend (live_keyboard_text), so physical typing keeps working
+// alongside.
+
+component OsKey inherits Rectangle {
+    in-out property <string> label;
+    in-out property <int> span: 1;
+    in-out property <bool> accent: false;
+    callback tap;
+    ta := TouchArea {
+        clicked => { root.tap(); }
+    }
+    background: ta.pressed ? #888888 : (root.accent ? black : white);
+    border-width: 2px;
+    border-color: black;
+    horizontal-stretch: root.span;
+    min-width: 56px;
+    Text {
+        text: root.label;
+        font-size: 30px;
+        color: root.accent ? white : black;
+        vertical-alignment: center;
+        horizontal-alignment: center;
+    }
+}
+
+// 116px header (title + buffer line) + 5 key rows of 76px + 4 gaps of
+// 8px + 2px borders.
+export component OsK inherits Rectangle {
+    height: 532px;
+    in-out property <int> content-h: 0;
+    in-out property <string> title: "";
+    in-out property <string> text: "";
+    callback key(string);
+    callback back;
+    callback commit;
+    callback cancel;
+
+    background: white;
+    border-width: 2px;
+    border-color: black;
+
+    // title band + the live buffer line (the firmware keyboard's field)
+    Text {
+        x: 24px;
+        y: 10px;
+        height: 30px;
+        font-size: 28px;
+        color: black;
+        text: root.title;
+    }
+    Rectangle {
+        x: 24px;
+        y: 48px;
+        width: parent.width - 48px;
+        height: 56px;
+        border-width: 2px;
+        border-color: black;
+        Text {
+            x: 12px;
+            width: parent.width - 24px;
+            height: parent.height;
+            vertical-alignment: center;
+            font-size: 30px;
+            color: black;
+            overflow: elide;
+            text: root.text == "" ? "…" : root.text;
+        }
+    }
+
+    // key rows
+    property <length> row-h: 76px;
+    property <length> rows-y: 116px;
+    HorizontalLayout {
+        x: 16px;
+        y: root.rows-y;
+        width: parent.width - 32px;
+        height: root.row-h;
+        spacing: 8px;
+        for k in ["1", "2", "3", "4", "5", "6", "7", "8", "9", "0"]: OsKey {
+            label: k;
+            tap => { root.key(k); }
+        }
+    }
+    HorizontalLayout {
+        x: 16px;
+        y: root.rows-y + root.row-h + 8px;
+        width: parent.width - 32px;
+        height: root.row-h;
+        spacing: 8px;
+        for k in ["q", "w", "e", "r", "t", "z", "u", "i", "o", "p", "ü"]: OsKey {
+            label: k;
+            tap => { root.key(k); }
+        }
+    }
+    HorizontalLayout {
+        x: 16px;
+        y: root.rows-y + 2 * (root.row-h + 8px);
+        width: parent.width - 32px;
+        height: root.row-h;
+        spacing: 8px;
+        for k in ["a", "s", "d", "f", "g", "h", "j", "k", "l", "ö", "ä"]: OsKey {
+            label: k;
+            tap => { root.key(k); }
+        }
+    }
+    HorizontalLayout {
+        x: 16px;
+        y: root.rows-y + 3 * (root.row-h + 8px);
+        width: parent.width - 32px;
+        height: root.row-h;
+        spacing: 8px;
+        OsKey {
+            label: "y";
+            tap => { root.key("y"); }
+        }
+        for k in ["x", "c", "v", "b", "n", "m"]: OsKey {
+            label: k;
+            tap => { root.key(k); }
+        }
+        for k in ["ß", ",", "."]: OsKey {
+            label: k;
+            tap => { root.key(k); }
+        }
+        OsKey {
+            span: 2;
+            label: "Del";
+            tap => { root.back(); }
+        }
+    }
+    HorizontalLayout {
+        x: 16px;
+        y: root.rows-y + 4 * (root.row-h + 8px);
+        width: parent.width - 32px;
+        height: root.row-h;
+        spacing: 8px;
+        OsKey {
+            label: "✕";
+            tap => { root.cancel(); }
+        }
+        OsKey {
+            span: 6;
+            label: "␣";
+            tap => { root.key(" "); }
+        }
+        OsKey {
+            span: 2;
+            label: "OK";
+            accent: true;
+            tap => { root.commit(); }
+        }
+    }
+}

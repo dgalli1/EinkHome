@@ -244,6 +244,7 @@ component SearchBody inherits Rectangle {
     in-out property <string> query: "";
     in-out property <string> placeholder: "";
     in-out property <bool> search-kb: false;
+    in-out property <string> live: "";
     in-out property <[string]> rows: [];
     in-out property <bool> hint: false;
     in-out property <image> input-icon;
@@ -290,7 +291,9 @@ component SearchBody inherits Rectangle {
                 color: root.search-kb ? white : black;
                 overflow: elide;
                 width: parent.width - 80px;
-                text: root.query == "" ? root.placeholder : root.query;
+                text: root.search-kb && root.live != ""
+                    ? root.live
+                    : (root.query == "" ? root.placeholder : root.query);
             }
             if (root.search-kb && root.query != ""): Rectangle {
                 x: 68px + query-text.preferred-width + 1px;
@@ -355,6 +358,7 @@ export component ShelfBody inherits Rectangle {
     in-out property <string> query: "";
     in-out property <string> search-placeholder: "";
     in-out property <bool> search-kb: false;
+    in-out property <string> kb-text: "";
     in-out property <[string]> history: [];
     in-out property <bool> history-hint: false;
     in-out property <bool> search-tab: false;
@@ -373,6 +377,7 @@ export component ShelfBody inherits Rectangle {
         query: root.query;
         placeholder: root.search-placeholder;
         search-kb: root.search-kb;
+        live: root.kb-text;
         rows: root.history;
         hint: root.history-hint;
         input-icon: root.input-icon;

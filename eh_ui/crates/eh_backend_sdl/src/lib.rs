@@ -109,30 +109,6 @@ impl SdlFb {
         })
     }
 
-    /// Append text to the open keyboard buffer (the C `AppendIpcText`, the
-    /// IPC "type" command).  No-op when no keyboard is open.
-    pub fn kb_type_text(&mut self, s: &str) {
-        if self.kb_open {
-            self.kb_buf.extend_from_slice(s.as_bytes());
-        }
-    }
-
-    /// Commit the open keyboard exactly like a real RETURN press: close it
-    /// and fire the app's handler with the buffer (the IPC "kb_commit").
-    pub fn kb_commit(&mut self) {
-        if self.kb_open {
-            let f = self.kb_on_done.take();
-            self.kb_open = false;
-            let buf = std::mem::take(&mut self.kb_buf);
-            if let Ok(video) = self.sdl.video() {
-                video.text_input().stop();
-            }
-            if let Some(f) = f {
-                f(&buf);
-            }
-        }
-    }
-
     /// Drain the SDL event pump into the internal queue; call once per frame.
     pub fn pump_events(&mut self) {
         let Ok(mut pump) = self.sdl.event_pump() else {
@@ -142,7 +118,14 @@ impl SdlFb {
     }
 
     fn pump_with(&mut self, pump: &mut EventPump) {
-        for ev in pump.poll_iter() {
+        self.pump_iter(&mut pump.poll_iter());
+    }
+
+    /// The pump body over any event stream — `poll_iter` live, or a
+    /// synthesized slice in tests (the physical-keyboard pass-through
+    /// below is exactly what a real window delivers).
+    fn pump_iter<I: Iterator<Item = Event>>(&mut self, events: &mut I) {
+        while let Some(ev) = events.next() {
             if matches!(ev, Event::Quit { .. }) {
                 self.close_requested = true;
             }
@@ -161,17 +144,17 @@ impl SdlFb {
                     }
                     Event::KeyDown {
                         keycode: Some(k), ..
-                    } => {
-                        match classify_kb_key(*k) {
-                            Some(KbKey::Backspace) => pop_char(&mut self.kb_buf),
-                            Some(KbKey::Commit) => self.kb_commit(),
-                            // Swallowed: translate() maps Space→Ok, which
-                            // would toggle something behind the search field.
-                            Some(KbKey::Swallow) => {}
-                            None => {} // falls through to translate()
-                        }
-                        continue;
-                    }
+                    } => match classify_kb_key(*k) {
+                        Some(KbKey::Backspace) => pop_char(&mut self.kb_buf),
+                        Some(KbKey::Commit) => self.kb_commit(),
+                        // Swallowed: translate() maps Space→Ok, which
+                        // would toggle something behind the search field.
+                        Some(KbKey::Swallow) => continue,
+                        // Unclassified (Escape, arrows, F11, letters on
+                        // layouts that skip TextInput) still reaches the
+                        // app via translate() below.
+                        None => {}
+                    },
                     _ => {}
                 }
             }
@@ -277,6 +260,32 @@ impl Framebuffer for SdlFb {
             },
             mode,
         );
+    }
+    fn needs_app_keyboard(&self) -> bool {
+        true
+    }
+    fn kb_type_text(&mut self, s: &str) {
+        if self.kb_open {
+            self.kb_buf.extend_from_slice(s.as_bytes());
+        }
+    }
+    fn kb_backspace(&mut self) {
+        if self.kb_open {
+            pop_char(&mut self.kb_buf);
+        }
+    }
+    fn kb_commit(&mut self) {
+        if self.kb_open {
+            let f = self.kb_on_done.take();
+            self.kb_open = false;
+            let buf = std::mem::take(&mut self.kb_buf);
+            if let Ok(video) = self.sdl.video() {
+                video.text_input().stop();
+            }
+            if let Some(f) = f {
+                f(&buf);
+            }
+        }
     }
     fn open_keyboard(&mut self, _title: &str, initial: &str, on_done: fn(&[u8])) {
         // No on-screen keyboard is rendered (like the C SDL build): the
@@ -465,5 +474,74 @@ mod tests {
         }
         pop_char(&mut buf); // empty-buffer pop is a no-op
         assert!(buf.is_empty());
+    }
+    #[test]
+    fn keyboard_pass_through_types_edits_and_commits() {
+        // The only SDL-initializing test in the crate: dummy video keeps
+        // it headless.  The pass-through under test is exactly what a
+        // real window delivers while the search keyboard is open.
+        use eh_hal::Framebuffer;
+        use sdl2::event::Event;
+        use sdl2::keyboard::{Keycode, Mod, Scancode};
+
+        std::env::set_var("SDL_VIDEODRIVER", "dummy");
+        static COMMIT: parking_lot::Mutex<String> = parking_lot::Mutex::new(String::new());
+        fn grab(bytes: &[u8]) {
+            *COMMIT.lock() = String::from_utf8_lossy(bytes).into_owned();
+        }
+
+        let mut fb = super::SdlFb::new("kb-test", 64, 64, 1.0).unwrap();
+        // With no keyboard open, TextInput must NOT reach any buffer.
+        fb.pump_iter(&mut [ev_text("ignored")].into_iter());
+        assert!(fb.live_keyboard_text().is_none());
+
+        fb.open_keyboard("Search", "", grab);
+        let key = |k: Keycode| Event::KeyDown {
+            timestamp: 0,
+            window_id: 0,
+            keycode: Some(k),
+            scancode: Some(Scancode::A),
+            keymod: Mod::NOMOD,
+            repeat: false,
+        };
+        fb.pump_iter(
+            &mut [
+                ev_text("héllo"),        // UTF-8 lands whole
+                key(Keycode::Space),     // swallowed (shelf shortcut)
+                ev_text(" world"),       //
+                key(Keycode::Backspace), // pops 'd'
+                ev_text("!"),            //
+            ]
+            .into_iter(),
+        );
+        assert_eq!(fb.live_keyboard_text().unwrap(), "héllo worl!");
+
+        // Return commits: buffer handed to the app, keyboard closed.
+        fb.pump_iter(&mut [key(Keycode::Return)].into_iter());
+        assert!(!matches!(fb.live_keyboard_text(), Some(_)));
+        assert_eq!(*COMMIT.lock(), "héllo worl!");
+
+        // Escape falls through to translate() as BACK even while open.
+        fb.open_keyboard("Search", "", grab);
+        fb.pump_iter(&mut [key(Keycode::Escape)].into_iter());
+        assert!(
+            matches!(
+                fb.poll_event(),
+                Some(eh_hal::InputEvent::KeyDown {
+                    key: eh_hal::KeyCode::Back,
+                    ..
+                })
+            ),
+            "queue after Escape: {:?}",
+            fb.queue
+        );
+    }
+
+    fn ev_text(text: &str) -> sdl2::event::Event {
+        sdl2::event::Event::TextInput {
+            timestamp: 0,
+            window_id: 0,
+            text: text.into(),
+        }
     }
 }

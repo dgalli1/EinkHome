@@ -21,6 +21,7 @@ import { ChooserSheet } from "chooser.slint";
 import { ContextMenu } from "context.slint";
 import { DownloadPopup } from "download.slint";
 import { SyncSheet } from "syncsheet.slint";
+import { OsK } from "osk.slint";
 import { SettingsPage } from "settings.slint";
 import { LogViewerPage, LicensesListPage, LicenseDetailPage } from "viewer.slint";
 import { LauncherPage, LauncherEntry } from "launcher.slint";
@@ -127,6 +128,9 @@ export component EhAppWindow inherits Window {
     in-out property <image> input-icon;
     in-out property <image> input-icon-inv;
     in-out property <image> bulb-icon;
+    in-out property <bool> osk-visible: false;
+    in-out property <string> kb-title: "";
+    in-out property <string> kb-text: "";
 
     // ── intents (pushed onto the bridge's action queue) ────────────────
     callback home;
@@ -161,7 +165,12 @@ export component EhAppWindow inherits Window {
     callback lic-row(int);
     callback launcher-back;
     callback launcher-page(int);
+    callback osk-key(string);
+    callback osk-back;
+    callback osk-ok;
+    callback osk-cancel;
     callback launcher-cell(int);
+
 
     // ── grid geometry (C eh_grid.c, mirrored exactly) ──────────────────
     property <length> avail-w: self.width - 16px;
@@ -232,6 +241,7 @@ export component EhAppWindow inherits Window {
         query: root.query;
         search-placeholder: root.search-placeholder;
         search-kb: root.search-kb;
+        kb-text: root.kb-text;
         history: root.history;
         history-hint: root.history-hint;
         search-tab: root.tab == EhTab.search;
@@ -410,5 +420,16 @@ export component EhAppWindow inherits Window {
         bar-fill: root.sync-bar-fill;
         stripe-path: root.sync-stripes;
         dismiss => { root.sync-dismiss(); }
+    }
+    if (root.osk-visible): OsK {
+        y: root.content-bottom - self.height;
+        width: 100%;
+        content-h: Math.floor(root.content-bottom / 1px);
+        title: root.kb-title;
+        text: root.kb-text;
+        key(k) => { root.osk-key(k); }
+        back => { root.osk-back(); }
+        commit => { root.osk-ok(); }
+        cancel => { root.osk-cancel(); }
     }
 }

@@ -258,6 +258,25 @@ pub trait Framebuffer {
         None
     }
 
+    /// True when this backend renders NO keyboard UI for
+    /// [`Framebuffer::open_keyboard`]: the app must draw its own
+    /// on-screen keyboard (PC hosts).  The firmware platforms show their
+    /// own keyboard, so the default is false.
+    fn needs_app_keyboard(&self) -> bool {
+        false
+    }
+
+    /// Append text to the open keyboard buffer (the IPC "type" path and
+    /// the app-side on-screen keyboard).  No-op when closed.
+    fn kb_type_text(&mut self, _text: &str) {}
+
+    /// Pop one UTF-8 scalar from the open keyboard buffer.
+    fn kb_backspace(&mut self) {}
+
+    /// Commit the open keyboard exactly like a physical RETURN: close it
+    /// and fire the app's `on_done` with the buffer.
+    fn kb_commit(&mut self) {}
+
     /// True when the device has an ACTIVE network connection (the C
     /// `eh_plat_net_active`).  The boot auto-sync and remote cover
     /// fetches are gated on this: an offline launch renders the cached

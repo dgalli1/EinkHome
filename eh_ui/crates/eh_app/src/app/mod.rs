@@ -294,6 +294,9 @@ pub struct App<B: Framebuffer> {
     /// The settings row (or search input) currently owning the on-screen
     /// keyboard — the draw inverts the editing row (C eh_g_kb_field).
     pub kb_editing: Option<KbField>,
+    /// Cached [`Framebuffer::needs_app_keyboard`]: hosts whose backend
+    /// renders no keyboard UI (SDL) get the app-side on-screen keyboard.
+    pub(crate) app_kb: bool,
     /// Download queue + worker + completion channel.
     pub downloader: crate::downloads::Downloader,
     /// Active download batch (sheet labels + drain behavior; owner:
@@ -458,6 +461,7 @@ impl<B: Framebuffer> App<B> {
             reader_pref: 0,
             reader_path: "auto".to_string(),
             search_kb: false,
+            app_kb: false,
             suggestions: Vec::new(),
             kb_editing: None,
             suggest_q: String::new(),
@@ -778,6 +782,28 @@ mod tests {
         }
         fn stride(&self) -> usize {
             1072
+        }
+        fn needs_app_keyboard(&self) -> bool {
+            false
+        }
+        fn kb_type_text(&mut self, s: &str) {
+            if *self.open.borrow() {
+                self.buf.borrow_mut().extend_from_slice(s.as_bytes());
+            }
+        }
+        fn kb_backspace(&mut self) {
+            if *self.open.borrow() {
+                self.buf.borrow_mut().pop();
+            }
+        }
+        fn kb_commit(&mut self) {
+            if *self.open.borrow() {
+                *self.open.borrow_mut() = false;
+                let b = self.buf.borrow().clone();
+                if let Some(f) = self.on_done.borrow_mut().take() {
+                    f(&b);
+                }
+            }
         }
         fn refresh(&mut self, r: Rect, m: eh_hal::RefreshMode) {
             self.refreshes.borrow_mut().push((r, m));
@@ -1590,5 +1616,73 @@ mod tests {
             0,
             "stale result must not touch the store"
         );
+    }
+    /// The on-screen keyboard's taps drive the backend keyboard buffer
+    /// and the OK key commits exactly like RETURN (search field).
+    #[test]
+    fn osk_keys_drive_the_search_field() {
+        let mut app = mk_app("osk");
+        app.app_kb = true;
+        app.tab = Tab::Search;
+        app.edit_search();
+        assert!(app.search_kb);
+        app.present();
+        assert!(app.ui.comp().get_osk_visible(), "OSK must be visible");
+
+        for c in "dune".chars() {
+            crate::ui::push_action(crate::ui::Action::KbChar(c));
+        }
+        app.apply_actions();
+        assert_eq!(app.fb().live_keyboard_text().unwrap(), "dune");
+
+        crate::ui::push_action(crate::ui::Action::KbOk);
+        app.apply_actions();
+        app.drain_keyboard();
+        assert_eq!(app.query, "dune", "OK must commit the buffer");
+        assert!(!app.search_kb);
+        app.present();
+        assert!(!app.ui.comp().get_osk_visible(), "OSK must retire");
+    }
+
+    /// Without an app-keyboard backend (firmware platforms) the panel
+    /// never shows; cancel still tears the band down.
+    #[test]
+    fn osk_hidden_on_firmware_and_cancel_works() {
+        let mut app = mk_app("oskoff");
+        app.tab = Tab::Search;
+        app.edit_search();
+        app.present();
+        assert!(!app.ui.comp().get_osk_visible());
+
+        crate::ui::push_action(crate::ui::Action::KbChar('x'));
+        crate::ui::push_action(crate::ui::Action::KbCancel);
+        app.apply_actions();
+        assert!(!app.search_kb);
+        assert!(app.fb().live_keyboard_text().is_none());
+    }
+
+    /// The same panel edits a settings field through the static commit
+    /// path (backspace pops, OK applies to the armed field).
+    #[test]
+    fn osk_edits_settings_fields() {
+        let mut app = mk_app("oskset");
+        app.app_kb = true;
+        app.config.api_url.clear(); // edit from scratch, not the mock host
+        app.edit_field(KbField::ApiHost);
+        for a in [
+            crate::ui::Action::KbChar('h'),
+            crate::ui::Action::KbChar('t'),
+            crate::ui::Action::KbBackspace,
+            crate::ui::Action::KbChar('x'),
+        ] {
+            crate::ui::push_action(a);
+        }
+        app.apply_actions();
+        assert_eq!(app.fb().live_keyboard_text().unwrap(), "hx");
+        crate::ui::push_action(crate::ui::Action::KbOk);
+        app.apply_actions();
+        app.drain_keyboard();
+        assert_eq!(app.config.api_url, "http://hx");
+        assert!(app.kb_editing.is_none());
     }
 }

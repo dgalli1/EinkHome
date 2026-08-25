@@ -107,6 +107,15 @@ pub enum Action {
     LauncherScroll(i32),
     /// A launcher app cell.
     LauncherCell(usize),
+    /// An on-screen-keyboard key press (the app-side keyboard on hosts
+    /// whose backend renders none — SDL).
+    KbChar(char),
+    /// The on-screen keyboard's backspace key.
+    KbBackspace,
+    /// The on-screen keyboard's OK key (commits like RETURN).
+    KbOk,
+    /// The on-screen keyboard's cancel key.
+    KbCancel,
 }
 
 thread_local! {
@@ -361,6 +370,12 @@ impl Ui {
         comp.on_launcher_back(|| push_action(Action::LauncherBack));
         comp.on_launcher_page(|d| push_action(Action::LauncherScroll(d)));
         comp.on_launcher_cell(|i| push_action(Action::LauncherCell(i as usize)));
+        comp.on_osk_key(|c| {
+            push_action(Action::KbChar(c.chars().next().unwrap_or(' ')));
+        });
+        comp.on_osk_back(|| push_action(Action::KbBackspace));
+        comp.on_osk_ok(|| push_action(Action::KbOk));
+        comp.on_osk_cancel(|| push_action(Action::KbCancel));
 
         let icons = icons::bake_all();
         comp.set_house_icon(icons.house.clone());

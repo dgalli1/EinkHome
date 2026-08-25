@@ -20,6 +20,7 @@ impl<B: Framebuffer> App<B> {
             self.fb_screen_w = fb.screen().width;
             self.fb_profile = fb.device_profile();
             self.fb_net_active = fb.net_active();
+            self.app_kb = fb.needs_app_keyboard();
         }
     }
     /// Screen width safe to call from overlay draws.
@@ -116,10 +117,31 @@ impl<B: Framebuffer> App<B> {
         c.set_top_title(title.into());
         let icon = self.ui.source_image(self.source);
         c.set_source_icon(icon);
-        // search page
+        // search page + the app-side on-screen keyboard (SDL hosts):
+        // visible while any firmware-keyboard edit is open, showing the
+        // live buffer.  The buffer read must precede the comp borrow
+        // (fb() needs &mut self).
+        let kb_open = self.search_kb || self.kb_editing.is_some();
+        let kb_text = if kb_open {
+            self.fb().live_keyboard_text().unwrap_or_default()
+        } else {
+            String::new()
+        };
+        let c = self.ui.comp();
         c.set_query(self.query.clone().into());
         c.set_search_placeholder(crate::i18n::tr("search.ph").to_string().into());
         c.set_search_kb(self.search_kb);
+        c.set_osk_visible(self.app_kb && kb_open);
+        c.set_kb_title(
+            match self.kb_editing {
+                Some(KbField::ApiHost) => crate::i18n::tr("settings.api_host"),
+                Some(KbField::ApiKey) => crate::i18n::tr("settings.api_key"),
+                _ => crate::i18n::tr("tab.search"),
+            }
+            .to_string()
+            .into(),
+        );
+        c.set_kb_text(kb_text.into());
         // self panel
         c.set_clock(clock_label().into());
         c.set_battery_level(
