@@ -98,8 +98,7 @@ rolling [dev release](https://github.com/dgalli1/EinkHome/releases/tag/dev)
 
 | asset | target |
 | --- | --- |
-| `bookshelf.app` | PocketBook armel (all but InkPad One) |
-| `bookshelf.armhf.app` | PocketBook armhf (InkPad One) |
+| `einkhome-<sha>.zip` | PocketBook: `bookshelf.app` (armel) + `bookshelf.armhf.app` (armhf) + `install.sh` |
 | `bookshelf.pc` | desktop SDL (x86_64 linux) |
 | `bookshelf.test` | headless SDL + e2e IPC (x86_64 linux) |
 | `einkhome-dev.apk` | Android (arm64-v8a + x86_64; built when the `eh_android` crate is on the branch) |
