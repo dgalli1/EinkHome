@@ -174,6 +174,9 @@ fn decode_jpeg(jpeg: &[u8]) -> Result<(u32, u32, Vec<u8>), String> {
             .iter()
             .flat_map(|px| [px[0], px[1], px[2]])
             .collect(),
+        // Grayscale JPEGs (1 byte per pixel — Kavita serves some covers
+        // this way) replicate to RGB.
+        n if n == (w as usize) * (h as usize) => pixels.iter().flat_map(|&g| [g, g, g]).collect(),
         _ => {
             return Err("jpeg: unexpected pixel count".to_string());
         }

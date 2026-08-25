@@ -1,12 +1,28 @@
 //! Book-file metadata + cover extraction (C eh_extract.h surface, pure
-//! Rust): epub/fb2/pdf metadata scans, plus cover art from embedded epub
-//! images, MuPDF first-page renders, or generated txt covers.
+//! Rust) across KOReader's DocumentRegistry formats:
+//!
+//! | format | cover source |
+//! |---|---|
+//! | EPUB | the OPF-named embedded image (two wild conventions resolved) |
+//! | PDF | MuPDF first-page render (`pdf-mupdf` feature) |
+//! | CBZ / CBT / ZIP | first archive image in natural name order |
+//! | FB2 | the `<coverpage>`-named base64 `<binary>`, else the first image binary |
+//! | MOBI / AZW / AZW3 | EXTH cover record, else the first image record (PalmDOC records decompressed) |
+//! | PDB | first record with an image magic (PeanutPress covers) |
+//! | RTF | the first `\pict` blip group |
+//! | XPS / OXPS | the first fixed page's image resource |
+//! | TXT | generated first-words cover |
+//! | DjVu, CHM, DOC | not extracted — they need vendor codecs (djvulibre / chmlib / OLE+Word); tiles use the placeholder |
+//! | HTML | no embedded art — placeholder, like KOReader's generated covers |
+//!
+//! Everything here is bytes-in/bytes-out with no App coupling, so both
+//! the Local import and any other consumer can call it from any context.
 //!
 //! Split out of `local.rs`: every function here is pure — a path in,
 //! bytes/metadata out — with no App coupling, so both the Local import
 //! and any other consumer can call it from any context.
 
-use std::io::Read;
+use std::io::{Read, Seek};
 use std::path::Path;
 
 /// Title-cap for filename-derived titles (C EH_MAX_TITLE_LEN).
@@ -70,6 +86,28 @@ pub fn extract_book_cover(path: &Path, ext: &str) -> Option<Vec<u8>> {
         "epub" => extract_epub_cover(path),
         "pdf" => pdf_first_page_png_or_none(path),
         "txt" => txt_word_cover(path),
+        // Comic/text archives: the first image member in natural filename
+        // order is the cover (KOReader picdocument lists archive images
+        // the same way).
+        "cbz" | "zip" => zip_image_cover(path),
+        "cbt" => tar_image_cover(path),
+        // FB2 carries its cover as a base64 <binary> named by <coverpage>.
+        "fb2" => fb2_cover(path),
+        // MOBI/AZW(+KF8): the EXTH cover record, else the first image
+        // record.  PDB containers: first record that starts with an
+        // image magic (PeanutPress covers).
+        "mobi" | "azw" | "azw3" => mobi_cover(path),
+        "pdb" => pdb_cover(path),
+        // RTF: the first \pict blip group.
+        "rtf" => rtf_cover(path),
+        // XPS/OXPS: the first fixed page's image resource.
+        "xps" | "oxps" => xps_cover(path),
+        // The rest of KOReader's registry needs vendor codecs this port
+        // does not carry: DjVu (IW44/JB2 page renders via djvulibre),
+        // CHM (LZX-compressed streams via chmlib), DOC (OLE compound +
+        // Word binary).  HTML/TXT carry no embedded art — TXT still gets
+        // the generated word cover above; HTML tiles use the
+        // placeholder, like KOReader's generated covers.
         _ => None,
     };
     if bytes.is_none() {
@@ -690,6 +728,573 @@ fn pdf_decode_bytes(bytes: &[u8]) -> String {
     }
 }
 
+// ── KOReader-registry covers: CBZ/CBT/ZIP, FB2, MOBI/PDB, RTF, XPS ──────
+
+/// True when bytes start with a PNG or JPEG magic — the two codecs
+/// [`crate::cover::decode_rgb`] speaks, and the only members worth
+/// returning from an archive scan.
+fn is_png_or_jpeg(b: &[u8]) -> bool {
+    b.starts_with(b"\x89PNG") || b.starts_with(b"\xff\xd8")
+}
+
+/// Natural-order key: digit runs compare numerically so `page2` sorts
+/// before `page10` (KOReader picdocument sorts the archive's image list).
+fn natural_key(name: &str) -> String {
+    let lower = name.to_lowercase();
+    let mut key = String::with_capacity(lower.len() + 8);
+    let mut digits = String::new();
+    for c in lower.chars() {
+        if c.is_ascii_digit() {
+            digits.push(c);
+        } else {
+            if !digits.is_empty() {
+                key.push_str(&format!("{digits:0>16}"));
+                digits.clear();
+            }
+            key.push(c);
+        }
+    }
+    if !digits.is_empty() {
+        key.push_str(&format!("{digits:0>16}"));
+    }
+    key
+}
+
+/// CBZ/ZIP cover: the first image member in natural filename order whose
+/// bytes carry a decodable magic.  Entries that fail the magic check are
+/// skipped, not fatal (archives mix thumbnails and pages).
+fn zip_image_cover(path: &Path) -> Option<Vec<u8>> {
+    let f = std::fs::File::open(path).ok()?;
+    let mut ar = zip::ZipArchive::new(f).ok()?;
+    let mut names: Vec<String> = (0..ar.len())
+        .filter_map(|i| {
+            let n = ar.by_index(i).ok()?.name().to_string();
+            let base = n.rsplit('/').next()?.to_ascii_lowercase();
+            img_ext(&base).then_some(n)
+        })
+        .collect();
+    names.sort_by_key(|n| natural_key(n));
+    for n in names {
+        let mut out = Vec::new();
+        if ar.by_name(&n).ok()?.read_to_end(&mut out).is_ok()
+            && is_png_or_jpeg(&out)
+            && crate::cover::decode_rgb(&out).is_ok()
+        {
+            return Some(out);
+        }
+    }
+    None
+}
+
+/// CBT cover: same rule over an uncompressed tar stream.  Handles ustar
+/// and the GNU `L` long-name convention; sparse/pax entries are skipped
+/// by their size fields like any other payload.
+fn tar_image_cover(path: &Path) -> Option<Vec<u8>> {
+    let mut f = std::fs::File::open(path).ok()?;
+    let mut pending_name: Option<String> = None;
+    loop {
+        let mut header = [0u8; 512];
+        if f.read_exact(&mut header).is_err() {
+            return None; // clean EOF: no image member found
+        }
+        if header.iter().all(|&b| b == 0) {
+            return None; // end-of-archive block
+        }
+        let name = pending_name.take().unwrap_or(tar_str(&header[0..100])?);
+        let size = tar_size(&header[124..136])?;
+        let typeflag = header[156];
+        if typeflag == b'L' {
+            // GNU long name: the next blocks carry the real name for the
+            // entry that follows; the payload is padded like any other.
+            let mut long = vec![0u8; size as usize];
+            f.read_exact(&mut long).ok()?;
+            pending_name = Some(
+                String::from_utf8_lossy(&long)
+                    .trim_end_matches('\0')
+                    .to_string(),
+            );
+            // The payload was just consumed: only the padding remains.
+            let pad = (512 - (size % 512)) % 512;
+            f.seek(std::io::SeekFrom::Current(pad as i64)).ok()?;
+            continue;
+        }
+        let base = name
+            .rsplit('/')
+            .next()
+            .unwrap_or(&name)
+            .to_ascii_lowercase();
+        if (typeflag == b'0' || typeflag == 0) && img_ext(&base) {
+            let mut out = vec![0u8; size as usize];
+            if f.read_exact(&mut out).is_ok()
+                && is_png_or_jpeg(&out)
+                && crate::cover::decode_rgb(&out).is_ok()
+            {
+                return Some(out);
+            }
+        }
+        // Payload is padded to a 512-byte boundary.
+        let pad = (512 - (size % 512)) % 512;
+        f.seek(std::io::SeekFrom::Current(size as i64 + pad as i64))
+            .ok()?;
+    }
+}
+
+fn tar_str(field: &[u8]) -> Option<String> {
+    let end = field.iter().position(|&b| b == 0).unwrap_or(field.len());
+    Some(String::from_utf8_lossy(&field[..end]).into_owned())
+}
+
+fn tar_size(octal: &[u8]) -> Option<u64> {
+    let s = std::str::from_utf8(octal).ok()?;
+    let s = s.trim_matches(|c: char| c == '\0' || c == ' ');
+    if s.is_empty() {
+        return Some(0);
+    }
+    u64::from_str_radix(s, 8).ok()
+}
+
+/// Minimal base64 (standard alphabet, whitespace and padding ignored) —
+/// FB2 binaries are the only consumer, and a hand-rolled decoder keeps
+/// the dependency surface at `zip` alone.
+fn base64_decode(s: &str) -> Option<Vec<u8>> {
+    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut table = [255u8; 256];
+    for (i, &c) in T.iter().enumerate() {
+        table[c as usize] = i as u8;
+    }
+    let mut out = Vec::with_capacity(s.len() / 4 * 3);
+    let mut acc = 0u32;
+    let mut nbits = 0u32;
+    for &b in s.as_bytes() {
+        let v = table[b as usize];
+        if v == 255 {
+            continue; // whitespace / padding / junk
+        }
+        acc = (acc << 6) | u32::from(v);
+        nbits += 6;
+        if nbits >= 8 {
+            nbits -= 8;
+            out.push((acc >> nbits) as u8);
+        }
+    }
+    (!out.is_empty()).then_some(out)
+}
+
+/// FB2 cover: `<coverpage><image l:href="#id"/>` names a `<binary
+/// id="id" content-type="image/…">` payload; without a coverpage the
+/// first image-typed binary wins (the FB2 spec's own fallback order).
+fn fb2_cover(path: &Path) -> Option<Vec<u8>> {
+    let buf = read_capped(path, 64 << 20);
+
+    // Optional <coverpage><image l:href="#id"/>: when present, only that
+    // binary qualifies; when absent the first image-typed binary wins
+    // (the FB2 spec's own fallback order).
+    let cover_id: Option<Vec<u8>> = find_at(&buf, b"<coverpage", 0).and_then(|href_at| {
+        let hash = find_at(&buf, b"#", href_at)?;
+        let id_end = buf[hash..]
+            .iter()
+            .position(|&b| b == b'"' || b == b'>' || b == b' ' || b == b'?')?
+            + hash;
+        Some(buf[hash + 1..id_end].to_vec())
+    });
+
+    // <binary id="<id>" ...> … </binary>
+    let mut from = 0;
+    while let Some(b) = find_at(&buf, b"<binary", from) {
+        let tag_end = find_at(&buf, b">", b)?;
+        let body_start = tag_end + 1;
+        let close = find_at(&buf, b"</binary>", body_start)?;
+        let tag = &buf[b..tag_end];
+        let id_at = find_at(tag, b"id", 0)
+            .map(|p| find_at(tag, b"\"", p).unwrap_or(0))
+            .map(|q| q + 1)?;
+        let id_stop = tag[id_at..]
+            .iter()
+            .position(|&b| b == b'"')
+            .map(|p| p + id_at)?;
+        let id_match = cover_id
+            .as_ref()
+            .is_some_and(|id| &tag[id_at..id_stop] == id);
+        let image_typed = find_at(tag, b"image/", 0).is_some();
+        if (cover_id.is_some() && id_match) || (cover_id.is_none() && image_typed) {
+            let b64 = std::str::from_utf8(&buf[body_start..close]).ok()?;
+            let bytes = base64_decode(b64)?;
+            return (is_png_or_jpeg(&bytes) && crate::cover::decode_rgb(&bytes).is_ok())
+                .then_some(bytes);
+        }
+        from = close + 1;
+    }
+
+    // Fallback: the first image-typed binary.
+    from = 0;
+    while let Some(b) = find_at(&buf, b"<binary", from) {
+        let tag_end = find_at(&buf, b">", b)?;
+        let body_start = tag_end + 1;
+        let close = find_at(&buf, b"</binary>", body_start)?;
+        let tag = &buf[b..tag_end];
+        if find_at(tag, b"image/", 0).is_some() {
+            let b64 = std::str::from_utf8(&buf[body_start..close]).ok()?;
+            let bytes = base64_decode(b64)?;
+            return (is_png_or_jpeg(&bytes) && crate::cover::decode_rgb(&bytes).is_ok())
+                .then_some(bytes);
+        }
+        from = close + 1;
+    }
+    None
+}
+
+/// PDB container: record offset table after the 78-byte header.
+struct PdbRecords {
+    /// Records as (offset, length) in file order.
+    records: Vec<(u64, u32)>,
+    /// PalmDOC compression of record 0 (1 none, 2 PalmDOC, 17480 HUFF).
+    compression: u16,
+    /// Record 0's raw bytes (PalmDOC + MOBI + EXTH headers).
+    record0: Vec<u8>,
+}
+
+fn pdb_open(path: &Path) -> Option<PdbRecords> {
+    let mut f = std::fs::File::open(path).ok()?;
+    let mut head = [0u8; 78];
+    f.read_exact(&mut head).ok()?;
+    let num = u16::from_be_bytes([head[76], head[77]]) as usize;
+    if num == 0 {
+        return None;
+    }
+    let mut table = vec![0u8; num * 8];
+    f.read_exact(&mut table).ok()?;
+    let mut offsets = Vec::with_capacity(num);
+    for r in table.as_chunks::<8>().0 {
+        offsets.push(u32::from_be_bytes([r[0], r[1], r[2], r[3]]) as u64);
+    }
+    let file_len = f.metadata().ok()?.len();
+    let mut records = Vec::with_capacity(num);
+    for (i, &off) in offsets.iter().enumerate() {
+        let end = offsets.get(i + 1).copied().unwrap_or(file_len);
+        records.push((off, (end.saturating_sub(off)).min(u32::MAX as u64) as u32));
+    }
+    let (off0, len0) = records[0];
+    let mut record0 = vec![0u8; len0 as usize];
+    f.seek(std::io::SeekFrom::Start(off0)).ok()?;
+    f.read_exact(&mut record0).ok()?;
+    let compression = u16::from_be_bytes([record0[0], record0[1]]);
+    Some(PdbRecords {
+        records,
+        compression,
+        record0,
+    })
+}
+
+fn pdb_read_record(pdb: &PdbRecords, path: &Path, idx: usize) -> Option<Vec<u8>> {
+    let (off, len) = *pdb.records.get(idx)?;
+    let mut f = std::fs::File::open(path).ok()?;
+    f.seek(std::io::SeekFrom::Start(off)).ok()?;
+    let mut buf = vec![0u8; len as usize];
+    f.read_exact(&mut buf).ok()?;
+    Some(buf)
+}
+
+fn be32(b: &[u8], off: usize) -> Option<u32> {
+    b.get(off..off + 4)
+        .map(|s| u32::from_be_bytes([s[0], s[1], s[2], s[3]]))
+}
+
+/// PalmDOC LZ77 (the classic 4096-byte window pair decoder).  HUFF/CDIC
+/// (compression 17480) is deliberately unsupported — those Amazon
+/// packings never wrap the cover record, and the codec is a project of
+/// its own.
+fn palmdoc_decompress(data: &[u8]) -> Option<Vec<u8>> {
+    let mut out = Vec::with_capacity(data.len() * 8);
+    let mut i = 0;
+    while i < data.len() {
+        // The flag byte nominally gates literal-vs-pair per bit; real
+        // streams are decodable positionally because the compressor
+        // escapes literals that would alias a pair prefix (values
+        // 0x00..=0x08 never appear as pair heads).
+        let _flags = data[i];
+        i += 1;
+        for bit in 0..8 {
+            if i >= data.len() {
+                break;
+            }
+            let b = data[i];
+            i += 1;
+            match b {
+                0x00..=0x08 => out.push(b),
+                0x09..=0x7f => {
+                    let b2 = *data.get(i)?;
+                    i += 1;
+                    let distance = (((b & 0x3f) << 4) | (b2 >> 4)) as usize + 1;
+                    let length = (b2 & 0x0f) as usize + 3;
+                    let start = out.len().checked_sub(distance)?;
+                    for k in 0..length {
+                        let byte = out[start + k];
+                        out.push(byte);
+                    }
+                }
+                0x80..=0xbf => {
+                    out.push(b' ');
+                    out.push(b & 0x7f);
+                }
+                _ => {
+                    let b2 = *data.get(i)?;
+                    i += 1;
+                    out.push(b' ');
+                    out.push(((b & 0x7f) << 1) | (b2 >> 7));
+                    out.push(b2 & 0x7f);
+                }
+            }
+            let _ = bit;
+        }
+    }
+    Some(out)
+}
+
+/// MOBI/AZW cover: the EXTH CoverRec Index (type 201) names the image
+/// record relative to `firstImageIndex`; without EXTH the first record
+/// from `firstImageIndex` that starts with an image magic wins
+/// (KOReader/crengine's `MOBIgetCoverPage`, narrowed to raw records —
+/// HUFF/CDIC packings are not decoded).
+fn mobi_cover(path: &Path) -> Option<Vec<u8>> {
+    let pdb = pdb_open(path)?;
+    if pdb.records.len() < 2 || &pdb.record0[16..20] != b"MOBI" {
+        // Not actually a MOBI payload (PalmDOC text in a .mobi name).
+        return pdb_cover(path);
+    }
+    let header_len = be32(&pdb.record0, 20)? as usize;
+    // MobileRead MOBI header layout: First Image index @108, EXTH flags
+    // @128 (both relative to record 0's start).
+    let first_image = be32(&pdb.record0, 108).filter(|&v| v != 0xffff_ffff);
+    let exth_flags = be32(&pdb.record0, 128).unwrap_or(0);
+
+    // EXTH walk: records are (type, length, payload) from record0 +
+    // 16 + header_len.
+    let mut cover_index: Option<u32> = None;
+    if exth_flags & 0x40 != 0 {
+        let mut p = 16 + header_len;
+        if pdb.record0.get(p..p + 4) == Some(&b"EXTH"[..]) {
+            let count = be32(&pdb.record0, p + 8)? as usize;
+            p += 12;
+            for _ in 0..count {
+                let rtype = be32(&pdb.record0, p)?;
+                let rlen = be32(&pdb.record0, p + 4)? as usize;
+                if rlen < 8 || p + rlen > pdb.record0.len() {
+                    break;
+                }
+                if rtype == 201 && rlen >= 12 {
+                    cover_index = be32(&pdb.record0, p + 8);
+                }
+                p += rlen;
+            }
+        }
+    }
+
+    // EXTH 201 is relative to the first image record (KindleUnpack's
+    // coverRecord = exth201 + firstImageIndex).
+    if let (Some(fii), Some(ci)) = (first_image, cover_index) {
+        let idx = fii.saturating_add(ci) as usize;
+        if idx < pdb.records.len() {
+            if let Some(mut bytes) = pdb_read_record(&pdb, path, idx) {
+                if !is_png_or_jpeg(&bytes) && pdb.compression == 2 {
+                    if let Some(dec) = palmdoc_decompress(&bytes) {
+                        bytes = dec;
+                    }
+                }
+                if is_png_or_jpeg(&bytes) && crate::cover::decode_rgb(&bytes).is_ok() {
+                    return Some(bytes);
+                }
+            }
+        }
+    }
+
+    // Fallback: the first image-magic record from firstImageIndex (raw —
+    // kindlegen and calibre store image records uncompressed).
+    let start = first_image.unwrap_or(1) as usize;
+    for idx in start..pdb.records.len() {
+        if let Some(bytes) = pdb_read_record(&pdb, path, idx) {
+            if is_png_or_jpeg(&bytes) && crate::cover::decode_rgb(&bytes).is_ok() {
+                return Some(bytes);
+            }
+        }
+    }
+    None
+}
+
+/// Generic PDB: the first record starting with an image magic (PeanutPress
+/// covers; PalmDOC text yields None).
+fn pdb_cover(path: &Path) -> Option<Vec<u8>> {
+    let pdb = pdb_open(path)?;
+    for idx in 1..pdb.records.len() {
+        if let Some(bytes) = pdb_read_record(&pdb, path, idx) {
+            if is_png_or_jpeg(&bytes) && crate::cover::decode_rgb(&bytes).is_ok() {
+                return Some(bytes);
+            }
+        }
+    }
+    None
+}
+
+/// RTF cover: the first `{\pict…\pngblip|\jpegblip <hex>}` group.  Nested
+/// destinations (`{\*\blipuid …}`) are skipped with brace matching, and
+/// control words inside the data are stepped over.
+fn rtf_cover(path: &Path) -> Option<Vec<u8>> {
+    let buf = read_capped(path, 16 << 20);
+    let mut from = 0;
+    while let Some(pict) = find_at(&buf, b"\\pict", from) {
+        let png = find_at(&buf, b"\\pngblip", pict);
+        let jpeg = find_at(&buf, b"\\jpegblip", pict);
+        let (blip, is_jpeg) = match (png, jpeg) {
+            (Some(a), Some(b)) => {
+                if a < b {
+                    (a, false)
+                } else {
+                    (b, true)
+                }
+            }
+            (Some(a), None) => (a, false),
+            (None, Some(b)) => (b, true),
+            _ => {
+                from = pict + 5;
+                continue;
+            }
+        };
+        let kw_len = if is_jpeg { 9 } else { 8 };
+        let bytes = rtf_hex_after(&buf[blip + kw_len..])?;
+        if is_png_or_jpeg(&bytes) && crate::cover::decode_rgb(&bytes).is_ok() {
+            return Some(bytes);
+        }
+        from = blip + 1;
+    }
+    None
+}
+
+/// Hex payload of a `\pict` group: hex digits accumulate, control words
+/// are stepped over, nested `{…}` destinations are skipped whole, and the
+/// group's closing brace ends the data.
+fn rtf_hex_after(data: &[u8]) -> Option<Vec<u8>> {
+    let mut hex = Vec::new();
+    let mut i = 0;
+    while i < data.len() {
+        match data[i] {
+            b'{' => {
+                // Skip a whole nested group (brace-aware, escapes honoured).
+                let mut depth = 1usize;
+                i += 1;
+                while i < data.len() && depth > 0 {
+                    match data[i] {
+                        b'\\'
+                            if i + 1 < data.len()
+                                && (data[i + 1] == b'{' || data[i + 1] == b'}') =>
+                        {
+                            i += 2;
+                        }
+                        b'{' => depth += 1,
+                        b'}' => depth -= 1,
+                        _ => {}
+                    }
+                    i += 1;
+                }
+            }
+            b'}' => break,
+            b'\\' => {
+                let mut j = i + 1;
+                while j < data.len() && data[j].is_ascii_alphabetic() {
+                    j += 1;
+                }
+                if j == i + 1 && j < data.len() {
+                    j += 1; // escaped symbol like \{ or \\
+                }
+                while j < data.len() && (data[j].is_ascii_digit() || data[j] == b'-') {
+                    j += 1;
+                }
+                if j < data.len() && data[j] == b' ' {
+                    j += 1;
+                }
+                i = j;
+            }
+            b if b.is_ascii_hexdigit() => {
+                hex.push(b);
+                i += 1;
+                if hex.len() > 8 << 20 {
+                    return None; // absurd blip: bail out
+                }
+            }
+            _ => i += 1,
+        }
+    }
+    if hex.len() < 8 || hex.len() % 2 != 0 {
+        return None;
+    }
+    let mut out = Vec::with_capacity(hex.len() / 2);
+    for pair in hex.as_chunks::<2>().0 {
+        out.push(u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok()?);
+    }
+    Some(out)
+}
+
+/// XPS/OXPS cover: the first fixed page's first `ImageSource` resource
+/// (the OPC walk KOReader's xps engine does: FixedDocSeq → FixedDocument
+/// → page), falling back to the first `.fpage` member.
+fn xps_cover(path: &Path) -> Option<Vec<u8>> {
+    let f = std::fs::File::open(path).ok()?;
+    let mut ar = zip::ZipArchive::new(f).ok()?;
+
+    let mut page: Option<String> = None;
+    if let Some(seq) = read_member(&mut ar, "FixedDocSeq.fdseq") {
+        if let Some(src) = quoted_value(&seq, "Source") {
+            if let Some(fdoc) = read_member(&mut ar, &src) {
+                page = quoted_value(&fdoc, "Source");
+            }
+        }
+    }
+    let page = match page {
+        Some(p) => p,
+        None => {
+            let mut pages: Vec<String> = (0..ar.len())
+                .filter_map(|i| {
+                    let n = ar.by_index(i).ok()?.name().to_string();
+                    n.ends_with(".fpage").then_some(n)
+                })
+                .collect();
+            pages.sort();
+            pages.into_iter().next()?
+        }
+    };
+
+    let xml = read_member(&mut ar, &page)?;
+    let mut from = 0;
+    while let Some(p) = find_at(xml.as_bytes(), b"ImageSource", from) {
+        let src = quoted_value(&xml[p..], "ImageSource")?;
+        let member = src.trim_start_matches('/');
+        if let Some(name) = resolve_member(&mut ar, member) {
+            let mut out = Vec::new();
+            if ar.by_name(&name).ok()?.read_to_end(&mut out).is_ok()
+                && is_png_or_jpeg(&out)
+                && crate::cover::decode_rgb(&out).is_ok()
+            {
+                return Some(out);
+            }
+        }
+        from = p + 11;
+    }
+    None
+}
+
+fn read_member(ar: &mut zip::ZipArchive<std::fs::File>, name: &str) -> Option<String> {
+    let name = resolve_member(ar, name)?;
+    let mut s = String::new();
+    ar.by_name(&name).ok()?.read_to_string(&mut s).ok()?;
+    Some(s)
+}
+
+/// First `Attr="value"` occurrence in an XML-ish buffer.
+fn quoted_value(xml: &str, attr: &str) -> Option<String> {
+    let needle = format!("{attr}=\"");
+    let start = xml.find(&needle)? + needle.len();
+    let end = xml[start..].find('"')? + start;
+    Some(xml[start..end].to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -871,6 +1476,472 @@ mod tests {
         );
         // Nothing matches: None.
         assert_eq!(resolve_member(&mut ar, "nope.png"), None);
+    }
+
+    // ── KOReader-registry covers ─────────────────────────────────────────
+
+    /// A valid 4×4 PNG (the shared tiny_png helper lives in local.rs's
+    /// test module; this one is local so both suites stay independent).
+    fn art_png() -> Vec<u8> {
+        let px = vec![0xEEu8; 16];
+        let mut out = std::io::Cursor::new(Vec::new());
+        {
+            let mut enc = png::Encoder::new(&mut out, 4, 4);
+            enc.set_color(png::ColorType::Grayscale);
+            enc.set_depth(png::BitDepth::Eight);
+            let mut wr = enc.write_header().unwrap();
+            wr.write_image_data(&px).unwrap();
+        }
+        out.into_inner()
+    }
+
+    /// A real 4×4 JPEG (PIL-encoded) — decode_rgb must accept every art
+    /// payload these tests feed through the extractors.
+    fn art_jpeg() -> Vec<u8> {
+        const TINY_JPEG: [u8; 632] = [
+            0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46, 0x00, 0x01, 0x01, 0x00,
+            0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0xff, 0xdb, 0x00, 0x43, 0x00, 0x10, 0x0b, 0x0c,
+            0x0e, 0x0c, 0x0a, 0x10, 0x0e, 0x0d, 0x0e, 0x12, 0x11, 0x10, 0x13, 0x18, 0x28, 0x1a,
+            0x18, 0x16, 0x16, 0x18, 0x31, 0x23, 0x25, 0x1d, 0x28, 0x3a, 0x33, 0x3d, 0x3c, 0x39,
+            0x33, 0x38, 0x37, 0x40, 0x48, 0x5c, 0x4e, 0x40, 0x44, 0x57, 0x45, 0x37, 0x38, 0x50,
+            0x6d, 0x51, 0x57, 0x5f, 0x62, 0x67, 0x68, 0x67, 0x3e, 0x4d, 0x71, 0x79, 0x70, 0x64,
+            0x78, 0x5c, 0x65, 0x67, 0x63, 0xff, 0xdb, 0x00, 0x43, 0x01, 0x11, 0x12, 0x12, 0x18,
+            0x15, 0x18, 0x2f, 0x1a, 0x1a, 0x2f, 0x63, 0x42, 0x38, 0x42, 0x63, 0x63, 0x63, 0x63,
+            0x63, 0x63, 0x63, 0x63, 0x63, 0x63, 0x63, 0x63, 0x63, 0x63, 0x63, 0x63, 0x63, 0x63,
+            0x63, 0x63, 0x63, 0x63, 0x63, 0x63, 0x63, 0x63, 0x63, 0x63, 0x63, 0x63, 0x63, 0x63,
+            0x63, 0x63, 0x63, 0x63, 0x63, 0x63, 0x63, 0x63, 0x63, 0x63, 0x63, 0x63, 0x63, 0x63,
+            0x63, 0x63, 0x63, 0x63, 0xff, 0xc0, 0x00, 0x11, 0x08, 0x00, 0x04, 0x00, 0x04, 0x03,
+            0x01, 0x22, 0x00, 0x02, 0x11, 0x01, 0x03, 0x11, 0x01, 0xff, 0xc4, 0x00, 0x1f, 0x00,
+            0x00, 0x01, 0x05, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b,
+            0xff, 0xc4, 0x00, 0xb5, 0x10, 0x00, 0x02, 0x01, 0x03, 0x03, 0x02, 0x04, 0x03, 0x05,
+            0x05, 0x04, 0x04, 0x00, 0x00, 0x01, 0x7d, 0x01, 0x02, 0x03, 0x00, 0x04, 0x11, 0x05,
+            0x12, 0x21, 0x31, 0x41, 0x06, 0x13, 0x51, 0x61, 0x07, 0x22, 0x71, 0x14, 0x32, 0x81,
+            0x91, 0xa1, 0x08, 0x23, 0x42, 0xb1, 0xc1, 0x15, 0x52, 0xd1, 0xf0, 0x24, 0x33, 0x62,
+            0x72, 0x82, 0x09, 0x0a, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x25, 0x26, 0x27, 0x28, 0x29,
+            0x2a, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x3a, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48,
+            0x49, 0x4a, 0x53, 0x54, 0x55, 0x56, 0x57, 0x58, 0x59, 0x5a, 0x63, 0x64, 0x65, 0x66,
+            0x67, 0x68, 0x69, 0x6a, 0x73, 0x74, 0x75, 0x76, 0x77, 0x78, 0x79, 0x7a, 0x83, 0x84,
+            0x85, 0x86, 0x87, 0x88, 0x89, 0x8a, 0x92, 0x93, 0x94, 0x95, 0x96, 0x97, 0x98, 0x99,
+            0x9a, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7, 0xa8, 0xa9, 0xaa, 0xb2, 0xb3, 0xb4, 0xb5,
+            0xb6, 0xb7, 0xb8, 0xb9, 0xba, 0xc2, 0xc3, 0xc4, 0xc5, 0xc6, 0xc7, 0xc8, 0xc9, 0xca,
+            0xd2, 0xd3, 0xd4, 0xd5, 0xd6, 0xd7, 0xd8, 0xd9, 0xda, 0xe1, 0xe2, 0xe3, 0xe4, 0xe5,
+            0xe6, 0xe7, 0xe8, 0xe9, 0xea, 0xf1, 0xf2, 0xf3, 0xf4, 0xf5, 0xf6, 0xf7, 0xf8, 0xf9,
+            0xfa, 0xff, 0xc4, 0x00, 0x1f, 0x01, 0x00, 0x03, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01,
+            0x01, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05,
+            0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0xff, 0xc4, 0x00, 0xb5, 0x11, 0x00, 0x02, 0x01,
+            0x02, 0x04, 0x04, 0x03, 0x04, 0x07, 0x05, 0x04, 0x04, 0x00, 0x01, 0x02, 0x77, 0x00,
+            0x01, 0x02, 0x03, 0x11, 0x04, 0x05, 0x21, 0x31, 0x06, 0x12, 0x41, 0x51, 0x07, 0x61,
+            0x71, 0x13, 0x22, 0x32, 0x81, 0x08, 0x14, 0x42, 0x91, 0xa1, 0xb1, 0xc1, 0x09, 0x23,
+            0x33, 0x52, 0xf0, 0x15, 0x62, 0x72, 0xd1, 0x0a, 0x16, 0x24, 0x34, 0xe1, 0x25, 0xf1,
+            0x17, 0x18, 0x19, 0x1a, 0x26, 0x27, 0x28, 0x29, 0x2a, 0x35, 0x36, 0x37, 0x38, 0x39,
+            0x3a, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48, 0x49, 0x4a, 0x53, 0x54, 0x55, 0x56, 0x57,
+            0x58, 0x59, 0x5a, 0x63, 0x64, 0x65, 0x66, 0x67, 0x68, 0x69, 0x6a, 0x73, 0x74, 0x75,
+            0x76, 0x77, 0x78, 0x79, 0x7a, 0x82, 0x83, 0x84, 0x85, 0x86, 0x87, 0x88, 0x89, 0x8a,
+            0x92, 0x93, 0x94, 0x95, 0x96, 0x97, 0x98, 0x99, 0x9a, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6,
+            0xa7, 0xa8, 0xa9, 0xaa, 0xb2, 0xb3, 0xb4, 0xb5, 0xb6, 0xb7, 0xb8, 0xb9, 0xba, 0xc2,
+            0xc3, 0xc4, 0xc5, 0xc6, 0xc7, 0xc8, 0xc9, 0xca, 0xd2, 0xd3, 0xd4, 0xd5, 0xd6, 0xd7,
+            0xd8, 0xd9, 0xda, 0xe2, 0xe3, 0xe4, 0xe5, 0xe6, 0xe7, 0xe8, 0xe9, 0xea, 0xf2, 0xf3,
+            0xf4, 0xf5, 0xf6, 0xf7, 0xf8, 0xf9, 0xfa, 0xff, 0xda, 0x00, 0x0c, 0x03, 0x01, 0x00,
+            0x02, 0x11, 0x03, 0x11, 0x00, 0x3f, 0x00, 0x6d, 0x14, 0x51, 0x5e, 0x59, 0xec, 0x9f,
+            0xff, 0xd9,
+        ];
+        TINY_JPEG.to_vec()
+    }
+
+    fn write_zip(path: &std::path::Path, entries: &[(&str, Vec<u8>)]) {
+        use std::io::Write as _;
+        let f = std::fs::File::create(path).unwrap();
+        let mut z = zip::ZipWriter::new(f);
+        for (name, data) in entries {
+            z.start_file(name, zip::write::SimpleFileOptions::default())
+                .unwrap();
+            z.write_all(data).unwrap();
+        }
+        z.finish().unwrap();
+    }
+
+    #[test]
+    fn cbz_cover_is_first_image_in_natural_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("comic.cbz");
+        write_zip(
+            &path,
+            &[
+                ("pages/page10.png", art_png()),
+                ("pages/page2.jpg", art_jpeg()),
+                ("pages/page1.png", art_png()),
+                ("cover.txt", b"not an image".to_vec()),
+            ],
+        );
+        let bytes = extract_book_cover(&path, "cbz").expect("cbz cover");
+        // Natural order: page1 < page2 < page10 (lexicographic would pick
+        // page10).
+        assert!(bytes.starts_with(b"\x89PNG"));
+        assert!(crate::cover::decode_rgb(&bytes).is_ok());
+    }
+
+    #[test]
+    fn zip_cover_skips_undecodable_members() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("book.zip");
+        write_zip(
+            &path,
+            &[
+                ("a/first.png", b"\x89PNG truncated garbage".to_vec()),
+                ("a/second.jpg", art_jpeg()),
+            ],
+        );
+        let bytes = extract_book_cover(&path, "zip").expect("zip cover");
+        assert!(bytes.starts_with(b"\xff\xd8"), "skipped to the jpeg");
+    }
+
+    #[test]
+    fn cbt_cover_reads_ustar_and_gnu_longnames() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("comic.cbt");
+
+        // Hand-build a tar: a GNU long-name entry whose name only fits
+        // via the 'L' payload, then the image, then EOF blocks.
+        let png = art_png();
+        let long_name = "very-long-directory-path/".repeat(6) + "page-001.png";
+        let mut tar = Vec::new();
+        let entry = |name: &str, typeflag: u8, payload: &[u8], out: &mut Vec<u8>| {
+            let mut h = [0u8; 512];
+            let nb = name.as_bytes();
+            h[..nb.len().min(100)].copy_from_slice(&nb[..nb.len().min(100)]);
+            h[156] = typeflag;
+            let size = payload.len();
+            let oct = format!("{:011o}", size);
+            h[124..124 + oct.len()].copy_from_slice(oct.as_bytes());
+            // ustar checksum: spaces while summing, then the real one.
+            h[148..156].fill(b' ');
+            let sum: u32 = h.iter().map(|&b| u32::from(b)).sum();
+            let chk = format!("{:06o}\0 ", sum);
+            h[148..156].copy_from_slice(chk.as_bytes());
+            out.extend_from_slice(&h);
+            out.extend_from_slice(payload);
+            let pad = (512 - (size % 512)) % 512;
+            out.extend(std::iter::repeat_n(0u8, pad));
+        };
+        let long_payload = {
+            let mut v = long_name.as_bytes().to_vec();
+            v.push(0);
+            v
+        };
+        entry("././@LongLink", b'L', &long_payload, &mut tar);
+        // The short header for the long-named entry carries a placeholder
+        // name and the real size.
+        {
+            let mut h = [0u8; 512];
+            h[..10].copy_from_slice(b"short.png\0");
+            h[156] = b'0';
+            let oct = format!("{:011o}", png.len());
+            h[124..124 + oct.len()].copy_from_slice(oct.as_bytes());
+            h[148..156].fill(b' ');
+            let sum: u32 = h.iter().map(|&b| u32::from(b)).sum();
+            let chk = format!("{:06o}\0 ", sum);
+            h[148..156].copy_from_slice(chk.as_bytes());
+            tar.extend_from_slice(&h);
+            tar.extend_from_slice(&png);
+            let pad = (512 - (png.len() % 512)) % 512;
+            tar.extend(std::iter::repeat_n(0u8, pad));
+        }
+        tar.extend(std::iter::repeat_n(0u8, 1024)); // EOF blocks
+        std::fs::write(&path, &tar).unwrap();
+
+        let bytes = extract_book_cover(&path, "cbt").expect("cbt cover");
+        assert!(bytes.starts_with(b"\x89PNG"));
+        assert_eq!(bytes, png);
+    }
+
+    #[test]
+    fn fb2_cover_prefers_the_coverpage_binary() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("book.fb2");
+        let b64 = |bytes: &[u8]| -> String {
+            const T: &[u8; 64] =
+                b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+            let mut out = String::new();
+            let mut acc = 0u32;
+            let mut n = 0;
+            for &b in bytes {
+                acc = (acc << 8) | u32::from(b);
+                n += 8;
+                while n >= 6 {
+                    n -= 6;
+                    out.push(T[((acc >> n) & 0x3f) as usize] as char);
+                }
+            }
+            if n > 0 {
+                out.push(T[((acc << (6 - n)) & 0x3f) as usize] as char);
+            }
+            while !out.len().is_multiple_of(4) {
+                out.push('=');
+            }
+            out
+        };
+        let xml = format!(
+            r##"<FictionBook><description><title-info><coverpage><image l:href="#cover.jpg"/></coverpage></title-info></description><body/><binary id="other.jpg" content-type="image/jpeg">{}</binary><binary id="cover.jpg" content-type="image/jpeg">{}</binary></FictionBook>"##,
+            b64(b"\xff\xd8\xff\xe0 other"),
+            b64(&art_jpeg()),
+        );
+        std::fs::write(&path, &xml).unwrap();
+        let bytes = extract_book_cover(&path, "fb2").expect("fb2 cover");
+        assert_eq!(bytes, art_jpeg(), "the coverpage binary, not the first");
+    }
+
+    #[test]
+    fn fb2_cover_falls_back_to_the_first_image_binary() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nofb2cover.fb2");
+        let png = art_png();
+        let xml = format!(
+            r#"<FictionBook><binary id="p1" content-type="image/png">{}</binary></FictionBook>"#,
+            {
+                const T: &[u8; 64] =
+                    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+                let mut out = String::new();
+                let mut acc = 0u32;
+                let mut n = 0;
+                for &b in &png {
+                    acc = (acc << 8) | u32::from(b);
+                    n += 8;
+                    while n >= 6 {
+                        n -= 6;
+                        out.push(T[((acc >> n) & 0x3f) as usize] as char);
+                    }
+                }
+                if n > 0 {
+                    out.push(T[((acc << (6 - n)) & 0x3f) as usize] as char);
+                }
+                while !out.len().is_multiple_of(4) {
+                    out.push('=');
+                }
+                out
+            }
+        );
+        std::fs::write(&path, &xml).unwrap();
+        let bytes = extract_book_cover(&path, "fb2").expect("fb2 fallback");
+        assert_eq!(bytes, png);
+    }
+
+    /// A minimal MOBI: PDB header + record 0 (PalmDOC + MOBI + EXTH with
+    /// a 201 cover index) + an uncompressed image record.  `first_image =
+    /// None` writes a text-only container (no image record).
+    fn write_mobi(path: &std::path::Path, with_exth: bool, first_image: Option<u32>) {
+        let art = art_jpeg();
+        let has_art = first_image.is_some();
+        let image_rec_index = 2u32; // record 0 header, record 1 text, record 2 image
+
+        // record 0: PalmDOC (16) + MOBI header + optional EXTH
+        let mut r0 = Vec::new();
+        r0.extend_from_slice(&2u16.to_be_bytes()); // PalmDOC compression
+        r0.extend_from_slice(&0u16.to_be_bytes());
+        r0.extend_from_slice(&0u32.to_be_bytes()); // text length
+        r0.extend_from_slice(&1u16.to_be_bytes()); // text record count
+        r0.extend_from_slice(&4096u16.to_be_bytes());
+        r0.extend_from_slice(&0u16.to_be_bytes()); // no encryption
+        r0.extend_from_slice(&0u16.to_be_bytes());
+        let mobi_start = r0.len() as u32;
+        r0.extend_from_slice(b"MOBI");
+        let mut body = Vec::new();
+        body.extend_from_slice(&248u32.to_be_bytes()); // header length
+        body.extend_from_slice(&2u32.to_be_bytes()); // mobi type
+        body.extend_from_slice(&65001u32.to_be_bytes()); // utf-8
+        body.extend_from_slice(&0u32.to_be_bytes()); // unique id
+        body.extend_from_slice(&0u32.to_be_bytes()); // file version
+        for _ in 0..10 {
+            body.extend_from_slice(&0xffff_ffffu32.to_be_bytes()); // indices
+        }
+        body.extend_from_slice(&1u32.to_be_bytes()); // first non-book index
+        body.extend_from_slice(&0u32.to_be_bytes()); // full name offset
+        body.extend_from_slice(&0u32.to_be_bytes()); // full name length
+        body.extend_from_slice(&9u32.to_be_bytes()); // locale
+        body.extend_from_slice(&0u32.to_be_bytes());
+        body.extend_from_slice(&0u32.to_be_bytes());
+        body.extend_from_slice(&6u32.to_be_bytes()); // min version
+        body.extend_from_slice(&first_image.unwrap_or(0xffff_ffff).to_be_bytes());
+        for _ in 0..4 {
+            body.extend_from_slice(&0u32.to_be_bytes()); // huffman
+        }
+        let exth_flag: u32 = if with_exth { 0x40 } else { 0 };
+        body.extend_from_slice(&exth_flag.to_be_bytes()); // exth flags
+        r0.extend_from_slice(&body);
+        if with_exth && has_art {
+            let mut exth = Vec::new();
+            exth.extend_from_slice(b"EXTH");
+            let mut recs = Vec::new();
+            recs.extend_from_slice(&201u32.to_be_bytes());
+            recs.extend_from_slice(&12u32.to_be_bytes());
+            recs.extend_from_slice(&(image_rec_index - first_image.unwrap_or(0)).to_be_bytes());
+            exth.extend_from_slice(&(recs.len() as u32 + 12).to_be_bytes());
+            exth.extend_from_slice(&1u32.to_be_bytes()); // record count
+            exth.extend_from_slice(&recs);
+            r0.extend_from_slice(&exth);
+        }
+        // Patch the MOBI header length to cover the EXTH too (the spec
+        // counts from "MOBI" through the end of the EXTH).
+        let hl = (r0.len() as u32) - mobi_start;
+        r0[mobi_start as usize + 4..mobi_start as usize + 8].copy_from_slice(&hl.to_be_bytes());
+
+        let text_rec = vec![b'x'; 16]; // one PalmDOC text record
+
+        // PDB container
+        let nrec: u16 = if has_art { 3 } else { 2 };
+        let mut out = Vec::new();
+        out.extend_from_slice(b"BOOKMOBI\0"); // name field head
+        out.resize(32, 0); // name (32)
+        out.extend_from_slice(&0u16.to_be_bytes()); // attributes
+        out.extend_from_slice(&0u16.to_be_bytes()); // version
+        out.extend_from_slice(&[0u8; 12]); // ctime/mtime/btime
+        out.extend_from_slice(&0u32.to_be_bytes()); // modnum
+        out.extend_from_slice(&0u32.to_be_bytes()); // app info
+        out.extend_from_slice(&0u32.to_be_bytes()); // sort info
+        out.extend_from_slice(b"BOOK"); // type
+        out.extend_from_slice(b"MOBI"); // creator
+        out.extend_from_slice(&0u32.to_be_bytes()); // unique seed
+        out.extend_from_slice(&0u32.to_be_bytes()); // next record list
+        out.extend_from_slice(&nrec.to_be_bytes());
+        let rec0_len = r0.len() as u32;
+        let mut table_off = 78 + nrec as usize * 8;
+        // record 0
+        // Each entry: offset u32 + attributes u8 + unique id [u8; 3].
+        out.extend_from_slice(&(table_off as u32).to_be_bytes());
+        out.push(0);
+        out.extend_from_slice(&[0, 0, 0]);
+        // record 1 (text)
+        table_off += rec0_len as usize;
+        out.extend_from_slice(&(table_off as u32).to_be_bytes());
+        out.push(0);
+        out.extend_from_slice(&[0, 0, 1]);
+        // record 2 (image)
+        if has_art {
+            table_off += text_rec.len();
+            out.extend_from_slice(&(table_off as u32).to_be_bytes());
+            out.push(0);
+            out.extend_from_slice(&[0, 0, 2]);
+        }
+        out.extend_from_slice(&r0);
+        out.extend_from_slice(&text_rec);
+        if has_art {
+            out.extend_from_slice(&art);
+        }
+        std::fs::write(path, &out).unwrap();
+    }
+
+    #[test]
+    fn mobi_cover_reads_the_exth_cover_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("book.mobi");
+        write_mobi(&path, true, Some(2));
+        let bytes = extract_book_cover(&path, "mobi").expect("mobi cover via EXTH");
+        assert!(bytes.starts_with(b"\xff\xd8"));
+    }
+
+    #[test]
+    fn mobi_cover_scans_image_records_without_exth() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("noexth.mobi");
+        write_mobi(&path, false, Some(2));
+        let bytes = extract_book_cover(&path, "mobi").expect("mobi cover via scan");
+        assert!(bytes.starts_with(b"\xff\xd8"));
+    }
+
+    #[test]
+    fn pdb_cover_scans_records_for_image_magic() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("book.pdb");
+        // A PalmDOC-ish PDB: record 0 header, record 1 text, record 2 art.
+        write_mobi(&path, false, Some(2));
+        let bytes = extract_book_cover(&path, "pdb").expect("pdb cover via scan");
+        assert!(bytes.starts_with(b"\xff\xd8"));
+    }
+
+    #[test]
+    fn rtf_cover_decodes_the_first_png_blip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("book.rtf");
+        let png = art_png();
+        let hex: String = png.iter().map(|b| format!("{:02x}", b)).collect();
+        let rtf = format!(
+            r#"{{\rtf1\ansi {{\pict\pngblip\picw4\pich4\picwgoal1000\pichgoal1000 {{\*\blipuid 123456}}{hex}}}}}"#
+        );
+        std::fs::write(&path, &rtf).unwrap();
+        let bytes = extract_book_cover(&path, "rtf").expect("rtf cover");
+        assert_eq!(bytes, png, "hex payload decoded past the blipuid group");
+    }
+
+    #[test]
+    fn rtf_cover_decodes_jpeg_blips() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("book.rtf");
+        let jpg = art_jpeg();
+        let hex: String = jpg.iter().map(|b| format!("{:02X}", b)).collect();
+        let rtf = format!(r#"{{\rtf1 {{\pict\jpegblip\picw4{hex}}}}}"#);
+        std::fs::write(&path, &rtf).unwrap();
+        let bytes = extract_book_cover(&path, "rtf").expect("rtf jpeg cover");
+        assert!(bytes.starts_with(b"\xff\xd8"));
+    }
+
+    #[test]
+    fn xps_cover_walks_fdseq_to_the_page_resource() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("book.xps");
+        write_zip(
+            &path,
+            &[
+                (
+                    "FixedDocSeq.fdseq",
+                    br#"<FixedDocumentSequence><DocumentReference Source="/Documents/1/FixedDoc.fdoc"/></FixedDocumentSequence>"#.to_vec(),
+                ),
+                (
+                    "Documents/1/FixedDoc.fdoc",
+                    br#"<FixedDocument><PageContent Source="/Documents/1/Pages/1.fpage"/></FixedDocument>"#.to_vec(),
+                ),
+                (
+                    "Documents/1/Pages/1.fpage",
+                    br#"<FixedPage><Canvas><Path Fill="{ImageBrush ImageSource="/Documents/1/Pages/1.image-1.png"}"/></Canvas></FixedPage>"#.to_vec(),
+                ),
+                ("Documents/1/Pages/1.image-1.png", art_png()),
+            ],
+        );
+        let bytes = extract_book_cover(&path, "xps").expect("xps cover");
+        assert!(bytes.starts_with(b"\x89PNG"));
+    }
+
+    #[test]
+    fn formats_without_extractable_covers_return_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let txt = dir.path().join("book.html");
+        std::fs::write(&txt, b"<html><body>no art</body></html>").unwrap();
+        assert!(extract_book_cover(&txt, "html").is_none(), "html");
+        assert!(extract_book_cover(&txt, "djvu").is_none(), "djvu");
+        assert!(extract_book_cover(&txt, "chm").is_none(), "chm");
+        assert!(extract_book_cover(&txt, "doc").is_none(), "doc");
+        // A text-only PalmDOC pdb: records exist but none is an image.
+        let pdb = dir.path().join("text.pdb");
+        write_mobi(&pdb, false, None);
+        // first_image = None -> the scan starts at record 1 (text) and
+        // finds nothing decodable.
+        assert!(extract_book_cover(&pdb, "pdb").is_none(), "text pdb");
+    }
+
+    #[test]
+    fn base64_decoder_handles_whitespace_and_padding() {
+        // "hello" -> aGVsbG8= (with newlines injected).
+        assert_eq!(
+            base64_decode("aGVs\nbG8=  ").as_deref(),
+            Some(b"hello".as_slice())
+        );
+        assert_eq!(base64_decode("").as_deref(), None);
+    }
+
+    #[test]
+    fn natural_key_orders_pages_numerically() {
+        assert!(natural_key("page2.png") < natural_key("page10.png"));
+        assert!(natural_key("p1.jpg") < natural_key("p2.jpg"));
+        assert_eq!(natural_key("cover.png"), natural_key("Cover.PNG"));
     }
 
     // ── misc helpers ────────────────────────────────────────────────────

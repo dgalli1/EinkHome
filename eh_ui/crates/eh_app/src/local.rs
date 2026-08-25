@@ -44,9 +44,11 @@ pub const BROWSE_MAX_ENTRIES: usize = 512;
 pub const FOLDER_ROW_H: u32 = 96;
 
 /// Extensions the shelf treats as book files (C BOOK_EXTS in
-/// eh_browser.c; shared by the Local import and the Folder browser).
-pub const BOOK_EXTS: [&str; 10] = [
-    "epub", "pdf", "mobi", "azw", "azw3", "fb2", "djvu", "txt", "cbr", "cbz",
+/// eh_browser.c; shared by the Local import and the Folder browser) —
+/// KOReader's DocumentRegistry set.
+pub const BOOK_EXTS: [&str; 20] = [
+    "epub", "pdf", "mobi", "azw", "azw3", "fb2", "djvu", "txt", "cbr", "cbz", "cbt", "pdb", "xps",
+    "oxps", "html", "htm", "rtf", "chm", "doc", "zip",
 ];
 
 /// True when `ext` (already lowercase) is a book extension (C eh_is_book_ext).
