@@ -142,7 +142,9 @@ component GridTile inherits Rectangle {
         Rectangle {
             x: 1px;
             y: 1px;
-            width: Math.max(0, Math.floor((parent.width - 2px) / 1px * t.progress / 100)) * 1px;
+            property <int> fill: Math.floor((parent.width - 2px) / 1px * t.progress / 100);
+            width: Math.max(0, fill - 2) * 1px;
+            visible: fill >= 2;
             height: parent.height - 2px;
             background: black;
         }
@@ -203,7 +205,9 @@ component ListRow inherits Rectangle {
         Rectangle {
             x: 1px;
             y: 1px;
-            width: Math.max(0, Math.floor((parent.width - 2px) / 1px * t.progress / 100)) * 1px;
+            property <int> fill: Math.floor((parent.width - 2px) / 1px * t.progress / 100);
+            width: Math.max(0, fill - 2) * 1px;
+            visible: fill >= 2;
             height: parent.height - 2px;
             background: black;
         }

@@ -393,7 +393,7 @@ impl<B: Framebuffer> App<B> {
                     .context
                     .items
                     .iter()
-                    .map(|a| a.label_key().to_string().into())
+                    .map(|a| crate::i18n::tr(a.label_key()).to_string().into())
                     .collect();
                 let rows = labels.len() as i32;
                 c.set_context_labels(slint::ModelRc::new(slint::VecModel::from(labels)));
