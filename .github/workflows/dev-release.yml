@@ -180,6 +180,9 @@ jobs:
         with:
           distribution: temurin
           java-version: "17"
+      - name: Set up Android SDK (cmdline-tools + licenses)
+        if: steps.gate.outputs.present == 'true'
+        uses: android-actions/setup-android@v3
       - name: Cache Android SDK components
         if: steps.gate.outputs.present == 'true'
         id: cache-android
