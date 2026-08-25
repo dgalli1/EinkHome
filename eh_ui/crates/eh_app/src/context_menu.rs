@@ -3,7 +3,7 @@
 //! routing its row taps, and the Delete/Download-all series actions
 //! (C eh_long_press → eh_context → eh_context_item_handler).
 
-use eh_hal::{Framebuffer, Rect};
+use eh_hal::Framebuffer;
 
 use crate::app::{App, Overlay};
 use crate::downloads::book_local_path;
@@ -18,8 +18,6 @@ use crate::widgets::context::ContextAction;
 pub struct MenuState {
     /// Rows in tap order; parallel to [`MenuState::rects`].
     pub items: Vec<ContextAction>,
-    /// Row rects rebuilt each draw so taps match the paint.
-    pub rects: Vec<Rect>,
     /// 0 = book menu, 1 = series menu (the `context menu open series=N`
     /// log marker).
     pub series: u32,
@@ -36,7 +34,6 @@ impl MenuState {
     /// Dismiss the menu: clear rows, geometry and target (an outside tap
     /// or back navigation).
     pub fn dismiss(&mut self) {
-        self.rects.clear();
         self.items.clear();
         self.book = None;
     }
@@ -208,12 +205,6 @@ mod tests {
         // dismiss must keep them (only rows, geometry and book go).
         let mut m = MenuState {
             items: vec![ContextAction::DownloadAll, ContextAction::DeleteAll],
-            rects: vec![Rect {
-                x: 0,
-                y: 0,
-                w: 10,
-                h: 10,
-            }],
             series: 1,
             book: Some(Book::default()),
             scope: "author:Rex".into(),
@@ -221,7 +212,7 @@ mod tests {
             count: 3,
         };
         m.dismiss();
-        assert!(m.rects.is_empty() && m.items.is_empty() && m.book.is_none());
+        assert!(m.items.is_empty() && m.book.is_none());
         assert_eq!(m.scope, "author:Rex");
         assert_eq!(m.label, "Rex");
         assert_eq!(m.count, 3);

@@ -235,10 +235,7 @@ pub struct App<B: Framebuffer> {
     /// The current page's entries; the grid widgets mirror these.
     pub entries: Vec<ShelfEntry>,
     pub overlay: Overlay,
-    /// Menu-row rects (rebuilt each draw; tap geometry matches the paint).
-    pub menu_rows: Vec<(Rect, MenuRow)>,
-    /// Settings row/button rects (same pattern).
-    pub settings_rows: Vec<(Rect, SettingsRow)>,
+
     pub launcher_items: Vec<LauncherItem>,
     /// Launcher item rects, parallel to `launcher_items` (layout coords,
     /// pre-scroll — taps apply the scroll offset like the C app).
@@ -259,8 +256,6 @@ pub struct App<B: Framebuffer> {
     /// Rotation (deg) of the top-bar sync glyph while a sync/download is
     /// in flight (C eh_g_state.sync_angle; the tick advances it 15°/s).
     pub sync_angle: i32,
-    /// Source-chooser row rects (parallel to the three rows).
-    pub source_rows: Vec<Rect>,
     /// Active grouping preset + drill level (C eh_g_group / drill).
     pub group: crate::store::GroupPreset,
     pub sort: crate::store::SortMode,
@@ -290,8 +285,6 @@ pub struct App<B: Framebuffer> {
     /// The settings row (or search input) currently owning the on-screen
     /// keyboard — the draw inverts the editing row (C eh_g_kb_field).
     pub kb_editing: Option<KbField>,
-    /// Group/sort chooser row rects (drawn in the chooser sheet overlays).
-    pub chooser_rects: Vec<Rect>,
     /// Download queue + worker + completion channel.
     pub downloader: crate::downloads::Downloader,
     /// Active download batch (sheet labels + drain behavior; owner:
@@ -426,7 +419,6 @@ impl<B: Framebuffer> App<B> {
             config,
             cfg_path,
             covers_dir,
-            source_rows: Vec::new(),
             group,
             sort: crate::store::SortMode::Title,
             dl: crate::downloads::BatchUi::default(),
@@ -437,8 +429,6 @@ impl<B: Framebuffer> App<B> {
             pages: 0,
             entries: Vec::new(),
             overlay: Overlay::None,
-            menu_rows: Vec::new(),
-            settings_rows: Vec::new(),
             launcher_items: Vec::new(),
             launcher_rects: Vec::new(),
             launcher_scroll: 0,
@@ -459,7 +449,6 @@ impl<B: Framebuffer> App<B> {
             kb_editing: None,
             suggest_q: String::new(),
             warm: crate::cover::WarmHandle::default(),
-            chooser_rects: Vec::new(),
             downloader: crate::downloads::Downloader::new(),
             sync_angle: 0,
             log_scroll: -1,

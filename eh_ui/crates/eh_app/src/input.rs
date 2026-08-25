@@ -93,7 +93,6 @@ impl<B: Framebuffer> App<B> {
                 }
                 Action::ChooserRow(i) => self.chooser_row(i),
                 Action::ChooserOutside => {
-                    self.chooser_rects.clear();
                     self.set_overlay(Overlay::None);
                 }
                 Action::ContextRow(i) => self.context_row(i),

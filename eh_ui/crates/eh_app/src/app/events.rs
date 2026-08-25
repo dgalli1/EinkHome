@@ -214,13 +214,7 @@ impl<B: Framebuffer> App<B> {
     fn back(&mut self) {
         if self.overlay != Overlay::None {
             self.set_overlay(Overlay::None);
-            self.menu_rows.clear();
-            self.settings_rows.clear();
-            self.launcher_rects.clear();
-            self.source_rows.clear();
-            self.context.rects.clear();
-            self.context.items.clear();
-            self.context.book = None;
+            self.context.dismiss();
             return;
         }
         // Drilled into a group: pop the drill level first.

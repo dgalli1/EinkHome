@@ -11,13 +11,11 @@ use crate::app::{App, Overlay};
 impl<B: Framebuffer> App<B> {
     /// Open the Group by chooser sheet.
     pub(crate) fn open_group_chooser(&mut self) {
-        self.chooser_rects.clear();
         self.set_overlay(Overlay::GroupChooser);
     }
 
     /// Open the Sort by chooser sheet.
     pub(crate) fn open_sort_chooser(&mut self) {
-        self.chooser_rects.clear();
         self.set_overlay(Overlay::SortChooser);
     }
 
@@ -42,7 +40,6 @@ impl<B: Framebuffer> App<B> {
                 self.rebuild_view();
             }
         }
-        self.chooser_rects.clear();
         self.set_overlay(Overlay::None);
     }
 
