@@ -674,6 +674,8 @@ mod tests {
     /// the contract the inkview backend implements over the firmware.
     pub(crate) struct FakeKb {
         px: Vec<u8>,
+        /// Force the app to draw its own status strip (self-panel devices).
+        self_panel: bool,
         buf: RefCell<Vec<u8>>,
         open: RefCell<bool>,
         on_done: KbDoneCell,
@@ -691,8 +693,13 @@ mod tests {
 
     impl FakeKb {
         fn new(w: u32, h: u32) -> Self {
+            Self::with_panel(w, h, false)
+        }
+
+        pub(crate) fn with_panel(w: u32, h: u32, self_panel: bool) -> Self {
             Self {
                 px: vec![0xFF; (w * h) as usize],
+                self_panel,
                 buf: RefCell::new(Vec::new()),
                 open: RefCell::new(false),
                 on_done: RefCell::new(None),
@@ -718,6 +725,10 @@ mod tests {
     impl Framebuffer for FakeKb {
         fn net_active(&self) -> bool {
             !self.offline
+        }
+
+        fn needs_self_panel(&self) -> bool {
+            self.self_panel
         }
 
         fn screen(&self) -> eh_hal::Screen {

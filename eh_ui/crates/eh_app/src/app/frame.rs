@@ -712,3 +712,47 @@ impl<B: Framebuffer> App<B> {
         }
     }
 }
+
+#[cfg(test)]
+mod self_panel_tests {
+    use super::*;
+    use crate::app::tests::FakeKb;
+
+    /// The self-drawn status strip renders through the Slint tree: with
+    /// needs_self_panel the window covers the full panel and the strip
+    /// band below the content carries the clock text (dark pixels) after
+    /// the first present.
+    #[test]
+    fn self_panel_strip_stamps_clock_into_the_band() {
+        let dir = std::env::temp_dir().join(format!("eh_slint_panel_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let fb = FakeKb::with_panel(1072, 1448, true);
+        let cfg = Config {
+            api_url: "http://mock.invalid".into(),
+            ..Default::default()
+        };
+        let mut app = App::new(fb, cfg, None, &dir);
+        app.present();
+
+        let px = app.fb().surface_mut().to_vec();
+        let w = 1072usize;
+        let band_y0 = (1448 - 106) as usize;
+        // The band: white background, black top rule, dark clock text.
+        let band = &px[band_y0 * w..(band_y0 + 106) * w];
+        let dark = band.iter().filter(|p| **p < 80).count();
+        assert!(
+            dark > 200,
+            "strip band must carry the clock glyph ink (dark={dark})"
+        );
+        // The top rule of the strip: a dark 2px line across the band's top.
+        let rule = &px[band_y0 * w..band_y0 * w + 2 * w];
+        assert!(
+            rule.iter().filter(|p| **p < 80).count() > w * 9 / 10,
+            "strip top rule missing"
+        );
+        // Above the band (content bottom edge): not part of the strip.
+        app.rebuild_view();
+        app.present();
+    }
+}
