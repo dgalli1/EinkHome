@@ -207,13 +207,15 @@ jobs:
     needs: [device, host, android]
     # PRs only rehearse the build; pushes (main/demo) and manual runs on
     # main publish.  The android job may be legitimately skipped.
-    if: >
-      always() && !cancelled() &&
-      needs.device.result == 'success' &&
-      needs.host.result == 'success' &&
-      (needs.android.result == 'success' || needs.android.result == 'skipped') &&
-      (github.event_name == 'push' ||
-       (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'))
+    if: >-
+      ${{
+        always() && !cancelled() &&
+        needs.device.result == 'success' &&
+        needs.host.result == 'success' &&
+        (needs.android.result == 'success' || needs.android.result == 'skipped') &&
+        (github.event_name == 'push' ||
+         (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'))
+      }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     concurrency:
