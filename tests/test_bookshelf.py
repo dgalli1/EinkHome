@@ -608,6 +608,9 @@ def _clear_guest_cfg() -> None:
         for ln in _GUEST_CFG_HOST.read_text(encoding="utf-8").splitlines()
         if not ln.startswith("reader=")
     ]
+    # A PBEMU_NO_KEEPID boot leaves the cfg foreign-owned and 0644;
+    # replace (dir is host-writable) instead of truncating in place.
+    _GUEST_CFG_HOST.unlink(missing_ok=True)
     _GUEST_CFG_HOST.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
@@ -617,11 +620,15 @@ def _restore_guest_cfg(saved: str) -> None:
     The settings save tests write reader=N into the shared bin cfg; if
     left there the next test boots with that reader preference.  Restore
     the pre-test text (or remove the file) so the preference does not
-    leak across runs."""
+    leak across runs.  Unlink-first: a PBEMU_NO_KEEPID boot leaves the
+    cfg foreign-owned and 0644, so replace instead of truncate."""
+    _GUEST_CFG_HOST.unlink(missing_ok=True)
     if saved:
         _GUEST_CFG_HOST.write_text(saved, encoding="utf-8")
-    else:
-        _GUEST_CFG_HOST.unlink(missing_ok=True)
+
+
+
+
 
 
 def test_more_overlay_settings_opens_page(fresh_bookshelf):

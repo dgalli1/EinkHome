@@ -224,7 +224,16 @@ class EmulatorBackend:
             if p_.is_file():
                 keep = [l for l in p_.read_text(encoding="utf-8").splitlines()
                         if not l.startswith("group=")]
-                p_.write_text("\n".join(keep) + "\n", encoding="utf-8")
+                try:
+                    p_.write_text("\n".join(keep) + "\n", encoding="utf-8")
+                except PermissionError:
+                    # PBEMU_NO_KEEPID sessions leave guest-written cfgs
+                    # foreign-owned and 0644; the parent dir stays
+                    # host-writable, so replace instead of truncate
+                    # (same trick _set_dead_cfg uses).
+                    p_.unlink(missing_ok=True)
+                    p_.write_text("\n".join(keep) + "\n",
+                                  encoding="utf-8")
 
     def restart(self, *, wait_init=True):
         from tests.support.bookshelf import env as _env
