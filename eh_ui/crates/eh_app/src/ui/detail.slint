@@ -26,14 +26,24 @@ export component BookDetailPage inherits Rectangle {
         home => { root.back(); }
     }
 
-    // the cover in large: 2:3 card at 333×500
+    // the cover in large: 2:3 card at 333×500.  Tapping it zooms the
+    // image to the whole content area (aspect-fit) — any tap zooms back.
+    property <bool> zoom: false;
+    if (root.has-cover): TouchArea {
+        x: root.zoom ? 0 : 48px;
+        y: root.zoom ? 96px : 128px;
+        width: root.zoom ? parent.width : 335px;
+        height: root.zoom ? parent.height - 96px : 502px;
+        clicked => { root.zoom = !root.zoom; }
+    }
     Image {
-        x: 49px;
-        y: 129px;
-        width: 333px;
-        height: 500px;
+        x: root.zoom ? 0 : 49px;
+        y: root.zoom ? 96px : 129px;
+        width: root.zoom ? parent.width : 333px;
+        height: root.zoom ? parent.height - 96px : 500px;
         source: root.cover;
         visible: root.has-cover;
+        image-fit: root.zoom ? ImageFit.contain : ImageFit.fill;
         image-rendering: pixelated;
     }
     Rectangle {
@@ -51,6 +61,7 @@ export component BookDetailPage inherits Rectangle {
 
     for r[idx] in root.rows: Rectangle {
         x: rows-x;
+        visible: !root.zoom;
         y: (128 + idx * 96) * 1px;
         width: rows-w;
         height: 88px;
