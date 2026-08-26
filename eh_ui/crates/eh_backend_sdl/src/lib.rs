@@ -125,7 +125,7 @@ impl SdlFb {
     /// synthesized slice in tests (the physical-keyboard pass-through
     /// below is exactly what a real window delivers).
     fn pump_iter<I: Iterator<Item = Event>>(&mut self, events: &mut I) {
-        while let Some(ev) = events.next() {
+        for ev in events.by_ref() {
             if matches!(ev, Event::Quit { .. }) {
                 self.close_requested = true;
             }
@@ -518,7 +518,7 @@ mod tests {
 
         // Return commits: buffer handed to the app, keyboard closed.
         fb.pump_iter(&mut [key(Keycode::Return)].into_iter());
-        assert!(!matches!(fb.live_keyboard_text(), Some(_)));
+        assert!(fb.live_keyboard_text().is_none());
         assert_eq!(*COMMIT.lock(), "héllo worl!");
 
         // Escape falls through to translate() as BACK even while open.

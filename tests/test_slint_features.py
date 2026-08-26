@@ -14,7 +14,6 @@ import sqlite3
 import time
 
 import pytest
-
 import test_bookshelf
 
 from tests.support.bookshelf.geometry import MORE_SETTINGS
@@ -128,7 +127,6 @@ def feature_env(tmp_path_factory):
 
 def test_exercise_every_feature(feature_env):
     bs, _runtime = feature_env
-    color_cover = getattr(feature_env, "color_cover", None)
     bs.begin_snapshots("slint-features")
     try:
         _settle(bs, 6.0)
@@ -137,7 +135,6 @@ def test_exercise_every_feature(feature_env):
         # app: the boot shelf re-reads the cache deterministically and the
         # RGB path renders end to end (the mock's own covers are 1x1 gray).
         import glob
-        import shutil
 
         from PIL import Image
 
@@ -166,7 +163,8 @@ def test_exercise_every_feature(feature_env):
         _snap(bs, "02-progress-bars")
 
         # ── stack cards: group by author → 2-book series cards ─────────
-        bs.tap_at(*bs.geom.menu_button_center()); _settle(bs, 0.7)
+        bs.tap_at(*bs.geom.menu_button_center())
+        _settle(bs, 0.7)
         _snap(bs, "03-more-drawer")
         bs.tap_more_item(0)  # Group by
         _settle(bs, 0.6)
@@ -197,16 +195,21 @@ def test_exercise_every_feature(feature_env):
         bs.tap_at(*bs.geom.home_button_center())  # the detail back chevron
         _settle(bs, 0.7)
 
-        bs.tap_at(*bs.geom.outside_more_overlay()); _settle(bs, 0.7)
+        bs.tap_at(*bs.geom.outside_more_overlay())
+        _settle(bs, 0.7)
         _settle(bs, 0.5)
 
-        bs.tap_at(*bs.geom.home_button_center()); _settle(bs, 0.7)  # pops one drill level
+        bs.tap_at(*bs.geom.home_button_center())
+
+        _settle(bs, 0.7)  # pops one drill level
         _settle(bs, 0.5)
-        bs.tap_at(*bs.geom.home_button_center()); _settle(bs, 0.7)  # back to the flat shelf
+        bs.tap_at(*bs.geom.home_button_center())
+        _settle(bs, 0.7)  # back to the flat shelf
         _settle(bs, 0.5)
 
         # ── sort chooser with selection ─────────────────────────────────
-        bs.tap_at(*bs.geom.menu_button_center()); _settle(bs, 0.7)
+        bs.tap_at(*bs.geom.menu_button_center())
+        _settle(bs, 0.7)
         bs.tap_more_item(1)  # Sort by
         _settle(bs, 0.6)
         _snap(bs, "09-sort-chooser")
@@ -224,21 +227,25 @@ def test_exercise_every_feature(feature_env):
         bs.tap_at(*bs.geom.source_button_center())
         _settle(bs, 0.6)
         _snap(bs, "11-source-chooser")
-        bs.tap_at(*bs.geom.outside_more_overlay()); _settle(bs, 0.7)  # stay on Kavita
+        bs.tap_at(*bs.geom.outside_more_overlay())
+        _settle(bs, 0.7)  # stay on Kavita
         _settle(bs, 0.5)
 
         # ── search: input + live suggestions band ───────────────────────
-        bs.tap_at(*bs.geom.search_icon_center()); _settle(bs, 0.7)
+        bs.tap_at(*bs.geom.search_icon_center())
+        _settle(bs, 0.7)
         bs.tap_search_input()
         _settle(bs, 0.3)
         bs.type_text("feature")
         _settle(bs, 0.8)
         _snap(bs, "12-search-suggestions")
-        bs.tap_at(*bs.geom.home_button_center()); _settle(bs, 0.7)
+        bs.tap_at(*bs.geom.home_button_center())
+        _settle(bs, 0.7)
         _settle(bs, 0.5)
 
         # ── download-all → progress popup → X cancel ────────────────────
-        bs.tap_at(*bs.geom.menu_button_center()); _settle(bs, 0.7)
+        bs.tap_at(*bs.geom.menu_button_center())
+        _settle(bs, 0.7)
         bs.tap_more_item(2)  # Download all
         _settle(bs, 1.0)
         _snap(bs, "13-download-popup")
@@ -256,7 +263,8 @@ def test_exercise_every_feature(feature_env):
         _snap(bs, "14-download-cancelled")
 
         # ── settings: rows + keyboard-inverted row ──────────────────────
-        bs.tap_at(*bs.geom.menu_button_center()); _settle(bs, 0.7)
+        bs.tap_at(*bs.geom.menu_button_center())
+        _settle(bs, 0.7)
         bs.tap_more_item(MORE_SETTINGS)
         _settle(bs, 0.8)
         _snap(bs, "15-settings")
@@ -267,7 +275,8 @@ def test_exercise_every_feature(feature_env):
         _settle(bs, 0.5)
 
         # ── licenses list + detail ──────────────────────────────────────
-        bs.tap_at(*bs.geom.menu_button_center()); _settle(bs, 0.7)
+        bs.tap_at(*bs.geom.menu_button_center())
+        _settle(bs, 0.7)
         bs.tap_more_item(MORE_SETTINGS)
         _settle(bs, 0.6)
         bs.tap_at(*bs.geom.settings_licenses_center())

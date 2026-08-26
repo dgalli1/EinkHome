@@ -2,7 +2,7 @@
 //!
 //! One cdylib, two hats:
 //!
-//! 1. **Platform backend**: [`AndroidFb`] implements `eh_hal::Framebuffer`
+//! 1. **Platform backend**: `AndroidFb` implements `eh_hal::Framebuffer`
 //!    over an RGBA buffer; `refresh` blits it into the `ANativeWindow`.
 //! 2. **Host**: `android_main` owns the lifecycle (surface gained/lost,
 //!    pause/resume), translates android-activity's touch/key events into
@@ -15,7 +15,11 @@
 //! The APK needs no Java/dex: the manifest declares android.app.NativeActivity
 //! with `android.app.lib_name = "eh_android"`, and android-activity's
 //! native-activity glue provides ANativeActivity_onCreate inside the .so.
+//!
+//! The whole crate is Android-only: host builds (workspace clippy/tests
+//! on a PC) compile to an empty cdylib via the crate-level cfg below.
 
+#![cfg(target_os = "android")]
 use android_activity::input::{InputEvent, MotionAction};
 use android_activity::{AndroidApp, MainEvent, PollEvent};
 use eh_hal::{Framebuffer, InputEvent as HalInput, KeyCode, PixelFormat, RefreshMode, Screen};

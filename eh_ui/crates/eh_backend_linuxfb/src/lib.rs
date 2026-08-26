@@ -7,7 +7,7 @@
 //! - The frame is mmap'd from `/dev/fb0`; geometry from `FBIOGET_VSCREENINFO` /
 //!   `FBIOGET_FSCREENINFO`.  `refresh()` clamps the region to the content area
 //!   then issues the vendor update ioctl selected by [`Flavor`] (see
-//!   [`mxcfb`]).
+//!   `mxcfb`).
 //! - On **real devices** the pixels land on the panel and are visible (this
 //!   is exactly what KOReader's `framebuffer_mxcfb.lua` does on PB/Kobo/
 //!   reMarkable/Cervantes).
@@ -15,7 +15,7 @@
 //!   `frame_dump` cannot see these pixels — that is an emulator observation
 //!   gap, not a device problem.  See `eh_backend_inkview` for the path that
 //!   pbemu can observe.
-//! - Input comes from evdev nodes ([`evdev`]); without them the backend is
+//! - Input comes from evdev nodes (`evdev`); without them the backend is
 //!   display-only (`poll_event` yields nothing), which is what the plain
 //!   `linuxfb` demo and the emulator use.
 //!

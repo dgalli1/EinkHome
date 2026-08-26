@@ -21,6 +21,8 @@ path = "android_main.rs"
 [dependencies]
 eh_app = { path = "../eh_app", default-features = false }
 eh_hal = { path = "../eh_hal" }
+
+[target.'cfg(target_os = "android")'.dependencies]
 android-activity = { version = "0.6", features = ["native-activity"] }
 ndk = "0.9"
 
