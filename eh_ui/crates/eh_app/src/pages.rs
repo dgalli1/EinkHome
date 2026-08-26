@@ -56,10 +56,22 @@ impl<B: Framebuffer> App<B> {
                 .ok()
                 .flatten()
                 .unwrap_or_default();
-            let art = crate::cover::load_cached(&self.covers_dir, &book.id)
-                .and_then(|bytes| crate::cover::decode_rgb(&bytes).ok())
-                .map(|(w, h, rgb)| (rgb, w, h))
-                .or_else(|| self.local_cover_art(&book));
+            // Decoded-art memory cache first: a shelf rebuild (tab
+            // switch, page flip) must not re-decode every visible cover
+            // — the PNG/JPEG decode dominated the switch otherwise.
+            let art = match self.art_cached(&book.id) {
+                Some(a) => Some(a),
+                None => {
+                    let art = crate::cover::load_cached(&self.covers_dir, &book.id)
+                        .and_then(|bytes| crate::cover::decode_rgb(&bytes).ok())
+                        .map(|(w, h, rgb)| (rgb, w, h))
+                        .or_else(|| self.local_cover_art(&book));
+                    if let Some((rgb, w, h)) = &art {
+                        self.art_store(&book.id, rgb.clone(), *w, *h);
+                    }
+                    art
+                }
+            };
             if art.is_some() {
                 crate::logger::log(&format!("[bookshelf] cover_tick cache hit id={}", book.id));
             }
@@ -108,18 +120,47 @@ impl<B: Framebuffer> App<B> {
                     return None;
                 };
                 crate::cover::store_raw(&self.covers_dir, &book.id, &extracted).ok()?;
+                crate::logger::log(&format!(
+                    "[bookshelf] cover_tick local extract id={}",
+                    book.id
+                ));
                 extracted
             }
         };
         if bytes.is_empty() {
             return None; // known-no-cover tombstone
         }
-        crate::logger::log(&format!(
-            "[bookshelf] cover_tick local extract id={}",
-            book.id
-        ));
         crate::cover::decode_rgb(&bytes)
             .ok()
             .map(|(w, h, rgb)| (rgb, w, h))
     }
+
+    /// Decoded-art memo look-up (FIFO-capped; see [`App::art_store`]).
+    fn art_cached(&self, id: &str) -> Option<(Vec<u8>, u32, u32)> {
+        self.art_cache.map.get(id).cloned()
+    }
+
+    /// Memoize a decoded cover: the working set of a page or two fits
+    /// easily, and a tab switch then pays plain clones instead of a
+    /// PNG/JPEG decode per visible tile.
+    fn art_store(&mut self, id: &str, rgb: Vec<u8>, w: u32, h: u32) {
+        const ART_CACHE_CAP: usize = 64;
+        if self.art_cache.order.contains(&id.to_string()) {
+            return;
+        }
+        if self.art_cache.order.len() >= ART_CACHE_CAP {
+            if let Some(oldest) = self.art_cache.order.pop_front() {
+                self.art_cache.map.remove(&oldest);
+            }
+        }
+        self.art_cache.order.push_back(id.to_string());
+        self.art_cache.map.insert(id.to_string(), (rgb, w, h));
+    }
+}
+
+/// Decoded cover memo (book id → RGB + dims) with FIFO eviction order.
+#[derive(Default)]
+pub(crate) struct ArtCache {
+    map: std::collections::HashMap<String, (Vec<u8>, u32, u32)>,
+    order: std::collections::VecDeque<String>,
 }

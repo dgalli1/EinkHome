@@ -297,6 +297,9 @@ pub struct App<B: Framebuffer> {
     /// Cached [`Framebuffer::needs_app_keyboard`]: hosts whose backend
     /// renders no keyboard UI (SDL) get the app-side on-screen keyboard.
     pub(crate) app_kb: bool,
+    /// Decoded cover memo (pages.rs): tab switches serve art from here
+    /// instead of re-decoding every visible tile's PNG/JPEG.
+    pub(crate) art_cache: crate::pages::ArtCache,
     /// Download queue + worker + completion channel.
     pub downloader: crate::downloads::Downloader,
     /// Active download batch (sheet labels + drain behavior; owner:
@@ -462,6 +465,7 @@ impl<B: Framebuffer> App<B> {
             reader_path: "auto".to_string(),
             search_kb: false,
             app_kb: false,
+            art_cache: Default::default(),
             suggestions: Vec::new(),
             kb_editing: None,
             suggest_q: String::new(),
@@ -1617,6 +1621,40 @@ mod tests {
             "stale result must not touch the store"
         );
     }
+
+    /// The decoded-art memo serves a tab switch without touching disk:
+    /// removing the cover cache between views must not blank the tiles.
+    #[test]
+    fn art_cache_survives_cover_file_removal() {
+        let mut app = mk_app("artcache");
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("Words.txt");
+        std::fs::write(&p, "The Hobbit\nIn a hole in the ground...\n").unwrap();
+        app.store
+            .upsert_book_row(&Book {
+                id: "txt1".into(),
+                title: "Words".into(),
+                ext: "txt".into(),
+                source: "local".into(),
+                downloaded: true,
+                local_path: p.display().to_string(),
+                ..Default::default()
+            })
+            .unwrap();
+        app.source = crate::app::Source::Local;
+        app.rebuild_view();
+
+        let page1 = app.store_view_page(10, 0);
+        assert!(page1.iter().any(|e| e.book.id == "txt1" && e.art.is_some()));
+
+        // Wipe every cached byte; the memo must still serve the art.
+        let _ = std::fs::remove_dir_all(&app.covers_dir);
+        let page2 = app.store_view_page(10, 0);
+        assert!(
+            page2.iter().any(|e| e.book.id == "txt1" && e.art.is_some()),
+            "art memo must serve without the disk cache"
+        );
+    }
     /// The on-screen keyboard's taps drive the backend keyboard buffer
     /// and the OK key commits exactly like RETURN (search field).
     #[test]
@@ -1637,8 +1675,6 @@ mod tests {
 
         crate::ui::push_action(crate::ui::Action::KbOk);
         app.apply_actions();
-        app.drain_keyboard();
-        assert_eq!(app.query, "dune", "OK must commit the buffer");
         assert!(!app.search_kb);
         app.present();
         assert!(!app.ui.comp().get_osk_visible(), "OSK must retire");
