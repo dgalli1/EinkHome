@@ -67,6 +67,21 @@ pub fn post_text(
     Ok(text)
 }
 
+/// DELETE a resource, return the response text (empty body tolerated).
+pub fn delete_text(agent: &Agent, base: &str, path: &str, token: &str) -> Result<String, String> {
+    let mut text = String::new();
+    agent
+        .delete(&format!("{base}{path}"))
+        .set("Authorization", &bearer(token))
+        .call()
+        .map_err(|e| ureq_err(&e))?
+        .into_reader()
+        .take(MAX_BODY)
+        .read_to_string(&mut text)
+        .map_err(|e| e.to_string())?;
+    Ok(text)
+}
+
 /// Render a ureq error (transport or HTTP status) as a message.
 fn ureq_err(e: &ureq::Error) -> String {
     match e {

@@ -50,6 +50,8 @@ export component EhAppWindow inherits Window {
     in-out property <[ShelfTile]> entries: [];
     // folder browser body (Folder source)
     in-out property <bool> browse-mode: false;
+    in-out property <bool> picker-mode: false;  // download-dir picker body
+    in-out property <string> picker-select-label: "";
     in-out property <[BrowseRow]> browse-rows: [];
     in-out property <int> browse-scroll: 0;
     // search page
@@ -87,6 +89,7 @@ export component EhAppWindow inherits Window {
     in-out property <string> settings-reader: "";
     in-out property <string> settings-dl-dir: "";
     in-out property <string> settings-sysapp: "";
+    in-out property <bool> settings-sysapp-on: false;
     in-out property <int> settings-editing: -1;
     in-out property <string> settings-save: "";
     in-out property <string> settings-logs: "";
@@ -170,6 +173,7 @@ export component EhAppWindow inherits Window {
     callback osk-ok;
     callback osk-cancel;
     callback launcher-cell(int);
+    callback picker-select;
 
 
     // ── grid geometry (C eh_grid.c, mirrored exactly) ──────────────────
@@ -226,7 +230,10 @@ export component EhAppWindow inherits Window {
         width: root.width;
         height: g-bot - 96px;
         rows: root.browse-rows;
+        picker: root.picker-mode;
+        select-label: root.picker-select-label;
         row-tap(i) => { root.browse-row(i + root.browse-scroll); }
+        select => { root.picker-select(); }
     }
     if (!root.browse-mode): ShelfBody {
         y: 96px;
@@ -328,8 +335,8 @@ export component EhAppWindow inherits Window {
         api-host: root.settings-api-host;
         api-key: root.settings-api-key;
         reader-value: root.settings-reader;
-        dl-dir: root.settings-dl-dir;
         sysapp-value: root.settings-sysapp;
+        sysapp-on: root.settings-sysapp-on;
         editing: root.settings-editing;
         save-label: root.settings-save;
         logs-label: root.settings-logs;

@@ -315,6 +315,13 @@ static TABLE: &[(&str, &str, &str, &str, &str)] = &[
         "No (solo app)",
     ),
     (
+        "settings.dl_use",
+        "Use this folder",
+        "Diesen Ordner verwenden",
+        "Utiliser ce dossier",
+        "Usa questa cartella",
+    ),
+    (
         "licenses.title",
         "Licenses",
         "Lizenzen",
@@ -382,7 +389,34 @@ static TABLE: &[(&str, &str, &str, &str, &str)] = &[
         "Tout télécharger",
         "Scarica tutto",
     ),
-    ("ctx.delete", "Delete", "Löschen", "Supprimer", "Elimina"),
+    (
+        "ctx.delete_device",
+        "Delete from device",
+        "Vom Gerät löschen",
+        "Supprimer de l'appareil",
+        "Elimina dal dispositivo",
+    ),
+    (
+        "ctx.delete_cloud",
+        "Delete from cloud",
+        "Aus der Cloud löschen",
+        "Supprimer du cloud",
+        "Elimina dal cloud",
+    ),
+    (
+        "ctx.mark_read",
+        "Mark as read",
+        "Als gelesen markieren",
+        "Marquer comme lu",
+        "Segna come letto",
+    ),
+    (
+        "ctx.mark_unread",
+        "Mark as unread",
+        "Als ungelesen markieren",
+        "Marquer comme non lu",
+        "Segna come non letto",
+    ),
     (
         "ctx.delete_series",
         "Delete series",
@@ -637,7 +671,7 @@ mod tests {
     fn table_rows_are_complete_across_languages() {
         // 83 keys ported verbatim from eh_g_i18n[] + dl.remaining + the
         // Slint-port additions (ctx.details, detail.* metadata labels).
-        assert_eq!(TABLE.len(), 96, "unexpected i18n table size");
+        assert_eq!(TABLE.len(), 100, "unexpected i18n table size");
         for row in TABLE {
             for col in [row.1, row.2, row.3, row.4] {
                 assert!(!col.is_empty(), "empty translation for key {}", row.0);

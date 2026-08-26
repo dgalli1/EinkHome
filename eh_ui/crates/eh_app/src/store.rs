@@ -330,6 +330,37 @@ impl Store {
         )?;
         Ok(())
     }
+    pub fn set_read(&self, id: &str, read: bool) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "INSERT INTO read_markers(book_id, is_read) VALUES(?1, ?2) \
+             ON CONFLICT(book_id) DO UPDATE SET is_read = excluded.is_read",
+            params![id, read as i64],
+        )?;
+        Ok(())
+    }
+
+    /// The local read marker (false when unset).
+    pub fn is_read(&self, id: &str) -> bool {
+        self.conn
+            .query_row(
+                "SELECT is_read FROM read_markers WHERE book_id = ?1",
+                params![id],
+                |r| r.get::<_, i64>(0),
+            )
+            .map(|v| v != 0)
+            .unwrap_or(false)
+    }
+
+    /// Remove a book row outright (the "delete from cloud" landing: the
+    /// server dropped it, so the local copy must go too).  Also clears
+    /// the row's read marker.
+    pub fn delete_book_row(&self, id: &str) -> rusqlite::Result<()> {
+        self.conn
+            .execute("DELETE FROM books WHERE id = ?1", params![id])?;
+        self.conn
+            .execute("DELETE FROM read_markers WHERE book_id = ?1", params![id])?;
+        Ok(())
+    }
 
     /// All books ordered for the shelf: by `added_at` desc, then title
     /// (the C app's default "Recent" grouping).  Returns a capped page.
@@ -1208,6 +1239,10 @@ fn apply_schema(conn: &Connection) -> rusqlite::Result<()> {
         "CREATE INDEX IF NOT EXISTS idx_suggest_book ON suggest(book_id);",
         "CREATE TABLE IF NOT EXISTS suggest_rank(",
         " term TEXT PRIMARY KEY, cnt INTEGER NOT NULL DEFAULT 0) WITHOUT ROWID;",
+        // Local read markers (the long-press "mark as read"; the
+        // firmware progress db is read-only for the app).
+        "CREATE TABLE IF NOT EXISTS read_markers(",
+        " book_id TEXT PRIMARY KEY, is_read INTEGER NOT NULL) WITHOUT ROWID;",
     ))?;
     // Add missing columns (migrations).
     for (col, kind) in MIGRATE_COLUMNS {

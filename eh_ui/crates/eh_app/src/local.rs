@@ -16,8 +16,8 @@
 pub(crate) mod browser;
 
 pub use browser::{
-    browse_page, browse_up, folder_book, start_browse, tap_browse_row, tap_picker_row, BrowseEntry,
-    Browser,
+    browse_page, browse_up, folder_book, picker_commit_current, start_browse, tap_browse_row,
+    tap_picker_row, BrowseEntry, Browser,
 };
 use std::path::Path;
 

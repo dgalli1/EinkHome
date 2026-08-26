@@ -81,7 +81,11 @@ impl<B: Framebuffer> App<B> {
             } else {
                 String::new()
             };
-            let progress = crate::progress::percent(&self.progress, &book.local_path);
+            let progress = if self.store.is_read(&book.id) {
+                100 // marked read: the tile ring shows a finished book
+            } else {
+                crate::progress::percent(&self.progress, &book.local_path)
+            };
             entries.push(ShelfEntry {
                 book,
                 art,

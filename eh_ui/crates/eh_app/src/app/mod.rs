@@ -1655,6 +1655,133 @@ mod tests {
             "art memo must serve without the disk cache"
         );
     }
+    /// The download-folder picker: a directory tap DESCENDS (never
+    /// commits — subfolders must stay reachable) and the explicit
+    /// select action commits the current browse path.
+    #[test]
+    fn picker_navigates_and_select_button_commits() {
+        let mut app = mk_app("pick");
+        let dir = tempfile::tempdir().unwrap();
+        let root_str = dir.path().to_string_lossy().into_owned();
+        std::fs::create_dir_all(dir.path().join("outer/inner")).unwrap();
+        let mut b = crate::local::browser::Browser {
+            picker: true,
+            root: root_str.clone(),
+            path: root_str.clone(),
+            ..Default::default()
+        };
+        b.load();
+        let before = app.config.downloads_dir.clone();
+        app.dl_picker = Some(b);
+        app.refresh_shelf();
+
+        // Row 0 = "outer": descend, do not commit.
+        crate::local::tap_picker_row(&mut app, 0);
+        assert_eq!(
+            app.dl_picker.as_ref().unwrap().path,
+            format!("{root_str}/outer")
+        );
+        assert_eq!(app.config.downloads_dir, before, "navigation committed");
+
+        // Row 0 = "..", row 1 = "inner": descend again.
+        crate::local::tap_picker_row(&mut app, 1);
+        assert!(app
+            .dl_picker
+            .as_ref()
+            .unwrap()
+            .path
+            .ends_with("/outer/inner"));
+
+        // The select button commits the CURRENT path and leaves the
+        // picker.
+        crate::ui::push_action(crate::ui::Action::PickerSelect);
+        app.apply_actions();
+        assert!(app.dl_picker.is_none());
+        assert_eq!(
+            app.config.downloads_dir.as_deref(),
+            Some(&*format!("{root_str}/outer/inner"))
+        );
+    }
+
+    /// The long-press menu must open MID-HOLD (once the budget passes),
+    /// not on release — and the trailing release must neither dismiss
+    /// the menu nor activate the tile under it.
+    #[test]
+    fn long_press_opens_menu_mid_hold() {
+        let mut app = mk_app("longhold");
+        app.store
+            .upsert_book_row(&Book {
+                id: "lp1".into(),
+                title: "Hold Me".into(),
+                ext: "epub".into(),
+                source: "local".into(),
+                downloaded: true,
+                ..Default::default()
+            })
+            .unwrap();
+        app.source = crate::app::Source::Local;
+        app.rebuild_view();
+        app.present(); // lay the Slint tree out: tile hit-testing needs it
+
+        // First grid tile's center: grid-x0 8 + cell 352/2, body 96+16.
+        let (tx, ty) = (8 + 176, 96 + 16 + 282);
+        app.on_event(&InputEvent::PointerDown { x: tx, y: ty });
+        assert_eq!(app.overlay, Overlay::None, "press alone opens nothing");
+        std::thread::sleep(std::time::Duration::from_millis(
+            crate::appui::LONG_PRESS_MS + 120,
+        ));
+        assert!(app.tick(), "the hold tick must report the opened menu");
+        assert_eq!(app.overlay, Overlay::Context, "menu opens mid-hold");
+
+        // The trailing release changes nothing.
+        app.on_event(&InputEvent::PointerUp { x: tx, y: ty });
+        assert_eq!(app.overlay, Overlay::Context, "release must not dismiss");
+        assert!(app.detail_book.is_none(), "tile must not activate");
+    }
+
+    /// The book menu's rows depend on the book: server rows offer
+    /// "delete from cloud" (local rows don't) and the mark row flips
+    /// read/unread with the stored marker.
+    #[test]
+    fn context_menu_rows_depend_on_source_and_read_state() {
+        use crate::widgets::context::ContextAction;
+        let mut app = mk_app("ctxrows");
+        let kv = Book {
+            id: "kv".into(),
+            source: "kavita".into(),
+            ..Default::default()
+        };
+        app.open_context_book(&kv);
+        assert_eq!(
+            app.context.items,
+            vec![
+                ContextAction::Open,
+                ContextAction::Details,
+                ContextAction::Download,
+                ContextAction::MarkRead,
+                ContextAction::DeleteDevice,
+                ContextAction::DeleteCloud,
+            ]
+        );
+        app.context_row(3); // MarkRead
+        assert!(app.store.is_read("kv"), "marker must persist");
+
+        app.open_context_book(&kv);
+        assert!(app.context.items.contains(&ContextAction::MarkUnread));
+        assert!(!app.context.items.contains(&ContextAction::MarkRead));
+
+        // A local book has no cloud copy: no cloud delete, device
+        // delete stays.
+        let loc = Book {
+            id: "lo".into(),
+            source: "local".into(),
+            ..Default::default()
+        };
+        app.open_context_book(&loc);
+        assert!(!app.context.items.contains(&ContextAction::DeleteCloud));
+        assert!(app.context.items.contains(&ContextAction::DeleteDevice));
+    }
+
     /// The on-screen keyboard's taps drive the backend keyboard buffer
     /// and the OK key commits exactly like RETURN (search field).
     #[test]

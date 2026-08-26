@@ -134,6 +134,7 @@ impl<B: Framebuffer> App<B> {
                     self.kb_editing = None;
                     self.dirty = true;
                 }
+                Action::PickerSelect => crate::local::picker_commit_current(self),
                 Action::SettingsBack => self.settings_back(),
                 Action::SettingsRow(i) => self.settings_row(i),
                 Action::ViewerBack => self.viewer_back(),
@@ -235,7 +236,9 @@ impl<B: Framebuffer> App<B> {
                 self.dl_picker = Some(b);
                 // The picker is NOT an overlay: it lives on the main page.
                 self.overlay = Overlay::None;
-                self.dirty = true;
+                // The rows model syncs in refresh_shelf — without it the
+                // picker opens empty until some other refresh happens.
+                self.refresh_shelf();
             }
             SettingsRow::SystemApp => {
                 if crate::sysapp::detect() {

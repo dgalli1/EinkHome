@@ -107,6 +107,8 @@ pub enum Action {
     LauncherScroll(i32),
     /// A launcher app cell.
     LauncherCell(usize),
+    /// The download-folder picker's "use this folder" button.
+    PickerSelect,
     /// An on-screen-keyboard key press (the app-side keyboard on hosts
     /// whose backend renders none — SDL).
     KbChar(char),
@@ -370,6 +372,7 @@ impl Ui {
         comp.on_launcher_back(|| push_action(Action::LauncherBack));
         comp.on_launcher_page(|d| push_action(Action::LauncherScroll(d)));
         comp.on_launcher_cell(|i| push_action(Action::LauncherCell(i as usize)));
+        comp.on_picker_select(|| push_action(Action::PickerSelect));
         comp.on_osk_key(|c| {
             push_action(Action::KbChar(c.chars().next().unwrap_or(' ')));
         });

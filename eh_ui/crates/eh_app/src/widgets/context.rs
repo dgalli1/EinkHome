@@ -3,12 +3,19 @@
 //! (sheet centred on the FULL screen; title band 72 + n*96 + 24 rows).
 
 /// A long-press action row (C eh_context_action).
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ContextAction {
     Open,
     Details,
     Download,
-    Delete,
+    /// Remove the downloaded file (the device copy).
+    DeleteDevice,
+    /// Remove the book from the server library (kavita rows only).
+    DeleteCloud,
+    /// Set the local read marker.
+    MarkRead,
+    /// Clear the local read marker.
+    MarkUnread,
     DownloadAll,
     DeleteAll,
 }
@@ -20,7 +27,10 @@ impl ContextAction {
             ContextAction::Open => "ctx.open",
             ContextAction::Details => "ctx.details",
             ContextAction::Download => "ctx.download",
-            ContextAction::Delete => "ctx.delete",
+            ContextAction::DeleteDevice => "ctx.delete_device",
+            ContextAction::DeleteCloud => "ctx.delete_cloud",
+            ContextAction::MarkRead => "ctx.mark_read",
+            ContextAction::MarkUnread => "ctx.mark_unread",
             ContextAction::DownloadAll => "ctx.download_all",
             ContextAction::DeleteAll => "ctx.delete_series",
         }

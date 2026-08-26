@@ -83,14 +83,26 @@ impl<B: Framebuffer> App<B> {
         self.set_overlay(Overlay::Context);
     }
 
-    /// Open the book context menu (Open/Download/Delete).
+    /// Open the book context menu.  Rows: Open / Details / Download /
+    /// Mark (read|unread) / Delete from device — plus Delete from cloud
+    /// for server-sourced rows only (local files have no cloud copy).
     pub(crate) fn open_context_book(&mut self, book: &Book) {
-        self.context.items = vec![
+        let mark = if self.store.is_read(&book.id) {
+            ContextAction::MarkUnread
+        } else {
+            ContextAction::MarkRead
+        };
+        let mut items = vec![
             ContextAction::Open,
             ContextAction::Details,
             ContextAction::Download,
-            ContextAction::Delete,
+            mark,
+            ContextAction::DeleteDevice,
         ];
+        if book.source == "kavita" {
+            items.push(ContextAction::DeleteCloud);
+        }
+        self.context.items = items;
         self.context.series = 0;
         self.context.book = Some(book.clone());
         crate::logger::log("[bookshelf] context menu open series=0");
@@ -113,6 +125,39 @@ impl<B: Framebuffer> App<B> {
                     self.press_book(&b);
                 }
             }
+            ContextAction::MarkRead | ContextAction::MarkUnread => {
+                if let Some(b) = &book {
+                    let read = action == ContextAction::MarkRead;
+                    if let Err(e) = self.store.set_read(&b.id, read) {
+                        crate::log(&format!("[eh_app] set_read: {e}"));
+                    } else {
+                        crate::logger::log(&format!(
+                            "[bookshelf] mark_read id={} read={read}",
+                            b.id
+                        ));
+                    }
+                }
+            }
+            ContextAction::DeleteCloud => {
+                if let Some(b) = book {
+                    match self.client.delete_cloud(&b.id) {
+                        Ok(()) => {
+                            // The server dropped it; the local row goes
+                            // too (the next delta would say the same).
+                            if let Err(e) = self.store.delete_book_row(&b.id) {
+                                crate::log(&format!("[eh_app] delete_book_row: {e}"));
+                            }
+                            crate::logger::log(&format!(
+                                "[bookshelf] delete_cloud removed id={}",
+                                b.id
+                            ));
+                        }
+                        Err(e) => {
+                            crate::log(&format!("[eh_app] delete_cloud {}: {e}", b.id));
+                        }
+                    }
+                }
+            }
             ContextAction::Details => {
                 if let Some(b) = book {
                     self.open_detail(&b);
@@ -125,7 +170,7 @@ impl<B: Framebuffer> App<B> {
                     self.enqueue_download(&b.id, &cur);
                 }
             }
-            ContextAction::Delete => {
+            ContextAction::DeleteDevice => {
                 if let Some(b) = book {
                     self.delete_book(&b);
                 }

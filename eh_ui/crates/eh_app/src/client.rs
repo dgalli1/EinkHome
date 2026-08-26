@@ -156,6 +156,19 @@ impl ApiClient {
         Ok(())
     }
 
+    /// `DELETE /api/v1/books/{id}` — remove the book from the server
+    /// library ("delete from cloud").  The next sync delta drops it
+    /// from the device store too.
+    pub fn delete_cloud(&self, id: &str) -> Result<(), String> {
+        crate::util::delete_text(
+            &self.agent,
+            &self.base,
+            &format!("/api/v1/books/{}", id),
+            &self.token,
+        )
+        .map(|_| ())
+    }
+
     /// `GET /api/v1/books/{id}/cover` → raw cover bytes (PNG).  Uses
     /// `?access_token=` since the device image path may not resend the
     /// Authorization header.

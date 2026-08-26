@@ -8,7 +8,11 @@ import { BrowseRow } from "types.slint";
 
 export component BrowseBody inherits Rectangle {
     in-out property <[BrowseRow]> rows: [];
+    in-out property <bool> picker: false;   // download-dir picker: select button
+    in-out property <string> select-label: "";
     callback row-tap(int);   // visible row index (0 = first visible)
+    callback select;         // "use this folder" (picker mode only)
+
 
     for r[idx] in root.rows: Rectangle {
         y: 20px + idx * 96px;
@@ -38,6 +42,31 @@ export component BrowseBody inherits Rectangle {
             height: 100%;
             enabled: !r.blank;
             clicked => { root.row-tap(idx); }
+        }
+    }
+
+    // picker: the explicit "use this folder" commit button, docked above
+    // the pager (navigation alone never commits).
+    if (root.picker): Rectangle {
+        x: 32px;
+        y: root.height - 96px;
+        width: root.width - 64px;
+        height: 84px;
+        background: black;
+        border-width: 2px;
+        border-color: black;
+        Text {
+            width: 100%;
+            height: parent.height;
+            vertical-alignment: center;
+            horizontal-alignment: center;
+            font-size: 32px;
+            font-weight: 700;
+            color: white;
+            text: root.select-label;
+        }
+        TouchArea {
+            clicked => { root.select(); }
         }
     }
 }

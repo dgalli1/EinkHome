@@ -102,6 +102,8 @@ impl<B: Framebuffer> App<B> {
         };
         c.set_back(back);
         c.set_browse_mode(self.browse_active());
+        c.set_picker_mode(self.dl_picker.is_some());
+        c.set_picker_select_label(crate::i18n::tr("settings.dl_use").to_string().into());
         c.set_grid_mode(self.view_mode == ViewMode::Grid);
         let slabel = match self.source {
             Source::Local => crate::i18n::tr("source.local").to_string(),
@@ -624,7 +626,8 @@ impl<B: Framebuffer> App<B> {
             Overlay::Settings => {
                 c.set_settings_title(crate::i18n::tr("settings.title").to_string().into());
                 let reader_val = self.reader_label();
-                let sysapp_val = if crate::sysapp::detect() {
+                let sysapp_on = crate::sysapp::detect();
+                let sysapp_val = if sysapp_on {
                     crate::i18n::tr("settings.sysapp_on").to_string()
                 } else {
                     crate::i18n::tr("settings.sysapp_off").to_string()
@@ -645,7 +648,9 @@ impl<B: Framebuffer> App<B> {
                 c.set_settings_api_key(self.config.api_token.clone().into());
                 c.set_settings_reader(reader_val.into());
                 c.set_settings_dl_dir(dl.into());
+                c.set_settings_sysapp_on(sysapp_on);
                 c.set_settings_sysapp(sysapp_val.into());
+                c.set_settings_sysapp_on(sysapp_on);
                 c.set_settings_editing(match self.kb_editing {
                     Some(KbField::ApiHost) => 0,
                     Some(KbField::ApiKey) => 1,

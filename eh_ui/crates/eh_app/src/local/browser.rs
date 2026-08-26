@@ -237,29 +237,34 @@ pub fn browse_up<B: Framebuffer>(app: &mut App<B>) -> bool {
     true
 }
 
-/// Picker-mode row tap (C eh_on_tap_browse in BR_MODE_PICKER): ".."
-/// ascends, any directory tap COMMITS it as the downloads dir (the app
-/// saves the config and re-resolves, C eh_settings_apply).  `idx` is the
-/// ABSOLUTE entry index.
+/// Picker-mode row tap: ".." ascends, a directory tap DESCENDS into it
+/// (normal navigation — the C app committed on first tap, which made
+/// subfolders unreachable).  Committing is the explicit "use this
+/// folder" button ([`picker_commit_current`]).  `idx` is the ABSOLUTE
+/// entry index.
 pub fn tap_picker_row<B: Framebuffer>(app: &mut App<B>, idx: usize) {
-    let path = match app.dl_picker.as_ref() {
-        Some(b) => b.path.clone(),
-        None => return,
-    };
     let Some(entry) = app.dl_picker.as_ref().unwrap().entries.get(idx).cloned() else {
         return;
     };
     if entry.name == ".." {
         app.dl_picker.as_mut().unwrap().up();
-        app.dirty = true;
-        app.refresh_shelf();
+    } else if entry.is_dir {
+        app.dl_picker.as_mut().unwrap().navigate(&entry.name);
+    } else {
+        return; // the picker lists directories only
+    }
+    app.dirty = true;
+    app.refresh_shelf();
+}
+
+/// The picker's "use this folder" button: the CURRENT browse path
+/// becomes the downloads dir (the app saves the config and re-resolves,
+/// C eh_settings_apply).
+pub fn picker_commit_current<B: Framebuffer>(app: &mut App<B>) {
+    let Some(path) = app.dl_picker.as_ref().map(|b| b.path.clone()) else {
         return;
-    }
-    if entry.is_dir {
-        // C folder_commit: the tapped directory becomes the downloads dir.
-        let path = format!("{}/{}", path.trim_end_matches('/'), entry.name);
-        app.commit_downloads_dir(&path);
-    }
+    };
+    app.commit_downloads_dir(&path);
 }
 
 #[cfg(test)]
