@@ -30,6 +30,15 @@ pub fn apply_source<B: eh_hal::Framebuffer>(app: &mut App<B>, row: usize) {
         "[eh_app] source switched to {}",
         new.ui_label_key()
     ));
+    // A source switch always drills back to the shelf root: the drilled
+    // group scope belongs to the previous source's view — "Robert Blaise"
+    // selected on Kavita must not stay selected after jumping to Local
+    // (C eh_on_tap_source resets the group drill).
+    app.drill = 0;
+    app.drill_values = Default::default();
+    app.drill_names = Default::default();
+    app.drill_saved_pages = [0; 2];
+    app.context.dismiss();
     app.tab = crate::app::Tab::Library;
     app.page = 0;
     match new {
@@ -43,11 +52,19 @@ pub fn apply_source<B: eh_hal::Framebuffer>(app: &mut App<B>, row: usize) {
             app.resync();
         }
         Source::Local => {
-            // The import applies on a later tick and rebuilds the view
-            // (C eh_local_import_scanner → async apply chain); its
-            // progress shows on the sync sheet until it lands.
             app.browser.open = false;
-            crate::local::kick_import(app);
+            // A populated local source shows its cached rows NOW — the
+            // chooser no longer re-runs the import on every switch (the
+            // walk + extraction of a 20k library is minutes of sheet).
+            // Freshness stays reachable: every boot rescans once (C
+            // EVT_INIT) and the top-bar sync button re-imports on
+            // demand.  Only a first-ever selection (no local rows yet)
+            // pays the import here; its apply rebuilds the view on a
+            // later tick.
+            if app.store.count_source("local").unwrap_or(0) == 0 {
+                crate::local::kick_import(app);
+            }
+            app.rebuild_view();
             app.refresh_shelf();
         }
         Source::Folder => {
