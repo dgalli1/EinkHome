@@ -504,7 +504,7 @@ impl Store {
         Ok(rows)
     }
 
-    /// Stream EVERY book in [`list_books`] order through `f` without
+    /// Stream EVERY book in [`Self::list_books`] order through `f` without
     /// materialising the library: the boot reconciliation walks 100k-scale
     /// stores, and collecting them first would break the RSS budget.
     pub fn for_each_book(&self, mut f: impl FnMut(&Book)) -> rusqlite::Result<()> {
