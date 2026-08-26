@@ -57,10 +57,11 @@ jobs:
         with:
           workspaces: eh_ui
       # The eh_ui workspace needs no submodule, firmware or emulator —
-      # the whole unit suite runs in seconds (one build script wants
-      # pkg-config + fontconfig headers, installed above).
-      - name: Install pkg-config + fontconfig headers
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends pkg-config libfontconfig1-dev
+      # the unit suite runs in seconds; one build script wants
+      # pkg-config + fontconfig headers and the SDL backend links
+      # -lSDL2 for its tests (installed below).
+      - name: Install Rust build deps (pkg-config, fontconfig, SDL2)
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends pkg-config libfontconfig1-dev libsdl2-dev libsdl2-ttf-dev libsdl2-image-dev
       - name: Run make test-rust
         run: make test-rust
 
