@@ -117,6 +117,45 @@ pub fn load_cached(covers_dir: &Path, id: &str) -> Option<Vec<u8>> {
     std::fs::read(p).ok()
 }
 
+/// Minimum sane cover side.  The pbemu-api answers HTTP 200 with an
+/// exact 1×1 grey placeholder PNG for every book without real artwork,
+/// so "the bytes decode" cannot separate real art from the fallback —
+/// only dimensions can.  Real covers (240×360 server JPEGs, extracted
+/// EPUB/PDF art) are far above this floor.
+const MIN_COVER_SIDE: u32 = 16;
+
+/// True when a decoded image is too small to be real cover art (the
+/// server's placeholder or corrupt input).
+fn is_degenerate(w: u32, h: u32) -> bool {
+    w < MIN_COVER_SIDE || h < MIN_COVER_SIDE
+}
+
+/// Reject bytes we must never cache: undecodable input, or the API's
+/// 1×1 grey placeholder (a cached placeholder permanently shadows the
+/// local-extraction fallback — older builds' unguarded prefetch cached
+/// it for every local book).
+fn validate_cover_bytes(bytes: &[u8]) -> Result<(), String> {
+    let (w, h, _) = decode_rgb(bytes)?;
+    if is_degenerate(w, h) {
+        return Err(format!("degenerate cover {w}x{h} (server placeholder)"));
+    }
+    Ok(())
+}
+/// Cached cover decoded to RGB `(rgb, w, h)` — the shelf art shape —
+/// with poison defence: an entry that does not decode, or decodes to
+/// placeholder dimensions, is UNLINKED and reported absent so the
+/// caller's local-extraction fallback can run and persist real art.
+pub fn load_valid_rgb(covers_dir: &Path, id: &str) -> Option<(Vec<u8>, u32, u32)> {
+    let bytes = load_cached(covers_dir, id)?;
+    match decode_rgb(&bytes) {
+        Ok((w, h, rgb)) if !is_degenerate(w, h) => Some((rgb, w, h)),
+        _ => {
+            let _ = std::fs::remove_file(cache_path(covers_dir, id));
+            None
+        }
+    }
+}
+
 /// Fetch a cover from the API and persist it to the cache.  Returns the
 /// PNG bytes (also written to disk).  Idempotent: an existing cache entry is
 /// returned without a network round-trip.
@@ -128,6 +167,9 @@ pub fn fetch(client: &ApiClient, covers_dir: &Path, id: &str) -> Result<Vec<u8>,
     if bytes.is_empty() {
         return Err("empty cover".into());
     }
+    // The API's coverless answer is a valid 1×1 PNG — never let it into
+    // the cache (it would shadow the local-extraction fallback forever).
+    validate_cover_bytes(&bytes)?;
     let path = cache_path(covers_dir, id);
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
@@ -434,6 +476,62 @@ mod tests {
         // Current stamp: a re-run is a no-op (fresh writes survive).
         store_raw(&covers, "bookC", b"new").unwrap();
         validate_raw_cache(&covers);
+
         assert_eq!(std::fs::read(raw_path(&covers, "bookC")).unwrap(), b"new");
+    }
+    /// The API server's coverless answer: an exact 1×1 grey RGB PNG
+    /// (byte-equivalent to api/storage/placeholder.py's PLACEHOLDER_PNG).
+    fn placeholder_png() -> Vec<u8> {
+        let mut out = Vec::new();
+        {
+            let mut enc = png::Encoder::new(&mut out, 1, 1);
+            enc.set_color(png::ColorType::Grayscale);
+            enc.set_depth(png::BitDepth::Eight);
+            let mut wr = enc.write_header().unwrap();
+            wr.write_image_data(&[0x80]).unwrap();
+        }
+        out
+    }
+
+    fn encode_gray_png(w: u32, h: u32) -> Vec<u8> {
+        let mut out = Vec::new();
+        {
+            let mut enc = png::Encoder::new(&mut out, w, h);
+            enc.set_color(png::ColorType::Grayscale);
+            enc.set_depth(png::BitDepth::Eight);
+            let mut wr = enc.write_header().unwrap();
+            wr.write_image_data(&vec![128u8; (w * h) as usize]).unwrap();
+        }
+        out
+    }
+
+    #[test]
+    fn validate_rejects_placeholder_and_accepts_real_art() {
+        assert!(validate_cover_bytes(&placeholder_png()).is_err());
+        // Below the floor on either side is degenerate.
+        assert!(validate_cover_bytes(&encode_gray_png(240, 8)).is_err());
+        assert!(validate_cover_bytes(&encode_gray_png(16, 16)).is_ok());
+        assert!(validate_cover_bytes(&encode_gray_png(240, 360)).is_ok());
+        assert!(validate_cover_bytes(b"not an image").is_err());
+    }
+
+    #[test]
+    fn load_valid_rgb_unlinks_a_cached_placeholder() {
+        let dir = tempfile::tempdir().unwrap();
+        let covers = resolve_covers_dir(dir.path());
+        let p = cache_path(&covers, "fld_poisoned");
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(&p, placeholder_png()).unwrap();
+
+        assert!(load_valid_rgb(&covers, "fld_poisoned").is_none());
+        assert!(
+            !p.exists(),
+            "poison entry must be unlinked so the local \
+            extraction fallback can persist real art"
+        );
+        // A real cover passes through untouched.
+        std::fs::write(&p, encode_gray_png(200, 300)).unwrap();
+        assert!(load_valid_rgb(&covers, "fld_poisoned").is_some());
+        assert!(p.exists());
     }
 }

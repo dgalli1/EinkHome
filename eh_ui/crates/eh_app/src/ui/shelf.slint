@@ -85,20 +85,23 @@ component GridTile inherits Rectangle {
         visible: !t.has-art || root.stack;
     }
 
-    // count badge (white digits on black, top-right over the art)
+    // count badge: bold white digits on a rounded black pill, inset
+    // top-right over the art
     if (root.sheets): Rectangle {
-        property <length> bw: badge-text.preferred-width + 12px;
-        x: root.card-x + root.card-w - bw - 2px;
-        y: root.card-y + 2px;
+        property <length> bw: badge-text.preferred-width + 20px;
+        x: root.card-x + root.card-w - bw - 6px;
+        y: root.card-y + 6px;
         width: bw;
-        height: 26px;
+        height: 38px;
+        border-radius: 10px;
         background: black;
         badge-text := Text {
-            x: 6px;
+            x: 10px;
             y: 0;
             height: parent.height;
             vertical-alignment: center;
-            font-size: 20px;
+            font-size: 28px;
+            font-weight: 700;
             color: white;
             text: t.stack-count;
         }

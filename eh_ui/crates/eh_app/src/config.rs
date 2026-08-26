@@ -19,6 +19,10 @@ pub struct Config {
     pub api_url: String,
     pub api_token: String,
     pub downloads_dir: Option<String>,
+    /// Persisted Local-source base folder (`local_dir=`): the directory
+    /// the Local import scans.  Absent → the storage root (C
+    /// eh_plat_browse_root).
+    pub local_dir: Option<String>,
     pub reader: Option<String>,
     pub source: Option<String>,
     /// Lowercased first 3 chars of the config's `language=`/`lang=` value
@@ -47,6 +51,9 @@ impl Config {
         }
         if over.downloads_dir.is_some() {
             self.downloads_dir = over.downloads_dir;
+        }
+        if over.local_dir.is_some() {
+            self.local_dir = over.local_dir;
         }
         if over.source.is_some() {
             self.source = over.source;
@@ -177,6 +184,11 @@ impl Config {
                 text.push_str(&format!("downloads_dir={d}\n"));
             }
         }
+        if let Some(d) = &self.local_dir {
+            if !d.is_empty() {
+                text.push_str(&format!("local_dir={d}\n"));
+            }
+        }
         text.push_str(&format!(
             "source={}\n",
             self.source.as_deref().unwrap_or("kavita")
@@ -220,6 +232,7 @@ pub(crate) fn parse_kv_file(path: &Path) -> std::io::Result<Config> {
             "reader" => cfg.reader = Some(value.to_string()),
             "downloads_dir" | "download_dir" => cfg.downloads_dir = Some(value.to_string()),
             "source" => cfg.source = Some(value.to_string()),
+            "local_dir" => cfg.local_dir = Some(value.to_string()),
             "group" => cfg.group = Some(value.to_string()),
             // C cfg_set_language: trimmed value, lowercased, truncated to
             // 3 chars (en/de/fr/it…).  Stored now; i18n consumes it in

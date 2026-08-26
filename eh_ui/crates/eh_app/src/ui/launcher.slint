@@ -125,9 +125,10 @@ export component LauncherPage inherits Rectangle {
                         text: it.letter;
                     }
                 }
-                // label: first line at baseline sy+160, optional second at +26
+                // label: first line 20px below the icon box, optional
+                // second line directly under it (line boxes 28px tall)
                 Text {
-                    y: 130px;
+                    y: 152px;
                     height: 28px;
                     width: parent.width - 8px;
                     x: 4px;
@@ -139,7 +140,7 @@ export component LauncherPage inherits Rectangle {
                     text: it.text;
                 }
                 if (it.label2 != ""): Text {
-                    y: 156px;
+                    y: 178px;
                     height: 28px;
                     width: parent.width - 8px;
                     x: 4px;

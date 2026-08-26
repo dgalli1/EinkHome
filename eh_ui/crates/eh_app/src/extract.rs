@@ -28,13 +28,18 @@ use std::path::Path;
 /// Title-cap for filename-derived titles (C EH_MAX_TITLE_LEN).
 pub(crate) const MAX_TITLE_LEN: usize = 96;
 
-/// Title/author pulled out of a book file.  `cover_hint` is the zip member
-/// path of an epub cover image when the OPF names one (consumers that do
-/// not render local covers simply ignore it).
+/// Title/author/series pulled out of a book file.  `cover_hint` is the
+/// zip member path of an epub cover image when the OPF names one
+/// (consumers that do not render local covers simply ignore it).  The
+/// series fields mirror what Kavita reads from the OPF: the calibre
+/// `calibre:series`/`calibre:series_index` meta pair, else the EPUB3
+/// `belongs-to-collection` + `group-position` pair.
 #[derive(Debug, Clone, Default)]
 pub struct ExtractedMeta {
     pub title: String,
     pub author: String,
+    pub series: String,
+    pub series_index: Option<f64>,
     pub cover_hint: Option<String>,
 }
 
@@ -43,8 +48,9 @@ impl ExtractedMeta {
         self.title.is_empty() && self.author.is_empty()
     }
 }
-/// Extract title/author from a book file (best-effort — any parse failure
-/// returns empty fields and the caller keeps the filename-derived title).
+/// Extract title/author/series from a book file (best-effort — any parse
+/// failure returns empty fields and the caller keeps the filename-derived
+/// title).
 pub fn extract_book_meta(path: &Path, ext: &str) -> ExtractedMeta {
     let r = match ext {
         "epub" => extract_epub(path).unwrap_or_default(),
@@ -57,6 +63,8 @@ pub fn extract_book_meta(path: &Path, ext: &str) -> ExtractedMeta {
     let r = ExtractedMeta {
         title: r.title.trim().to_string(),
         author: r.author.trim().to_string(),
+        series: r.series.trim().to_string(),
+        series_index: r.series_index,
         cover_hint: r.cover_hint,
     };
     if r.is_empty() {
@@ -436,11 +444,117 @@ fn extract_epub(path: &Path) -> Option<ExtractedMeta> {
     let mut opf = String::new();
     ar.by_name(&opf_path).ok()?.read_to_string(&mut opf).ok()?;
     let (title, author) = grab_two_fields(opf.as_bytes(), &["title"], &["creator"], MAX_TITLE_LEN);
+    let (series, series_index) = epub_series(&opf);
     Some(ExtractedMeta {
         title,
         author,
+        series,
+        series_index,
         cover_hint: cover_hint(&opf),
     })
+}
+
+/// The EPUB's series + position from the OPF metadata block, mirroring
+/// Kavita's parsing: the calibre pair
+/// `<meta name="calibre:series" content="…"/>` /
+/// `<meta name="calibre:series_index" content="…"/>`, else the EPUB3
+/// collection pair `<meta property="belongs-to-collection">…</meta>` /
+/// `<meta property="group-position">…</meta>`.  Calibre wins when both
+/// are present (it is the explicit, indexed form).  No series meta →
+/// ("", None).
+fn epub_series(opf: &str) -> (String, Option<f64>) {
+    use quick_xml::events::Event;
+    let mut rd = quick_xml::Reader::from_str(opf);
+    rd.config_mut().trim_text(true);
+    let mut calibre_series = String::new();
+    let mut calibre_idx: Option<f64> = None;
+    let mut collection = String::new();
+    let mut group_pos: Option<f64> = None;
+    // Text capture for the EPUB3 Start/End form: the collection name.
+    let mut cap: Option<(&str, String)> = None;
+    loop {
+        match rd.read_event_into(&mut Vec::new()) {
+            Ok(Event::Empty(e)) => {
+                if local_name(e.name().as_ref()) != "meta" {
+                    continue;
+                }
+                let mut name = None;
+                let mut property = None;
+                let mut content = None;
+                for a in e.attributes().flatten() {
+                    match a.key.as_ref() {
+                        b"name" => name = String::from_utf8(a.value.into_owned()).ok(),
+                        b"property" => property = String::from_utf8(a.value.into_owned()).ok(),
+                        b"content" => content = String::from_utf8(a.value.into_owned()).ok(),
+                        _ => {}
+                    };
+                }
+                match (name.as_deref(), content.as_deref()) {
+                    (Some("calibre:series"), Some(v)) => {
+                        calibre_series = v.trim().to_string();
+                    }
+                    (Some("calibre:series_index"), Some(v)) => {
+                        calibre_idx = v.trim().parse().ok();
+                    }
+                    _ => {}
+                }
+                // A self-closing belongs-to-collection carries no name.
+                if property.as_deref() == Some("group-position") {
+                    if let Some(v) = content.as_deref() {
+                        group_pos = v.trim().parse().ok();
+                    }
+                }
+            }
+            Ok(Event::Start(e)) => {
+                if local_name(e.name().as_ref()) != "meta" {
+                    continue;
+                }
+                let property = e.attributes().flatten().find_map(|a| {
+                    (a.key.as_ref() == b"property")
+                        .then(|| String::from_utf8(a.value.into_owned()).ok())
+                        .flatten()
+                });
+                match property.as_deref() {
+                    Some("belongs-to-collection") if collection.is_empty() => {
+                        cap = Some(("collection", String::new()));
+                    }
+                    Some("group-position") if group_pos.is_none() => {
+                        cap = Some(("position", String::new()));
+                    }
+                    _ => {}
+                }
+            }
+            Ok(Event::Text(t)) => {
+                if let Some((which, buf)) = cap.as_mut() {
+                    if let Ok(txt) = t.unescape() {
+                        buf.push_str(txt.trim());
+                    }
+                    let _ = which;
+                }
+            }
+            Ok(Event::End(_)) => {
+                if let Some((which, buf)) = cap.take() {
+                    match which {
+                        "collection" => collection = buf,
+                        "position" => group_pos = buf.trim().parse().ok(),
+                        _ => {}
+                    }
+                }
+            }
+            Ok(Event::Eof) => break,
+            Err(_) => break,
+            _ => {}
+        }
+    }
+    if !calibre_series.is_empty() {
+        calibre_series.truncate(MAX_TITLE_LEN - 1);
+        (calibre_series, calibre_idx)
+    } else if !collection.is_empty() {
+        collection.truncate(MAX_TITLE_LEN - 1);
+        (collection, group_pos)
+    } else {
+        (String::new(), None)
+    }
 }
 
 /// The full-path attribute of the container's first <rootfile> element.
@@ -519,6 +633,8 @@ fn extract_fb2(path: &Path) -> Option<ExtractedMeta> {
     Some(ExtractedMeta {
         title,
         author,
+        series: String::new(),
+        series_index: None,
         cover_hint: None,
     })
 }
@@ -593,6 +709,8 @@ fn extract_pdf(path: &Path) -> Option<ExtractedMeta> {
     Some(ExtractedMeta {
         title,
         author,
+        series: String::new(),
+        series_index: None,
         cover_hint: None,
     })
 }

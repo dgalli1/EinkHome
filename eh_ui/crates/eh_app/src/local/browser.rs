@@ -34,9 +34,12 @@ pub struct Browser {
     pub scroll: usize,
     pub entries: Vec<BrowseEntry>,
     pub open: bool,
-    /// BR_MODE_PICKER: the Settings download-folder chooser — only
-    /// directories are listed and a tap commits that directory.
+    /// BR_MODE_PICKER: a Settings folder chooser — only directories are
+    /// listed and a tap commits that directory.
     pub picker: bool,
+    /// The picker's commit target: false = downloads dir, true = the
+    /// Local-source base folder.
+    pub picker_local: bool,
 }
 
 impl Browser {
@@ -258,15 +261,23 @@ pub fn tap_picker_row<B: Framebuffer>(app: &mut App<B>, idx: usize) {
 }
 
 /// The picker's "use this folder" button: the CURRENT browse path
-/// becomes the downloads dir (the app saves the config and re-resolves,
-/// C eh_settings_apply).
+/// becomes the picked directory (the app saves the config and
+/// re-resolves, C eh_settings_apply) — the downloads dir or the
+/// Local-source base folder, per [`Browser::picker_local`].
 pub fn picker_commit_current<B: Framebuffer>(app: &mut App<B>) {
-    let Some(path) = app.dl_picker.as_ref().map(|b| b.path.clone()) else {
+    let Some((path, local)) = app
+        .dl_picker
+        .as_ref()
+        .map(|b| (b.path.clone(), b.picker_local))
+    else {
         return;
     };
-    app.commit_downloads_dir(&path);
+    if local {
+        app.commit_local_dir(&path);
+    } else {
+        app.commit_downloads_dir(&path);
+    }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;

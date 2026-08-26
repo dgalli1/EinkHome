@@ -77,6 +77,13 @@ pub fn hash_hex(s: &str) -> String {
     format!("{h:08x}")
 }
 
+/// Stable series id for a local book's EPUB-metadata series (the
+/// grouping key in the store + view): `loc_ser_` + the same djb2 hex
+/// the file ids use.
+pub(crate) fn local_series_id(series: &str) -> String {
+    format!("loc_ser_{}", hash_hex(series))
+}
+
 /// Filename without its extension, capped like the C title field.
 fn stem_title(name: &str) -> String {
     let stem = match name.rfind('.') {
@@ -270,7 +277,12 @@ pub(crate) struct ScanJob {
 /// Safe to call from the boot path and on every Local selection — a new
 /// kick invalidates any in-flight result.
 pub fn kick_import<B: Framebuffer>(app: &mut App<B>) {
-    let root = browse_root();
+    let root = app
+        .config
+        .local_dir
+        .clone()
+        .filter(|d| !d.is_empty())
+        .unwrap_or_else(browse_root);
     kick_import_rooted(app, &root);
 }
 
@@ -289,6 +301,11 @@ pub(crate) fn kick_import_rooted<B: Framebuffer>(app: &mut App<B>, root: &str) {
     app.syncing = true;
     app.sync_popup_open(SyncStage::Scan);
     let root = root.to_string();
+    // Metadata cache snapshot: ids already in local_meta skip the file
+    // open entirely — the apply prefers the cached row over fresh
+    // extraction, so re-reading 20k EPUBs/PDFs per scan was pure waste
+    // (the dominant scan cost).
+    let cached = app.store.local_meta_all().unwrap_or_default();
     let spawned = std::thread::Builder::new()
         .name("local-scan".into())
         .spawn(move || {
@@ -296,9 +313,14 @@ pub(crate) fn kick_import_rooted<B: Framebuffer>(app: &mut App<B>, root: &str) {
             let mut books: Vec<LocalBook> = Vec::with_capacity(files.len());
             let mut last = std::time::Instant::now();
             for f in &files {
+                let meta = if cached.contains_key(&f.id) {
+                    ExtractedMeta::default()
+                } else {
+                    extract_book_meta(Path::new(&f.local_path), &f.ext)
+                };
                 books.push(LocalBook {
                     book: f.to_book(),
-                    meta: extract_book_meta(Path::new(&f.local_path), &f.ext),
+                    meta,
                 });
                 if last.elapsed() >= std::time::Duration::from_millis(SCAN_PROGRESS_MS) {
                     last = std::time::Instant::now();
@@ -363,18 +385,42 @@ pub fn poll_import<B: Framebuffer>(app: &mut App<B>) -> bool {
         return changed; // stale chain (source switch / settings change): drop
     }
     app.syncing = false;
-    let applied = (|| -> rusqlite::Result<()> {
+    let applied = (|| -> rusqlite::Result<(usize, usize)> {
+        // Diff against the walked set: only NEW (or size-changed) files
+        // are upserted, only VANISHED ids deleted — untouched rows keep
+        // their rowid, read marker and cached title, so a warm rescan
+        // writes a handful of rows instead of rewriting all 20k.
+        let existing = app.store.source_ids("local")?;
+        let walked: std::collections::HashSet<&str> =
+            books.iter().map(|lb| lb.book.id.as_str()).collect();
+        let mut added = 0usize;
+        let mut removed = 0usize;
         app.store.begin()?;
-        app.store.delete_source("local")?;
+        for id in existing.keys() {
+            if !walked.contains(id.as_str()) {
+                app.store.delete_book_row(id)?;
+                removed += 1;
+            }
+        }
         for lb in &books {
+            if existing.get(&lb.book.id) == Some(&lb.book.size) {
+                continue; // unchanged file: the row stays exactly as-is
+            }
             let mut b = lb.book.clone();
             match app.store.local_meta_get(&b.id) {
-                Some((t, a)) => {
+                Some((t, a, s, si)) => {
                     if !t.is_empty() {
                         b.title = t;
                     }
                     if !a.is_empty() {
                         b.author = a;
+                    }
+                    if !s.is_empty() {
+                        b.series = s.clone();
+                        b.series_id = local_series_id(&s);
+                    }
+                    if let Some(v) = si {
+                        b.series_idx = v;
                     }
                 }
                 None => {
@@ -384,20 +430,38 @@ pub fn poll_import<B: Framebuffer>(app: &mut App<B>) -> bool {
                     if !lb.meta.author.is_empty() {
                         b.author = lb.meta.author.clone();
                     }
-                    app.store
-                        .local_meta_put(&b.id, &lb.meta.title, &lb.meta.author)?;
+                    if !lb.meta.series.is_empty() {
+                        b.series = lb.meta.series.clone();
+                        b.series_id = local_series_id(&lb.meta.series);
+                    }
+                    b.series_idx = lb.meta.series_index.unwrap_or(0.0);
+                    app.store.local_meta_put(
+                        &b.id,
+                        &lb.meta.title,
+                        &lb.meta.author,
+                        &lb.meta.series,
+                        lb.meta.series_index,
+                    )?;
                 }
             }
             app.store.upsert_book_row(&b)?;
+            added += 1;
         }
-        app.store.commit()
+        app.store.commit()?;
+        Ok((added, removed))
     })();
     match applied {
-        Ok(()) => {
+        Ok((added, removed)) => {
+            if added > 0 || removed > 0 {
+                crate::log(&format!(
+                    "[eh_app] local: import diff +{added} -{removed} ({} unchanged)",
+                    books.len() - added
+                ));
+            }
             crate::logger::log(&format!(
                 "[bookshelf] local: imported {} books (local) from {}",
                 books.len(),
-                browse_root()
+                browse_root(),
             ));
             app.rebuild_view();
             app.refresh_shelf();
@@ -469,6 +533,21 @@ mod tests {
     /// A minimal but structurally valid epub: zip container, container.xml
     /// pointing at an OPF with dc:title/dc:creator and a cover manifest.
     fn write_epub(path: &Path) {
+        write_epub_opf(
+            path,
+            br#"<package xmlns="http://www.idpf.org/2007/opf" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <metadata>
+    <dc:title>The Rust Book</dc:title>
+    <dc:creator>A. Coder</dc:creator>
+    <meta name="cover" content="cover-img"/>
+  </metadata>
+  <manifest><item id="cover-img" href="cover.png" media-type="image/png"/></manifest>
+</package>"#,
+        );
+    }
+
+    /// The same epub skeleton with a caller-provided OPF payload.
+    fn write_epub_opf(path: &Path, opf: &[u8]) {
         use std::io::Write;
         use zip::write::SimpleFileOptions;
         let f = std::fs::File::create(path).unwrap();
@@ -487,18 +566,7 @@ mod tests {
         .unwrap();
         z.start_file("OEBPS/content.opf", SimpleFileOptions::default())
             .unwrap();
-        z.write_all(
-            br#"<?xml version="1.0"?>
-<package xmlns="http://www.idpf.org/2007/opf" xmlns:dc="http://purl.org/dc/elements/1.1/">
-  <metadata>
-    <dc:title>The Rust Book</dc:title>
-    <dc:creator>A. Coder</dc:creator>
-    <meta name="cover" content="cover-img"/>
-  </metadata>
-  <manifest><item id="cover-img" href="cover.png" media-type="image/png"/></manifest>
-</package>"#,
-        )
-        .unwrap();
+        z.write_all(opf).unwrap();
         z.finish().unwrap();
     }
 
@@ -621,6 +689,49 @@ mod tests {
         assert_eq!(m.title, "The Rust Book");
         assert_eq!(m.author, "A. Coder");
         assert_eq!(m.cover_hint.as_deref(), Some("cover.png"));
+    }
+
+    #[test]
+    fn epub_series_from_calibre_meta_and_epub3_collection() {
+        let dir = tempfile::tempdir().unwrap();
+        // The calibre pair (what Kavita prefers).
+        let p = dir.path().join("calibre.epub");
+        write_epub_opf(
+            &p,
+            br#"<package xmlns="http://www.idpf.org/2007/opf" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <metadata>
+    <dc:title>T</dc:title>
+    <meta name="calibre:series" content="1% Lifesteal"/>
+    <meta name="calibre:series_index" content="3"/>
+  </metadata>
+</package>"#,
+        );
+        let m = extract_book_meta(&p, "epub");
+        assert_eq!(m.series, "1% Lifesteal");
+        assert_eq!(m.series_index, Some(3.0));
+
+        // The EPUB3 collection pair.
+        let p = dir.path().join("epub3.epub");
+        write_epub_opf(
+            &p,
+            br##"<package xmlns="http://www.idpf.org/2007/opf" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <metadata>
+    <dc:title>T</dc:title>
+    <meta property="belongs-to-collection" id="c01">The Expanse</meta>
+    <meta refines="#c01" property="group-position">2</meta>
+  </metadata>
+</package>"##,
+        );
+        let m = extract_book_meta(&p, "epub");
+        assert_eq!(m.series, "The Expanse");
+        assert_eq!(m.series_index, Some(2.0));
+
+        // No series meta at all: empty series, no index.
+        let p = dir.path().join("plain.epub");
+        write_epub(&p);
+        let m = extract_book_meta(&p, "epub");
+        assert_eq!(m.series, "");
+        assert_eq!(m.series_index, None);
     }
 
     #[test]

@@ -197,9 +197,12 @@ impl<B: Framebuffer> App<B> {
                 .search(&self.query, per, page * per, &self.source.config_value())
                 .unwrap_or_default()
         };
-        // C cover-warm pass — network-gated: an offline flip renders the
-        // cached covers only (no remote fetches, C eh_plat_net_active).
-        if self.fb().net_active() {
+        // Server-backed sources only: a Local/Folder tile has no server
+        // cover, and fetching its `fld_` id caches the API's 1×1 grey
+        // placeholder over the local-extraction art permanently.  Also
+        // network-gated: an offline flip renders the cached covers only
+        // (C eh_plat_net_active).
+        if self.source == Source::Kavita && self.fb().net_active() {
             for b in &books {
                 let _ = cover::fetch(&self.client, &self.covers_dir, &b.id);
             }
@@ -217,6 +220,21 @@ impl<B: Framebuffer> App<B> {
         crate::logger::log("[bookshelf] settings: saved");
         self.dl_picker = None;
         self.set_overlay(Overlay::Settings);
+    }
+
+    /// Local-base picker commit: store the chosen Local-source base
+    /// folder, persist it, and — when the Local source is live — kick a
+    /// re-scan so the shelf drops rows from the old base.  Back returns
+    /// to Settings.
+    pub(crate) fn commit_local_dir(&mut self, path: &str) {
+        self.config.local_dir = Some(path.to_string());
+        self.save_config();
+        crate::logger::log("[bookshelf] settings: saved");
+        self.dl_picker = None;
+        self.set_overlay(Overlay::Settings);
+        if self.source == Source::Local {
+            crate::local::kick_import(self);
+        }
     }
 
     /// Save the settings screen's edits to the config file (C

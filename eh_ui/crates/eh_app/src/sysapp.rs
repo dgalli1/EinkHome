@@ -26,6 +26,14 @@ pub fn detect() -> bool {
     Path::new(&format!("{}/bookshelf.app", dir())).exists()
 }
 
+/// True where a home-task override makes sense: the PocketBook firmware
+/// root exists.  Hosts (SDL/PC) and Android have no /mnt/ext1 — the
+/// Settings row is hidden there.  `$EH_SYSAPP_DIR` (the e2e hook) forces
+/// it on so the suite can exercise promote/demote.
+pub fn platform_supported() -> bool {
+    std::env::var_os("EH_SYSAPP_DIR").is_some() || Path::new("/mnt/ext1").is_dir()
+}
+
 /// The running binary's path.  `/proc/self/exe` is authoritative (works
 /// even if the on-disk file was unlinked); fall back to argv[0].
 fn self_bin() -> Option<PathBuf> {

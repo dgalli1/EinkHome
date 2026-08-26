@@ -20,8 +20,6 @@ export component BookDetailPage inherits Rectangle {
         y: 0;
         back: true;
         search-tab: true;
-        title-bold: true;
-        top-title: root.title;
         back-icon: root.back-icon;
         home => { root.back(); }
     }
@@ -59,33 +57,58 @@ export component BookDetailPage inherits Rectangle {
     property <length> rows-x: 429px;
     property <length> rows-w: root.width - rows-x - 48px;
 
-    for r[idx] in root.rows: Rectangle {
+    // Right column: the book title first — wrapped onto as many lines
+    // as it needs (elided only past the available height) — then the
+    // label/value field rows.
+    VerticalLayout {
         x: rows-x;
-        visible: !root.zoom;
-        y: (128 + idx * 96) * 1px;
+        y: 128px;
         width: rows-w;
-        height: 88px;
-        background: transparent;
+        height: parent.height - 152px;
+        spacing: 12px;
+        visible: !root.zoom;
+
         Text {
-            x: 0;
-            y: 0;
-            height: 26px;
-            font-size: 22px;
-            color: #555555;
-            overflow: elide;
-            width: parent.width;
-            text: r.label;
-        }
-        Text {
-            x: 0;
-            y: 30px;
-            height: 34px;
-            vertical-alignment: center;
-            font-size: 28px;
+            text: root.title;
+            font-size: 32px;
+            font-weight: 700;
             color: black;
+            wrap: word-wrap;
             overflow: elide;
-            width: parent.width;
-            text: r.value;
+            horizontal-stretch: 1;
+            vertical-stretch: 0;
+        }
+        for r in root.rows: Rectangle {
+            background: transparent;
+            min-height: 88px;
+            max-height: 88px;
+            vertical-stretch: 0;
+            Text {
+                x: 0;
+                y: 0;
+                height: 26px;
+                font-size: 22px;
+                color: #555555;
+                overflow: elide;
+                width: parent.width;
+                text: r.label;
+            }
+            Text {
+                x: 0;
+                y: 30px;
+                height: 34px;
+                vertical-alignment: center;
+                font-size: 28px;
+                color: black;
+                overflow: elide;
+                width: parent.width;
+                text: r.value;
+            }
+        }
+        // slack sink: keeps the title at its natural wrapped height and
+        // the rows at their fixed pitch instead of stretching either
+        Rectangle {
+            vertical-stretch: 1;
         }
     }
 }

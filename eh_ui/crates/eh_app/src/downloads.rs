@@ -292,11 +292,17 @@ pub fn sweep_stale_parts(dir: &str) -> usize {
 }
 
 /// Re-probe every book's on-device file and resync its downloaded flag
-/// (C eh_refresh_downloaded_flags; the C boot path slices this across
-/// timer ticks — Rust boots differently, so one bounded pass inline).
+/// (C eh_refresh_downloaded_flags; C slices this across timer ticks — here
+/// it is one streamed pass, cheap enough to stay on the boot path).
 /// A book counts as downloaded when its expected downloads-dir filename
 /// OR its stored local_path still exists; stale flags are cleared and
 /// fresh ones gain their path.  Returns the number of flags flipped.
+///
+/// The scan is ONE ordered pass via [`crate::store::Store::for_each_book`]:
+/// the former `list_books(256, offset)` paging carried an unindexed
+/// ORDER BY, so SQLite re-sorted the whole books table once per page —
+/// 24 s at 100k books before the first frame.  Flips (normally none) are
+/// collected during the pass and applied in a single transaction.
 pub fn refresh_downloaded_flags(store: &crate::store::Store, dir: &str) -> usize {
     sweep_stale_parts(dir);
     // Snapshot the dir ONCE; the per-book test is a hash lookup.
@@ -308,45 +314,34 @@ pub fn refresh_downloaded_flags(store: &crate::store::Store, dir: &str) -> usize
             .collect(),
         Err(_) => std::collections::HashSet::new(), // stale flags beat a crash
     };
-    const PAGE: usize = 256;
-    let mut changed = 0usize;
-    let mut offset = 0usize;
-    loop {
-        let books = match store.list_books(PAGE, offset) {
-            Ok(b) => b,
-            Err(_) => break,
-        };
-        let got = books.len();
-        for b in &books {
-            let path = book_local_path(b, dir);
-            let mut dl = names.contains(
-                path.file_name()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .as_ref(),
-            ) && path.is_file();
-            // The path a fresh flag records: the downloads-dir location,
-            // or the stored location when only that still exists (C
-            // book_existing_path keeps the stored path there).
-            let mut where_ = path.to_string_lossy().into_owned();
-            if !dl && !b.local_path.is_empty() && Path::new(&b.local_path).is_file() {
-                // File still at its stored location although the downloads
-                // folder has moved.
-                dl = true;
-                where_ = b.local_path.clone();
-            }
-            if dl != b.downloaded {
-                let stored = if dl { where_ } else { String::new() };
-                if store.set_downloaded(&b.id, dl, &stored).is_ok() {
-                    changed += 1;
-                }
-            }
+    let mut flips: Vec<(String, bool, String)> = Vec::new();
+    let scanned = store.for_each_book(|b| {
+        let path = book_local_path(b, dir);
+        let mut dl = names.contains(
+            path.file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .as_ref(),
+        ) && path.is_file();
+        // The path a fresh flag records: the downloads-dir location,
+        // or the stored location when only that still exists (C
+        // book_existing_path keeps the stored path there).
+        let mut where_ = path.to_string_lossy().into_owned();
+        if !dl && !b.local_path.is_empty() && Path::new(&b.local_path).is_file() {
+            // File still at its stored location although the downloads
+            // folder has moved.
+            dl = true;
+            where_ = b.local_path.clone();
         }
-        if got < PAGE {
-            break;
+        if dl != b.downloaded {
+            let stored = if dl { where_ } else { String::new() };
+            flips.push((b.id.clone(), dl, stored));
         }
-        offset += got;
+    });
+    if scanned.is_err() {
+        return 0;
     }
+    let changed = store.set_downloaded_flips(&flips);
     if changed > 0 {
         crate::log(&format!(
             "[bookshelf] refresh_downloaded_flags changed={changed}"

@@ -217,17 +217,18 @@ class BookshelfGeometry:
 
     def settings_row_center(self, row: int) -> tuple[int, int]:
         """Centre of settings row *row* (0=API host, 1=API key, 2=reader,
-        3=download folder, 4=install as system app)."""
+        3=download folder, 4=local folder, 5=install as system app)."""
         y = SETTINGS_ROW1_Y + row * SETTINGS_ROW_H
         return (self.screen_w // 2, y + (SETTINGS_ROW_H - 12) // 2)
 
     def settings_sysapp_center(self) -> tuple[int, int]:
-        """Centre of the Install-as-system-app toggle row (row 4)."""
-        return self.settings_row_center(4)
+        """Centre of the Install-as-system-app toggle row (row 5 — the
+        harness always sets EH_SYSAPP_DIR, so the row is present)."""
+        return self.settings_row_center(5)
 
     def settings_save_center(self) -> tuple[int, int]:
-        """Centre of the Save & apply button."""
-        y = SETTINGS_ROW1_Y + 5 * SETTINGS_ROW_H + 24
+        """Centre of the Save & apply button (below the 6 cards)."""
+        y = SETTINGS_ROW1_Y + 6 * SETTINGS_ROW_H + 24
         return (self.screen_w // 2, y + (SETTINGS_BTN_H - 12) // 2)
 
     def settings_back_center(self) -> tuple[int, int]:
@@ -236,12 +237,12 @@ class BookshelfGeometry:
 
     def settings_logs_center(self) -> tuple[int, int]:
         """Centre of the Show logs button (below Save)."""
-        y = SETTINGS_ROW1_Y + 5 * SETTINGS_ROW_H + 24 + SETTINGS_BTN_H
+        y = SETTINGS_ROW1_Y + 6 * SETTINGS_ROW_H + 24 + SETTINGS_BTN_H
         return (self.screen_w // 2, y + (SETTINGS_BTN_H - 12) // 2)
 
     def settings_licenses_center(self) -> tuple[int, int]:
         """Centre of the Licenses button (below Show logs)."""
-        y = SETTINGS_ROW1_Y + 5 * SETTINGS_ROW_H + 24 + 2 * SETTINGS_BTN_H
+        y = SETTINGS_ROW1_Y + 6 * SETTINGS_ROW_H + 24 + 2 * SETTINGS_BTN_H
         return (self.screen_w // 2, y + (SETTINGS_BTN_H - 12) // 2)
 
     # ── third-party licenses viewer (full-screen) ─────────────────────

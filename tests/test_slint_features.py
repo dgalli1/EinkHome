@@ -169,7 +169,7 @@ def test_exercise_every_feature(feature_env):
         bs.tap_more_item(0)  # Group by
         _settle(bs, 0.6)
         _snap(bs, "04-group-chooser")
-        bs.tap_at(*bs.geom.group_option_center(2))
+        bs.tap_at(*bs.geom.group_option_center(1, n_rows=4))
         _settle(bs, 0.8)
         _snap(bs, "05-stack-cards")
 
@@ -186,10 +186,11 @@ def test_exercise_every_feature(feature_env):
         _settle(bs, 0.6)
         _snap(bs, "08-context-menu")
 
-        # Details: the second row of the 4-row menu (Open/Details/
-        # Download/Delete) opens the metadata page (cover large + every
-        # store field); Back returns to the shelf.
-        bs.tap_context_item(1, n_items=4)
+        # Details: the second row of the 6-row book menu (Open/Details/
+        # Download/Mark/Delete-device/Delete-cloud) opens the metadata
+        # page (cover large + every store field); Back returns to the
+        # shelf.
+        bs.tap_context_item(1, n_items=6)
         _settle(bs, 0.8)
         _snap(bs, "08b-book-detail")
         bs.tap_at(*bs.geom.home_button_center())  # the detail back chevron

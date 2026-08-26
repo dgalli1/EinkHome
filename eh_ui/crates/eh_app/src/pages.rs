@@ -62,9 +62,7 @@ impl<B: Framebuffer> App<B> {
             let art = match self.art_cached(&book.id) {
                 Some(a) => Some(a),
                 None => {
-                    let art = crate::cover::load_cached(&self.covers_dir, &book.id)
-                        .and_then(|bytes| crate::cover::decode_rgb(&bytes).ok())
-                        .map(|(w, h, rgb)| (rgb, w, h))
+                    let art = crate::cover::load_valid_rgb(&self.covers_dir, &book.id)
                         .or_else(|| self.local_cover_art(&book));
                     if let Some((rgb, w, h)) = &art {
                         self.art_store(&book.id, rgb.clone(), *w, *h);
