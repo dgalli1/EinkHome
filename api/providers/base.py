@@ -191,6 +191,15 @@ class Provider(ABC):
         if needed."""
         raise NotImplementedError
 
+    def delete_book(self, book_id: str) -> bool:
+        """Remove a book from the server library ("delete from cloud").
+
+        Returns True when the book existed and was removed.  The base
+        implementation reports unsupported (False) — backends whose
+        upstream cannot delete books keep it, and the API answers 404
+        so the device can say so."""
+        return False
+
     @abstractmethod
     def open_file(self, book_id: str) -> tuple[str, Iterator[bytes]] | None:
         """Begin downloading a book's file.

@@ -282,6 +282,11 @@ class MockProvider(Provider):
         # Short-TTL cache for _scan() (health, library counts)
         self._scan_cache: list[dict[str, Any]] | None = None
         self._scan_cache_ts: float = 0.0
+        # Cloud-delete tombstones: ids removed via DELETE /books/{id}.
+        # They vanish from every listing/walk/get, which makes the next
+        # sync delta report them as removed (the fingerprint walk stops
+        # yielding them).
+        self._deleted: set[str] = set()
 
     # --- helpers -----------------------------------------------------------
 
@@ -467,6 +472,8 @@ class MockProvider(Provider):
         slice without materialising the whole library."""
         for entry in self._scan():
             meta = self._book_from_path(entry)
+            if meta.id in self._deleted:
+                continue
             if series_id and meta.series_id != series_id:
                 continue
             if search and search.lower() not in meta.title.lower():
@@ -485,6 +492,8 @@ class MockProvider(Provider):
                 if i >= limit:
                     break
                 meta = self._corpus_meta(i, rec)
+                if meta.id in self._deleted:
+                    continue
                 if series_id and meta.series_id != series_id:
                     continue
                 if q is not None and q not in meta.title.lower():
@@ -497,6 +506,8 @@ class MockProvider(Provider):
             # count always holds.
             for i in range(used, self.synthetic_count):
                 meta = self._synthetic(i)
+                if meta.id in self._deleted:
+                    continue
                 if series_id and meta.series_id != series_id:
                     continue
                 if q is not None and q not in meta.title.lower():
@@ -507,6 +518,8 @@ class MockProvider(Provider):
             return
         for i in range(self.synthetic_count):
             meta = self._synthetic(i)
+            if meta.id in self._deleted:
+                continue
             if series_id and meta.series_id != series_id:
                 continue
             if q is not None and q not in meta.title.lower():
@@ -635,7 +648,10 @@ class MockProvider(Provider):
             # dir layer: [0, n_dir)
             if start < n_dir:
                 for entry in scanned[start : min(end, n_dir)]:
-                    out.append(self._book_from_path(entry))
+                    meta = self._book_from_path(entry)
+                    if meta.id in self._deleted:
+                        continue
+                    out.append(meta)
             # corpus layer: [n_dir, n_dir + n_corpus)
             c_start = n_dir
             c_end = n_dir + n_corpus
@@ -643,7 +659,10 @@ class MockProvider(Provider):
                 lo = max(start - c_start, 0)
                 hi = min(end - c_start, n_corpus)
                 for i in range(lo, hi):
-                    out.append(self._corpus(i))
+                    meta = self._corpus(i)
+                    if meta.id in self._deleted:
+                        continue
+                    out.append(meta)
             # synthetic padding layer: [n_dir + n_corpus, n_dir +
             # synthetic_count)
             s_start = n_dir + n_corpus
@@ -651,7 +670,10 @@ class MockProvider(Provider):
                 lo = max(start - s_start, 0)
                 hi = min(end - s_start, self.synthetic_count)
                 for i in range(lo, hi):
-                    out.append(self._synthetic(i))
+                    meta = self._synthetic(i)
+                    if meta.id in self._deleted:
+                        continue
+                    out.append(meta)
             return out
         out = []
         skipped = 0
@@ -701,17 +723,29 @@ class MockProvider(Provider):
         output shape and values as walk_books' metas, so a provider
         that implements it can skip BookMeta construction entirely."""
         for entry in self._scan():
+            fid = self._book_id(entry["abs"])
+            if fid in self._deleted:
+                continue
             yield self._dir_fp(entry)
         if self.corpus:
             # Catalogue = dir books + the first `count` corpus records
             # + synthetic padding (mirrors _all).
             limit = min(self.synthetic_count, len(self.corpus))
-            yield from self._corpus_fps(limit)
+            for id, fp, ts in self._corpus_fps(limit):
+                if id in self._deleted:
+                    continue
+                yield (id, fp, ts)
             for i in range(limit, self.synthetic_count):
-                yield self._syn_fp(i)
+                id, fp, ts = self._syn_fp(i)
+                if id in self._deleted:
+                    continue
+                yield (id, fp, ts)
         else:
             for i in range(self.synthetic_count):
-                yield self._syn_fp(i)
+                id, fp, ts = self._syn_fp(i)
+                if id in self._deleted:
+                    continue
+                yield (id, fp, ts)
 
     def _corpus_fps(self, limit: int) -> Iterator[tuple[str, str, str]]:
         """(id, fp, added_at) for the first ``limit`` corpus records in
@@ -786,7 +820,15 @@ class MockProvider(Provider):
             ts,
         )
 
+    def delete_book(self, book_id: str) -> bool:
+        if self.get_book(book_id) is None:
+            return False
+        self._deleted.add(book_id)
+        return True
+
     def get_book(self, book_id: str) -> BookMeta | None:
+        if book_id in self._deleted:
+            return None
         idx = self._syn_index(book_id)
         if idx is not None:
             return self._synthetic(idx)
@@ -804,6 +846,8 @@ class MockProvider(Provider):
         return PLACEHOLDER_PNG
 
     def open_file(self, book_id: str) -> tuple[str, Iterator[bytes]] | None:
+        if book_id in self._deleted:
+            return None
         idx = self._syn_index(book_id)
         if idx is not None:
             meta = self._synthetic(idx)

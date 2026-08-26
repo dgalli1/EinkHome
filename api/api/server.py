@@ -431,6 +431,43 @@ class PbemuAPIServer(http.server.BaseHTTPRequestHandler):
         # PUT was previously an alias for GET; nothing writes via PUT.
         self._send(*_json(405, {"error": "method not allowed"}))
 
+    def do_DELETE(self) -> None:  # noqa: N802
+        self._safe_handle(self._dispatch_delete)
+
+    def _dispatch_delete(self) -> None:
+        path, _ = self._split_path()
+        endpoint, full = self._route(path)
+        if endpoint is None:
+            self._send(*_json(404, {"error": "not found", "path": full}))
+            return
+        if not self._auth_ok():
+            self._send(*_json(401, {"error": "unauthorized"}))
+            return
+        self._handle_delete(endpoint, full)
+
+    def _handle_delete(self, endpoint: str, full_path: str) -> None:
+        """DELETE /api/v1/books/{id} — remove a book from the server
+        library ("delete from cloud").  The next sync delta reports the
+        removal, so every device drops its copy.  Backends whose
+        upstream cannot delete answer 404 (the provider base's default)."""
+        provider = self.app.provider
+        if endpoint.startswith("books/"):
+            book_id = endpoint[len("books/") :]
+            if provider.delete_book(book_id):
+                self._send(*_json(200, {"deleted": True, "id": book_id}))
+            else:
+                self._send(
+                    *_json(
+                        404,
+                        {
+                            "error": "delete not supported or unknown id",
+                            "id": book_id,
+                        },
+                    )
+                )
+            return
+        self._send(*_json(405, {"error": "method not allowed", "path": full_path}))
+
     def _route(self, path: str) -> tuple[str | None, str]:
         """Map a URL path onto an `endpoint` string.
 

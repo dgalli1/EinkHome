@@ -726,5 +726,38 @@ def test_books_since_filter_excludes_boundary(server):
     assert _json_or_default(body, {})["count"] == 1
 
 
+def _http_delete(url, headers=None):
+    try:
+        req = request.Request(url, method="DELETE", headers=headers or {})
+        with request.urlopen(req) as r:
+            return r.status, r.read().decode("utf-8")
+    except request.HTTPError as e:
+        return e.code, e.read().decode("utf-8", errors="replace")
+
+
+def test_delete_book_drops_it_from_listings_and_get(server):
+    """DELETE /books/{id} ("delete from cloud"): the mock tombstones the
+    id — gone from listings, GET 404s, re-delete 404s."""
+    hdr = {"Authorization": "Bearer test-token"}
+    _, body = _http_get(server.url("/api/v1/books?limit=5"), headers=hdr)
+    items = json.loads(body)["items"]
+    assert items, "mock library must not be empty"
+    book_id = items[0]["id"]
+
+    status, body = _http_delete(server.url(f"/api/v1/books/{book_id}"), hdr)
+    assert status == 200
+    assert json.loads(body)["deleted"] is True
+
+    _, body = _http_get(server.url("/api/v1/books?limit=50"), headers=hdr)
+    ids = [b["id"] for b in json.loads(body)["items"]]
+    assert book_id not in ids
+
+    status, _ = _http_get(server.url(f"/api/v1/books/{book_id}"), headers=hdr)
+    assert status == 404
+
+    status, _ = _http_delete(server.url(f"/api/v1/books/{book_id}"), hdr)
+    assert status == 404
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
