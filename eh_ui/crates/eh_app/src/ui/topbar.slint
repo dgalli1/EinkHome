@@ -1,5 +1,5 @@
 // The top bar (C eh_topbar.c verbatim): white 96px band, house/back
-// chevron at x=8, source button (x=112 w=176, icon + label), centered
+// chevron at x=8, source button (x=112 w=224, icon + label), centered
 // title, right icon stack (search/layout/sync/menu, 96px buttons from the
 // right edge with 8px pad), 2px vertical separators.  Icons are baked at
 // boot by the bridge (src/ui/icons.rs) from the same line-art code the C
@@ -40,7 +40,7 @@ export component TopBar inherits Rectangle {
     callback menu;
 
     // bottom separator (C draws it below the bar; the source button's
-    // white fill erases it in x112..288 exactly like the C app)
+    // white fill erases it in x112..336 exactly like the C app)
     Rectangle { y: 95px; height: 2px; background: black; }
 
     // left button: back chevron (search / drilled) or house
@@ -55,11 +55,11 @@ export component TopBar inherits Rectangle {
     // source button (hidden on the search tab)
     TopBarButton {
         x: 112px;
-        width: 176px;
+        width: 224px;
         visible: !root.search-tab;
         clicked => { root.source-btn(); }
         // white fill over the button band (erases the separator below)
-        Rectangle { x: 0; y: 0; width: 176px; height: 96px; background: white; }
+        Rectangle { x: 0; y: 0; width: 224px; height: 96px; background: white; }
         Image {
             x: 8px;
             y: 22px;
@@ -73,7 +73,7 @@ export component TopBar inherits Rectangle {
             font-size: 30px;
             color: black;
             overflow: elide;
-            width: 100px;
+            width: 148px;
             text: root.source-label;
         }
     }
@@ -81,10 +81,15 @@ export component TopBar inherits Rectangle {
     // centered title (C: 44px, glyph top at y0+28, budget between the
     // flanking stacks)
     Text {
-        property <length> left-w: root.search-tab ? 0px : (112px + 176px);
-        property <length> right-w: root.search-tab ? 0px : (8px + 4 * 96px);
-        property <length> band-w: Math.max(root.width - left-w - right-w, 64px);
-        x: left-w;
+        property <length> left-w: root.search-tab ? 0px : (112px + 224px);
+        // browse mode hides the layout switch: its slot goes back to the
+        // title.  16px total breathing room so an elided path never
+        // touches the flanking separators/icons.
+        property <length> right-w: root.search-tab
+            ? 0px
+            : (8px + (root.browse-mode ? 3 : 4) * 96px);
+        property <length> band-w: Math.max(root.width - left-w - right-w - 16px, 64px);
+        x: left-w + 8px;
         width: band-w;
         y: 28px;
         height: 52px;
@@ -131,16 +136,14 @@ export component TopBar inherits Rectangle {
         clicked => { root.menu(); }
         // hamburger: three 48x6 black bars at cy-21/-3/+15
         Rectangle { x: 24px; y: 27px; width: 48px; height: 6px; background: black; }
-        Rectangle { x: 24px; y: 45px; width: 48px; height: 6px; background: black; }
-        Rectangle { x: 24px; y: 63px; width: 48px; height: 6px; background: black; }
     }
 
     // vertical separators (drawn last so button fills don't cover them):
-    // after the left button (108), after the source button (288), and the
+    // after the left button (108), after the source button (336), and the
     // left edges of the four right buttons
     property <bool> seps: !root.search-tab;
     Rectangle { x: 108px; y: 0; width: 2px; height: 96px; background: black; visible: seps; }
-    Rectangle { x: 288px; y: 0; width: 2px; height: 96px; background: black; visible: seps; }
+    Rectangle { x: 336px; y: 0; width: 2px; height: 96px; background: black; visible: seps; }
     Rectangle { x: root.width - 8px - 4 * 96px; y: 0; width: 2px; height: 96px; background: black; visible: seps; }
     Rectangle { x: root.width - 8px - 3 * 96px; y: 0; width: 2px; height: 96px; background: black; visible: seps; }
     Rectangle { x: root.width - 8px - 2 * 96px; y: 0; width: 2px; height: 96px; background: black; visible: seps; }

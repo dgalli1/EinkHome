@@ -300,8 +300,8 @@ class BookshelfGeometry:
 
     # ── source button + source-chooser sheet (C eh_source_geom) ────────
     def source_button_center(self) -> tuple[int, int]:
-        """Top-bar source button: fixed x=112 w=176, full bar height."""
-        return (112 + 176 // 2, 96 // 2)
+        """Top-bar source button: fixed x=112 w=224, full bar height."""
+        return (112 + 224 // 2, 96 // 2)
 
     def source_option_center(self, index: int) -> tuple[int, int]:
         """Centre of source-chooser row *index* (0 = Kavita, 1 = Local,
