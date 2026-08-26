@@ -89,21 +89,29 @@ impl<B: Framebuffer> App<B> {
             }
             InputEvent::PointerUp { x, y } => {
                 let (x, y) = (*x, *y);
-                // A firmware long-press (handled below) already opened the
-                // menu; the trailing release must not re-classify as a
-                // second long-press (or as a tap on the now-open sheet).
-                let seen = self.long_press_seen;
-                self.long_press_seen = false;
+                if self.long_press_seen {
+                    // A long-press already fired mid-hold (the firmware
+                    // gesture or the SDL hold-timer synthesis) and opened
+                    // the menu.  The trailing release must not reach
+                    // Slint: the pressed tile's TouchArea would fire
+                    // clicked and launch the book under the menu.
+                    self.long_press_seen = false;
+                    self.press_pos = None;
+                    self.press_start = None;
+                    self.drag_total = 0;
+                    self.drag_y = None;
+                    return;
+                }
                 // Long-press on the shelf → context menu (C eh_long_press).
-                let is_long = !seen
-                    && match (self.press_pos, self.press_start) {
-                        (Some((px, py)), Some(t0)) => {
-                            let moved = (x - px).abs() > 24 || (y - py).abs() > 24;
-                            let held = t0.elapsed() >= std::time::Duration::from_millis(450);
-                            !moved && held
-                        }
-                        _ => false,
-                    };
+                let is_long = match (self.press_pos, self.press_start) {
+                    (Some((px, py)), Some(t0)) => {
+                        let moved = (x - px).abs() > 24 || (y - py).abs() > 24;
+                        let held = t0.elapsed()
+                            >= std::time::Duration::from_millis(crate::appui::LONG_PRESS_MS);
+                        !moved && held
+                    }
+                    _ => false,
+                };
                 self.press_pos = None;
                 self.press_start = None;
                 // A drag (moved > 48px) is not a tap.
@@ -210,6 +218,23 @@ impl<B: Framebuffer> App<B> {
     /// band changed and a repaint is due.  The caller owns the cadence
     /// (the facade's weak timer; the C app re-arms SetWeakTimerEx here).
     pub fn tick(&mut self) -> bool {
+        // SDL long-press synthesis: the firmware delivers
+        // EVT_POINTER_LONGPRESS mid-hold, SDL only raw down/up.  Once a
+        // shelf hold passes the budget, fire the same synthetic path —
+        // the menu opens while the finger is still down.
+        if !self.long_press_seen
+            && self.tab == Tab::Library
+            && self.overlay == Overlay::None
+            && self.drag_total.abs() <= 24
+        {
+            if let (Some((px, py)), Some(t0)) = (self.press_pos, self.press_start) {
+                if t0.elapsed() >= std::time::Duration::from_millis(crate::appui::LONG_PRESS_MS) {
+                    let ev = InputEvent::PointerLongPress { x: px, y: py };
+                    self.on_event(&ev);
+                    return true; // the menu opened: repaint
+                }
+            }
+        }
         // Background full-library cover-warm pass (one fetch per tick).
         self.cover_warm_tick();
         // Drain the local-source import (progress ticks + the terminal

@@ -21,6 +21,10 @@ pub const GRAY_WHITE: u8 = 0xff;
 /// Corner scroll-button geometry (C EH_SCROLL_BTN_*).
 pub const SCROLL_BTN_W: u32 = 150;
 pub const SCROLL_BTN_H: u32 = 96;
+/// Hold duration before a shelf press classifies as a long-press (the
+/// C EVT_POINTER_LONGPRESS budget; SDL synthesizes the gesture at this
+/// point — the menu must not wait for the release).
+pub const LONG_PRESS_MS: u64 = 450;
 
 /// Layout constants (mirror eh_core.h).
 pub const TOP_BAR_H: u32 = 96;
