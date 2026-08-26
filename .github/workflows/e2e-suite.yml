@@ -64,7 +64,9 @@ jobs:
         with:
           tool: cargo-zigbuild
       - name: Install zig
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends zig
+        # ubuntu-24.04 ships no zig package; cargo-zigbuild's documented
+        # fallback runs zig via `python3 -m ziglang`.
+        run: python3 -m pip install --quiet ziglang
       - name: Cache Rust build
         uses: Swatinem/rust-cache@v2
         with:

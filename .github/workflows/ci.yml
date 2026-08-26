@@ -56,9 +56,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: eh_ui
-      # The eh_ui workspace is self-contained (no build scripts, fonts are
-      # in-repo), so this needs no submodule, firmware or emulator — the
-      # whole unit suite runs in seconds.
+      # The eh_ui workspace needs no submodule, firmware or emulator —
+      # the whole unit suite runs in seconds (one build script wants
+      # pkg-config + fontconfig headers, installed above).
+      - name: Install pkg-config + fontconfig headers
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends pkg-config libfontconfig1-dev
       - name: Run make test-rust
         run: make test-rust
 
