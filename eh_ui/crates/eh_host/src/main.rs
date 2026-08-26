@@ -72,6 +72,11 @@ fn main() -> Result<(), String> {
         libc::signal(libc::SIGTERM, on_signal as *const () as libc::sighandler_t);
     }
     loop {
+        // Settings → Reset database: the app asked to close (the wipe is
+        // done; the next start rebuilds from the fresh database).
+        if app.exit_requested {
+            return Ok(());
+        }
         if SIGNALED.load(Ordering::SeqCst) || app.fb().close_requested() {
             return Ok(());
         }

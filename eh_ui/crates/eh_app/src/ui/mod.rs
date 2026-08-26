@@ -91,7 +91,7 @@ pub enum Action {
     SyncDismiss,
     /// The settings page's back chevron.
     SettingsBack,
-    /// A settings row/button (0..4 cards, 5 Save, 6 logs, 7 licenses).
+    /// A settings row/button (0..4 cards, then Save / logs / licenses / reset).
     SettingsRow(usize),
     /// The viewers' back chevron (detail -> list -> shelf).
     ViewerBack,
@@ -388,11 +388,19 @@ impl Ui {
         comp.set_layout_grid_icon(icons.layout_grid.clone());
         comp.set_layout_list_icon(icons.layout_list.clone());
         comp.set_sync_icon(icons.sync.clone());
+        comp.set_house_icon_inv(icons.house_inv.clone());
+        comp.set_back_icon_inv(icons.back_inv.clone());
+        comp.set_search_icon_inv(icons.search_inv.clone());
+        comp.set_layout_grid_icon_inv(icons.layout_grid_inv.clone());
+        comp.set_layout_list_icon_inv(icons.layout_list_inv.clone());
+        comp.set_sync_icon_inv(icons.sync_inv.clone());
+        // The spin quadrants as indexable image models (topbar.slint picks
+        // sync-frames[sync-angle / 90]).
+        let quads = slint::VecModel::from(icons.sync_rot.clone());
+        comp.set_sync_frames(slint::ModelRc::new(quads));
+        let inv_quads = slint::VecModel::from(icons.sync_inv_rot.clone());
+        comp.set_sync_frames_inv(slint::ModelRc::new(inv_quads));
         comp.set_input_icon(icons.input.clone());
-        comp.set_input_icon_inv(icons.input_inv.clone());
-        comp.set_chevron(icons.chevron.clone());
-        comp.set_chevron_down(icons.chevron_down.clone());
-        comp.set_bulb_icon(icons.bulb.clone());
 
         Ui {
             window,
@@ -416,6 +424,13 @@ impl Ui {
     /// fire their callbacks synchronously, pushing intents).
     pub fn dispatch(&self, ev: WindowEvent) {
         self.comp.window().dispatch_event(ev);
+    }
+    /// Flag the Slint window for redraw.  MinimalSoftwareWindow never
+    /// repaints unprompted — pointer press/release feedback (the chrome
+    /// buttons' inversion) relies on this, flushed by present()'s
+    /// Slint-dirt path.
+    pub fn request_redraw(&self) {
+        self.window.request_redraw();
     }
 
     /// Paint the current property state into the framebuffer.  Returns
@@ -442,12 +457,22 @@ impl Ui {
         out
     }
 
-    /// Source icon by active source (set at source switches).
-    pub fn source_image(&self, source: crate::app::Source) -> slint::Image {
+    /// Source icon by active source (set at source switches): the glyph
+    /// and its inverted twin (press feedback).
+    pub fn source_images(&self, source: crate::app::Source) -> (slint::Image, slint::Image) {
         match source {
-            crate::app::Source::Kavita => self.icons.source_kavita.clone(),
-            crate::app::Source::Local => self.icons.source_local.clone(),
-            crate::app::Source::Folder => self.icons.source_folder.clone(),
+            crate::app::Source::Kavita => (
+                self.icons.source_kavita.clone(),
+                self.icons.source_kavita_inv.clone(),
+            ),
+            crate::app::Source::Local => (
+                self.icons.source_local.clone(),
+                self.icons.source_local_inv.clone(),
+            ),
+            crate::app::Source::Folder => (
+                self.icons.source_folder.clone(),
+                self.icons.source_folder_inv.clone(),
+            ),
         }
     }
 }

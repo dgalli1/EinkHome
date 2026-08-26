@@ -41,10 +41,12 @@ pub enum SettingsRow {
     ApiKey,
     ReaderApp,
     DownloadFolder,
+    LocalFolder,
     SystemApp,
-    Save,
     ShowLogs,
+    Save,
     Licenses,
+    ResetDb,
 }
 
 /// A launcher entry (C BsLauncherItem): a group header (group=true) or an
@@ -263,8 +265,11 @@ pub struct App<B: Framebuffer> {
     /// top-bar sync glyph).
     pub syncing: bool,
     /// Rotation (deg) of the top-bar sync glyph while a sync/download is
-    /// in flight (C eh_g_state.sync_angle; the tick advances it 15°/s).
+    /// in flight: always a multiple of 90 — the glyph spins in baked
+    /// quadrants (ui::icons sync_rot), stepped by `sync_spin_tick`.
     pub sync_angle: i32,
+    /// Tick divider for the 600 ms spin cadence (3 × 200 ms facade tick).
+    pub(crate) spin_div: u32,
     /// Active grouping preset + drill level (C eh_g_group / drill).
     pub group: crate::store::GroupPreset,
     pub sort: crate::store::SortMode,
@@ -326,6 +331,10 @@ pub struct App<B: Framebuffer> {
     pub dirty: bool,
     /// The overlay the last present drew (skip detection).
     pub last_overlay: Overlay,
+    /// Set by Settings → Reset database: the host shells (SDL loop,
+    /// inkview tick) poll this and close the app so the next start
+    /// rebuilds everything from the wiped database.
+    pub exit_requested: bool,
     /// Folder-source browser state (C BR_MODE_BROWSER: path/scroll/rows).
     pub browser: crate::local::Browser,
     /// In-flight Local import scan (generation guard + worker receiver;
@@ -468,10 +477,11 @@ impl<B: Framebuffer> App<B> {
             art_cache: Default::default(),
             suggestions: Vec::new(),
             kb_editing: None,
+            sync_angle: 0,
             suggest_q: String::new(),
+            spin_div: 0,
             warm: crate::cover::WarmHandle::default(),
             downloader: crate::downloads::Downloader::new(),
-            sync_angle: 0,
             log_scroll: -1,
             lic_scroll: 0,
             license_selected: None,
@@ -484,6 +494,7 @@ impl<B: Framebuffer> App<B> {
             scan_job: crate::local::ScanJob::default(),
             dirty: true,
             last_overlay: Overlay::None,
+            exit_requested: false,
             db_path,
             sync_worker: crate::sync::WorkerHandle::default(),
             sync_popup: SyncPopup::default(),
@@ -564,7 +575,10 @@ impl<B: Framebuffer> App<B> {
         // The visible page's covers first (the C on-page fetch path), so
         // the initial shelf shows art without waiting for the background
         // pass to reach them; skipped entirely offline.
-        if online {
+        // Server-backed sources only: a Local/Folder tile has no server
+        // cover, and fetching its `fld_` id used to cache the API's 1×1
+        // grey placeholder over the local-extraction art permanently.
+        if online && self.source == Source::Kavita {
             let ids: Vec<String> = self.entries.iter().map(|e| e.book.id.clone()).collect();
             for id in ids {
                 if cover::load_cached(&self.covers_dir, &id).is_none() {
@@ -1109,6 +1123,28 @@ mod tests {
     }
 
     #[test]
+    fn sync_spin_steps_ninety_degrees_every_third_active_tick() {
+        let (mut app, _dl) = mk_dl_app("spin");
+        // Nothing in flight: the glyph rests and the angle resets.
+        app.sync_angle = 270;
+        assert!(!app.sync_spin_tick());
+        assert_eq!(app.sync_angle, 0);
+        // In flight: two quiet ticks, then one 90° step (600 ms cadence).
+        // Boot ticks may have bumped the divider: pin a known phase.
+        app.syncing = true;
+        app.spin_div = 0;
+        assert!(!app.sync_spin_tick());
+        assert!(!app.sync_spin_tick());
+        assert!(app.sync_spin_tick());
+        assert_eq!(app.sync_angle, 90);
+        // A full revolution wraps back to the idle orientation.
+        app.sync_angle = 270;
+        app.spin_div = 2;
+        assert!(app.sync_spin_tick());
+        assert_eq!(app.sync_angle, 0);
+    }
+
+    #[test]
     fn download_all_noop_when_nothing_undownloaded() {
         let (mut app, _dl) = mk_dl_app("noop");
         app.store.upsert_book(&meta("a")).unwrap();
@@ -1362,10 +1398,15 @@ mod tests {
         assert_eq!(app.sync_popup.stage, SyncStage::Meta);
         assert!(app.syncing);
 
-        // Modal while the sync runs: a tap must not dismiss.
+        // Tap-outside dismisses mid-run: the sheet closes, the sync
+        // itself keeps running in the background.
+        app.present(); // sync the sheet into the Slint tree before tapping
         tap(&mut app, 536, 700);
-        assert_eq!(app.overlay, Overlay::Sync);
+        assert_eq!(app.overlay, Overlay::None);
+        assert!(!app.sync_popup.open);
+        assert!(app.syncing, "the sync chain runs behind the closed sheet");
 
+        // Worker events still land on the (hidden) popup state machine.
         app.apply_sync_event(crate::sync::SyncEvent::MetaBatch { done: 2, total: 0 });
         assert_eq!(app.sync_popup.stage, SyncStage::Meta);
         assert_eq!(app.sync_popup.round, 2);
@@ -1378,7 +1419,8 @@ mod tests {
             (3, 10)
         );
 
-        // Complete: the sheet moves to COVERS (warm pass), then flashes
+        // Complete: with the sheet dismissed nothing restages; a fresh
+        // open (next trigger) then moves to COVERS (warm pass), flashes
         // DONE and auto-closes (C eh_sync_popup_finish → close tick).
         app.apply_sync_event(crate::sync::SyncEvent::Complete { rounds: 0 });
         assert!(!app.syncing, "spinner stops at the terminal event");
@@ -1386,6 +1428,8 @@ mod tests {
             app.sync_worker.rx.is_none(),
             "event stream detached at completion"
         );
+        app.sync_popup_open(SyncStage::Covers);
+
         assert_eq!(app.sync_popup.stage, SyncStage::Covers);
         // No warm pass queued → the next tick flashes Done, the next one
         // (after the 900 ms delay) closes.
@@ -1401,21 +1445,21 @@ mod tests {
     }
 
     #[test]
-    fn sync_popup_tap_dismisses_only_after_finish() {
+    fn sync_popup_tap_dismisses_while_running() {
         let mut app = mk_app("syncdismiss");
         app.sync_popup_open(SyncStage::Meta);
         app.syncing = true; // simulate the live run
         app.present(); // sync the sheet into the Slint tree before tapping
-        tap(&mut app, 536, 700);
-        assert_eq!(app.overlay, Overlay::Sync, "modal while the sync runs");
-        app.apply_sync_event(crate::sync::SyncEvent::Failed("boom".into()));
-        app.present(); // the sheet must be current for the dismiss tap
-        assert!(!app.syncing);
-        assert_eq!(app.sync_popup.stage, SyncStage::Fail);
-        assert_eq!(app.sync_popup.error, crate::i18n::tr("sync.failed"));
-        // Tap-to-dismiss after finish (C eh_popups tap path).
+                       // Tap-to-dismiss mid-run: the sheet closes while the sync chain
+                       // keeps running behind it.
         tap(&mut app, 536, 700);
         assert_eq!(app.overlay, Overlay::None);
+        assert!(!app.sync_popup.open);
+        assert!(app.syncing);
+        // A later failure still lands cleanly with the sheet closed.
+        app.apply_sync_event(crate::sync::SyncEvent::Failed("boom".into()));
+        assert!(!app.syncing);
+        assert_eq!(app.sync_popup.error, crate::i18n::tr("sync.failed"));
     }
 
     #[test]
@@ -1588,6 +1632,197 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(SYNC_DONE_CLOSE_MS + 50));
         assert!(app.sync_popup_close_tick());
         assert_eq!(app.overlay, Overlay::None);
+    }
+
+    /// Serializes tests that point EH_BROWSE_ROOT at a private tempdir:
+    /// the env var is process-global and the test threads run in
+    /// parallel (a kick reads it synchronously on the calling thread,
+    /// so holding the lock across the whole test is enough).
+    static BROWSE_ROOT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Switching to a POPULATED local source must show the cached rows
+    /// without re-running the import (walk + extraction of a 20k
+    /// library is minutes of modal sheet); only an empty local source
+    /// pays the scan.
+    #[test]
+    fn source_switch_local_shows_cached_rows_without_rescan() {
+        let mut app = mk_app("srclocal");
+        let book = crate::store::Book {
+            id: "fld_cached1".into(),
+            title: "Cached Book".into(),
+            ext: "epub".into(),
+            downloaded: true,
+            local_path: "/tmp/cached.epub".into(),
+            filename: "cached.epub".into(),
+            source: "local".into(),
+            ..Default::default()
+        };
+        app.store.upsert_book_row(&book).unwrap();
+
+        crate::source::apply_source(&mut app, 1);
+
+        assert_eq!(app.source, Source::Local);
+        assert!(!app.syncing, "populated local source must not rescan");
+        assert!(!app.sync_popup.open, "no sheet for a cached switch");
+        assert!(app.scan_job.rx.is_none(), "no scan worker spawned");
+        assert_eq!(app.entries.len(), 1, "cached row shown immediately");
+        assert_eq!(app.entries[0].book.id, "fld_cached1");
+    }
+
+    /// A source switch drills out to the shelf root: the drilled group
+    /// scope ("Robert Blaise" on Kavita) belongs to the previous source
+    /// and must not survive the jump to Local.
+    #[test]
+    fn source_switch_resets_drill_scope() {
+        let mut app = mk_app("srcdrill");
+        let book = crate::store::Book {
+            id: "fld_cached2".into(),
+            title: "Local Book".into(),
+            ext: "epub".into(),
+            source: "local".into(),
+            ..Default::default()
+        };
+        app.store.upsert_book_row(&book).unwrap();
+        // Simulate a Kavita drill: group level 1 with a selected author.
+        app.drill = 1;
+        app.drill_values[0] = "rex1".into();
+        app.drill_names[0] = "Rex".into();
+        app.drill_saved_pages[0] = 3;
+        app.page = 3;
+
+        crate::source::apply_source(&mut app, 1);
+
+        assert_eq!(app.source, Source::Local);
+        assert_eq!(app.drill, 0, "the drill scope must reset");
+        assert!(app.drill_values[0].is_empty() && app.drill_names[0].is_empty());
+        assert_eq!(app.drill_saved_pages, [0; 2]);
+        assert_eq!(app.page, 0);
+        assert!(app.context.items.is_empty(), "no stale context menu");
+        assert_eq!(app.entries.len(), 1, "unscoped local rows shown");
+    }
+
+    /// A first-ever Local selection (no rows yet) still kicks the
+    /// import — with its visible sheet — and the landing apply fills
+    /// the store.
+    #[test]
+    fn source_switch_local_kicks_import_when_empty() {
+        let _g = BROWSE_ROOT_LOCK.lock().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("b.epub"), b"x").unwrap();
+        let old = std::env::var("EH_BROWSE_ROOT").ok();
+        std::env::set_var("EH_BROWSE_ROOT", root.path());
+        let mut app = mk_app("srclocalnew");
+        crate::source::apply_source(&mut app, 1);
+        assert!(app.syncing, "empty local source must kick the import");
+        assert_eq!(app.sync_popup.stage, SyncStage::Scan);
+        let mut applied = false;
+        for _ in 0..300 {
+            if crate::local::poll_import(&mut app) && !app.syncing {
+                applied = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        match old {
+            Some(v) => std::env::set_var("EH_BROWSE_ROOT", v),
+            None => std::env::remove_var("EH_BROWSE_ROOT"),
+        }
+        assert!(applied, "import never landed");
+        assert_eq!(app.store.count_source("local").unwrap(), 1);
+    }
+
+    /// The top-bar sync button is the Local source's manual re-import
+    /// (the chooser no longer rescans on every switch).
+    #[test]
+    fn sync_button_on_local_source_rescans() {
+        let _g = BROWSE_ROOT_LOCK.lock().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("a.epub"), b"x").unwrap();
+        let old = std::env::var("EH_BROWSE_ROOT").ok();
+        std::env::set_var("EH_BROWSE_ROOT", root.path());
+        let mut app = mk_app("synclocal");
+        app.source = Source::Local;
+        app.do_sync();
+        assert!(app.syncing, "sync button must kick the local import");
+        assert_eq!(app.sync_popup.stage, SyncStage::Scan);
+        let mut applied = false;
+        for _ in 0..300 {
+            if crate::local::poll_import(&mut app) && !app.syncing {
+                applied = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        match old {
+            Some(v) => std::env::set_var("EH_BROWSE_ROOT", v),
+            None => std::env::remove_var("EH_BROWSE_ROOT"),
+        }
+        assert!(applied, "import never landed");
+        assert_eq!(app.store.count_source("local").unwrap(), 1);
+    }
+
+    /// A warm rescan must DIFF, not rewrite: new files are added,
+    /// vanished files deleted (FTS included), and untouched rows keep
+    /// their rowid — the old apply did delete_source + re-upsert of the
+    /// whole 20k source on every scan.
+    #[test]
+    fn local_rescan_diffs_instead_of_rewriting_all_rows() {
+        let mut app = mk_app("rescandiff");
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("a.epub"), b"x").unwrap();
+        std::fs::write(root.path().join("b.epub"), b"x").unwrap();
+        crate::local::kick_import_rooted(&mut app, root.path().to_str().unwrap());
+        let mut applied = false;
+        for _ in 0..300 {
+            if crate::local::poll_import(&mut app) && !app.syncing {
+                applied = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(applied, "first import never landed");
+        let id = |name: &str| {
+            format!(
+                "fld_{}",
+                crate::local::hash_hex(&root.path().join(name).to_string_lossy())
+            )
+        };
+        let (id_a, id_b) = (id("a.epub"), id("b.epub"));
+        app.store.set_read(&id_b, true).unwrap();
+        let rowid_b = app.store.book_rowid(&id_b).unwrap().expect("b rowid");
+
+        // b stays, a vanishes, c appears.
+        std::fs::remove_file(root.path().join("a.epub")).unwrap();
+        std::fs::write(root.path().join("c.epub"), b"x").unwrap();
+        crate::local::kick_import_rooted(&mut app, root.path().to_str().unwrap());
+        let mut applied = false;
+        for _ in 0..300 {
+            if crate::local::poll_import(&mut app) && !app.syncing {
+                applied = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(applied, "rescan never landed");
+
+        assert!(
+            app.store.get_book(&id_a).unwrap().is_none(),
+            "vanished file's row must go"
+        );
+        assert!(app.store.get_book(&id_b).unwrap().is_some());
+        assert!(
+            app.store.get_book(&id("c.epub")).unwrap().is_some(),
+            "new file's row must appear"
+        );
+        assert_eq!(app.store.count_source("local").unwrap(), 2);
+        // The untouched row was NOT rewritten (rowid stable) and keeps
+        // its read marker.
+        assert_eq!(app.store.book_rowid(&id_b).unwrap(), Some(rowid_b));
+        assert!(app.store.is_read(&id_b));
+        // FTS tracks the diff: the removed title is gone, the new one
+        // is searchable.
+        assert!(app.store.search("a", 10, 0, "local").unwrap().is_empty());
+        assert_eq!(app.store.search("c", 10, 0, "local").unwrap().len(), 1);
     }
 
     /// Injected progress ticks move the sheet counter; a foreign

@@ -16,10 +16,10 @@ use crate::appui::{
     draw_house, draw_layout_icon, draw_search_icon, draw_sync_icon,
 };
 
-/// Bake one icon: `size` (w, h) RGBA tile, `draw` paints with a DrawCtx
-/// whose surface covers exactly the tile.  `white_bg` false starts from a
-/// black tile (the inverted input magnifier).
-fn bake(size: (u32, u32), white_bg: bool, draw: impl FnOnce(&mut DrawCtx)) -> Image {
+/// Paint one icon tile into a fresh RGBA buffer: `size` (w, h), `draw`
+/// paints with a DrawCtx whose surface covers exactly the tile.
+/// `white_bg` false starts from a black tile (the inverted input magnifier).
+fn paint(size: (u32, u32), white_bg: bool, draw: impl FnOnce(&mut DrawCtx)) -> Vec<u8> {
     let (w, h) = (size.0 as usize, size.1 as usize);
     let mut buf = vec![0xff_u8; w * h * 4];
     if !white_bg {
@@ -44,12 +44,56 @@ fn bake(size: (u32, u32), white_bg: bool, draw: impl FnOnce(&mut DrawCtx)) -> Im
         };
         draw(&mut ctx);
     }
+    buf
+}
+
+/// Wrap a painted RGBA buffer into a Slint image.
+fn tile(buf: &[u8], size: (u32, u32)) -> Image {
     Image::from_rgba8(
-        slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(&buf, w as u32, h as u32),
+        slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(buf, size.0, size.1),
     )
 }
 
-/// All baked icons for one boot.
+/// Bake one icon (+ its color-inverted twin for press feedback).
+fn pair(size: (u32, u32), draw: impl FnOnce(&mut DrawCtx)) -> (Image, Image) {
+    let buf = paint(size, true, draw);
+    let mut inv = buf.clone();
+    invert(&mut inv);
+    (tile(&buf, size), tile(&inv, size))
+}
+
+/// Invert every pixel's RGB channels (alpha untouched): white tile with
+/// black ink becomes the pressed-state black tile with white ink.
+fn invert(buf: &mut [u8]) {
+    for px in buf.as_chunks_mut::<4>().0 {
+        px[0] = !px[0];
+        px[1] = !px[1];
+        px[2] = !px[2];
+    }
+}
+
+/// Rotate an RGBA buffer 90° clockwise; `n` is both width and height
+/// (square tiles only).  Pixel (x, y) lands at (n-1-y, x).
+fn rot90(buf: &[u8], n: usize) -> Vec<u8> {
+    let mut out = vec![0_u8; buf.len()];
+    for y in 0..n {
+        for x in 0..n {
+            let src = (y * n + x) * 4;
+            let dst = (x * n + (n - 1 - y)) * 4;
+            out[dst..dst + 4].copy_from_slice(&buf[src..src + 4]);
+        }
+    }
+    out
+}
+
+/// Bake one icon (no inverted twin needed: never shown inside a button).
+fn bake(size: (u32, u32), white_bg: bool, draw: impl FnOnce(&mut DrawCtx)) -> Image {
+    tile(&paint(size, white_bg, draw), size)
+}
+
+/// All baked icons for one boot.  Every top-bar button glyph has an
+/// inverted twin (`*_inv`: black tile, white ink) shown while the button
+/// is held — e-ink press feedback is a hard color reversal.
 pub struct Icons {
     pub house: Image,
     pub back: Image,
@@ -60,6 +104,20 @@ pub struct Icons {
     pub layout_grid: Image,
     pub layout_list: Image,
     pub sync: Image,
+    /// The sync glyph in 90° CW steps (index = angle/90) plus the
+    /// inverted twins.  The software renderer cannot rotate images, so
+    /// the in-flight spin is baked as four tiles.
+    pub sync_rot: Vec<Image>,
+    pub sync_inv_rot: Vec<Image>,
+    pub house_inv: Image,
+    pub back_inv: Image,
+    pub source_kavita_inv: Image,
+    pub source_local_inv: Image,
+    pub source_folder_inv: Image,
+    pub search_inv: Image,
+    pub layout_grid_inv: Image,
+    pub layout_list_inv: Image,
+    pub sync_inv: Image,
     pub input: Image,
     pub input_inv: Image,
     pub bulb: Image,
@@ -72,19 +130,37 @@ pub struct Icons {
 
 /// Bake the full icon set (a few ms at boot).
 pub fn bake_all() -> Icons {
-    let house = bake((96, 96), true, |ctx| draw_house(ctx, 48, 48, 0));
-    let back = bake((96, 96), true, |ctx| draw_back_chevron(ctx, 48, 48, 0));
-    let source_kavita = bake((52, 52), true, |ctx| draw_globe_icon(ctx, 0, 0, 0));
-    let source_local = bake((52, 52), true, |ctx| draw_book_icon(ctx, 0, 0, 0));
-    let source_folder = bake((52, 52), true, |ctx| draw_folder_icon(ctx, 0, 0, 0));
-    let search = bake((96, 96), true, |ctx| draw_search_icon(ctx, 48, 48, 0));
-    let layout_grid = bake((96, 96), true, |ctx| {
+    let (house, house_inv) = pair((96, 96), |ctx| draw_house(ctx, 48, 48, 0));
+    let (back, back_inv) = pair((96, 96), |ctx| draw_back_chevron(ctx, 48, 48, 0));
+    let (source_kavita, source_kavita_inv) = pair((52, 52), |ctx| draw_globe_icon(ctx, 0, 0, 0));
+    let (source_local, source_local_inv) = pair((52, 52), |ctx| draw_book_icon(ctx, 0, 0, 0));
+    let (source_folder, source_folder_inv) = pair((52, 52), |ctx| draw_folder_icon(ctx, 0, 0, 0));
+    let (search, search_inv) = pair((96, 96), |ctx| draw_search_icon(ctx, 48, 48, 0));
+    let (layout_grid, layout_grid_inv) = pair((96, 96), |ctx| {
         draw_layout_icon(ctx, 48, 48, ViewMode::Grid, 0)
     });
-    let layout_list = bake((96, 96), true, |ctx| {
+    let (layout_list, layout_list_inv) = pair((96, 96), |ctx| {
         draw_layout_icon(ctx, 48, 48, ViewMode::List, 0)
     });
-    let sync = bake((96, 96), true, |ctx| draw_sync_icon(ctx, 48, 48, 0, 0));
+    // Sync spin: bake the idle glyph once and derive the 90° quadrants by
+    // buffer rotation; each gets its inverted twin for press feedback.
+    let mut sync_bufs: Vec<Vec<u8>> = vec![paint((96, 96), true, |ctx| {
+        draw_sync_icon(ctx, 48, 48, 0, 0)
+    })];
+    for _ in 1..4 {
+        sync_bufs.push(rot90(sync_bufs.last().unwrap(), 96));
+    }
+    let sync_rot: Vec<Image> = sync_bufs.iter().map(|b| tile(b, (96, 96))).collect();
+    let sync_inv_rot: Vec<Image> = sync_bufs
+        .iter()
+        .map(|b| {
+            let mut i = b.clone();
+            invert(&mut i);
+            tile(&i, (96, 96))
+        })
+        .collect();
+    let sync = sync_rot[0].clone();
+    let sync_inv = sync_inv_rot[0].clone();
     // Search-input magnifier: ring centre at (30, 34) in a 60x60 tile
     // (C: circle at bx+30, by+bh/2 of the 68px box).
     let input = bake((60, 60), true, |ctx| {
@@ -132,6 +208,17 @@ pub fn bake_all() -> Icons {
         layout_grid,
         layout_list,
         sync,
+        sync_rot,
+        sync_inv_rot,
+        house_inv,
+        back_inv,
+        source_kavita_inv,
+        source_local_inv,
+        source_folder_inv,
+        search_inv,
+        layout_grid_inv,
+        layout_list_inv,
+        sync_inv,
         input,
         input_inv,
         bulb,

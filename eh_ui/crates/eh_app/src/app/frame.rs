@@ -117,8 +117,9 @@ impl<B: Framebuffer> App<B> {
         c.set_sync_angle(self.sync_angle);
         let title = self.ui_title();
         c.set_top_title(title.into());
-        let icon = self.ui.source_image(self.source);
+        let (icon, icon_inv) = self.ui.source_images(self.source);
         c.set_source_icon(icon);
+        c.set_source_icon_inv(icon_inv);
         // search page + the app-side on-screen keyboard (SDL hosts):
         // visible while any firmware-keyboard edit is open, showing the
         // live buffer.  The buffer read must precede the comp borrow
@@ -232,6 +233,12 @@ impl<B: Framebuffer> App<B> {
                     }
                 }
             }
+            // Slint-internal dirt without App state (a TouchArea press on
+            // a chrome button): draw it and flush just the changed region
+            // as a Partial — never a full-band flash for a press.
+            else if let Some(r) = self.render_ui(false) {
+                self.fb().refresh(r, eh_hal::RefreshMode::Partial);
+            }
             return;
         }
 
@@ -288,7 +295,7 @@ impl<B: Framebuffer> App<B> {
     /// rebuild the current page.
     pub fn relayout(&mut self) {
         self.sync_fb_cache();
-        let fb = self.fb.as_ref().expect("fb");
+        let fb = self.fb.as_mut().expect("fb");
         let scr = fb.screen();
         let (content_bottom, self_panel, win_h) = if fb.needs_self_panel() {
             (scr.height.saturating_sub(106), 106, scr.height)
@@ -531,17 +538,12 @@ impl<B: Framebuffer> App<B> {
                     return;
                 };
                 c.set_detail_title(book.title.clone().into());
-                // cover: cache first, then the local extraction path
-                let art = crate::cover::load_cached(&self.covers_dir, &book.id)
-                    .and_then(|bytes| {
-                        crate::cover::decode_rgb(&bytes)
-                            .ok()
-                            .map(|(w, h, rgb)| (rgb, w, h))
-                    })
-                    .or_else(|| {
-                        let book_ref = &book;
-                        self.local_cover_art(book_ref)
-                    });
+                // cover: cache first (degenerate placeholder entries are
+                // unlinked by the loader), then the local extraction path
+                let art = crate::cover::load_valid_rgb(&self.covers_dir, &book.id).or_else(|| {
+                    let book_ref = &book;
+                    self.local_cover_art(book_ref)
+                });
                 match &art {
                     Some((rgb, w, h)) => {
                         c.set_detail_cover(slint::Image::from_rgb8(slint::SharedPixelBuffer::<
@@ -590,6 +592,11 @@ impl<B: Framebuffer> App<B> {
                 } else {
                     crate::i18n::tr("detail.no").to_string()
                 };
+                let path = if book.local_path.is_empty() {
+                    "–".to_string()
+                } else {
+                    book.local_path.clone()
+                };
                 let rows: Vec<crate::ui::DetailRow> = [
                     ("detail.author", book.author.clone()),
                     ("detail.series", series),
@@ -614,6 +621,7 @@ impl<B: Framebuffer> App<B> {
                     ("detail.progress", progress),
                     ("detail.source", source),
                     ("detail.downloaded", downloaded),
+                    ("detail.path", path),
                 ]
                 .iter()
                 .map(|(k, v)| crate::ui::DetailRow {
@@ -633,23 +641,44 @@ impl<B: Framebuffer> App<B> {
                     crate::i18n::tr("settings.sysapp_off").to_string()
                 };
                 let dl = self.config.downloads_dir.clone().unwrap_or_default();
-                let labels: Vec<slint::SharedString> = [
-                    crate::i18n::tr("settings.api_host"),
-                    crate::i18n::tr("settings.api_key"),
-                    crate::i18n::tr("settings.reader"),
-                    crate::i18n::tr("settings.dl_dir"),
-                    crate::i18n::tr("settings.system_app"),
-                ]
-                .iter()
-                .map(|s| s.to_string().into())
-                .collect();
+                // The Local row shows the EFFECTIVE base: the configured
+                // folder, else the storage-root default.
+                let local_dir = self
+                    .config
+                    .local_dir
+                    .clone()
+                    .filter(|d| !d.is_empty())
+                    .unwrap_or_else(crate::local::browse_root);
+                // (label key, value) per card, in display order; the
+                // System-app card only exists where the platform supports
+                // a home-task override.
+                let mut rows: Vec<(&str, String)> = vec![
+                    ("settings.api_host", self.config.api_url.clone()),
+                    ("settings.api_key", self.config.api_token.clone()),
+                    ("settings.reader", reader_val),
+                    ("settings.dl_dir", dl),
+                    ("settings.local_dir", local_dir),
+                ];
+                let sysapp_supported = crate::sysapp::platform_supported();
+                if sysapp_supported {
+                    rows.push(("settings.system_app", sysapp_val));
+                }
+                let labels: Vec<slint::SharedString> = rows
+                    .iter()
+                    .map(|(k, _)| crate::i18n::tr(k).to_string().into())
+                    .collect();
+                let sysapp_idx = if sysapp_supported {
+                    (labels.len() - 1) as i32
+                } else {
+                    -1
+                };
+                let values: Vec<slint::SharedString> =
+                    rows.into_iter().map(|(_, v)| v.into()).collect();
+                let n_rows = labels.len() as i32;
                 c.set_settings_labels(slint::ModelRc::new(slint::VecModel::from(labels)));
-                c.set_settings_api_host(self.config.api_url.clone().into());
-                c.set_settings_api_key(self.config.api_token.clone().into());
-                c.set_settings_reader(reader_val.into());
-                c.set_settings_dl_dir(dl.into());
-                c.set_settings_sysapp_on(sysapp_on);
-                c.set_settings_sysapp(sysapp_val.into());
+                c.set_settings_values(slint::ModelRc::new(slint::VecModel::from(values)));
+                c.set_settings_card_rows(n_rows);
+                c.set_settings_sysapp_idx(sysapp_idx);
                 c.set_settings_sysapp_on(sysapp_on);
                 c.set_settings_editing(match self.kb_editing {
                     Some(KbField::ApiHost) => 0,
@@ -659,6 +688,7 @@ impl<B: Framebuffer> App<B> {
                 c.set_settings_save(crate::i18n::tr("settings.save").to_string().into());
                 c.set_settings_logs(crate::i18n::tr("settings.logs").to_string().into());
                 c.set_settings_licenses(crate::i18n::tr("settings.licenses").to_string().into());
+                c.set_settings_reset(crate::i18n::tr("settings.reset_db").to_string().into());
             }
             Overlay::LogViewer => {
                 c.set_viewer_title(crate::i18n::tr("log.title").to_string().into());

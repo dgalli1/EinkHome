@@ -60,6 +60,7 @@ mod imp {
     }
     pub unsafe extern "C" fn FullUpdate() {}
     pub unsafe extern "C" fn PartialUpdate(_x: i32, _y: i32, _w: i32, _h: i32) {}
+    pub unsafe extern "C" fn CloseApp() {}
     pub unsafe extern "C" fn iv_update_panel(_reading_mode: i32) {}
     pub unsafe extern "C" fn DrawPanel(
         _icon: *const core::ffi::c_void,
@@ -213,6 +214,7 @@ mod imp {
             hproc: extern "C" fn(*mut i8),
         );
         pub(super) fn CloseKeyboard();
+        pub(super) fn CloseApp();
         pub(super) fn SetWeakTimerEx(
             name: *const u8,
             handler: extern "C" fn(*mut core::ffi::c_void),
@@ -243,7 +245,7 @@ mod imp {
 #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
 use imp::{
     device_has_audio, device_has_touchpanel, device_number, iv_ipc_cmd, iv_update_panel, BanSleep,
-    CloseKeyboard, DrawPanel, FullUpdate, GetBatteryPower, GetCanvas, GetDeviceModel,
+    CloseApp, CloseKeyboard, DrawPanel, FullUpdate, GetBatteryPower, GetCanvas, GetDeviceModel,
     GetFrontlightEnabled, GetFrontlightState, GetResource, GetSoftwareVersion, LoadPNG, NewTaskEx,
     OpenBook, OpenControlPanel, OpenKeyboard, PanelHeight, PartialUpdate, QueryNetwork, Repaint,
     ScreenHeight, ScreenWidth, SetWeakTimerEx,
@@ -251,10 +253,10 @@ use imp::{
 #[cfg(not(any(target_arch = "arm", target_arch = "aarch64")))]
 use imp::{
     device_has_audio, device_has_touchpanel, device_number, iv_ipc_cmd, iv_update_panel, BanSleep,
-    DrawPanel, FullUpdate, GetBatteryPower, GetCanvas, GetDeviceModel, GetFrontlightEnabled,
-    GetFrontlightState, GetResource, GetSoftwareVersion, LoadPNG, NewTaskEx, OpenBook,
-    OpenControlPanel, PanelHeight, PartialUpdate, QueryNetwork, Repaint, ScreenHeight, ScreenWidth,
-    SetWeakTimerEx,
+    CloseApp, DrawPanel, FullUpdate, GetBatteryPower, GetCanvas, GetDeviceModel,
+    GetFrontlightEnabled, GetFrontlightState, GetResource, GetSoftwareVersion, LoadPNG, NewTaskEx,
+    OpenBook, OpenControlPanel, PanelHeight, PartialUpdate, QueryNetwork, Repaint, ScreenHeight,
+    ScreenWidth, SetWeakTimerEx,
 };
 
 /// The inkview canvas-backed framebuffer.
@@ -746,4 +748,11 @@ pub fn arm_weak_timer(
             ms,
         );
     }
+}
+
+/// Public wrapper around the SDK import: ask inkview to close the app
+/// (C CloseApp) — return to the launcher / home screen.  A no-op on
+/// host builds (the SDL shell closes on its own `exit_requested`).
+pub fn close_app() {
+    unsafe { CloseApp() }
 }

@@ -87,6 +87,12 @@ fn init_once() {
 extern "C" fn eh_pb_tick(_data: *mut std::ffi::c_void) {
     APP.with(|a| {
         if let Some(app) = a.borrow_mut().as_mut() {
+            // Settings → Reset database asked to close: hand the shell
+            // back to inkview (the wiped DB rebuilds on the next start).
+            if app.exit_requested {
+                eh_backend_inkview::close_app();
+                return;
+            }
             // The 200 ms suggest poll (C suggest_debounce_tick); cheap
             // no-op while the search keyboard is closed.
             app.tick();

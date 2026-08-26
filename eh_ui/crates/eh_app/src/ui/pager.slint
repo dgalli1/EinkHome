@@ -22,7 +22,8 @@ component PagerButton inherits Rectangle {
     }
     Text {
         y: 0;
-        height: 51px;
+        height: parent.height;
+        width: parent.width;
         vertical-alignment: center;
         horizontal-alignment: center;
         font-size: 28px;
@@ -47,8 +48,8 @@ export component Pager inherits Rectangle {
     }
 
     Text {
-        y: 0;
-        height: 85px;
+        y: 16px;
+        height: 64px;
         x: (parent.width - self.preferred-width) / 2;
         vertical-alignment: center;
         font-size: 30px;

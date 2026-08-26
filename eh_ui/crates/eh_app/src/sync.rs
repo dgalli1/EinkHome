@@ -318,6 +318,13 @@ impl<B: Framebuffer> App<B> {
             self.sync_popup_open(SyncStage::Meta);
             return;
         }
+        // The Local source has no server chain: the sync button IS its
+        // manual re-import (the source chooser no longer rescans on
+        // every switch — it shows the cached rows instantly).
+        if self.source == Source::Local {
+            crate::local::kick_import(self);
+            return;
+        }
         self.start_sync(true);
     }
 
@@ -568,16 +575,23 @@ impl<B: Framebuffer> App<B> {
     pub(crate) fn warm_progress(&self) -> (u32, u32) {
         (self.warm.done(), self.warm.total as u32)
     }
-    /// Advance the top-bar sync glyph rotation while a sync or download is
-    /// in flight (C sync_spin_tick): 15°/s.  The facade ticks every 200 ms,
-    /// so +3° per active tick matches the C cadence; returns true when the
-    /// angle moved and the top bar needs a repaint.
+    /// Advance the top-bar sync glyph while a sync or download is in
+    /// flight.  The software renderer cannot rotate images, so the glyph
+    /// spins in baked 90° steps (ui::icons sync_rot): one quadrant per
+    /// third active tick — the facade ticks every 200 ms, so a full
+    /// revolution takes 2.4 s; returns true when the angle moved and the
+    /// top bar needs a repaint.
     pub(crate) fn sync_spin_tick(&mut self) -> bool {
         if !(self.syncing || self.downloader.pending > 0) {
             self.sync_angle = 0; // nothing in flight — the glyph rests
             return false;
         }
-        self.sync_angle = (self.sync_angle + 3) % 360;
+        self.spin_div += 1;
+        if self.spin_div < 3 {
+            return false;
+        }
+        self.spin_div = 0;
+        self.sync_angle = (self.sync_angle + 90) % 360;
         true
     }
 }

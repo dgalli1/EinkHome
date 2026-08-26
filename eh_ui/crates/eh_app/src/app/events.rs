@@ -48,12 +48,16 @@ impl<B: Framebuffer> App<B> {
                 self.log_drag_acc = 0;
                 self.drag_y = Some(*y);
                 // Slint hit-tests the press (TouchArea grab pairing); the
-                // release reports the semantic target.
+                // release reports the semantic target.  MinimalSoftwareWindow
+                // never redraws on its own: request the frame so the held
+                // button's pressed state (press inversion) flushes through
+                // present()'s Slint-dirt path.
                 self.ui
                     .dispatch(slint::platform::WindowEvent::PointerPressed {
                         position: slint::LogicalPosition::new(*x as f32, *y as f32),
                         button: slint::platform::PointerEventButton::Left,
                     });
+                self.ui.request_redraw();
             }
             InputEvent::PointerMove { x, y } => {
                 // Drag scrolling (C eh_main.c drag_scroll_move): the
@@ -126,6 +130,9 @@ impl<B: Framebuffer> App<B> {
                         position: slint::LogicalPosition::new(x as f32, y as f32),
                         button: slint::platform::PointerEventButton::Left,
                     });
+                // The released glyph must un-invert even when the click
+                // hit nothing App-visible.
+                self.ui.request_redraw();
                 self.pending_long =
                     is_long && self.tab == Tab::Library && self.overlay == Overlay::None;
                 self.pending_drag = dragged;

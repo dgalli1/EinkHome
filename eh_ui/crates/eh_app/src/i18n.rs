@@ -294,6 +294,13 @@ static TABLE: &[(&str, &str, &str, &str, &str)] = &[
         "Licenze",
     ),
     (
+        "settings.reset_db",
+        "Reset database",
+        "Datenbank zurücksetzen",
+        "Réinitialiser la base",
+        "Reimposta database",
+    ),
+    (
         "settings.system_app",
         "Install as system app",
         "Als System-App installieren",
@@ -445,6 +452,7 @@ static TABLE: &[(&str, &str, &str, &str, &str)] = &[
         "Téléchargé",
         "Scaricato",
     ),
+    ("detail.path", "Path", "Pfad", "Chemin", "Percorso"),
     ("detail.yes", "Yes", "Ja", "Oui", "Sì"),
     ("detail.no", "No", "Nein", "Non", "No"),
     ("dl.failed", "Failed", "Fehlgeschlagen", "Échoué", "Fallito"),
@@ -461,6 +469,13 @@ static TABLE: &[(&str, &str, &str, &str, &str)] = &[
         "Lade %d / %d",
         "Téléchargement %d / %d",
         "Download %d / %d",
+    ),
+    (
+        "settings.local_dir",
+        "Local folder",
+        "Lokaler Ordner",
+        "Dossier local",
+        "Cartella locale",
     ),
     (
         "dl.complete",
@@ -670,8 +685,9 @@ mod tests {
     #[test]
     fn table_rows_are_complete_across_languages() {
         // 83 keys ported verbatim from eh_g_i18n[] + dl.remaining + the
-        // Slint-port additions (ctx.details, detail.* metadata labels).
-        assert_eq!(TABLE.len(), 100, "unexpected i18n table size");
+        // Slint-port additions (ctx.details, detail.* metadata labels)
+        // + settings.reset_db.
+        assert_eq!(TABLE.len(), 103, "unexpected i18n table size");
         for row in TABLE {
             for col in [row.1, row.2, row.3, row.4] {
                 assert!(!col.is_empty(), "empty translation for key {}", row.0);

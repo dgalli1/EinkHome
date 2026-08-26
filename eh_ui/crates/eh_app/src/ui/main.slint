@@ -46,6 +46,17 @@ export component EhAppWindow inherits Window {
     in-out property <int> pages: 1;
     in-out property <bool> syncing: false;
     in-out property <int> sync-angle: 0;
+    // top-bar icon set + inverted press-feedback twins + spin quadrants
+    // (baked at boot; see ui/icons.rs)
+    in-out property <image> source-icon-inv;
+    in-out property <image> house-icon-inv;
+    in-out property <image> back-icon-inv;
+    in-out property <image> search-icon-inv;
+    in-out property <image> layout-grid-icon-inv;
+    in-out property <image> layout-list-icon-inv;
+    in-out property <image> sync-icon-inv;
+    in-out property <[image]> sync-frames;
+    in-out property <[image]> sync-frames-inv;
     in-out property <bool> grid-mode: true;
     in-out property <[ShelfTile]> entries: [];
     // folder browser body (Folder source)
@@ -84,16 +95,15 @@ export component EhAppWindow inherits Window {
     in-out property <string> sync-stripes: "";
     in-out property <string> settings-title: "";
     in-out property <[string]> settings-labels: [];
-    in-out property <string> settings-api-host: "";
-    in-out property <string> settings-api-key: "";
-    in-out property <string> settings-reader: "";
-    in-out property <string> settings-dl-dir: "";
-    in-out property <string> settings-sysapp: "";
+    in-out property <[string]> settings-values: [];   // aligned with labels
+    in-out property <int> settings-card-rows: 0;
+    in-out property <int> settings-sysapp-idx: -1;    // -1 = row hidden
     in-out property <bool> settings-sysapp-on: false;
     in-out property <int> settings-editing: -1;
     in-out property <string> settings-save: "";
     in-out property <string> settings-logs: "";
     in-out property <string> settings-licenses: "";
+    in-out property <string> settings-reset: "";
     in-out property <string> viewer-path: "";
     in-out property <string> detail-title: "";
     in-out property <[DetailRow]> detail-rows: [];
@@ -180,7 +190,7 @@ export component EhAppWindow inherits Window {
     property <length> avail-w: self.width - 16px;
     property <length> g-bot: content-bottom - 96px;
     property <length> g-avail-h: g-bot - 96px - 12px - 8px;
-    property <int> g-cols: avail-w >= 1480px ? 4 : (avail-w >= 840px ? 3 : 2);
+    property <int> g-cols: avail-w >= 1360px ? 4 : (avail-w >= 840px ? 3 : 2);
     property <int> g-rows: g-avail-h >= 1400px ? 3 : 2;
     property <length> cell-w: Math.min(Math.max(avail-w / g-cols, 280px), 420px);
     property <length> cell-h: Math.min(Math.max(g-avail-h / g-rows, 280px), 600px);
@@ -216,6 +226,15 @@ export component EhAppWindow inherits Window {
         layout-grid-icon: root.layout-grid-icon;
         layout-list-icon: root.layout-list-icon;
         sync-icon: root.sync-icon;
+        source-icon-inv: root.source-icon-inv;
+        house-icon-inv: root.house-icon-inv;
+        back-icon-inv: root.back-icon-inv;
+        search-icon-inv: root.search-icon-inv;
+        layout-grid-icon-inv: root.layout-grid-icon-inv;
+        layout-list-icon-inv: root.layout-list-icon-inv;
+        sync-icon-inv: root.sync-icon-inv;
+        sync-frames: root.sync-frames;
+        sync-frames-inv: root.sync-frames-inv;
         home => { root.home(); }
         source-btn => { root.source-btn(); }
         search => { root.search(); }
@@ -332,15 +351,15 @@ export component EhAppWindow inherits Window {
         height: root.height;
         title: root.settings-title;
         card-labels: root.settings-labels;
-        api-host: root.settings-api-host;
-        api-key: root.settings-api-key;
-        reader-value: root.settings-reader;
-        sysapp-value: root.settings-sysapp;
+        card-values: root.settings-values;
+        card-rows: root.settings-card-rows;
+        sysapp-idx: root.settings-sysapp-idx;
         sysapp-on: root.settings-sysapp-on;
         editing: root.settings-editing;
         save-label: root.settings-save;
         logs-label: root.settings-logs;
         licenses-label: root.settings-licenses;
+        reset-label: root.settings-reset;
         back-icon: root.back-icon;
         back => { root.settings-back(); }
         row-tap(i) => { root.settings-row(i); }

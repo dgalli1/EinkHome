@@ -10,6 +10,7 @@
 use eh_hal::Framebuffer;
 
 use crate::app::{App, KbField, Overlay, Tab, ViewMode};
+use crate::store::Store;
 use crate::ui::Action;
 
 impl<B: Framebuffer> App<B> {
@@ -108,9 +109,10 @@ impl<B: Framebuffer> App<B> {
                     }
                 }
                 Action::SyncDismiss => {
-                    if !self.syncing {
-                        self.set_overlay(Overlay::None);
-                    }
+                    // Tap-outside dismisses at any stage: the sheet is only
+                    // the progress view — the sync chain runs detached on
+                    // its worker and keeps going behind the closed sheet.
+                    self.set_overlay(Overlay::None);
                 }
                 Action::KbChar(c) => {
                     self.fb().kb_type_text(&c.to_string());
@@ -189,18 +191,39 @@ impl<B: Framebuffer> App<B> {
         self.overlay = Overlay::None;
     }
 
-    /// A settings row/button tap (C eh_on_tap_settings's dispatch).
+    /// The Settings rows in display order: the System-app card only
+    /// exists where a home-task override makes sense (PocketBook, or the
+    /// e2e's EH_SYSAPP_DIR hook).
+    fn settings_rows() -> Vec<crate::app::SettingsRow> {
+        use crate::app::SettingsRow;
+        let mut rows = vec![
+            SettingsRow::ApiHost,
+            SettingsRow::ApiKey,
+            SettingsRow::ReaderApp,
+            SettingsRow::DownloadFolder,
+            SettingsRow::LocalFolder,
+        ];
+        if crate::sysapp::platform_supported() {
+            rows.push(SettingsRow::SystemApp);
+        }
+        rows
+    }
+
+    /// A settings row/button tap (C eh_on_tap_settings's dispatch).  The
+    /// Slint page numbers cards 0..n and the three buttons n..n+2, so
+    /// the mapping follows the live row count.
     pub(crate) fn settings_row(&mut self, i: usize) {
         use crate::app::SettingsRow;
-        let row = match i {
-            0 => SettingsRow::ApiHost,
-            1 => SettingsRow::ApiKey,
-            2 => SettingsRow::ReaderApp,
-            3 => SettingsRow::DownloadFolder,
-            4 => SettingsRow::SystemApp,
-            5 => SettingsRow::Save,
-            6 => SettingsRow::ShowLogs,
-            _ => SettingsRow::Licenses,
+        let rows = Self::settings_rows();
+        let row = if i < rows.len() {
+            rows[i]
+        } else {
+            match i - rows.len() {
+                0 => SettingsRow::Save,
+                1 => SettingsRow::ShowLogs,
+                2 => SettingsRow::Licenses,
+                _ => SettingsRow::ResetDb,
+            }
         };
         match row {
             SettingsRow::ApiHost => self.edit_field(KbField::ApiHost),
@@ -215,6 +238,7 @@ impl<B: Framebuffer> App<B> {
                 self.overlay = Overlay::Licenses;
                 self.dirty = true;
             }
+            SettingsRow::ResetDb => self.reset_database(),
             SettingsRow::DownloadFolder => {
                 // Open the folder picker rooted at the storage root,
                 // starting at the current downloads dir when it is under
@@ -240,6 +264,29 @@ impl<B: Framebuffer> App<B> {
                 // picker opens empty until some other refresh happens.
                 self.refresh_shelf();
             }
+            SettingsRow::LocalFolder => {
+                // Same picker, different commit target: the Local-source
+                // base folder (starts at the current base when it is
+                // under the browse root).
+                let root = crate::local::browse_root();
+                let start = self
+                    .config
+                    .local_dir
+                    .clone()
+                    .filter(|d| d.starts_with(&root))
+                    .unwrap_or_else(|| root.clone());
+                let mut b = crate::local::browser::Browser {
+                    picker: true,
+                    picker_local: true,
+                    root: root.clone(),
+                    path: start,
+                    ..Default::default()
+                };
+                b.load();
+                self.dl_picker = Some(b);
+                self.overlay = Overlay::None;
+                self.refresh_shelf();
+            }
             SettingsRow::SystemApp => {
                 if crate::sysapp::detect() {
                     crate::sysapp::unpromote();
@@ -254,6 +301,38 @@ impl<B: Framebuffer> App<B> {
                 self.dirty = true;
             }
         }
+    }
+
+    /// Settings → Reset database: wipe the metadata store (every source's
+    /// books, history, cursors, downloaded flags) and close the app — the
+    /// next start re-syncs Kavita and re-imports Local from scratch.
+    ///
+    /// The sync worker and the local import scan hold their OWN store
+    /// connections to the same file, so both are aborted before the wipe;
+    /// a straggler writing into its unlinked handle is harmless, the
+    /// fresh database this creates is the one that survives.  Downloads
+    /// (the .epub files themselves) and the cover cache are NOT touched.
+    fn reset_database(&mut self) {
+        crate::logger::log("[bookshelf] settings: resetting the local database");
+        self.sync_abort();
+        crate::local::cancel_scan(self);
+        for suffix in ["", "-wal", "-shm"] {
+            let mut p = self.db_path.clone().into_os_string();
+            p.push(suffix);
+            let _ = std::fs::remove_file(std::path::PathBuf::from(p));
+        }
+        self.store = Store::open(&self.db_path).expect("reopen store after database reset");
+        // A clean shelf: no drill scope, no pickers, no overlays.
+        self.drill = 0;
+        self.drill_values = Default::default();
+        self.drill_names = Default::default();
+        self.drill_saved_pages = [0; 2];
+        self.context.dismiss();
+        self.detail_book = None;
+        self.dl_picker = None;
+        self.set_overlay(Overlay::None);
+        self.refresh_shelf();
+        self.exit_requested = true;
     }
 
     /// The book-detail page's back chevron: close + drop the stashed book.

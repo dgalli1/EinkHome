@@ -1,13 +1,38 @@
 // The top bar (C eh_topbar.c verbatim): white 96px band, house/back
-// chevron at x=8, source button (x=112 w=224, icon + label), centered
-// title, right icon stack (search/layout/sync/menu, 96px buttons from the
-// right edge with 8px pad), 2px vertical separators.  Icons are baked at
-// boot by the bridge (src/ui/icons.rs) from the same line-art code the C
-// port drew with, so glyph pixels match the previous renderer exactly.
+// chevron at x=8 (hit zone extends to the screen edge), source button
+// (x=112 w=224, icon + label), centered title, right icon stack
+// (search/layout/sync/menu, 96px buttons from the right edge with 8px
+// pad — the menu's hit zone extends to the screen edge), 2px vertical
+// separators.  Icons are baked at boot by the bridge (src/ui/icons.rs)
+// from the same line-art code the C port drew with, so glyph pixels
+// match the previous renderer exactly.
 
+// A chrome button: press feedback on e-ink is a hard color inversion — a
+// black fill plus the glyph's baked inverted twin while the TouchArea is
+// held.  `custom-glyph` buttons paint their own glyph (source label,
+// hamburger bars) and only get the fill + the `down` flag.
 component TopBarButton inherits TouchArea {
     width: 96px;
     height: 96px;
+    in-out property <image> icon;
+    in-out property <image> icon-inv: icon;
+    in-out property <bool> custom-glyph: false;
+    in-out property <bool> down: self.pressed;
+    // Glyph-tile offset for edge-extended hit zones: the tile is 96px,
+    // so +8px on a 104px button keeps the glyph where the narrower
+    // button had it while the touch area reaches the screen edge.
+    in-out property <length> icon-x: 0px;
+    Rectangle {
+        width: 100%;
+        height: 100%;
+        background: black;
+        visible: down;
+    }
+    Image {
+        x: parent.icon-x;
+        visible: !parent.custom-glyph;
+        source: parent.down ? parent.icon-inv : parent.icon;
+    }
 }
 
 export component TopBar inherits Rectangle {
@@ -17,8 +42,8 @@ export component TopBar inherits Rectangle {
 
     in-out property <bool> back: false;
     in-out property <string> top-title: "";
-    in-out property <string> source-label: "";
     in-out property <image> source-icon;
+    in-out property <string> source-label: "";
     in-out property <bool> syncing: false;
     in-out property <int> sync-angle: 0;
     in-out property <bool> search-tab: false;
@@ -31,7 +56,17 @@ export component TopBar inherits Rectangle {
     in-out property <image> layout-grid-icon;
     in-out property <image> layout-list-icon;
     in-out property <image> sync-icon;
-
+    // inverted twins (press feedback) — see TopBarButton
+    in-out property <image> source-icon-inv;
+    in-out property <image> house-icon-inv;
+    in-out property <image> back-icon-inv;
+    in-out property <image> search-icon-inv;
+    in-out property <image> layout-grid-icon-inv;
+    in-out property <image> layout-list-icon-inv;
+    in-out property <image> sync-icon-inv;
+    // the sync glyph's baked 90° spin quadrants, index = angle/90
+    in-out property <[image]> sync-frames;
+    in-out property <[image]> sync-frames-inv;
     callback home;
     callback source-btn;
     callback search;
@@ -39,39 +74,48 @@ export component TopBar inherits Rectangle {
     callback sync;
     callback menu;
 
-    // bottom separator (C draws it below the bar; the source button's
-    // white fill erases it in x112..336 exactly like the C app)
-    Rectangle { y: 95px; height: 2px; background: black; }
 
-    // left button: back chevron (search / drilled) or house
+    // left button: back chevron (search / drilled) or house.  The hit
+    // zone extends to the screen edge (x=0) and the fill runs into the
+    // separator at x=108 (no gap, like the right-side buttons); the
+    // glyph tile stays at the C position (x=8..104) via icon-x.
     TopBarButton {
-        x: 8px;
+        x: 0px;
+        width: 108px;
+        icon-x: 8px;
         clicked => { root.home(); }
-        Image {
-            source: root.back ? root.back-icon : root.house-icon;
-        }
+        icon: root.back ? root.back-icon : root.house-icon;
+        icon-inv: root.back ? root.back-icon-inv : root.house-icon-inv;
     }
 
-    // source button (hidden on the search tab)
-    TopBarButton {
-        x: 112px;
-        width: 224px;
+    // source button (hidden on the search tab): icon + label are painted
+    // here (custom glyph) so the label can flip white on press too.  It
+    // starts AT the separator's right edge (x=110) so its press fill has
+    // no gap either side; the glyph/label keep their absolute x via the
+    // +2px inner offsets.
+    src-btn := TopBarButton {
+        x: 110px;
+        width: 226px;
         visible: !root.search-tab;
+        custom-glyph: true;
         clicked => { root.source-btn(); }
-        // white fill over the button band (erases the separator below)
-        Rectangle { x: 0; y: 0; width: 224px; height: 96px; background: white; }
         Image {
-            x: 8px;
+            x: 10px;
             y: 22px;
-            source: root.source-icon;
+            source: src-btn.down ? root.source-icon-inv : root.source-icon;
         }
         Text {
-            x: 68px;
-            y: 28px;
+            x: 70px;
+            // Box center 52 → the 30px font's descender-free glyphs
+            // (cap band ≈35-57 at y:28) land on visual center ≈50 — the
+            // source-icon family's glyph center (globe 48.5, folder 49.5,
+            // book 52.5, all bottom-aligned at y≈73).  Line-box centering
+            // at y:28 rode 4px high, worst against the low book glyph.
+            y: 32px;
             height: 40px;
             vertical-alignment: center;
             font-size: 30px;
-            color: black;
+            color: src-btn.down ? white : black;
             overflow: elide;
             width: 148px;
             text: root.source-label;
@@ -81,7 +125,7 @@ export component TopBar inherits Rectangle {
     // centered title (C: 44px, glyph top at y0+28, budget between the
     // flanking stacks)
     Text {
-        property <length> left-w: root.search-tab ? 0px : (112px + 224px);
+        property <length> left-w: root.search-tab ? 0px : (110px + 226px);
         // browse mode hides the layout switch: its slot goes back to the
         // title.  16px total breathing room so an elided path never
         // touches the flanking separators/icons.
@@ -107,7 +151,8 @@ export component TopBar inherits Rectangle {
         x: root.width - 8px - 4 * 96px;
         visible: !root.search-tab;
         clicked => { root.search(); }
-        Image { source: root.search-icon; }
+        icon: root.search-icon;
+        icon-inv: root.search-icon-inv;
     }
 
     // layout switch: grid/list only applies to the shelf — hidden while
@@ -116,28 +161,35 @@ export component TopBar inherits Rectangle {
         x: root.width - 8px - 3 * 96px;
         visible: !root.search-tab && !root.browse-mode;
         clicked => { root.layout(); }
-        Image { source: root.grid-mode ? root.layout-grid-icon : root.layout-list-icon; }
+        icon: root.grid-mode ? root.layout-grid-icon : root.layout-list-icon;
+        icon-inv: root.grid-mode ? root.layout-grid-icon-inv : root.layout-list-icon-inv;
     }
 
+    // sync/refresh: while a sync or download runs the tick advances
+    // sync-angle in 90° steps and the baked quadrant swaps (the software
+    // renderer cannot rotate — see icons.rs)
     TopBarButton {
         x: root.width - 8px - 2 * 96px;
         visible: !root.search-tab;
         clicked => { root.sync(); }
-        Image {
-            source: root.sync-icon;
-            transform-rotation: root.syncing ? root.sync-angle * 1deg : 0deg;
-            transform-origin: { x: self.width / 2, y: self.height / 2 };
-        }
+        property <int> frame: Math.round(root.sync-angle / 90);
+        icon: root.syncing ? root.sync-frames[frame] : root.sync-icon;
+        icon-inv: root.syncing ? root.sync-frames-inv[frame] : root.sync-icon-inv;
     }
 
-    TopBarButton {
-        x: root.width - 8px - 96px;
+    mb-btn := TopBarButton {
+        // hit zone reaches the right screen edge; the 96px tile stays at
+        // its original x (= left edge of the widened button), so the
+        // hamburger keeps its exact C position.
+        x: root.width - 104px;
+        width: 104px;
         visible: !root.search-tab;
+        custom-glyph: true;
         clicked => { root.menu(); }
-        // hamburger: three 48x6 black bars at cy-21/-3/+15
-        Rectangle { x: 24px; y: 27px; width: 48px; height: 6px; background: black; }
-        Rectangle { x: 24px; y: 45px; width: 48px; height: 6px; background: black; }
-        Rectangle { x: 24px; y: 63px; width: 48px; height: 6px; background: black; }
+        // hamburger: three 48x6 bars at cy-21/-3/+15 (white on press)
+        Rectangle { x: 24px; y: 27px; width: 48px; height: 6px; background: mb-btn.down ? white : black; }
+        Rectangle { x: 24px; y: 45px; width: 48px; height: 6px; background: mb-btn.down ? white : black; }
+        Rectangle { x: 24px; y: 63px; width: 48px; height: 6px; background: mb-btn.down ? white : black; }
     }
 
     // vertical separators (drawn last so button fills don't cover them):
@@ -150,4 +202,8 @@ export component TopBar inherits Rectangle {
     Rectangle { x: root.width - 8px - 3 * 96px; y: 0; width: 2px; height: 96px; background: black; visible: seps; }
     Rectangle { x: root.width - 8px - 2 * 96px; y: 0; width: 2px; height: 96px; background: black; visible: seps; }
     Rectangle { x: root.width - 8px - 96px; y: 0; width: 2px; height: 96px; background: black; visible: seps; }
+    // bottom separator: drawn LAST so it runs continuously under every
+    // button — no per-button gaps (the old source-button white-fill erase
+    // is gone with it)
+    Rectangle { y: 95px; height: 2px; width: 100%; background: black; }
 }
