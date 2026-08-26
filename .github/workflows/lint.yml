@@ -28,6 +28,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: armv7-unknown-linux-gnueabi armv7-unknown-linux-gnueabihf
+      # Slint's text stack builds yeslogic-fontconfig-sys, whose build
+      # script shells out to pkg-config for fontconfig.
+      - name: Install pkg-config + fontconfig headers
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends pkg-config libfontconfig1-dev
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-zigbuild
