@@ -16,7 +16,7 @@ use crate::widgets::context::ContextAction;
 /// (Download all / Delete series).
 #[derive(Default)]
 pub struct MenuState {
-    /// Rows in tap order; parallel to [`MenuState::rects`].
+    /// Rows in tap order; parallel to the tap rectangles.
     pub items: Vec<ContextAction>,
     /// 0 = book menu, 1 = series menu (the `context menu open series=N`
     /// log marker).
