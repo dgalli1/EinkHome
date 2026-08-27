@@ -42,6 +42,7 @@ SETTINGS_ROW1_Y = 112
 CTX_ITEM_H = 96
 CTX_TITLE_H = 72
 CTX_PAD = 24
+CTX_PILL_H = 84  # clickable box inside each 96px row pitch (context.slint)
 # ── Launcher overlay layout (must match bookshelf.c) ─────────────────
 LAUNCHER_COLS = 3
 LAUNCHER_GROUP_H = 64
@@ -326,15 +327,23 @@ class BookshelfGeometry:
 
     def context_item_center(self, item: int, n_items: int = 2) -> tuple[int, int]:
         """Centre of context-menu item *item* (0-based) in a sheet of
-        *n_items* rows.  The app centres the sheet on the full logical
-        screen (``context_geom``: ``py = (ScreenHeight() - ph) / 2``),
-        not on the content area above the system strip."""
+        *n_items* rows.
+
+        The app centres the sheet on Slint's root screen-h, which is the
+        FULL scanout height (logical screen + system panel; the wrap
+        presents the panel below the framebuffer), not the logical
+        screen the rest of the harness reasons in — same trap as
+        ``_chooser_py``.  Pills are CTX_PILL_H tall inside a 96px pitch.
+        """
         pw = self.screen_w * 3 // 4
         ph = CTX_TITLE_H + n_items * CTX_ITEM_H + CTX_PAD
         px = (self.screen_w - pw) // 2
-        py = (self.screen_h - ph) // 2
-        iy = py + CTX_TITLE_H + item * CTX_ITEM_H
-        return (px + pw // 2, iy + CTX_ITEM_H // 2)
+        py = (self.screen_h + self.panel_h - ph) // 2
+        iy = py + CTX_TITLE_H + item * CTX_ITEM_H + CTX_PILL_H // 2
+        # Injected hwevent taps reach the app panel_h lower than the FB
+        # position they target (the emulator's input bridge adds the
+        # scanout offset); aim above by the same amount.
+        return (px + pw // 2, iy - self.panel_h)
 
     # ── firmware on-screen keyboard ───────────────────────────────────
     # The keyboard is drawn by the firmware in the guest's logical space.

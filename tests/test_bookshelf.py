@@ -2087,12 +2087,9 @@ def test_book_longpress_open(fresh_bookshelf):
     _clear_downloads()
     _restart_bookshelf(bs.emulator)
     bs.wait_for_stable()
-    before = bs.frame_hash()
-    bs.long_press_book(0)
-    bs.wait_hash_change(before)
-    bs.assert_log_contains("context menu open series=0")
+    bs.long_press_menu(0, series=False)
     before = bs.current_log()
-    bs.tap_context_item(0)  # Open
+    bs.tap_context_item(0, n_items=6)  # Open
     _wait_log_slice(bs, before, "draw_dl_popup")
     _wait_log_slice(bs, before, "launching reader")
     bs.assert_log_contains("download_book_file OK")
@@ -2107,12 +2104,9 @@ def test_book_longpress_download(fresh_bookshelf):
     _clear_downloads()
     _restart_bookshelf(bs.emulator)
     bs.wait_for_stable()
-    before = bs.frame_hash()
-    bs.long_press_book(0)
-    bs.wait_hash_change(before)
-    bs.assert_log_contains("context menu open series=0")
+    bs.long_press_menu(0, series=False)
     before = bs.current_log()
-    bs.tap_context_item(1)  # Download (0 is Open)
+    bs.tap_context_item(1, n_items=6)  # Download (0 is Open)
     _wait_log_slice(bs, before, "draw_dl_popup")
     _wait_log_count(bs, "download_book_file OK", 1)
     assert len(_downloaded_files()) >= 1
@@ -2123,22 +2117,20 @@ def test_book_longpress_delete(fresh_bookshelf):
     """Long-press a downloaded book → Delete removes the local file."""
     bs = fresh_bookshelf
     _clear_downloads()
-    _restart_bookshelf(bs.emulator)
     # First download the book so there is something to delete.
-    before = bs.current_log()
-    bs.long_press_book(0)
-    _wait_log_slice(bs, before, "context menu open series=0")
-    bs.tap_context_item(1)  # Download (0 is Open)
+    _restart_bookshelf(bs.emulator)
+    bs.wait_for_stable()
+    # First download the book so there is something to delete.
+    bs.tap_context_item(1, n_items=6)  # Download (0 is Open)
     _wait_log_count(bs, "download_book_file OK", 1)
     assert len(_downloaded_files()) >= 1, "setup download failed"
     # Dismiss the popup (the download kept it open), then delete via the
     # context menu.
     bs.tap_at(*bs.geom.book_tile_center(0))
     time.sleep(0.5)
+    bs.long_press_menu(0, series=False)
     before = bs.current_log()
-    bs.long_press_book(0)
-    _wait_log_slice(bs, before, "context menu open series=0")
-    bs.tap_context_item(2)  # Delete
+    bs.tap_context_item(2, n_items=6)  # Delete (device)
     _wait_log_slice(bs, before, "delete_book_file removed")
     assert len(_downloaded_files()) == 0, "delete did not remove the file"
 
@@ -2158,10 +2150,7 @@ def test_series_longpress_download_all(fresh_bookshelf):
         _group_by_series(bs)
         series_idx = _grouped_series_index(bs, _SERIES_STEM.replace("_", " "))
         pos = _goto_view_tile(bs, series_idx)
-        before = bs.frame_hash()
-        bs.long_press_book(pos)
-        bs.wait_hash_change(before)
-        bs.assert_log_contains("context menu open series=1")
+        bs.long_press_menu(pos, series=True)
         before = bs.current_log()
         bs.tap_context_item(0, n_items=2)  # Download all
         _wait_log_slice(bs, before, "draw_dl_popup")
@@ -2185,9 +2174,8 @@ def test_series_longpress_delete(fresh_bookshelf):
         series_idx = _grouped_series_index(bs, _SERIES_STEM.replace("_", " "))
         pos = _goto_view_tile(bs, series_idx)
         # Download the series first so delete has files to remove.
+        bs.long_press_menu(pos, series=True)
         before = bs.current_log()
-        bs.long_press_book(pos)
-        _wait_log_slice(bs, before, "context menu open series=1")
         bs.tap_context_item(0, n_items=2)  # Download all
         _wait_log_count(bs, "download_book_file OK", 2)
         removed_before = bs.current_log().count("delete_book_file removed")
@@ -2195,9 +2183,8 @@ def test_series_longpress_delete(fresh_bookshelf):
         # whole series.
         bs.tap_at(*bs.geom.book_tile_center(pos))
         time.sleep(0.5)
+        bs.long_press_menu(pos, series=True)
         before = bs.current_log()
-        bs.long_press_book(pos)
-        _wait_log_slice(bs, before, "context menu open series=1")
         bs.tap_context_item(1, n_items=2)  # Delete series
         _wait_log_slice(bs, before, "delete_series")
         removed_after = bs.current_log().count("delete_book_file removed")

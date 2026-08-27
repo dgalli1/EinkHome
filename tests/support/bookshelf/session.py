@@ -283,6 +283,30 @@ class BookshelfSession:
     def long_press_book(self, index: int, *, hold: float = 0.9) -> None:
         self.long_press_at(*self._g.book_tile_center(index), hold=hold)
 
+    def long_press_menu(self, index: int, series: bool) -> None:
+        """Long-press a tile until its context menu is actually open.
+
+        The injected hold is classified App-side against a 450ms budget,
+        which is racy on a loaded runner: a hold that straddles the
+        budget classifies as a plain tap and the menu never opens.
+        Retry a couple of times before giving up (the caller's
+        log-slice wait still asserts the exact scope line).
+        """
+        import time as _time
+        scope = "1" if series else "0"
+        needle = f"context menu open series={scope}"
+        last_err: AssertionError | None = None
+        for _ in range(3):
+            before = self.current_log()
+            self.long_press_book(index)
+            deadline = _time.monotonic() + 5.0
+            while _time.monotonic() < deadline:
+                if needle in self.current_log()[len(before):]:
+                    return
+                _time.sleep(0.3)
+            last_err = AssertionError(f"{needle} never appeared")
+        raise last_err
+
     def tap_sync_button(self) -> None:
         self.tap_at(*self._g.sync_button_center())
 
