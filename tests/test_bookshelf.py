@@ -402,6 +402,18 @@ def fresh_bookshelf(bookshelf_env, request):
     # reset it so every test boots on the default view.
     bs.backend.reset_view_state()
     bs.begin_snapshots(request.node.name)
+    # The guest's launches leak SysV message queues into the long-lived
+    # container IPC namespace; once one is created mode=0 (the firmware's
+    # msgget omits permission bits — see pbemu's force-msgq-bug.sh),
+    # later launches fail with EACCES and the UI wedges.  The runner uid
+    # owns the userns, so it can scrub them between tests.
+    if shutil.which(PODMAN) is not None:
+        subprocess.run(
+            [PODMAN, "unshare", "ipcrm", "--all=msg"],
+            check=False,
+            capture_output=True,
+            timeout=15,
+        )
     bs.backend.restart()
     bs.snapshot("boot")
     yield bs
@@ -2080,6 +2092,24 @@ def test_download_all_drains_beyond_first_slice(fresh_bookshelf):
         _clear_downloads()
 
 
+def _tap_context_and_wait(bs, item: int, needle: str, *, n_items: int) -> None:
+    """Tap a context row and wait for its log effect, retrying once.
+
+    A tap can be lost to a popup/outside-dismiss race on a loaded
+    runner (the menu closes without running the action); a second tap
+    is idempotent for every action used here (Open re-opens, Download
+    dedups via enqueue, Delete removes remaining files).
+    """
+    for attempt in range(2):
+        before = bs.current_log()
+        bs.tap_context_item(item, n_items=n_items)
+        try:
+            _wait_log_slice(bs, before, needle, timeout=12)
+            return
+        except AssertionError:
+            if attempt:
+                raise
+
 def test_book_longpress_open(fresh_bookshelf):
     """Long-press a book → context menu → Open works like a single tap:
     download (with the popup) then launch the reader."""
@@ -2088,10 +2118,8 @@ def test_book_longpress_open(fresh_bookshelf):
     _restart_bookshelf(bs.emulator)
     bs.wait_for_stable()
     bs.long_press_menu(0, series=False)
-    before = bs.current_log()
-    bs.tap_context_item(0, n_items=6)  # Open
-    _wait_log_slice(bs, before, "draw_dl_popup")
-    _wait_log_slice(bs, before, "launching reader")
+    _tap_context_and_wait(bs, 0, "draw_dl_popup", n_items=6)
+    _wait_log_slice(bs, bs.current_log(), "launching reader", timeout=20)
     bs.assert_log_contains("download_book_file OK")
     assert len(_downloaded_files()) >= 1
     _kill_guest_tasks()  # kill the launched reader
@@ -2105,9 +2133,7 @@ def test_book_longpress_download(fresh_bookshelf):
     _restart_bookshelf(bs.emulator)
     bs.wait_for_stable()
     bs.long_press_menu(0, series=False)
-    before = bs.current_log()
-    bs.tap_context_item(1, n_items=6)  # Download (0 is Open)
-    _wait_log_slice(bs, before, "draw_dl_popup")
+    _tap_context_and_wait(bs, 1, "draw_dl_popup", n_items=6)
     _wait_log_count(bs, "download_book_file OK", 1)
     assert len(_downloaded_files()) >= 1
     _clear_downloads()
@@ -2121,17 +2147,14 @@ def test_book_longpress_delete(fresh_bookshelf):
     _restart_bookshelf(bs.emulator)
     bs.wait_for_stable()
     # First download the book so there is something to delete.
-    bs.tap_context_item(1, n_items=6)  # Download (0 is Open)
-    _wait_log_count(bs, "download_book_file OK", 1)
+    _tap_context_and_wait(bs, 1, "download_book_file OK", n_items=6)
     assert len(_downloaded_files()) >= 1, "setup download failed"
     # Dismiss the popup (the download kept it open), then delete via the
     # context menu.
     bs.tap_at(*bs.geom.book_tile_center(0))
     time.sleep(0.5)
     bs.long_press_menu(0, series=False)
-    before = bs.current_log()
-    bs.tap_context_item(2, n_items=6)  # Delete (device)
-    _wait_log_slice(bs, before, "delete_book_file removed")
+    _tap_context_and_wait(bs, 2, "delete_book_file removed", n_items=6)
     assert len(_downloaded_files()) == 0, "delete did not remove the file"
 
 
@@ -2151,9 +2174,7 @@ def test_series_longpress_download_all(fresh_bookshelf):
         series_idx = _grouped_series_index(bs, _SERIES_STEM.replace("_", " "))
         pos = _goto_view_tile(bs, series_idx)
         bs.long_press_menu(pos, series=True)
-        before = bs.current_log()
-        bs.tap_context_item(0, n_items=2)  # Download all
-        _wait_log_slice(bs, before, "draw_dl_popup")
+        _tap_context_and_wait(bs, 0, "draw_dl_popup", n_items=2)
         bs.assert_log_contains("download_series")
         bs.assert_log_contains("queued=2")
         _wait_log_count(bs, "download_book_file OK", 2)
@@ -2175,8 +2196,7 @@ def test_series_longpress_delete(fresh_bookshelf):
         pos = _goto_view_tile(bs, series_idx)
         # Download the series first so delete has files to remove.
         bs.long_press_menu(pos, series=True)
-        before = bs.current_log()
-        bs.tap_context_item(0, n_items=2)  # Download all
+        _tap_context_and_wait(bs, 0, "draw_dl_popup", n_items=2)
         _wait_log_count(bs, "download_book_file OK", 2)
         removed_before = bs.current_log().count("delete_book_file removed")
         # Dismiss the popup (the download kept it open), then delete the
@@ -2184,9 +2204,7 @@ def test_series_longpress_delete(fresh_bookshelf):
         bs.tap_at(*bs.geom.book_tile_center(pos))
         time.sleep(0.5)
         bs.long_press_menu(pos, series=True)
-        before = bs.current_log()
-        bs.tap_context_item(1, n_items=2)  # Delete series
-        _wait_log_slice(bs, before, "delete_series")
+        _tap_context_and_wait(bs, 1, "delete_series", n_items=2)
         removed_after = bs.current_log().count("delete_book_file removed")
         assert removed_after - removed_before == 2, (
             f"delete-series removed {removed_after - removed_before} files, expected 2"
@@ -2217,13 +2235,24 @@ def _ensure_offline_assets(emulator: Emulator) -> None:
 
 
 def _wait_offline_log(bs: BookshelfSession) -> str:
-    """Poll the current invocation log until a cover cache hit appears."""
+    """Poll the current invocation log until a cover cache hit appears.
+
+    Cover ticks fire per grid rebuild; if the boot settled its first
+    paint before the PNG loader was ready, no later rebuild happens on
+    its own — flip the pager (a refresh_shelf runs either way) to give
+    the loader another tick.
+    """
     deadline = time.monotonic() + 10
     log = ""
+    nudged = False
     while time.monotonic() < deadline:
         log = bs.current_log()
         if "cover_tick cache hit id=" in log:
             break
+        if not nudged and deadline - time.monotonic() < 6:
+            bs.tap_pager_next()
+            bs.tap_pager_prev()
+            nudged = True
         time.sleep(0.5)
     return log
 

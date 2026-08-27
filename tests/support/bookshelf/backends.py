@@ -15,6 +15,7 @@ emulator those are `.live` host paths; on SDL they are local build dirs.
 
 from __future__ import annotations
 
+import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -174,7 +175,19 @@ class EmulatorBackend:
 
     # input
     def tap(self, x, y):
-        self._ui.tap(self._emu, x, y) if self._ui else self._emu.tap(x, y)
+        # podman exec hiccups (container busy on a loaded runner) must
+        # not lose a tap: retry once after a beat.
+        for attempt in range(2):
+            try:
+                if self._ui:
+                    self._ui.tap(self._emu, x, y)
+                else:
+                    self._emu.tap(x, y)
+                return
+            except subprocess.CalledProcessError:
+                if attempt:
+                    raise
+                time.sleep(1.0)
     def down(self, x, y):
         self._ui.pointer_down(self._emu, x, y) if self._ui else None
     def move(self, x, y):

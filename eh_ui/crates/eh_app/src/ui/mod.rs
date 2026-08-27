@@ -358,7 +358,10 @@ impl Ui {
         comp.on_source_outside(|| push_action(Action::SourceOutside));
         comp.on_chooser_row(|i| push_action(Action::ChooserRow(i as usize)));
         comp.on_chooser_outside(|| push_action(Action::ChooserOutside));
-        comp.on_context_row(|i| push_action(Action::ContextRow(i as usize)));
+        comp.on_context_row(|i| {
+            crate::log(&format!("[eh_app][diag] ctx row-tap idx={i}"));
+            push_action(Action::ContextRow(i as usize))
+        });
         comp.on_context_outside(|| push_action(Action::ContextOutside));
         comp.on_dl_cancel(|| push_action(Action::DownloadCancel));
         comp.on_dl_dismiss(|| push_action(Action::DownloadDismiss));
