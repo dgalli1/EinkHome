@@ -603,6 +603,8 @@ fn launch_app_impl(path: &str, name: &str, args: &[String]) -> bool {
             0,
         )
     };
+    let last_rc = rc;
+    LAST_NEWTASK_RC.with(|c| c.set(last_rc));
     // Keep the buffers alive until the next launch.
     let mut owned = Vec::with_capacity(cargs.len() + 3);
     owned.push(p);
@@ -668,9 +670,19 @@ impl InkviewFb {
         unsafe { OpenBook(c.as_ptr() as *const u8, std::ptr::null(), 1) }
     }
 
-    pub fn launch_app(&mut self, path: &str, name: &str, args: &[String]) -> bool {
+    fn launch_app(&mut self, path: &str, name: &str, args: &[String]) -> bool {
         launch_app_impl(path, name, args)
     }
+
+    fn last_launch_rc(&self) -> i32 {
+        LAST_NEWTASK_RC.with(|c| c.get())
+    }
+}
+
+// Raw rc of the last NewTaskEx call (launcher diagnostics).
+#[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
+thread_local! {
+    pub static LAST_NEWTASK_RC: std::cell::Cell<i32> = const { std::cell::Cell::new(0) };
 }
 
 /// Owners of the C strings passed to NewTaskEx (kept alive until the next
