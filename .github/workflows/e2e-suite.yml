@@ -1,10 +1,10 @@
 name: e2e-suite
 
 # Reusable e2e runner: full environment setup + one test suite.
-# Called by ci.yml twice per suite — the primary run and, only when it
-# fails, a retry that lands on a fresh runner (hosted-runner kernels
-# are intermittently unstable for the qemu guest: monitor shmget
-# crashes, boot hangs, informer deaths — a fresh VM usually recovers).
+# Called by ci.yml once per suite.  Boot flakiness on hosted-runner
+# kernels (monitor shmget crashes, boot hangs, informer deaths) is
+# absorbed inside the suite: _start_emulator retries the boot cycle
+# with backoff before failing.
 
 on:
   workflow_call:

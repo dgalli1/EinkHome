@@ -77,19 +77,3 @@ jobs:
     with:
       suite: scale
 
-
-  e2e-retry:
-    name: E2E (bookshelf suite, retry)
-    needs: e2e
-    if: failure()
-    uses: ./.github/workflows/e2e-suite.yml
-    with:
-      suite: bookshelf
-
-  e2e-scale-retry:
-    name: E2E (100k scale suite, retry)
-    needs: e2e-scale
-    if: failure()
-    uses: ./.github/workflows/e2e-suite.yml
-    with:
-      suite: scale
