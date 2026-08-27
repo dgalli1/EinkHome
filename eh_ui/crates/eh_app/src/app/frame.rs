@@ -929,4 +929,40 @@ mod self_panel_tests {
         app.rebuild_view();
         app.present();
     }
+
+    /// The corner scroll buttons must carry chevron ink: commit db14552
+    /// rewired the icon pushes and dropped set_chevron/set_chevron_down,
+    /// leaving the ScrollButtons (launcher grid + both viewers) with an
+    /// empty image — a blank bordered box.  With the launcher up, the
+    /// bottom-corner button bands must hold dark glyph pixels (the grey
+    /// disabled border is 0xaa, so only the chevron counts as dark).
+    #[test]
+    fn launcher_scroll_buttons_stamp_chevron_ink() {
+        let dir = std::env::temp_dir().join(format!("eh_slint_scroll_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let fb = FakeKb::with_panel(1072, 1448, false);
+        let cfg = Config {
+            api_url: "http://mock.invalid".into(),
+            ..Default::default()
+        };
+        let mut app = App::new(fb, cfg, None, &dir);
+        app.set_overlay(crate::app::Overlay::Launcher);
+        app.present();
+
+        let px = app.fb().surface_mut().to_vec();
+        let w = 1072usize;
+        // Each button is 150x96 at the window bottom; the 48x48 chevron
+        // is centred, so sample the inner region clear of the 2px border.
+        let band = |x0: usize| -> usize {
+            (1360..1444)
+                .map(|y| &px[y * w + x0..y * w + x0 + 146])
+                .map(|row| row.iter().filter(|p| **p < 80).count())
+                .sum()
+        };
+        let left = band(2);
+        let right = band(1072 - 150 + 2);
+        assert!(left > 50, "up-chevron ink missing (dark={left})");
+        assert!(right > 50, "down-chevron ink missing (dark={right})");
+    }
 }

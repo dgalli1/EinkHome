@@ -404,6 +404,10 @@ impl Ui {
         let inv_quads = slint::VecModel::from(icons.sync_inv_rot.clone());
         comp.set_sync_frames_inv(slint::ModelRc::new(inv_quads));
         comp.set_input_icon(icons.input.clone());
+        comp.set_input_icon_inv(icons.input_inv.clone());
+        comp.set_chevron(icons.chevron.clone());
+        comp.set_chevron_down(icons.chevron_down.clone());
+        comp.set_bulb_icon(icons.bulb.clone());
 
         Ui {
             window,
