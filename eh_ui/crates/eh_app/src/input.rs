@@ -444,10 +444,7 @@ impl<B: Framebuffer> App<B> {
             it.params.len()
         ));
         if !self.fb().launch_app(&it.path, &it.text, &it.params) {
-            crate::log(&format!(
-                "[eh_app] launch failed (NewTaskEx rc={})",
-                self.fb().last_launch_rc()
-            ));
+            crate::log("[eh_app] launch failed (no task system on this platform)");
         }
     }
 }

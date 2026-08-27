@@ -244,12 +244,6 @@ pub trait Framebuffer {
         false
     }
 
-    /// Raw platform rc of the last `launch_app` (0 == launched); used
-    /// only for failure diagnostics.
-    fn last_launch_rc(&self) -> i32 {
-        0
-    }
-
     /// Open the platform text keyboard, preloaded with `initial`.  On commit
     /// (or cancel) `on_done` receives the buffer contents; on a backend
     /// without a keyboard it is called immediately with `initial`.
