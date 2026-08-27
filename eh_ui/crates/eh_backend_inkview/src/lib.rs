@@ -384,7 +384,7 @@ impl Framebuffer for InkviewFb {
         );
     }
 
-    fn open_book(&mut self, path: &str, title: &str) -> bool {
+    fn open_book(&mut self, path: &str, title: &str) -> i32 {
         InkviewFb::open_book(self, path, title)
     }
 
@@ -663,9 +663,9 @@ impl InkviewFb {
     /// Open a downloaded book in the firmware reader (the stock bookshelf's
     /// canonical path: `OpenBook(path, NULL, 1)` routes through
     /// monitor.app/reader_controller).
-    pub fn open_book(&mut self, path: &str, _title: &str) -> bool {
+    pub fn open_book(&mut self, path: &str, _title: &str) -> i32 {
         let c = std::ffi::CString::new(path).unwrap_or_default();
-        unsafe { OpenBook(c.as_ptr() as *const u8, std::ptr::null(), 1) == 0 }
+        unsafe { OpenBook(c.as_ptr() as *const u8, std::ptr::null(), 1) }
     }
 
     pub fn launch_app(&mut self, path: &str, name: &str, args: &[String]) -> bool {

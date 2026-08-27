@@ -356,11 +356,21 @@ def _stage_binary(binary: Path) -> None:
     shutil.copy2(binary, bin_dir / "bookshelf.app")
     (bin_dir / "bookshelf.app").chmod(0o755)
 
-    # Write config to host-side .live
-    (bin_dir / "bookshelf.cfg").write_text(
-        f"api_url=http://127.0.0.1:{API_PORT}\napi_token={API_TOKEN}\n",
-        encoding="utf-8",
-    )
+    # Unlink-first: NO_KEEPID boots leave this cfg foreign-owned and
+    # 0644, so an in-place rewrite EACCESes; the parent dir stays
+    # host-writable (same trick as reset_view_state).
+    cfg = bin_dir / "bookshelf.cfg"
+    try:
+        cfg.write_text(
+            f"api_url=http://127.0.0.1:{API_PORT}\napi_token={API_TOKEN}\n",
+            encoding="utf-8",
+        )
+    except PermissionError:
+        cfg.unlink(missing_ok=True)
+        cfg.write_text(
+            f"api_url=http://127.0.0.1:{API_PORT}\napi_token={API_TOKEN}\n",
+            encoding="utf-8",
+        )
 
     # Push binary + config into running container via podman cp + exec.
     # container_sh runs INSIDE the container, so host paths don't work;

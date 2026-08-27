@@ -231,8 +231,9 @@ pub trait Framebuffer {
 
     /// Open a book file in the platform reader (the firmware's canonical
     /// open path).  Default: not available on this platform.
-    fn open_book(&mut self, _path: &str, _title: &str) -> bool {
-        false
+    /// Returns the raw inkview OpenBook rc (0 == launched).
+    fn open_book(&mut self, _path: &str, _title: &str) -> i32 {
+        -1
     }
 
     /// Launch another on-device application (the launcher's action).

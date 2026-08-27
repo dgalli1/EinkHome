@@ -198,7 +198,11 @@ impl<B: Framebuffer> App<B> {
                     path.display()
                 ));
                 crate::log(&format!("[eh_app] opening reader path={}", path.display()));
-                self.fb().open_book(&path_str, title)
+                let rc = self.fb().open_book(&path_str, title);
+                if rc != 0 {
+                    crate::log(&format!("[eh_app] OpenBook rc={rc}"));
+                }
+                rc == 0
             }
         };
         if !ok {
