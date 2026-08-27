@@ -176,8 +176,8 @@ class EmulatorBackend:
     # input
     def tap(self, x, y):
         # podman exec hiccups (container busy on a loaded runner) must
-        # not lose a tap: retry once after a beat.
-        for attempt in range(2):
+        # not lose a tap: retry with backoff.
+        for attempt in range(3):
             try:
                 if self._ui:
                     self._ui.tap(self._emu, x, y)
@@ -185,9 +185,9 @@ class EmulatorBackend:
                     self._emu.tap(x, y)
                 return
             except subprocess.CalledProcessError:
-                if attempt:
+                if attempt == 2:
                     raise
-                time.sleep(1.0)
+                time.sleep(1.0 + 2.0 * attempt)
     def down(self, x, y):
         self._ui.pointer_down(self._emu, x, y) if self._ui else None
     def move(self, x, y):
