@@ -88,9 +88,9 @@ jobs:
         run: |
           mkdir -p .cache
           podman save pbdev -o .cache/pbdev-image.tar
-      - name: Cache firmware zip
+      - name: Restore firmware zip
         id: cache-fw
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: .cache/fw
           key: pb-fw-${{ env.FIRMWARE_URL }}
@@ -99,6 +99,19 @@ jobs:
         run: |
           mkdir -p .cache/fw
           curl -fL --retry 3 --retry-delay 5 -o ".cache/fw/${{ env.FIRMWARE_ZIP }}" "${{ env.FIRMWARE_URL }}"
+          # Reject partial downloads now: a silently accepted truncated
+          # zip would be cached under the immutable key above forever.
+          unzip -tq ".cache/fw/${{ env.FIRMWARE_ZIP }}" >/dev/null
+      - name: Save firmware zip for future runs
+        # Persist immediately after a good download: actions/cache@v4's
+        # implicit post-job save is skipped whenever ANY step of the job
+        # fails afterwards (emulator flake, test failure), which kept
+        # every e2e attempt re-downloading the ~1.1 GB zip.
+        if: steps.cache-fw.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: .cache/fw
+          key: pb-fw-${{ env.FIRMWARE_URL }}
       - name: Stage firmware
         run: |
           cd pbemu

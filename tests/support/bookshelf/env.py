@@ -476,7 +476,26 @@ def _start_emulator_once() -> Emulator:
 def _wait_bookshelf_active(emulator: Emulator, timeout: float = 30.0) -> None:
     """Poll until bookshelf.app is the active task."""
     session = Session(emulator)
-    session.wait_for_active_app("bookshelf.app", "bookshelf", timeout=timeout)
+    try:
+        session.wait_for_active_app("bookshelf.app", "bookshelf", timeout=timeout)
+    except TimeoutError as exc:
+        # Hosted-runner-only failures (the app never registers) are
+        # undebuggable without the guest side: surface whatever the app
+        # and monitor logged before giving up.
+        tails: list[str] = []
+        for path in (
+            PBEMU_ROOT / FIRMWARE / ".live" / "tmp" / "bookshelf.log",
+            PBEMU_ROOT / FIRMWARE / ".live" / "mnt/ext1/system/bin/bookshelf.log",
+            PBEMU_ROOT / FIRMWARE / ".live" / "var/log/monitor.log",
+        ):
+            try:
+                text = path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            tail = "\n".join(text.splitlines()[-15:])
+            tails.append(f"--- {path.name} (last 15 lines) ---\n{tail}")
+        detail = "\n".join(tails) if tails else "(no guest logs found)"
+        raise TimeoutError(f"{exc}\n{detail}") from exc
 
 
 def _parse_panel_h(firmware: str) -> int:
