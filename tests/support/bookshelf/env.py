@@ -480,9 +480,85 @@ def _start_emulator_once() -> Emulator:
     )
 
     emulator = Emulator(firmware=FIRMWARE)
-    emulator.wait_for_monitor(timeout=60)
-    emulator.wait_for_hwevent(timeout=60)
+    _wait_boot(emulator)
     return emulator
+
+
+def _boot_forensics(last_exec_err: str) -> str:
+    """Guest-side evidence for a boot that never reached monitor.app."""
+    tails: list[str] = []
+    for path in (
+        PBEMU_ROOT / FIRMWARE / ".live" / "var" / "log" / "monitor.log",
+        PBEMU_ROOT / FIRMWARE / ".live" / "var" / "log" / "system.log",
+    ):
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        tails.append(f"--- {path.name} (last 20 lines) ---\n" + "\n".join(
+            text.splitlines()[-20:]
+        ))
+    ps = ""
+    try:
+        ps = subprocess.run(
+            [PODMAN, "ps", "-a", "--format", "{{.Names}} {{.Status}}"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        ).stdout
+    except Exception:  # noqa: BLE001 — diagnostics must not raise
+        ps = "(podman ps failed)"
+    return (
+        f"last podman exec error: {last_exec_err or '(none)'}"
+        f"\ncontainers:\n{ps}\n" + "\n".join(tails)
+    )
+
+
+def _wait_boot(emulator: Emulator, *, cap: float = 240.0, stall: float = 45.0) -> None:
+    """Wait for monitor.app + /hwevent with runner-tolerant semantics.
+
+    A fixed 60s wait failed 12x in a row on one hosted runner (and the
+    error carried no evidence — see the 2026-08-27 e2e boot failure).
+    Two changes:
+      - progress-aware: keep waiting while the guest makes observable
+        progress (monitor.log growing — a slow TCG boot under CPU steal
+        still converges), only give up when nothing changed for *stall*
+        seconds or *cap* elapsed;
+      - the raised error carries container state, the last exec error
+        and the guest log tails, so the next occurrence is diagnosable.
+    """
+    mlog = PBEMU_ROOT / FIRMWARE / ".live" / "var" / "log" / "monitor.log"
+    deadline = time.monotonic() + cap
+    last_change = time.monotonic()
+    last_size = -1
+    last_exec_err = ""
+    while time.monotonic() < deadline:
+        res = container_sh(
+            "ps -eo args | grep -q '[q]emu-arm.*monitor.app'"
+            " && test -e /dev/mqueue/hwevent",
+            check=False,
+        )
+        if res.returncode == 0:
+            return
+        last_exec_err = (res.stderr or "").strip().splitlines()[-1:] or [""]
+        last_exec_err = last_exec_err[0]
+        try:
+            size = mlog.stat().st_size
+        except OSError:
+            size = 0
+        if size != last_size:
+            last_size = size
+            last_change = time.monotonic()
+        if time.monotonic() - last_change > stall:
+            raise TimeoutError(
+                "guest boot stalled: no monitor.log growth for"
+                f" {stall:.0f}s and monitor.app never appeared\n"
+                + _boot_forensics(last_exec_err)
+            )
+        time.sleep(0.5)
+    raise TimeoutError(
+        f"guest boot exceeded {cap:.0f}s cap\n" + _boot_forensics(last_exec_err)
+    )
 
 
 def _wait_bookshelf_active(emulator: Emulator, timeout: float = 30.0) -> None:
