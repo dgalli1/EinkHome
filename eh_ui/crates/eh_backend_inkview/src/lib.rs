@@ -298,8 +298,16 @@ impl InkviewFb {
         }
     }
 
-    fn canvas(&self) -> ICanvas {
-        unsafe { std::ptr::read(GetCanvas()) }
+    /// Canvas snapshot; `None` when no canvas is registered yet (the host
+    /// stubs return null — `GetCanvas()` must only be read through this
+    /// guard, a bare `ptr::read` is UB on host builds).
+    fn canvas(&self) -> Option<ICanvas> {
+        let p = unsafe { GetCanvas() };
+        if p.is_null() {
+            None
+        } else {
+            Some(unsafe { std::ptr::read(p) })
+        }
     }
 }
 
@@ -315,22 +323,30 @@ impl Framebuffer for InkviewFb {
 
     fn format(&self) -> PixelFormat {
         // Kaleido colour devices: 24bpp canvas.  Monochrome: 8bpp gray.
-        match self.canvas().depth {
-            24 => PixelFormat::Rgb24,
-            32 => PixelFormat::Rgba32,
-            _ => PixelFormat::Grayscale8,
+        match self.canvas() {
+            Some(cv) => match cv.depth {
+                24 => PixelFormat::Rgb24,
+                32 => PixelFormat::Rgba32,
+                _ => PixelFormat::Grayscale8,
+            },
+            None => PixelFormat::Grayscale8,
         }
     }
 
     fn surface_mut(&mut self) -> &mut [u8] {
-        let cv = self.canvas();
+        let cv = match self.canvas() {
+            Some(cv) => cv,
+            // No canvas (host stub): an empty surface, never a null-derived
+            // slice — `from_raw_parts_mut` requires non-null even for len 0.
+            None => return &mut [],
+        };
         let stride = cv.scanline.max(cv.width) as usize;
         let bytes = stride * cv.height.max(0) as usize;
         unsafe { core::slice::from_raw_parts_mut(cv.addr, bytes) }
     }
 
     fn stride(&self) -> usize {
-        self.canvas().scanline.max(self.canvas().width) as usize
+        self.canvas().map_or(0, |cv| cv.scanline.max(cv.width)) as usize
     }
 
     fn refresh(&mut self, region: Rect, mode: RefreshMode) {
