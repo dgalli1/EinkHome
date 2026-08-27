@@ -23,6 +23,7 @@ import sys
 import time
 from collections.abc import Iterator
 from contextlib import suppress
+from pathlib import Path
 from typing import Any
 
 from storage.ledger import fingerprint_blob
@@ -842,7 +843,22 @@ class MockProvider(Provider):
         return None
 
     def get_cover(self, book_id: str) -> bytes | None:
-        # No real covers in mock mode — return the 1x1 placeholder.
+        # A staged sidecar cover (<book stem>.png next to the file —
+        # scripts/stage-mock-books.sh writes them for the e2e fixtures)
+        # is served as-is: the device refuses to cache the 1x1
+        # placeholder (its validate_cover_bytes rejects degenerate
+        # covers), so tests asserting on cached art need real PNGs.
+        for entry in self._scan():
+            if self._book_id(entry["abs"]) != book_id:
+                continue
+            sidecar = entry["abs"].rsplit(".", 1)[0] + ".png"
+            if os.path.isfile(sidecar):
+                try:
+                    return Path(sidecar).read_bytes()
+                except OSError:
+                    pass
+            break
+        # No real cover in mock mode — return the 1x1 placeholder.
         return PLACEHOLDER_PNG
 
     def open_file(self, book_id: str) -> tuple[str, Iterator[bytes]] | None:

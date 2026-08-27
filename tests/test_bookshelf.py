@@ -1796,6 +1796,24 @@ def _clear_downloads() -> None:
     )
 
 
+def _settle_log(bs: BookshelfSession, quiet: float, *, timeout: float = 20.0) -> None:
+    """Wait until the invocation log has been silent for *quiet* seconds
+    (or the timeout elapses).  Used after an action whose app-side echo
+    (auto-dismisses, auto-opens, retries) races the harness's next step:
+    once no new lines land for a beat the gesture stream is drained."""
+    deadline = time.monotonic() + timeout
+    last_len = len(bs.current_log())
+    since = time.monotonic()
+    while time.monotonic() < deadline:
+        time.sleep(0.2)
+        cur = len(bs.current_log())
+        if cur != last_len:
+            last_len = cur
+            since = time.monotonic()
+        elif time.monotonic() - since >= quiet:
+            return
+
+
 def _wait_log_count(bs: BookshelfSession, needle: str, count: int, *, timeout: float = 20.0) -> None:
     """Poll until *needle* appears at least *count* times in the current
     invocation's log (downloads drain one-per-timer-tick)."""
@@ -2156,7 +2174,7 @@ def test_book_longpress_download(fresh_bookshelf):
     _restart_bookshelf(bs.emulator)
     bs.wait_for_stable()
     bs.long_press_menu(0, series=False)
-    _tap_context_and_wait(bs, 1, "draw_dl_popup", n_items=6)
+    _tap_context_and_wait(bs, 2, "draw_dl_popup", n_items=6)
     _wait_log_count(bs, "download_book_file OK", 1)
     assert len(_downloaded_files()) >= 1
     _clear_downloads()
@@ -2169,16 +2187,52 @@ def test_book_longpress_delete(fresh_bookshelf):
     # First download the book so there is something to delete.
     _restart_bookshelf(bs.emulator)
     bs.wait_for_stable()
-    # First download the book so there is something to delete.
-    _tap_context_and_wait(bs, 1, "download_book_file OK", n_items=6)
-    assert len(_downloaded_files()) >= 1, "setup download failed"
-    # Dismiss the popup (the download kept it open), then delete via the
-    # context menu.
-    bs.tap_at(*bs.geom.book_tile_center(0))
-    time.sleep(0.5)
-    bs.long_press_menu(0, series=False)
-    _tap_context_and_wait(bs, 2, "delete_book_file removed", n_items=6)
-    assert len(_downloaded_files()) == 0, "delete did not remove the file"
+    # A single-book context download closes its own popup and auto-opens
+    # the reader (downloads.rs dl.autopen) — let that burst (including
+    # the failed OpenBook attempt on the stub epub) drain before the
+    # next gesture.  An unexpected app respawn can also swallow a
+    # gesture outright (the context-row tap then lands as a plain shelf
+    # tap), so both phases verify their exact effect from the log and
+    # retry; a retry whose delete hits a different book first cleans the
+    # downloads dir so the next attempt starts from a known state.
+    removed: str | None = None
+    for _attempt in range(3):
+        before = bs.current_log()
+        bs.long_press_menu(0, series=False)
+        bs.tap_context_item(2, n_items=6)
+        deadline = time.monotonic() + 30
+        target = None
+        while time.monotonic() < deadline and target is None:
+            m = re.search(
+                r"download_book_file OK .*path=(\S+\.epub)",
+                bs.current_log()[len(before):],
+            )
+            if m:
+                target = m.group(1)
+            else:
+                time.sleep(0.5)
+        assert target, "setup download failed"
+        _settle_log(bs, 3.0)
+        before = bs.current_log()
+        bs.long_press_menu(0, series=False)
+        bs.tap_context_item(4, n_items=6)
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline:
+            sl = bs.current_log()[len(before):]
+            if f"delete_book_file removed path={target}" in sl:
+                removed = target
+                break
+            if "delete_book_file missing" in sl:
+                # The menu opened on a different book than the one the
+                # setup phase downloaded — a respawn race re-targeted a
+                # gesture.  Clean up and redo both phases.
+                _clear_downloads()
+                break
+            time.sleep(0.5)
+        if removed:
+            break
+    assert removed is not None, "delete did not remove the downloaded file"
+    assert removed not in _downloaded_files()
 
 
 def test_series_longpress_download_all(fresh_bookshelf):
@@ -2629,3 +2683,20 @@ def test_search_folded_suggestion_finds_diacritic_title(fresh_bookshelf):
         _wait_draw_grid_view(bs, before, 1)
     finally:
         hp.unlink(missing_ok=True)
+
+
+def test_zz_probe_menu_book(fresh_bookshelf):
+    """Throwaway: which book does long-press(0) target?"""
+    import time as _t
+    bs = fresh_bookshelf
+    bs.wait_for_stable()
+    for attempt in range(2):
+        before = bs.current_log()
+        bs.long_press_menu(0, series=False)
+        sl = bs.current_log()[len(before):]
+        print(f"\n=== attempt {attempt}")
+        for l in sl.splitlines():
+            if any(k in l for k in ("menu open", "dl worker", "download_book", "set_read")):
+                print(l)
+        bs.tap_at(20, 300)
+        _t.sleep(0.8)

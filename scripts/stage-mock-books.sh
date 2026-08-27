@@ -43,6 +43,29 @@ for name in \
 	Twenty_Thousand_Leagues \
 	Wuthering_Heights; do
 	printf 'Mock book for e2e tests: %s\n' "${name}" > "${BOOKS_DIR}/${name}.epub"
+
+	# A real (240x360, two-tone) cover PNG per title: the app refuses to
+	# cache the API's 1x1 placeholder (validate_cover_bytes), so without
+	# these the offline cover-cache assertions can never fire.  One
+	# identical PNG for every title is enough — the suite asserts on
+	# cache hits and log lines, not on rendered art.
+	base64 -d > "${BOOKS_DIR}/${name}.png" <<'B64'
+iVBORw0KGgoAAAANSUhEUgAAAPAAAAFoCAIAAADmdeFfAAACt0lEQVR42u3UQQ0AIAADsUHQ
+gRKUzL8QPPAkrYTlsrFPA7+YJkDQIGgQNAgaQYOgQdAgaBA0ggZBg6BB0CBoBA2CBkGDoEHQ
+CBoEDYIGQYOgETQIGgQNggZBI2gQNAgaBA2CRtAgaBA0CBpBg6BB0CBoEDSCBkGDoEHQIGgE
+DYIGQYOgQdAIGgQNggZBg6ARNAgaBA2CBkEjaBA0CBoEDYJG0CBoEDQIGgSNoEHQIGgQNIIG
+QYOgQdAgaAQNggZBg6BB0AgaBA2CBkGDoBE0CBoEDYIGQSNoEDQIGgQNgkbQIGgQNAgaBI2g
+QdAgaBA0ggZBg6BB0CBoBA2CBkGDoEHQCBoEDYIGQYOgETQIGgQNggZBI2gQNAgaBA2CRtAg
+aBA0CBoEjaBB0CBoEDQIGkGDoEHQIGgEDYIGQYOgQdAIGgQNggZBg6ARNAgaBA2CBkEjaBA0
+CBoEDYJG0CBoEDQIGgSNoEHQIGh4t9paAQ8NggZBg6ARNAgaBA2CBkEjaBA0CBoEDYJG0CBo
+EDQIGgSNoEHQIGgQNAgaQYOgQdAgaBA0ggZBg6BB0CBoBA2CBkGDoBE0CBoEDYIGQSNoEDQI
+GgQNgkbQIGgQNAgaBI2gQdAgaBA0CBpBg6BB0CBoEDSCBkGDoEHQIGgEDYIGQYOgETQIGgQN
+ggZBI2gQNAgaBA2CRtAgaBA0CBoEjaBB0CBoEDQIGkGDoEHQIGgQNIIGQYOgQdAgaAQNggZB
+g6BB0AgaBA2CBkEjaBA0CBoEDYJG0CBoEDQIGgSNoEHQIGgQNAgaQYOgQdAgaBA0ggZBg6BB
+0CBoBA2CBkGDoEHQCBoEDYIGQSNoEDQIGgQNgkbQIGgQNAgaBI2gQdAgaBA0CBpBg6BB0CBo
+EDSCBkGDoEHQIGgEDYIGQYOgQdAIGgQNggZBQ3IB598ElDg9DcEAAAAASUVORK5CYII=
+B64
 done
 
 echo "Staged $(find "${BOOKS_DIR}" -maxdepth 1 -name '*.epub' | wc -l) books in ${BOOKS_DIR}"
+
