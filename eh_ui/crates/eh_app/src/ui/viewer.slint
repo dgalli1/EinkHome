@@ -60,6 +60,7 @@ export component LogViewerPage inherits Rectangle {
     in-out property <bool> up-ok: false;
     in-out property <bool> down-ok: false;
     in-out property <image> back-icon;
+    in-out property <image> back-icon-inv;
     in-out property <image> chevron;
     in-out property <image> chevron-down;
 
@@ -75,6 +76,7 @@ export component LogViewerPage inherits Rectangle {
         title-bold: true;
         top-title: root.title;
         back-icon: root.back-icon;
+        back-icon-inv: root.back-icon-inv;
         home => { root.back(); }
     }
     // the log path in its own band below the header rule
@@ -132,6 +134,7 @@ export component LicensesListPage inherits Rectangle {
     in-out property <bool> up-ok: false;
     in-out property <bool> down-ok: false;
     in-out property <image> back-icon;
+    in-out property <image> back-icon-inv;
     in-out property <image> chevron;
     in-out property <image> chevron-down;
 
@@ -148,6 +151,7 @@ export component LicensesListPage inherits Rectangle {
         title-bold: true;
         top-title: root.title;
         back-icon: root.back-icon;
+        back-icon-inv: root.back-icon-inv;
         home => { root.back(); }
     }
 
@@ -215,6 +219,7 @@ export component LicenseDetailPage inherits Rectangle {
     in-out property <bool> up-ok: false;
     in-out property <bool> down-ok: false;
     in-out property <image> back-icon;
+    in-out property <image> back-icon-inv;
     in-out property <image> chevron;
     in-out property <image> chevron-down;
 
@@ -230,6 +235,7 @@ export component LicenseDetailPage inherits Rectangle {
         title-bold: true;
         top-title: root.title;
         back-icon: root.back-icon;
+        back-icon-inv: root.back-icon-inv;
         home => { root.back(); }
     }
 

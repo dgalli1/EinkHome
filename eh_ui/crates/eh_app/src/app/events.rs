@@ -144,9 +144,13 @@ impl<B: Framebuffer> App<B> {
             }
             // The firmware's own long-press gesture (C EVT_POINTER_LONGPRESS):
             // many panels swallow the release after it, so the UP-timing
-            // heuristic above never fires on device.  Synthesise the press/
-            // release pair so Slint reports the pressed tile, then flag the
-            // pending long-press exactly as the UP path does.
+            // heuristic above never fires on device.  On the shelf the
+            // gesture opens the tile context menu; everywhere else it must
+            // still END the press — a chrome button held into the gesture
+            // would otherwise keep its TouchArea grab forever (the swallowed
+            // release never un-presses it) and stay color-inverted on
+            // screen.  Ending the grab fires the button's normal click,
+            // exactly like a delivered UP does for a long tap.
             InputEvent::PointerLongPress { x, y } => {
                 if self.tab == Tab::Library && self.overlay == Overlay::None {
                     self.press_pos = None;
@@ -165,6 +169,22 @@ impl<B: Framebuffer> App<B> {
                         });
                     self.long_press_seen = true;
                     self.pending_long = true;
+                    self.apply_actions();
+                } else if let Some((px, py)) = self.press_pos.take() {
+                    self.press_start = None;
+                    self.drag_total = 0;
+                    self.drag_y = None;
+                    // The real DOWN already grabbed the TouchArea; release
+                    // at the press position (inside the button) so the
+                    // click fires, then flag the gesture so the swallowed
+                    // or trailing UP is dropped without a second click.
+                    self.ui
+                        .dispatch(slint::platform::WindowEvent::PointerReleased {
+                            position: slint::LogicalPosition::new(px as f32, py as f32),
+                            button: slint::platform::PointerEventButton::Left,
+                        });
+                    self.ui.request_redraw();
+                    self.long_press_seen = true;
                     self.apply_actions();
                 }
             }

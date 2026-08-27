@@ -21,6 +21,7 @@ export component SettingsPage inherits Rectangle {
     in-out property <string> licenses-label: "";
     in-out property <string> reset-label: "";
     in-out property <image> back-icon;
+    in-out property <image> back-icon-inv;
 
     callback back;
     callback row-tap(int);   // 0..n cards, then n..n+3 = Save/logs/licenses/reset
@@ -34,6 +35,7 @@ export component SettingsPage inherits Rectangle {
         title-bold: true;
         top-title: root.title;
         back-icon: root.back-icon;
+        back-icon-inv: root.back-icon-inv;
         home => { root.back(); }
     }
 

@@ -361,6 +361,7 @@ export component EhAppWindow inherits Window {
         licenses-label: root.settings-licenses;
         reset-label: root.settings-reset;
         back-icon: root.back-icon;
+        back-icon-inv: root.back-icon-inv;
         back => { root.settings-back(); }
         row-tap(i) => { root.settings-row(i); }
     }
@@ -372,6 +373,7 @@ export component EhAppWindow inherits Window {
         cover: root.detail-cover;
         has-cover: root.detail-has-cover;
         back-icon: root.back-icon;
+        back-icon-inv: root.back-icon-inv;
         back => { root.detail-back(); }
     }
     if (root.overlay == EhOverlay.log-viewer): LogViewerPage {
@@ -387,6 +389,7 @@ export component EhAppWindow inherits Window {
         up-ok: root.viewer-up;
         down-ok: root.viewer-down;
         back-icon: root.back-icon;
+        back-icon-inv: root.back-icon-inv;
         back => { root.viewer-back(); }
         scroll(d) => { root.viewer-scroll(d); }
     }
@@ -401,6 +404,7 @@ export component EhAppWindow inherits Window {
         up-ok: root.viewer-up;
         down-ok: root.viewer-down;
         back-icon: root.back-icon;
+        back-icon-inv: root.back-icon-inv;
         back => { root.viewer-back(); }
         scroll(d) => { root.viewer-scroll(d); }
         row-tap(i) => { root.lic-row(i); }
@@ -416,6 +420,7 @@ export component EhAppWindow inherits Window {
         up-ok: root.viewer-up;
         down-ok: root.viewer-down;
         back-icon: root.back-icon;
+        back-icon-inv: root.back-icon-inv;
         back => { root.viewer-back(); }
         scroll(d) => { root.viewer-scroll(d); }
     }
@@ -433,6 +438,7 @@ export component EhAppWindow inherits Window {
         up-ok: root.launcher-up;
         down-ok: root.launcher-down;
         back-icon: root.back-icon;
+        back-icon-inv: root.back-icon-inv;
         back => { root.launcher-back(); }
         scroll-page(d) => { root.launcher-page(d); }
         cell(i) => { root.launcher-cell(i); }

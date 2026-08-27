@@ -930,6 +930,85 @@ mod self_panel_tests {
         app.present();
     }
 
+    /// The firmware long-press gesture (EVT_POINTER_LONGPRESS) fires
+    /// mid-hold and many panels then SWALLOW the trailing release — the
+    /// app never sees the UP.  On a chrome button (top-bar back chevron
+    /// on the launcher / settings) that used to leave the TouchArea
+    /// grabbed forever: the button stayed color-inverted and the page
+    /// never closed.  The gesture must end the press (firing the
+    /// button's normal click) on every screen, not just the shelf.
+    #[test]
+    fn longpress_releases_chrome_button_on_every_screen() {
+        let dir = std::env::temp_dir().join(format!("eh_lp_chrome_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let fb = FakeKb::with_panel(1072, 1448, false);
+        let cfg = Config {
+            api_url: "http://mock.invalid".into(),
+            ..Default::default()
+        };
+        let mut app = App::new(fb, cfg, None, &dir);
+        let dark_topbar = |app: &mut App<FakeKb>| -> usize {
+            let px = app.fb().surface_mut().to_vec();
+            let w = 1072usize;
+            (0..92)
+                .map(|y| &px[y * w..y * w + 104])
+                .map(|row| row.iter().filter(|p| **p < 80).count())
+                .sum()
+        };
+        // The top-bar back chevron (x 0..108, y 0..96), held into the
+        // firmware gesture; the panel swallows the trailing UP.
+        for ov in [crate::app::Overlay::Launcher, crate::app::Overlay::Settings] {
+            app.set_overlay(ov);
+            app.present();
+            app.on_event(&eh_hal::InputEvent::PointerDown { x: 54, y: 48 });
+            app.present();
+            let held = dark_topbar(&mut app);
+            app.on_event(&eh_hal::InputEvent::PointerLongPress { x: 54, y: 48 });
+            app.present();
+            // No PointerUp: the release was swallowed.  The gesture itself
+            // must have ended the press (un-inverted, page closed).
+            let after = dark_topbar(&mut app);
+            assert_eq!(
+                app.overlay,
+                crate::app::Overlay::None,
+                "{ov:?}: long-press must close the page (released back)"
+            );
+            assert!(
+                held - after > 1000,
+                "{ov:?}: button must un-invert (held={held} after={after})"
+            );
+            // And the swallowed UP must not re-fire the click afterwards.
+            app.set_overlay(ov);
+            app.present();
+            app.on_event(&eh_hal::InputEvent::PointerDown { x: 54, y: 48 });
+            app.on_event(&eh_hal::InputEvent::PointerLongPress { x: 54, y: 48 });
+            app.on_event(&eh_hal::InputEvent::PointerUp { x: 54, y: 48 });
+            app.present();
+            assert_eq!(
+                app.overlay,
+                crate::app::Overlay::None,
+                "{ov:?}: one gesture, one click"
+            );
+        }
+        // The shelf keeps its own gesture: a long-press on a tile arms the
+        // context menu (pending_long) and the trailing UP is consumed —
+        // never delivered to Slint as a second click.
+        app.set_overlay(crate::app::Overlay::None);
+        app.refresh_shelf();
+        app.present();
+        app.on_event(&eh_hal::InputEvent::PointerDown { x: 200, y: 300 });
+        app.on_event(&eh_hal::InputEvent::PointerLongPress { x: 200, y: 300 });
+        assert!(app.pending_long, "shelf long-press arms the context menu");
+        app.on_event(&eh_hal::InputEvent::PointerUp { x: 200, y: 300 });
+        // The UP went through the drop path (gesture already handled):
+        // the flag is reset and nothing re-dispatched to Slint.
+        assert!(
+            !app.long_press_seen,
+            "trailing UP consumed by the drop path"
+        );
+    }
+
     /// The corner scroll buttons must carry chevron ink: commit db14552
     /// rewired the icon pushes and dropped set_chevron/set_chevron_down,
     /// leaving the ScrollButtons (launcher grid + both viewers) with an
