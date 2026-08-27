@@ -43,18 +43,28 @@ jobs:
         with:
           path: pbemu/.venv
           key: pbemu-venv-${{ steps.pbemu-rev.outputs.sha }}-${{ hashFiles('pbemu/pyproject.toml') }}
-      - name: Set up pbemu venv
-        if: steps.cache-venv.outputs.cache-hit != 'true'
-        run: cd pbemu && ./setup-venv.sh
+      # A GH-cache restore can claim success yet deliver a tree whose
+      # .venv/bin/python is absent (observed 2026-08-27 during a cache
+      # service outage: BlobNotFound + silently incomplete archives).
+      # Verify before trusting it; rebuild in place when broken so a
+      # poisoned cache never bricks whole suites downstream.
+      - name: Set up pbemu venv (verified)
+        run: |
+          cd pbemu
+          if [ -x .venv/bin/python ] && \
+             .venv/bin/python -c 'import sys, pytest, pbemu  # noqa: F401' 2>/dev/null; then
+            echo 'cached venv usable'
+          else
+            echo 'venv missing/broken; rebuilding'
+            rm -rf .venv
+            ./setup-venv.sh
+          fi
       - name: Cache PocketBook SDK
         id: cache-sdk
         uses: actions/cache@v4
         with:
           path: sdk/pocketbook-sdk-b288
           key: pb-sdk-b288-${{ hashFiles('sdk/install-sdk.sh') }}
-      - name: Install PocketBook SDK
-        if: steps.cache-sdk.outputs.cache-hit != 'true'
-        run: ./sdk/install-sdk.sh
       - name: Set up Rust (armv7 cross + zigbuild)
         uses: dtolnay/rust-toolchain@stable
         with:
