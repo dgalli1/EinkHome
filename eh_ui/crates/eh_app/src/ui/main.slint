@@ -435,6 +435,7 @@ export component EhAppWindow inherits Window {
         back-icon: root.back-icon;
         back => { root.launcher-back(); }
         scroll-page(d) => { root.launcher-page(d); }
+        cell(i) => { root.launcher-cell(i); }
     }
     if (root.overlay == EhOverlay.sync): SyncSheet {
         content-h: Math.floor(root.content-bottom / 1px);
