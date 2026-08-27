@@ -1,7 +1,7 @@
 name: dev-release
 
-# Build every executable for every target and publish them as a rolling
-# "dev" prerelease on GitHub:
+# Build every executable for every target and publish them as prereleases
+# on GitHub:
 #
 #   bookshelf.app        PocketBook armel (every device but the InkPad One)
 #   bookshelf.armhf.app  PocketBook armhf (InkPad One)
@@ -329,14 +329,16 @@ jobs:
         run: |
           cd dist
           sha256sum -- * > SHA256SUMS
-      - name: Publish rolling dev release
+      - name: Publish dev releases
         env:
           GH_TOKEN: ${{ github.token }}
           REF_NAME: ${{ github.ref_name }}
           SHA: ${{ github.sha }}
         run: |
+          SHORT="${SHA:0:7}"
+          TAG="dev-${SHORT}"
           {
-            echo "Rolling dev build of \`${REF_NAME}\` @ ${SHA}"
+            echo "Dev build of \`${REF_NAME}\` @ ${SHA}"
             echo
             echo "Built by the [dev-release pipeline](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/workflows/dev-release.yml)."
             echo
@@ -351,12 +353,22 @@ jobs:
             echo "PocketBook install: unzip, then \`./install.sh <device-ip> [api-url]\`."
             echo "Kobo/reMarkable: copy \`bookshelf-linux-armv7\` to the device and run it from its directory."
           } > notes.md
-          # Rolling release: recreate so the tag always points at the
-          # built commit, then upload the fresh assets.
-          gh release delete dev --yes --cleanup-tag 2>/dev/null || true
-          gh release create dev --prerelease \
-            --title "Dev build (${REF_NAME} @ ${SHA:0:7})" \
+          # Immutable per-push prerelease: one release per built commit.
+          # Re-running the workflow for the same SHA recreates its own
+          # release rather than failing on the existing tag.
+          gh release delete "$TAG" --yes --cleanup-tag 2>/dev/null || true
+          gh release create "$TAG" --prerelease \
+            --title "Dev build (${REF_NAME} @ ${SHORT})" \
             --notes-file notes.md \
             --target "$SHA" \
             dist/*
-          gh release view dev --json assets --jq '.assets[].name'
+          # Rolling alias: recreate so the `dev` tag always points at the
+          # newest built commit, then upload the fresh assets.  Drop this
+          # block if nothing consumes the rolling `dev` tag.
+          gh release delete dev --yes --cleanup-tag 2>/dev/null || true
+          gh release create dev --prerelease \
+            --title "Dev build (${REF_NAME} @ ${SHORT})" \
+            --notes-file notes.md \
+            --target "$SHA" \
+            dist/*
+          gh release view "$TAG" --json assets --jq '.assets[].name'
