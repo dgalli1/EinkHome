@@ -222,11 +222,6 @@ class BookshelfGeometry:
         y = SETTINGS_ROW1_Y + row * SETTINGS_ROW_H
         return (self.screen_w // 2, y + (SETTINGS_ROW_H - 12) // 2)
 
-    def settings_sysapp_center(self) -> tuple[int, int]:
-        """Centre of the Install-as-system-app toggle row (row 5 — the
-        harness always sets EH_SYSAPP_DIR, so the row is present)."""
-        return self.settings_row_center(5)
-
     def settings_save_center(self) -> tuple[int, int]:
         """Centre of the Save & apply button (below the 6 cards)."""
         y = SETTINGS_ROW1_Y + 6 * SETTINGS_ROW_H + 24

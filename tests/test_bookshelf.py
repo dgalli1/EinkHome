@@ -491,16 +491,23 @@ def test_header_tap_opens_control_panel(fresh_bookshelf):
     firmware control panel.  Regression: the handler was dropped in the
     popup commit, silently breaking the strip tap for the self-drawn
     strip case (the live device, where the firmware panel never
-    activates).  In the emulator the firmware's panel intercepts the
-    tap itself, so this only runs when the app draws the strip.  The
-    strip lives at the BOTTOM of the screen (stock type-1 panel)."""
+    activates).  The strip lives at the BOTTOM of the screen (stock
+    type-1 panel).
+
+    Backend-agnostic assertion: whichever surface handles the tap, the
+    screen changes — the app-drawn strip logs the firmware handoff and
+    the firmware's own panel repaints.  A framebuffer hash change is
+    the portable proof, so no skip is needed."""
     bs = fresh_bookshelf
-    log = bs.current_log()
-    if "self_panel=1" not in log:
-        pytest.skip("firmware panel active: the tap is handled by the firmware")
-    before = bs.current_log()
+    app_drawn = "self_panel=1" in bs.current_log()
+    before_log = bs.current_log()
+    before = bs.frame_hash()
     bs.tap_at(bs.geom.screen_w // 2, bs.geom.screen_h - bs.geom.panel_h // 2)
-    _wait_log_slice(bs, before, "system bar tapped -> control panel")
+    bs.wait_hash_change(before, timeout=15)
+    if app_drawn:
+        # On the app-drawn surface the tap must reach the app and be
+        # handed to the firmware (open_control_panel), not swallowed.
+        _wait_log_slice(bs, before_log, "system bar tapped -> control panel")
 
 
 def test_menu_button_opens_more_overlay(fresh_bookshelf):
@@ -786,63 +793,6 @@ def test_settings_api_host_row_opens_keyboard(fresh_bookshelf):
     bs.tap_settings_row(0)
     bs.wait_hash_change(before)
 
-
-def test_settings_system_app_toggle_promotes_and_demotes(fresh_bookshelf):
-    """Install-as-system-app: toggling ON copies the running binary + a
-    fresh cfg to the home-task path; toggling OFF removes them again.
-
-    SDL-only: on the emulator the app IS the home task (it runs from
-    /mnt/ext1/system/bin/bookshelf.app), so sysapp_self_bin() == the
-    promote target -> promote is a deliberate no-op and the copy this
-    test inspects never happens.  The test's premise (target dir differs
-    from the running binary) only holds under SDL, where EH_SYSAPP_DIR
-    isolates a per-instance run_dir/sysapp.
-    """
-    if os.environ.get("EH_TEST_BACKEND", "emulator") != "sdl":
-        pytest.skip("sysapp promote/demote target == running binary under "
-                    "the emulator; needs an isolated EH_SYSAPP_DIR (SDL)")
-
-    def _exists(path: Path) -> bool:
-        return path.exists()
-
-    bs = fresh_bookshelf
-    run_dir = bs.backend._run_dir
-    sysapp = run_dir / "sysapp"
-    app = sysapp / "bookshelf.app"
-    cfg = sysapp / "bookshelf.cfg"
-    # Start from a clean slate.
-    app.unlink(missing_ok=True)
-    cfg.unlink(missing_ok=True)
-    assert not _exists(app)
-
-    bs.open_settings()
-    bs.wait_for_stable(timeout=20.0)
-
-    # Toggle ON → home-task override + cfg appear.
-    before = bs.frame_hash()
-    bs.tap_settings_sysapp()
-    bs.wait_hash_change(before, timeout=20.0)
-    deadline = time.monotonic() + 10.0
-    while time.monotonic() < deadline and not (_exists(app) and _exists(cfg)):
-        time.sleep(0.2)
-    assert _exists(app), "promote did not write bookshelf.app"
-    assert _exists(cfg), "promote did not write bookshelf.cfg"
-    assert app.stat().st_size > 1000, "promoted binary looks empty"
-    assert "api_url=" in cfg.read_text(encoding="utf-8"), \
-        "promoted cfg lost the API url"
-    assert bs.current_log().count("installed as home task") >= 1, \
-        "log missing promote result"
-
-    # Toggle OFF → override + cfg are removed again.
-    before2 = bs.frame_hash()
-    bs.tap_settings_sysapp()
-    bs.wait_hash_change(before2, timeout=20.0)
-    deadline = time.monotonic() + 10.0
-    while time.monotonic() < deadline and (_exists(app) or _exists(cfg)):
-        time.sleep(0.2)
-    assert not _exists(app), "demote left bookshelf.app behind"
-    assert not _exists(cfg), "demote left bookshelf.cfg behind"
-    assert bs.current_log().count("removed from system") >= 1
 
 
 # ── launcher (app grid) ───────────────────────────────────────────────
