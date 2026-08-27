@@ -1752,7 +1752,19 @@ def _clear_downloads() -> None:
             try:
                 p.unlink()
             except OSError as exc:
-                leftovers.append(f"{p.name}: {exc}")
+                # PBEMU_NO_KEEPID sessions map guest-downloaded files to
+                # subordinate uids the host uid cannot remove when the
+                # guest also owns their parent dir; delete through the
+                # container's userns view instead (rootless podman is a
+                # hard requirement of this fixture).
+                subprocess.run(
+                    [PODMAN, "unshare", "rm", "-f", str(p)],
+                    check=False,
+                    capture_output=True,
+                    timeout=15,
+                )
+                if p.exists():
+                    leftovers.append(f"{p.name}: {exc}")
         if not leftovers and not _downloaded_files():
             return
         time.sleep(0.5)
