@@ -410,7 +410,7 @@ def _start_emulator() -> Emulator:
     tries so a flaky boot does not fail the whole suite.
     """
     last_exc: Exception | None = None
-    for _attempt in range(8):
+    for _attempt in range(12):
         try:
             return _start_emulator_once()
         except Exception as exc:  # noqa: BLE001
@@ -421,8 +421,10 @@ def _start_emulator() -> Emulator:
                 env=_pbemu_env(),
                 check=False,
             )
-            time.sleep(2.0)
-    raise RuntimeError(f"emulator did not boot after 8 attempts: {last_exc}")
+            # Paced retry: the failure mode is a runner kernel that
+            # refuses guest SysV SHM until some host-side state clears.
+            time.sleep(min(2.0 + 2.0 * _attempt, 10.0))
+    raise RuntimeError(f"emulator did not boot after 12 attempts: {last_exc}")
 
 
 def _start_emulator_once() -> Emulator:

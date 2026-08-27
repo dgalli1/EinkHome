@@ -162,6 +162,26 @@ jobs:
           else
             pbemu/.venv/bin/python -m pytest tests/test_bookshelf.py -q
           fi
+      - name: Capture host forensics on failure
+        # Bookshelf-suite boots have died at guest-SHM init on hosted
+        # runners while scale passes on neighbouring VMs of the same
+        # image; kernel/podman state at death time is the missing
+        # evidence (OOM kills, netavark crashes, sysctl drift).
+        if: failure()
+        run: |
+          {
+            echo '── sysctl IPC ──'
+            sysctl kernel.shmmax kernel.shmall kernel.msgmax kernel.msgmnb \
+              kernel.msgmni kernel.sem 2>&1
+            echo '── limits ──'
+            ulimit -a
+            echo '── dmesg tail ──'
+            sudo dmesg | tail -80
+            echo '── podman events ──'
+            podman events --since 30m --stream=false 2>&1 | tail -60
+            echo '── containers ──'
+            podman ps -a 2>&1
+          } > build/host-forensics.txt 2>&1 || true
       - name: Generate HTML report
         # Playwright-style report (see docs/playwright-report-spec.md):
         # per-action screenshots + steps + errors, rendered from
