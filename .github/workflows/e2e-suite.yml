@@ -59,9 +59,26 @@ jobs:
             rm -rf .venv
             ./setup-venv.sh
           fi
-      - name: Cache PocketBook SDK
+      # Restore/install/save mirrors the firmware pattern below: the
+      # implicit post-job save of actions/cache@v4 is skipped whenever
+      # ANY later step fails (emulator flake), which would keep e2e
+      # runs re-fetching the SDK forever after one bad suite.
+      - name: Restore PocketBook SDK cache
         id: cache-sdk
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
+        with:
+          path: sdk/pocketbook-sdk-b288
+          key: pb-sdk-b288-${{ hashFiles('sdk/install-sdk.sh') }}
+      - name: Install PocketBook SDK (cache miss)
+        # All repo caches expired together on 2026-09-04 (7-day
+        # inactivity since the last green run) and the bookshelf suites
+        # died at "required path missing: .../inkview.h" — this step is
+        # the fallback the other cached inputs always had.
+        if: steps.cache-sdk.outputs.cache-hit != 'true'
+        run: sdk/install-sdk.sh
+      - name: Save PocketBook SDK for future runs
+        if: steps.cache-sdk.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
         with:
           path: sdk/pocketbook-sdk-b288
           key: pb-sdk-b288-${{ hashFiles('sdk/install-sdk.sh') }}

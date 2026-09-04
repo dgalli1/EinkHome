@@ -160,7 +160,10 @@ fn resolve_dirs(droid: &AndroidApp) -> (std::path::PathBuf, std::path::PathBuf) 
     // reading the staged cfg from it, but run the store/scratch state out
     // of a dir we CAN write, so App::new's store open survives the first
     // launch instead of aborting into a black screen.
-    eprintln!("[eh_android] data dir {} unwritable; falling back", files_dir.display());
+    eprintln!(
+        "[eh_android] data dir {} unwritable; falling back",
+        files_dir.display()
+    );
     for fallback in ["/data/local/tmp/einkhome"] {
         let fb = std::path::PathBuf::from(fallback);
         if is_writable(&fb) {
@@ -185,7 +188,11 @@ fn resolve_dirs(droid: &AndroidApp) -> (std::path::PathBuf, std::path::PathBuf) 
 /// appop on API 30+, the legacy WRITE_EXTERNAL_STORAGE grant below that.
 fn storage_granted(env: &mut jni::Env) -> jni::errors::Result<bool> {
     let sdk = env
-        .get_static_field(jni_str!("android/os/Build$VERSION"), jni_str!("SDK_INT"), jni_sig!("I"))?
+        .get_static_field(
+            jni_str!("android/os/Build$VERSION"),
+            jni_str!("SDK_INT"),
+            jni_sig!("I"),
+        )?
         .i()?;
     if sdk >= 30 {
         // Environment.isExternalStorageManager()
@@ -217,22 +224,36 @@ fn storage_granted(env: &mut jni::Env) -> jni::errors::Result<bool> {
 /// runtime permission dialog is requested directly.
 fn request_storage(env: &mut jni::Env) -> jni::errors::Result<()> {
     let sdk = env
-        .get_static_field(jni_str!("android/os/Build$VERSION"), jni_str!("SDK_INT"), jni_sig!("I"))?
+        .get_static_field(
+            jni_str!("android/os/Build$VERSION"),
+            jni_str!("SDK_INT"),
+            jni_sig!("I"),
+        )?
         .i()?;
     let activity = activity_object(env)?;
     if sdk >= 30 {
         let action = env.new_string("android.settings.MANAGE_APP_ALL_FILES_ACCESS_PERMISSION")?;
-        let intent =
-            env.new_object(jni_str!("android/content/Intent"), jni_sig!("(Ljava/lang/String;)V"), &[(&action).into()])?;
+        let intent = env.new_object(
+            jni_str!("android/content/Intent"),
+            jni_sig!("(Ljava/lang/String;)V"),
+            &[(&action).into()],
+        )?;
         let pkg = env
-            .call_method(&activity, jni_str!("getPackageName"), jni_sig!("()Ljava/lang/String;"), &[])?
+            .call_method(
+                &activity,
+                jni_str!("getPackageName"),
+                jni_sig!("()Ljava/lang/String;"),
+                &[],
+            )?
             .l()?;
         let scheme = env.new_string("package")?;
         let uri = env
             .call_static_method(
                 jni_str!("android/net/Uri"),
                 jni_str!("fromParts"),
-                jni_sig!("(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)Landroid/net/Uri;"),
+                jni_sig!(
+                    "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)Landroid/net/Uri;"
+                ),
                 &[
                     (&scheme).into(),
                     (&pkg).into(),
@@ -288,9 +309,7 @@ fn activity_object<'local>(
 }
 
 /// Run `f` with a JNI env attached to this (android_main) thread.
-fn with_jni<T>(
-    f: impl FnOnce(&mut jni::Env) -> jni::errors::Result<T>,
-) -> jni::errors::Result<T> {
+fn with_jni<T>(f: impl FnOnce(&mut jni::Env) -> jni::errors::Result<T>) -> jni::errors::Result<T> {
     let vm = unsafe { jni::JavaVM::from_raw(ndk_context::android_context().vm().cast()) };
     vm.attach_current_thread(f)
 }
