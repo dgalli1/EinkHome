@@ -16,22 +16,22 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 /// Home-task override dir: `$EH_SYSAPP_DIR` (the SDL e2e suite's test
-/// hook), else the real device path.
-pub fn dir() -> String {
-    std::env::var("EH_SYSAPP_DIR").unwrap_or_else(|_| "/mnt/ext1/system/bin".to_string())
+/// hook), else the platform's firmware dir (only set on PocketBook).
+pub fn dir(paths: &eh_hal::PlatformPaths) -> String {
+    std::env::var("EH_SYSAPP_DIR").unwrap_or_else(|_| paths.sysapp_dir.clone())
 }
 
 /// True when a home-task override binary is installed.
-pub fn detect() -> bool {
-    Path::new(&format!("{}/bookshelf.app", dir())).exists()
+pub fn detect(paths: &eh_hal::PlatformPaths) -> bool {
+    Path::new(&format!("{}/bookshelf.app", dir(paths))).exists()
 }
 
-/// True where a home-task override makes sense: the PocketBook firmware
-/// root exists.  Hosts (SDL/PC) and Android have no /mnt/ext1 — the
-/// Settings row is hidden there.  `$EH_SYSAPP_DIR` (the e2e hook) forces
-/// it on so the suite can exercise promote/demote.
-pub fn platform_supported() -> bool {
-    std::env::var_os("EH_SYSAPP_DIR").is_some() || Path::new("/mnt/ext1").is_dir()
+/// True where a home-task override makes sense: the backend reports
+/// PocketBook firmware (C `eh_plat_*`).  Hosts (SDL/PC) and Android hide
+/// the Settings row.  `$EH_SYSAPP_DIR` (the e2e hook) forces it on so the
+/// suite can exercise promote/demote.
+pub fn platform_supported(paths: &eh_hal::PlatformPaths) -> bool {
+    std::env::var_os("EH_SYSAPP_DIR").is_some() || paths.device
 }
 
 /// The running binary's path.  `/proc/self/exe` is authoritative (works
@@ -70,7 +70,7 @@ pub fn promote<B: Framebuffer>(app: &mut App<B>) -> bool {
         crate::logger::log("[bookshelf] sysapp: cannot resolve the running binary");
         return false;
     };
-    let dir = dir();
+    let dir = dir(&app.paths);
     let dst = format!("{dir}/bookshelf.app");
     let cfg = format!("{dir}/bookshelf.cfg");
     if let Err(e) = std::fs::create_dir_all(&dir) {
@@ -106,8 +106,8 @@ pub fn promote<B: Framebuffer>(app: &mut App<B>) -> bool {
 }
 
 /// Remove the home-task override (binary + cfg).
-pub fn unpromote() {
-    let dir = dir();
+pub fn unpromote(paths: &eh_hal::PlatformPaths) {
+    let dir = dir(paths);
     let _ = std::fs::remove_file(format!("{dir}/bookshelf.app"));
     let _ = std::fs::remove_file(format!("{dir}/bookshelf.cfg"));
     crate::logger::log(

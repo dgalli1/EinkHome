@@ -218,6 +218,10 @@ pub struct App<B: Framebuffer> {
     fb_screen_w: u32,
     pub(crate) fb_net_active: bool,
     fb_profile: eh_hal::DeviceProfile,
+    /// The platform storage layout (C eh_plat_* paths), resolved by the
+    /// backend once at construction — the app never probes for
+    /// platform-specific mounts itself.
+    pub paths: eh_hal::PlatformPaths,
     theme_cache: std::collections::HashMap<String, Option<eh_hal::ThemeBitmap>>,
     /// The bottom of the app's content area (C `eh_content_bottom()`): the
     /// screen height minus the self-drawn status strip on devices where the
@@ -379,6 +383,9 @@ impl<B: Framebuffer> App<B> {
     /// the full library from the API first; a warm store is instant).
     pub fn new(fb: B, config: Config, cfg_path: Option<PathBuf>, app_dir: &Path) -> Self {
         let client = ApiClient::new(&config.api_url, &config.api_token);
+        // The backend owns the platform layout (C eh_plat_* paths); take
+        // the snapshot before the fb moves into Self.
+        let paths = fb.paths();
         let db_path = app_dir.join(Store::LIB_DB_FILENAME);
         let store = Store::open(&db_path)
             .unwrap_or_else(|e| panic!("open store at {}: {e}", db_path.display()));
@@ -386,7 +393,7 @@ impl<B: Framebuffer> App<B> {
         let mut downloads_dir = config
             .downloads_dir
             .clone()
-            .unwrap_or_else(crate::local::default_downloads_dir);
+            .unwrap_or_else(|| paths.downloads_dir.clone());
         // C eh_resolve_downloads_dir: a downloads dir we cannot create or
         // write (first run on the host, non-root guest) falls through to
         // the platform scratch root so downloads still work.
@@ -438,6 +445,7 @@ impl<B: Framebuffer> App<B> {
             fb_screen_w: sw,
             fb_net_active: true,
             fb_profile: eh_hal::DeviceProfile::default(),
+            paths,
             theme_cache: std::collections::HashMap::new(),
             content_bottom,
             self_panel,
@@ -593,6 +601,17 @@ impl<B: Framebuffer> App<B> {
     /// (dead/delayed API for the e2e suite) must NOT leak into the base
     /// cfg: the save writes the base file's own api_url/api_token, while
     /// the runtime config keeps the override (re-applied on every load).
+    /// The storage root for this run (C eh_plat_browse_root): the
+    /// `$EH_BROWSE_ROOT` env hook first (host tests / the e2e suite point
+    /// it at a private tempdir), else the platform's browse root from
+    /// [`Framebuffer::paths`] — the backend owns the answer.
+    pub fn browse_root(&self) -> String {
+        match std::env::var("EH_BROWSE_ROOT") {
+            Ok(d) if !d.is_empty() => d,
+            _ => self.paths.browse_root.clone(),
+        }
+    }
+
     fn ensure_config(config: &Config, cfg_path: Option<&Path>, downloads_dir: &str) -> Config {
         let mut config = config.clone();
         if config.downloads_dir.as_deref().unwrap_or("") != downloads_dir {
@@ -825,6 +844,9 @@ mod tests {
         }
         fn refresh(&mut self, r: Rect, m: eh_hal::RefreshMode) {
             self.refreshes.borrow_mut().push((r, m));
+        }
+        fn paths(&self) -> eh_hal::PlatformPaths {
+            eh_hal::PlatformPaths::host("/tmp")
         }
         fn mark_dirty(&mut self, _r: Rect) {}
         fn poll_event(&mut self) -> Option<InputEvent> {

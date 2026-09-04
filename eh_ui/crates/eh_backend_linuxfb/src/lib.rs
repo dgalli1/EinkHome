@@ -272,4 +272,10 @@ impl Framebuffer for LinuxFb {
             mode,
         );
     }
+
+    /// Generic Linux device: a Unix user's home directory is the useful
+    /// book root (Kobo/reMarkable layouts can special-case later).
+    fn paths(&self) -> eh_hal::PlatformPaths {
+        eh_hal::PlatformPaths::host(&std::env::var("HOME").unwrap_or_else(|_| "/tmp".into()))
+    }
 }

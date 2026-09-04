@@ -193,29 +193,18 @@ impl Store {
         Ok(())
     }
 
+    /// Delete one book row and its search index entry.
     pub fn delete_book(&self, id: &str) -> rusqlite::Result<()> {
+        self.fts_drop_row(id);
         self.conn.execute("DELETE FROM books WHERE id=?1", [id])?;
-        // Remove from FTS too.
-        if !self.no_fts {
-            let _ = self.conn.execute(
-                "DELETE FROM search_fts WHERE rowid IN (SELECT rowid FROM books WHERE id=?1)",
-                [id],
-            );
-        }
         Ok(())
     }
 
     /// Drop every book of one source (C eh_store_delete_source): local
     /// imports replace wholesale, so a re-scan never leaves stale entries
-    /// behind.  FTS rows go first, while the books rows still exist.
+    /// behind.
     pub fn delete_source(&self, source: &str) -> rusqlite::Result<()> {
-        if !self.no_fts {
-            let _ = self.conn.execute(
-                "DELETE FROM search_fts WHERE rowid IN \
-                 (SELECT rowid FROM books WHERE source=?1)",
-                [source],
-            );
-        }
+        self.fts_drop_where("source", source);
         self.conn
             .execute("DELETE FROM books WHERE source=?1", [source])?;
         Ok(())
@@ -325,6 +314,10 @@ impl Store {
     /// caller has already resolved downloaded/local_path/source — C
     /// eh_store_upsert_book with the record filled by local_file_to_book).
     pub fn upsert_book_row(&self, b: &Book) -> rusqlite::Result<()> {
+        // Drop the search-index doc under the rowid the row HAD first —
+        // INSERT OR REPLACE below assigns a fresh rowid, and the old doc is
+        // only addressable while the old row still exists.
+        self.fts_drop_row(&b.id);
         self.conn.execute(
             concat!(
                 "INSERT OR REPLACE INTO books(",
@@ -454,15 +447,8 @@ impl Store {
     /// server dropped it, so the local copy must go too).  Also clears
     /// the row's read marker.
     pub fn delete_book_row(&self, id: &str) -> rusqlite::Result<()> {
-        // FTS first: the external-content index resolves rows by rowid,
-        // so its entry must go while the books row still exists (the
-        // same order delete_source's bulk delete uses).
-        if !self.no_fts {
-            self.conn.execute(
-                "DELETE FROM search_fts WHERE rowid IN (SELECT rowid FROM books WHERE id=?1)",
-                [id],
-            )?;
-        }
+        // FTS first (while the books row can still resolve the doc's rowid).
+        self.fts_drop_row(id);
         self.conn
             .execute("DELETE FROM books WHERE id = ?1", params![id])?;
         self.conn
@@ -782,17 +768,49 @@ impl Store {
     }
 
     // ── FTS helpers ────────────────────────────────────────────────────
+    //
+    // `search_fts` is a SELF-MANAGED FTS5 table (no content=): every doc is
+    // inserted with an explicit `rowid = books.rowid` and dropped with a
+    // plain DELETE.  The previous external-content setup (`content='books'`)
+    // was a landmine: deleting a doc that is not in the index — or whose
+    // content row already changed rowid via INSERT OR REPLACE — reports
+    // SQLITE_CORRUPT_VTAB ("database disk image is malformed") and persists
+    // a poisoned index, which bricked every local-import re-scan on the
+    // Android build.  Self-managed deletes of missing docs are no-ops.
 
+    /// Drop the search-index doc for one book (no-op when absent).
+    fn fts_drop_row(&self, id: &str) {
+        if self.no_fts {
+            return;
+        }
+        let _ = self.conn.execute(
+            "DELETE FROM search_fts WHERE rowid=(SELECT rowid FROM books WHERE id=?1)",
+            [id],
+        );
+    }
+
+    /// Drop the search-index docs for all books matching `column = value`
+    /// (`column` is a static column name of `books`).
+    fn fts_drop_where(&self, column: &str, value: &str) {
+        if self.no_fts {
+            return;
+        }
+        let _ = self.conn.execute(
+            &format!(
+                "DELETE FROM search_fts WHERE rowid IN \
+                 (SELECT rowid FROM books WHERE {column}=?1)"
+            ),
+            [value],
+        );
+    }
+
+    /// Re-index one book's row at its (potentially new) rowid — must run
+    /// AFTER the books row write (C store_fts_sync_row).
     fn fts_sync_row(&self, id: &str) {
         if self.no_fts {
             return;
         }
-        // Drop stale FTS entry for this book's current rowid.
-        let _ = self.conn.execute(
-            "DELETE FROM search_fts WHERE rowid IN (SELECT rowid FROM books WHERE id=?1)",
-            [id],
-        );
-        // Re-index the book's row at its (potentially new) rowid.
+        self.fts_drop_row(id);
         let _ = self.conn.execute(
             "INSERT INTO search_fts(rowid, title, author, series, search_text) \
              SELECT rowid, title, author, series, COALESCE(search_text,'') FROM books WHERE id=?1",
@@ -1419,9 +1437,25 @@ fn apply_schema(conn: &Connection) -> rusqlite::Result<()> {
 }
 
 fn init_fts(conn: &Connection) -> bool {
+    // The legacy external-content table (`content='books'`) desyncs from its
+    // content table (INSERT OR REPLACE reassigns rowids; deleting an
+    // unindexed doc reports SQLITE_CORRUPT and persists a poisoned index).
+    // Swap it for a self-managed table — the empty index then makes
+    // fts_backfill reindex the whole library once.
+    let legacy = matches!(
+        conn.query_row(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='search_fts'",
+            [],
+            |r| r.get::<_, String>(0),
+        ),
+        Ok(sql) if sql.contains("content=")
+    );
+    if legacy {
+        let _ = conn.execute_batch("DROP TABLE search_fts;");
+    }
     // Returns true when FTS5 is available.
     conn.execute_batch(
-        "CREATE VIRTUAL TABLE IF NOT EXISTS search_fts USING fts5(title, author, series, search_text, content='books', content_rowid=rowid)"
+        "CREATE VIRTUAL TABLE IF NOT EXISTS search_fts USING fts5(title, author, series, search_text)",
     )
     .is_ok()
 }
@@ -1933,6 +1967,63 @@ mod tests {
         assert_eq!(got.size, 1234);
         assert!(got.downloaded);
         assert_eq!(got.source, "local");
+    }
+
+    /// The Android import regression: upsert N books (external-content FTS5
+    /// index synced per row), commit, then in a fresh apply-transaction
+    /// delete them again via [`Store::delete_book_row`] — the FTS delete
+    /// must not surface "database disk image is malformed".
+    #[test]
+    fn delete_book_row_roundtrip_through_rescanned_import() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("t.db");
+        let mk = |id: &str| Book {
+            id: id.into(),
+            title: format!("T {id}"),
+            ext: "epub".into(),
+            size: 10,
+            downloaded: true,
+            local_path: format!("/sdcard/{id}.epub"),
+            filename: format!("{id}.epub"),
+            source: "local".into(),
+            ..Default::default()
+        };
+        // Session 1: import 3 books.
+        {
+            let store = Store::open(&db).unwrap();
+            store.begin().unwrap();
+            for id in ["a", "b", "c"] {
+                store.upsert_book_row(&mk(id)).unwrap();
+            }
+            store.commit().unwrap();
+        }
+        // Session 2: rescan says the files vanished → all rows deleted.
+        {
+            let store = Store::open(&db).unwrap();
+            store.begin().unwrap();
+            for id in ["a", "b", "c"] {
+                store.delete_book_row(id).unwrap();
+            }
+            store.commit().unwrap();
+            assert_eq!(store.count().unwrap(), 0);
+            // A re-import after the wipe must find the books again (and
+            // stay searchable): the index was rebuilt, not poisoned.
+            store.begin().unwrap();
+            for id in ["a", "b", "c"] {
+                store.upsert_book_row(&mk(id)).unwrap();
+            }
+            store.commit().unwrap();
+            let hits: i64 = store
+                .conn
+                .query_row(
+                    "SELECT COUNT(*) FROM books WHERE rowid IN \
+                     (SELECT rowid FROM search_fts WHERE search_fts MATCH 'T')",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(hits, 3);
+        }
     }
 
     #[test]

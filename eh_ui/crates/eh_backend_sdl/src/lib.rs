@@ -329,6 +329,11 @@ impl Framebuffer for SdlFb {
     fn battery_level(&self) -> Option<u8> {
         parse_pbemu_battery(std::env::var("PBEMU_BATTERY").ok().as_deref())
     }
+
+    /// PC-host layout: books and downloads under `$HOME`.
+    fn paths(&self) -> eh_hal::PlatformPaths {
+        eh_hal::PlatformPaths::host(&std::env::var("HOME").unwrap_or_else(|_| "/tmp".into()))
+    }
 }
 /// Translate an SDL event into a shell InputEvent.  With logical sizing SDL
 /// reports pointer co-ords in the logical w×h space (matches the C backend).

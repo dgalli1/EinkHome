@@ -634,7 +634,7 @@ impl<B: Framebuffer> App<B> {
             Overlay::Settings => {
                 c.set_settings_title(crate::i18n::tr("settings.title").to_string().into());
                 let reader_val = self.reader_label();
-                let sysapp_on = crate::sysapp::detect();
+                let sysapp_on = crate::sysapp::detect(&self.paths);
                 let sysapp_val = if sysapp_on {
                     crate::i18n::tr("settings.sysapp_on").to_string()
                 } else {
@@ -648,7 +648,7 @@ impl<B: Framebuffer> App<B> {
                     .local_dir
                     .clone()
                     .filter(|d| !d.is_empty())
-                    .unwrap_or_else(crate::local::browse_root);
+                    .unwrap_or_else(|| self.browse_root());
                 // (label key, value) per card, in display order; the
                 // System-app card only exists where the platform supports
                 // a home-task override.
@@ -659,7 +659,7 @@ impl<B: Framebuffer> App<B> {
                     ("settings.dl_dir", dl),
                     ("settings.local_dir", local_dir),
                 ];
-                let sysapp_supported = crate::sysapp::platform_supported();
+                let sysapp_supported = crate::sysapp::platform_supported(&self.paths);
                 if sysapp_supported {
                     rows.push(("settings.system_app", sysapp_val));
                 }

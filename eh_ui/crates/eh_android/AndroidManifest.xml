@@ -5,10 +5,19 @@
     android:versionName="0.1.0">
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!-- Storage access (KOReader parity): the legacy runtime permission on
+         API 28/29, "All files access" (appop) on API 30+.  The app requests
+         it at boot via JNI before building the shelf (see android_main). -->
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="29" />
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="29" />
+    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
     <uses-sdk android:minSdkVersion="28" android:targetSdkVersion="34" />
     <application
         android:label="EinkHome"
-        android:hasCode="false">
+        android:hasCode="false"
+        android:requestLegacyExternalStorage="true">
         <activity
             android:name="android.app.NativeActivity"
             android:label="EinkHome"

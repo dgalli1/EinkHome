@@ -138,7 +138,7 @@ impl<B: Framebuffer> App<B> {
             .config
             .downloads_dir
             .clone()
-            .unwrap_or_else(crate::local::default_downloads_dir);
+            .unwrap_or_else(|| self.paths.downloads_dir.clone());
         let cur = book_local_path(book, &downloads_dir);
         let stored = PathBuf::from(&book.local_path);
         let exists = cur.is_file() || (!book.local_path.is_empty() && stored.is_file());

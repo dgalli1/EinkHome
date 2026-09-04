@@ -9,7 +9,8 @@
 #![no_std]
 
 extern crate alloc;
-use alloc::string::String;
+use alloc::format;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 /// Physical pixel geometry of a display.
@@ -331,6 +332,12 @@ pub trait Framebuffer {
         DeviceProfile::default()
     }
 
+    /// The platform's storage layout (C `eh_plat_browse_root` &
+    /// friends): where the Local import / Folder browser / downloads live
+    /// and whether the firmware-only facilities exist.  The backend owns
+    /// the answer — no `/mnt/ext1` filesystem probing in the app.
+    fn paths(&self) -> PlatformPaths;
+
     /// Resolve a named firmware theme bitmap (C `GetResource(name, NULL)`).
     /// `None` when the name is unknown or the platform has no theme store.
     fn theme_resource(&self, _name: &str) -> Option<ThemeBitmap> {
@@ -345,6 +352,59 @@ pub trait Framebuffer {
     }
 }
 
+/// The platform's storage layout (the C `eh_plat_*` path helpers): where
+/// books live, where downloads land, and which firmware-only facilities
+/// exist.  The BACKEND owns the answers — the app never probes the
+/// filesystem for platform-specific mounts (probing `/mnt/ext1` from the
+/// app made the Android build look for its books on a PocketBook path
+/// that can never exist there).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PlatformPaths {
+    /// Storage root the Local import walks and the Folder browser lists
+    /// (C `eh_plat_browse_root`).  The `$EH_BROWSE_ROOT` env hook still
+    /// overrides this per run (host tests / the e2e suite).
+    pub browse_root: String,
+    /// Default downloads directory (C `eh_plat_downloads_dir`); the app
+    /// resolves + creates it and falls back to a scratch dir when
+    /// unwritable.
+    pub downloads_dir: String,
+    /// True on PocketBook firmware: the home-task override, the firmware
+    /// reader and the desktop-config facilities exist.  Hosts (SDL /
+    /// linuxfb desktop) and Android hide those features.
+    pub device: bool,
+    /// The firmware home-task override dir (C `eh_sysapp`'s target);
+    /// only meaningful when `device` is true.
+    pub sysapp_dir: String,
+    /// The launcher's user `*.app` scan dir; empty → the scan is skipped.
+    pub user_apps_dir: String,
+}
+
+impl PlatformPaths {
+    /// The PocketBook firmware layout (C app's device paths).
+    pub fn pocketbook() -> Self {
+        Self {
+            browse_root: "/mnt/ext1".into(),
+            downloads_dir: "/mnt/ext1/Downloads".into(),
+            device: true,
+            sysapp_dir: "/mnt/ext1/system/bin".into(),
+            user_apps_dir: "/mnt/ext1/applications".into(),
+        }
+    }
+
+    /// A PC-host layout rooted at `home` (`$HOME`; the caller resolves it —
+    /// this crate is no_std and cannot touch the environment).
+    pub fn host(home: &str) -> Self {
+        Self {
+            browse_root: home.to_string(),
+            downloads_dir: format!("{home}/Downloads"),
+            device: false,
+            sysapp_dir: String::new(),
+            user_apps_dir: String::new(),
+        }
+    }
+}
+
+/// Device capability profile (the C `eh_plat_device_profile` probes).  Raw
 /// Device capability profile (the C `eh_plat_device_profile` probes).  Raw
 /// firmware identity used for launcher conditional resolution; neutral
 /// defaults match every conditional ("all").

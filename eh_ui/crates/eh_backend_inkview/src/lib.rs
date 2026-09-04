@@ -552,6 +552,12 @@ impl Framebuffer for InkviewFb {
         }
     }
 
+    /// The PocketBook firmware layout: ext1 storage, the system bin dir
+    /// for the home-task override, the applications scan dir.
+    fn paths(&self) -> eh_hal::PlatformPaths {
+        eh_hal::PlatformPaths::pocketbook()
+    }
+
     /// C GetResource(name, NULL): the firmware theme store the stock
     /// launcher resolves its icons through before LoadPNG.
     fn theme_resource(&self, name: &str) -> Option<eh_hal::ThemeBitmap> {

@@ -341,7 +341,7 @@ impl<B: Framebuffer> App<B> {
         self.config
             .downloads_dir
             .clone()
-            .unwrap_or_else(crate::local::default_downloads_dir)
+            .unwrap_or_else(|| self.paths.downloads_dir.clone())
     }
 
     // ── shelf state ───────────────────────────────────────────────────

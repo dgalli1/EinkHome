@@ -194,7 +194,7 @@ impl<B: Framebuffer> App<B> {
     /// The Settings rows in display order: the System-app card only
     /// exists where a home-task override makes sense (PocketBook, or the
     /// e2e's EH_SYSAPP_DIR hook).
-    fn settings_rows() -> Vec<crate::app::SettingsRow> {
+    fn settings_rows(&self) -> Vec<crate::app::SettingsRow> {
         use crate::app::SettingsRow;
         let mut rows = vec![
             SettingsRow::ApiHost,
@@ -203,7 +203,7 @@ impl<B: Framebuffer> App<B> {
             SettingsRow::DownloadFolder,
             SettingsRow::LocalFolder,
         ];
-        if crate::sysapp::platform_supported() {
+        if crate::sysapp::platform_supported(&self.paths) {
             rows.push(SettingsRow::SystemApp);
         }
         rows
@@ -214,7 +214,7 @@ impl<B: Framebuffer> App<B> {
     /// the mapping follows the live row count.
     pub(crate) fn settings_row(&mut self, i: usize) {
         use crate::app::SettingsRow;
-        let rows = Self::settings_rows();
+        let rows = self.settings_rows();
         let row = if i < rows.len() {
             rows[i]
         } else {
@@ -243,7 +243,7 @@ impl<B: Framebuffer> App<B> {
                 // Open the folder picker rooted at the storage root,
                 // starting at the current downloads dir when it is under
                 // the root (C eh_on_tap_settings_folder -> eh_folder_open).
-                let root = crate::local::browse_root();
+                let root = self.browse_root();
                 let start = self
                     .config
                     .downloads_dir
@@ -268,7 +268,7 @@ impl<B: Framebuffer> App<B> {
                 // Same picker, different commit target: the Local-source
                 // base folder (starts at the current base when it is
                 // under the browse root).
-                let root = crate::local::browse_root();
+                let root = self.browse_root();
                 let start = self
                     .config
                     .local_dir
@@ -288,8 +288,8 @@ impl<B: Framebuffer> App<B> {
                 self.refresh_shelf();
             }
             SettingsRow::SystemApp => {
-                if crate::sysapp::detect() {
-                    crate::sysapp::unpromote();
+                if crate::sysapp::detect(&self.paths) {
+                    crate::sysapp::unpromote(&self.paths);
                     crate::logger::log(
                         "[bookshelf] sysapp: removed from system — stock home returns after reboot",
                     );

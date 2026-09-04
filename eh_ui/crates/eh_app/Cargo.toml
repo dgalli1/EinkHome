@@ -35,7 +35,7 @@ serde_json = "1"
 # SQLite persistence with the exact existing books/meta/view/search schema
 # (device DB stays compatible with the C app's store).  bundled cross-compiles
 # the C glue via zig cc under cargo-zigbuild.
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.33", features = ["bundled"] }
 
 # Cover decoding: covers are served as PNG (cached covers dir) or JPEG
 # (the raw /cover endpoint — 240x360 JPEGs for Kavita).  Single-threaded

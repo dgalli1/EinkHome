@@ -30,10 +30,6 @@ use crate::widgets::sync_popup::{SyncPopup, SyncStage};
 
 // ── shared facts ─────────────────────────────────────────────────────────
 
-/// The on-device storage root (C eh_plat_browse_root).  Host/SDL tests
-/// override it with EH_BROWSE_ROOT.
-pub const DEVICE_BROWSE_ROOT: &str = "/mnt/ext1";
-
 /// The directory walk's caps (C EH_LOCAL_SCAN_DEPTH / EH_LOCAL_SCAN_CAP):
 /// recursion depth and total books per import.
 pub const SCAN_DEPTH: u32 = 8;
@@ -91,41 +87,6 @@ fn stem_title(name: &str) -> String {
         _ => name,
     };
     stem.chars().take(MAX_TITLE_LEN - 1).collect()
-}
-
-/// True when running on PocketBook hardware (the ext1 mount exists).
-/// Platform seam for the path defaults: device builds keep the firmware
-/// layout, PC hosts (SDL / linuxfb desktop) get useful $HOME-based ones.
-fn on_device() -> bool {
-    Path::new(DEVICE_BROWSE_ROOT).is_dir()
-}
-
-/// Fallback storage root on PC hosts.
-fn home_dir() -> String {
-    std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string())
-}
-
-/// The storage root for this run (env override first — the SDL/host test
-/// path), then the device mount on hardware, else the PC home directory
-/// (browsing /mnt/ext1 on a desktop can never list anything).
-pub fn browse_root() -> String {
-    match std::env::var("EH_BROWSE_ROOT") {
-        Ok(d) if !d.is_empty() => d,
-        _ if on_device() => DEVICE_BROWSE_ROOT.to_string(),
-        _ => home_dir(),
-    }
-}
-
-/// The default downloads directory per platform (C eh_plat_downloads_dir):
-/// the device's ext1 Downloads mount on hardware, $HOME/Downloads on PC
-/// hosts.  App::new resolves + creates it and falls back to /tmp when
-/// unwritable, so this stays a pure default.
-pub fn default_downloads_dir() -> String {
-    if on_device() {
-        format!("{DEVICE_BROWSE_ROOT}/Downloads")
-    } else {
-        format!("{}/Downloads", home_dir())
-    }
 }
 
 // ── scanner (C eh_local.c) ───────────────────────────────────────────────
@@ -277,12 +238,10 @@ pub(crate) struct ScanJob {
 /// Safe to call from the boot path and on every Local selection — a new
 /// kick invalidates any in-flight result.
 pub fn kick_import<B: Framebuffer>(app: &mut App<B>) {
-    let root = app
-        .config
-        .local_dir
-        .clone()
-        .filter(|d| !d.is_empty())
-        .unwrap_or_else(browse_root);
+    let root = match app.config.local_dir.clone().filter(|d| !d.is_empty()) {
+        Some(d) => d,
+        None => app.browse_root(),
+    };
     kick_import_rooted(app, &root);
 }
 
@@ -461,7 +420,7 @@ pub fn poll_import<B: Framebuffer>(app: &mut App<B>) -> bool {
             crate::logger::log(&format!(
                 "[bookshelf] local: imported {} books (local) from {}",
                 books.len(),
-                browse_root(),
+                app.browse_root(),
             ));
             app.rebuild_view();
             app.refresh_shelf();

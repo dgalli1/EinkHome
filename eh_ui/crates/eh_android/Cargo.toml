@@ -24,7 +24,9 @@ eh_hal = { path = "../eh_hal" }
 
 [target.'cfg(target_os = "android")'.dependencies]
 android-activity = { version = "0.6", features = ["native-activity"] }
+jni = "0.22"
 ndk = "0.9"
+ndk-context = "0.1"
 
 [package.metadata.android]
 package = "de.einkhome.app"

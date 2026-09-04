@@ -11,9 +11,7 @@ use eh_hal::Framebuffer;
 use crate::app::App;
 use crate::store::Book;
 
-use super::{
-    browse_root, ext_of, hash_hex, is_book_ext, stem_title, BROWSE_MAX_ENTRIES, FOLDER_ROW_H,
-};
+use super::{ext_of, hash_hex, is_book_ext, stem_title, BROWSE_MAX_ENTRIES, FOLDER_ROW_H};
 
 // ── folder browser (C eh_browser.c BR_MODE_BROWSER) ─────────────────────
 
@@ -201,7 +199,7 @@ pub fn folder_book(path: &str, name: &str) -> Book {
 /// Open the folder browser at the storage root (C source-tap →
 /// eh_browse_start): the browser becomes the shelf body.
 pub fn start_browse<B: Framebuffer>(app: &mut App<B>) {
-    let root = browse_root();
+    let root = app.browse_root();
     app.browser.start(&root);
     app.refresh_shelf();
 }

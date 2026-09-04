@@ -11,9 +11,9 @@ use crate::app::{App, LauncherItem};
 use super::LAUNCHER_MAX_PARAMS;
 
 /// The user-apps scan dir (C EH_USER_APPS_DIR); EH_USER_APPS_DIR overrides
-/// for host verification.
-fn user_apps_dir() -> String {
-    std::env::var("EH_USER_APPS_DIR").unwrap_or_else(|_| "/mnt/ext1/applications".into())
+/// for host verification, else the platform's dir (PocketBook only).
+fn user_apps_dir(paths: &eh_hal::PlatformPaths) -> String {
+    std::env::var("EH_USER_APPS_DIR").unwrap_or_else(|_| paths.user_apps_dir.clone())
 }
 
 /// EH_DESKTOP_DIR overrides both for host verification.
@@ -347,9 +347,10 @@ pub fn build<B: eh_hal::Framebuffer>(app: &mut App<B>) -> bool {
         .and_then(|v| v.get("applications"))
         .and_then(|a| a.as_object());
 
-    // Merge the firmware desktop configs + the ext1 scan (pure; see the
-    // assemble contract tests).
-    app.launcher_items = assemble(db_apps, vw.as_ref(), &prof, &scan_ext1_app_files());
+    // Merge the firmware desktop configs + the platform user-apps scan
+    // (pure; see the assemble contract tests).
+    let ext1_files = scan_ext1_app_files(&app.paths);
+    app.launcher_items = assemble(db_apps, vw.as_ref(), &prof, &ext1_files);
 
     // Host fallback (the C SDL build's freedesktop discovery): when the
     // firmware desktop configs and the ext1 scan yield nothing, list the
@@ -388,9 +389,13 @@ pub fn build<B: eh_hal::Framebuffer>(app: &mut App<B>) -> bool {
 
 /// The user-apps dir's `*.app` files as full paths, SORTED by file name —
 /// readdir order is arbitrary, so without the sort the launcher's grid
-/// would reshuffle across boots.
-fn scan_ext1_app_files() -> Vec<String> {
-    let dir = user_apps_dir();
+/// would reshuffle across boots.  An empty platform dir (hosts, Android)
+/// scans nothing.
+fn scan_ext1_app_files(paths: &eh_hal::PlatformPaths) -> Vec<String> {
+    let dir = user_apps_dir(paths);
+    if dir.is_empty() {
+        return Vec::new();
+    }
     let mut out: Vec<String> = std::fs::read_dir(&dir)
         .into_iter()
         .flatten()
