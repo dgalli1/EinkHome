@@ -39,7 +39,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends podman catatonit slirp4netns fuse-overlayfs uidmap
       - name: Cache pbemu venv
         id: cache-venv
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: pbemu/.venv
           key: pbemu-venv-${{ steps.pbemu-rev.outputs.sha }}-${{ hashFiles('pbemu/pyproject.toml') }}
@@ -60,12 +60,12 @@ jobs:
             ./setup-venv.sh
           fi
       # Restore/install/save mirrors the firmware pattern below: the
-      # implicit post-job save of actions/cache@v4 is skipped whenever
+      # implicit post-job save of actions/cache@v6 is skipped whenever
       # ANY later step fails (emulator flake), which would keep e2e
       # runs re-fetching the SDK forever after one bad suite.
       - name: Restore PocketBook SDK cache
         id: cache-sdk
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: sdk/pocketbook-sdk-b288
           key: pb-sdk-b288-${{ hashFiles('sdk/install-sdk.sh') }}
@@ -78,7 +78,7 @@ jobs:
         run: sdk/install-sdk.sh
       - name: Save PocketBook SDK for future runs
         if: steps.cache-sdk.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v6
         with:
           path: sdk/pocketbook-sdk-b288
           key: pb-sdk-b288-${{ hashFiles('sdk/install-sdk.sh') }}
@@ -100,7 +100,7 @@ jobs:
           workspaces: eh_ui
       - name: Cache pbdev podman image
         id: cache-image
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: .cache/pbdev-image.tar
           key: pbdev-image-${{ steps.pbemu-rev.outputs.sha }}-${{ hashFiles('pbemu/Dockerfile') }}-${{ runner.arch }}
@@ -117,7 +117,7 @@ jobs:
           podman save pbdev -o .cache/pbdev-image.tar
       - name: Restore firmware zip
         id: cache-fw
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: .cache/fw
           key: pb-fw-${{ env.FIRMWARE_URL }}
@@ -130,12 +130,12 @@ jobs:
           # zip would be cached under the immutable key above forever.
           unzip -tq ".cache/fw/${{ env.FIRMWARE_ZIP }}" >/dev/null
       - name: Save firmware zip for future runs
-        # Persist immediately after a good download: actions/cache@v4's
+      # Persist immediately after a good download: actions/cache@v6's
         # implicit post-job save is skipped whenever ANY step of the job
         # fails afterwards (emulator flake, test failure), which kept
         # every e2e attempt re-downloading the ~1.1 GB zip.
         if: steps.cache-fw.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v6
         with:
           path: .cache/fw
           key: pb-fw-${{ env.FIRMWARE_URL }}

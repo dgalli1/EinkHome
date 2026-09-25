@@ -36,7 +36,7 @@ jobs:
         run: echo "sha=$(git -C pbemu rev-parse HEAD)" >> "$GITHUB_OUTPUT"
       - name: Cache pbemu venv
         id: cache-venv
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: pbemu/.venv
           key: pbemu-venv-${{ steps.pbemu-rev.outputs.sha }}-${{ hashFiles('pbemu/pyproject.toml') }}
