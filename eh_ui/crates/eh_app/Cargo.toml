@@ -47,7 +47,7 @@ png = "0.17"
 # parsers are pure Rust.  zip runs with default features trimmed (deflate
 # only) so the armv7 cross-build stays free of C compression backends.
 quick-xml = "0.37"
-zip = { version = "2", default-features = false, features = ["deflate"] }
+zip = { version = "9", default-features = false, features = ["deflate"] }
 jpeg-decoder = { version = "0.3", default-features = false }
 # PDF first-page rendering (cover art) via the vendored MuPDF C build.
 # Optional: the Android port compiles without it (PDF metadata extraction
